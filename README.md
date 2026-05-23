@@ -99,6 +99,7 @@ drafts/            сырые заметки и исходный материа�
 - [Стандартная библиотека](docs/stdlib.md)
 - [Доменные ядра](docs/core.md)
 - [Racket Bootstrap](docs/racket.md)
+- [Дорожная карта](docs/roadmap.md)
 
 ## Девиз
 
