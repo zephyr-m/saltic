@@ -80,6 +80,7 @@ racket tools/format.rkt examples/basic.s
 ```bash
 just
 just parse
+just check
 just test
 just example
 just docs
@@ -89,7 +90,6 @@ just docs
 
 ```bash
 just format
-just check
 just run
 just explain
 ```

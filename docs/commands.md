@@ -24,6 +24,12 @@ just test
 Запускает тесты Racket.
 
 ```bash
+just check
+```
+
+Парсит `examples/basic.s` и запускает первый semantic checker.
+
+```bash
 just example
 ```
 
@@ -77,6 +83,7 @@ Preferences: File Icon Theme -> S Language Icons
 
 ```bash
 racket tools/parse.rkt examples/basic.s
+racket tools/check.rkt examples/basic.s
 raco test tests
 ```
 
@@ -88,7 +95,6 @@ raco test tests
 
 ```bash
 just format
-just check
 just run
 just explain
 ```
@@ -97,7 +103,6 @@ just explain
 
 ```text
 format  -> formatter
-check   -> checker
 run     -> interpreter
 explain -> объяснение AST/diagnostics для человека
 ```

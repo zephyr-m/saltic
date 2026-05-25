@@ -25,7 +25,7 @@ explain file="examples/basic.s":
     @echo "next step: build a small AST explainer for {{file}}"
 
 check:
-    @echo "checker is not implemented yet"
+    racket tools/check.rkt examples/basic.s
 
 format:
     @echo "formatter is not implemented yet"

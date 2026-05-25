@@ -95,6 +95,7 @@ drafts/            сырые заметки и исходный материа�
 - [Философия](docs/philosophy.md)
 - [Грамматика](docs/grammar.md)
 - [Команды](docs/commands.md)
+- [Checker](docs/checker.md)
 - [Синтаксис](docs/syntax.md)
 - [Типы](docs/types.md)
 - [Ошибки](docs/errors.md)
