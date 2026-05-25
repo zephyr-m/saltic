@@ -85,6 +85,7 @@ skill main() {
 ```text
 docs/              черновики спецификации
 examples/          примеры кода на S
+editors/vscode-s/  VS Code подсветка и иконка языка
 brand/references/  визуальные референсы
 drafts/            сырые заметки и исходный материал
 ```
@@ -92,6 +93,8 @@ drafts/            сырые заметки и исходный материа�
 ## Документация
 
 - [Философия](docs/philosophy.md)
+- [Грамматика](docs/grammar.md)
+- [Команды](docs/commands.md)
 - [Синтаксис](docs/syntax.md)
 - [Типы](docs/types.md)
 - [Ошибки](docs/errors.md)
@@ -100,6 +103,7 @@ drafts/            сырые заметки и исходный материа�
 - [Доменные ядра](docs/core.md)
 - [Racket Bootstrap](docs/racket.md)
 - [Дорожная карта](docs/roadmap.md)
+- [Не цели](docs/non-goals.md)
 
 ## Девиз
 

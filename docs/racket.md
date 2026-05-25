@@ -73,6 +73,29 @@ racket tools/format.rkt examples/basic.s
 
 Позже вокруг этого может появиться единая CLI-утилита S.
 
+## Текущие команды
+
+Сейчас команды обёрнуты в `justfile`.
+
+```bash
+just
+just parse
+just test
+just example
+just docs
+```
+
+Заглушки под следующие этапы:
+
+```bash
+just format
+just check
+just run
+just explain
+```
+
+Полный список зафиксирован в [Командах](commands.md).
+
 ## Открытые вопросы
 
 - Делать S как `#lang s` или как набор Racket tools вокруг `.s` файлов?
