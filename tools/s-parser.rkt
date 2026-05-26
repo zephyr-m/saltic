@@ -9,6 +9,7 @@
 (struct program (items) #:transparent)
 (struct const-decl (name value) #:transparent)
 (struct enum-decl (name variants) #:transparent)
+(struct entry-decl (params body) #:transparent)
 (struct skill-decl (name params body) #:transparent)
 
 (struct var-decl (name value) #:transparent)
@@ -32,6 +33,7 @@
 
 (define keywords
   '#hash(("skill" . SKILL)
+         ("program" . PROGRAM)
          ("out" . OUT)
          ("enum" . ENUM)
          ("drum" . DRUM)
@@ -198,12 +200,21 @@
 
 (define (parse-top-level tokens)
   (cond
+    [(token? tokens 'PROGRAM) (parse-entry tokens)]
     [(token? tokens 'SKILL) (parse-skill tokens)]
     [(and (token? tokens 'IDENT) (token? (advance tokens) 'ASSIGN)
           (token? (advance (advance tokens)) 'ENUM))
      (parse-enum tokens)]
     [(token? tokens 'IDENT) (parse-const tokens)]
     [else (parse-error (peek tokens) "expected top-level declaration")]))
+
+(define (parse-entry tokens)
+  (define-values (_program t1) (expect tokens 'PROGRAM))
+  (define-values (_lp t2) (expect t1 'LPAREN "expected ( after program"))
+  (define-values (params t3) (parse-param-list t2))
+  (define-values (_rp t4) (expect t3 'RPAREN))
+  (define-values (body rest) (parse-block t4))
+  (values (entry-decl params body) rest))
 
 (define (parse-const tokens)
   (define-values (name t1) (expect-ident tokens))
@@ -420,6 +431,7 @@
     [(program? ast) `(program ,@(map ast->datum (program-items ast)))]
     [(const-decl? ast) `(const ,(const-decl-name ast) ,(ast->datum (const-decl-value ast)))]
     [(enum-decl? ast) `(enum ,(enum-decl-name ast) ,@(enum-decl-variants ast))]
+    [(entry-decl? ast) `(entry ,(entry-decl-params ast) ,(ast->datum (entry-decl-body ast)))]
     [(skill-decl? ast) `(skill ,(skill-decl-name ast) ,(skill-decl-params ast)
                               ,(ast->datum (skill-decl-body ast)))]
     [(var-decl? ast) `(var ,(var-decl-name ast) ,(ast->datum (var-decl-value ast)))]

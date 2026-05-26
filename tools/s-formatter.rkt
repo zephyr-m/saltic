@@ -36,6 +36,10 @@
          (format "~a~a," (indent 1) variant))
        "\n")
       "\n}")]
+    [`(entry ,params ,body)
+     (format "program(~a) ~a"
+             (string-join params ", ")
+             (format-block body 0))]
     [`(skill ,name ,params ,body)
      (format "skill ~a(~a) ~a"
              name

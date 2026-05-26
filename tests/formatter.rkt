@@ -11,7 +11,7 @@
   #<<S
 MaxRetries=3
 Status=enum{OK,ERROR,}
-skill main(){
+program(){
 @x=10
 (x==10){host.io.println("ok")}
 drum(2){host.io.println("tick")}
@@ -30,7 +30,7 @@ Status = enum {
     ERROR,
 }
 
-skill main() {
+program() {
     @x = 10
     (x == 10) {
         host.io.println("ok")

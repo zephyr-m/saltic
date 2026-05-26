@@ -48,7 +48,7 @@ std.cli
 ## Пример
 
 ```s
-skill main() {
+program() {
     std.io.println("hello, S")
     out none
 }
@@ -95,7 +95,7 @@ host.debug.show(...)
 Первый полезный пример:
 
 ```s
-skill main(path) {
+program(path) {
     @text = host.file.read(path)
     @count = host.str.lines_count(text)
     host.io.println(path, ": ", count, " lines")

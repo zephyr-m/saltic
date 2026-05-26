@@ -13,7 +13,7 @@
 (check-equal?
  (check-s-string
   #<<S
-skill main() {
+program() {
     y = 20
     out none
 }
@@ -25,7 +25,7 @@ S
  (check-s-string
   #<<S
 MaxRetries = 3
-skill main() {
+program() {
     MaxRetries = 4
     out none
 }
@@ -36,7 +36,7 @@ S
 (check-equal?
  (check-s-string
   #<<S
-skill main() {
+program() {
     @x = 10
     x = "hello"
     out none

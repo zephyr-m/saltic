@@ -19,7 +19,7 @@ skill divide(a, b) {
     out a / b
 }
 
-skill main() {
+program() {
     @x = 10
     @y = add(x, 20)
     @safe = divide(y, 2) rescue |err| {

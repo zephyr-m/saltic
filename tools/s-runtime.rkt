@@ -13,7 +13,7 @@
          s-error?
          s-enum?)
 
-(struct runtime (constants enums skills) #:transparent)
+(struct runtime (constants enums skills entry) #:transparent)
 (struct env (vars parent) #:transparent)
 (struct s-none () #:transparent)
 (struct s-error (name) #:transparent)
@@ -40,9 +40,9 @@
 
 (define (run-s-datum/args ast program-args [out (current-output-port)])
   (define rt (build-runtime ast))
-  (unless (hash-has-key? (runtime-skills rt) "main")
-    (runtime-error "missing skill 'main'"))
-  (call-skill rt "main" program-args out))
+  (unless (runtime-entry rt)
+    (runtime-error "missing program entry"))
+  (call-entry rt program-args out))
 
 (define (build-runtime ast)
   (match ast
@@ -50,17 +50,20 @@
      (define constants (make-hash))
      (define enums (make-hash))
      (define skills (make-hash))
-     (define rt (runtime constants enums skills))
+     (define entry #f)
+     (define rt (runtime constants enums skills #f))
      (for ([item items])
        (match item
          [`(const ,name ,value)
           (hash-set! constants name (eval-expr rt (make-root-env) value (current-output-port)))]
          [`(enum ,name ,variants ...)
           (hash-set! enums name variants)]
+         [`(entry ,params ,body)
+          (set! entry (list params body))]
          [`(skill ,name ,params ,body)
           (hash-set! skills name (list params body))]
          [_ (runtime-error "unsupported top-level item: ~s" item)]))
-     rt]
+     (runtime constants enums skills entry)]
     [_ (runtime-error "expected program AST")]))
 
 (define (make-root-env)
@@ -107,6 +110,23 @@
        (eval-block rt scope body out)
        none-value)]
     [_ (runtime-error "unknown skill '~a'" name)]))
+
+(define (call-entry rt args out)
+  (match (runtime-entry rt)
+    [(list params body)
+     (unless (= (length params) (length args))
+       (runtime-error "program expected ~a args, got ~a"
+                      (length params)
+                      (length args)))
+     (define scope (make-root-env))
+     (for ([param params]
+           [arg args])
+       (env-define! scope param arg))
+     (with-handlers ([return-signal?
+                      (lambda (signal) (return-signal-value signal))])
+       (eval-block rt scope body out)
+       none-value)]
+    [_ (runtime-error "missing program entry")]))
 
 (define (eval-block rt scope block out)
   (match block

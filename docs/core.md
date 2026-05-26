@@ -17,6 +17,7 @@ core.geometry
 core.logic
 core.language
 core.informatics
+core.engine
 core.history
 core.geography
 core.economics
@@ -28,7 +29,7 @@ core.economics
 use core.math
 use core.physics
 
-skill main() {
+program() {
     @force = physics.force(mass, acceleration)
     @area = math.triangle(a, b, c)
     out none
@@ -59,6 +60,16 @@ core.informatics.std
 
 Подробнее: [core.informatics](informatics.md).
 
+## Engine
+
+`core.engine` — будущий общий фундамент для интерактивных физических сцен.
+
+Он должен быть базой для игр, симуляций, визуальных редакторов и CAD-like workflows.
+
+Сейчас отдельный `core.cad` не вводится: CAD-подобные инструменты должны вырасти поверх `core.engine`, `core.geometry` и `core.physics`.
+
+Подробнее: [core.engine](engine.md).
+
 ## Ограничение
 
 `core.*` не должен быть свалкой runtime-заглушек.
@@ -78,5 +89,6 @@ L3 — большая идея, но не первая реализация.
 - `core.math`;
 - `core.logic`.
 - `core.informatics` как место будущей std.
+- `core.engine` как будущий фундамент для игр, симуляций и CAD-like tooling.
 
 Остальные домены не должны мешать MVP языка.

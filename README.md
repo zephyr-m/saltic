@@ -8,6 +8,8 @@ S берёт Zig как инженерную отправную точку, но
 
 Так как собственной архитектуры пока нет, первая практическая цель — вырастить S внутри Racket: описать синтаксис, parser, AST, checker, formatter и раннее исполнение. Backend под свою архитектуру остаётся долгосрочной целью.
 
+Долгосрочная цель шире обычного языка программирования: S должен стать основой эмуляции физического мира, где работа происходит через действия, наблюдение, измерение, симуляцию и воспроизводимую историю изменений.
+
 ## Статус
 
 S находится в исследовательской фазе `v0.1`.
@@ -66,7 +68,7 @@ skill divide(a, b) {
     out a / b
 }
 
-skill main() {
+program() {
     @value = divide(10, 2) rescue |err| {
         host.io.println("error")
         0
@@ -100,6 +102,7 @@ drafts/            сырые заметки и исходный материа�
 - [Типы](docs/types.md)
 - [Ошибки](docs/errors.md)
 - [Runtime](docs/runtime.md)
+- [Foundation](docs/foundation.md)
 - [Библиотечная архитектура](docs/libraries.md)
 - [C interop](docs/c-interop.md)
 - [sys](docs/sys.md)
@@ -107,6 +110,8 @@ drafts/            сырые заметки и исходный материа�
 - [Стандартная библиотека](docs/stdlib.md)
 - [core](docs/core.md)
 - [core.informatics](docs/informatics.md)
+- [core.engine](docs/engine.md)
+- [Physical world emulation](docs/world.md)
 - [agent](docs/agent.md)
 - [Racket Bootstrap](docs/racket.md)
 - [Дорожная карта](docs/roadmap.md)

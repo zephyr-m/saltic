@@ -25,7 +25,7 @@
 ```s
 c.import "stdio.h"
 
-skill main() {
+program() {
     c.puts("hello from C")
     out none
 }
@@ -37,7 +37,7 @@ skill main() {
 c.import "stdlib.h"
 c.import "string.h"
 
-skill main() {
+program() {
     @ptr = c.malloc(128)
     c.memset(ptr, 0, 128)
     c.free(ptr)

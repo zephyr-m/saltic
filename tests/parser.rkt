@@ -21,7 +21,13 @@
 (check-true
  (for/or ([item (cdr basic-datum)])
    (match item
-     [`(skill "main" ,_ ,_) #t]
+     [`(entry ,_ ,_) #t]
+     [_ #f])))
+
+(check-true
+ (for/or ([item (cdr basic-datum)])
+   (match item
+     [`(skill "add" ,_ ,_) #t]
      [_ #f])))
 
 (check-true

@@ -38,6 +38,7 @@
   (define constants (make-hash))
   (define enums (make-hash))
   (define skills (make-hash))
+  (define entry #f)
   (define diagnostics '())
   (define (define-global! table kind name value)
     (if (or (hash-has-key? constants name)
@@ -52,12 +53,17 @@
        (define-global! constants 'const name (infer-literalish-type value))]
       [`(enum ,name ,variants ...)
        (define-global! enums 'enum name variants)]
+      [`(entry ,params ,body)
+       (if entry
+           (set! diagnostics (cons "error: duplicate program entry" diagnostics))
+           (set! entry (list params body)))]
       [`(skill ,name ,params ,body)
        (define-global! skills 'skill name params)]
       [_ (void)]))
   (values (hash 'constants constants
                 'enums enums
-                'skills skills)
+                'skills skills
+                'entry entry)
           (reverse diagnostics)))
 
 (define (check-top-level item globals)
@@ -65,6 +71,8 @@
     [`(const ,_ ,value)
      (result-diagnostics (infer-expr value (make-root-scope) globals))]
     [`(enum ,_ ,_ ...) '()]
+    [`(entry ,params ,body)
+     (check-skill params body globals)]
     [`(skill ,_ ,params ,body)
      (check-skill params body globals)]
     [`(out ,_)

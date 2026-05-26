@@ -43,7 +43,7 @@ just run-file examples/count-lines.s docs/roadmap.md
 ```
 
 Проверяет `.s` файл и запускает его через ранний Racket runtime.
-Аргументы после имени `.s` файла передаются в параметры `skill main(...)`.
+Аргументы после имени `.s` файла передаются в параметры `program(...)`.
 
 ```bash
 just example

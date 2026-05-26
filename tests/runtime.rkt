@@ -21,7 +21,7 @@ skill fail() {
     out error.Boom
 }
 
-skill main() {
+program() {
     @value = fail() rescue |err| {
         host.io.println(err)
         42
@@ -38,7 +38,7 @@ S
    (lambda ()
      (run-s-string
       #<<S
-skill main() {
+program() {
     @same = 1 == 2
     host.io.println(same)
     out none
@@ -52,7 +52,7 @@ S
    (lambda ()
      (run-s-string/args
       #<<S
-skill main(name) {
+program(name) {
     host.io.println("hello, ", name)
     out none
 }
@@ -65,7 +65,7 @@ S
    (lambda ()
      (run-s-string/args
       #<<S
-skill main(path) {
+program(path) {
     @text = host.file.read(path)
     @count = host.str.lines_count(text)
     host.io.println(path, ": ", count, " lines")
