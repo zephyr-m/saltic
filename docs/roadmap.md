@@ -42,7 +42,7 @@ tick
 [done]    Этап 3. Checker
 [done]    Этап 4. Интерпретатор первого подмножества
 [next]    Этап 5. Удобство письма: formatter, diagnostics, examples
-[next]    Этап 6. Runtime и stdlib для маленьких программ
+[next]    Этап 6. Runtime и core.informatics.std
 [future]  Этап 7. Offline cookbook
 [future]  Этап 8. IR
 [future]  Этап 9. Первый внешний backend
@@ -173,7 +173,7 @@ just run
 - `switch`;
 - `drum (N)`;
 - вызовы;
-- `std.io.println`;
+- `host.io.println`;
 - простая модель ошибок и `rescue`.
 
 Готово, когда:
@@ -209,17 +209,17 @@ racket tools/format.rkt examples/basic.s
 - единый стиль для документации и примеров;
 - команда `just run-file <file>` как основной способ пробовать свои программы.
 
-## Этап 6. Runtime и stdlib для маленьких программ
+## Этап 6. Runtime и будущая core.informatics.std
 
 Цель: сделать S полезным для нескольких простых задач, а не только для `basic.s`.
 
-Минимум:
+Минимум bootstrap runtime:
 
-- `std.io`;
-- `std.file`;
-- `std.str`;
-- `std.math`;
-- `std.time`;
+- `host.io`;
+- `host.file`;
+- `host.str`;
+- `host.math`;
+- `host.time`;
 - простой CLI ввод;
 - тестирование S-программ;
 - понятные runtime errors.
@@ -227,7 +227,7 @@ racket tools/format.rkt examples/basic.s
 Готово, когда:
 
 - можно написать несколько маленьких инструментов;
-- cookbook использует std, а не магические встроенные функции;
+- ясно отделены `host.*` intrinsics, `sys.*` и будущая `core.informatics.std`;
 - API остаётся коротким и запоминаемым;
 - runtime покрыт тестами.
 
@@ -412,7 +412,7 @@ examples/basic.s
   -> checker
   -> interpreter
   -> formatter + diagnostics
-  -> runtime + stdlib
+  -> runtime + core.informatics.std
   -> cookbook
   -> IR
   -> backend

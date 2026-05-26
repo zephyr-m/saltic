@@ -26,7 +26,7 @@ skill divide(a, b) {
 
 ```s
 @safe = divide(10, 0) rescue |err| {
-    std.io.println("division failed")
+    host.io.println("division failed")
     0
 }
 ```

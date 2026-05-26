@@ -68,12 +68,12 @@ skill divide(a, b) {
 
 skill main() {
     @value = divide(10, 2) rescue |err| {
-        std.io.println("error")
+        host.io.println("error")
         0
     }
 
     drum (5) {
-        std.io.println("tick")
+        host.io.println("tick")
     }
 
     out none
@@ -100,8 +100,14 @@ drafts/            сырые заметки и исходный материа�
 - [Типы](docs/types.md)
 - [Ошибки](docs/errors.md)
 - [Runtime](docs/runtime.md)
+- [Библиотечная архитектура](docs/libraries.md)
+- [C interop](docs/c-interop.md)
+- [sys](docs/sys.md)
+- [Host intrinsics](docs/host.md)
 - [Стандартная библиотека](docs/stdlib.md)
-- [Доменные ядра](docs/core.md)
+- [core](docs/core.md)
+- [core.informatics](docs/informatics.md)
+- [agent](docs/agent.md)
 - [Racket Bootstrap](docs/racket.md)
 - [Дорожная карта](docs/roadmap.md)
 - [Не цели](docs/non-goals.md)

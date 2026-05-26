@@ -241,15 +241,13 @@
         (result 'error '())]
        [else
         (result 'unknown '())])]
-    [(list "std" _ ...)
-     (result 'module-path '())]
-    [(list "core" _ ...)
+    [(list "host" _ ...)
      (result 'module-path '())]
     [_ (result 'unknown '())]))
 
 (define (infer-call-type callee globals)
   (match callee
-    [`(path "std" "io" "println") 'none]
+    [`(path "host" "io" "println") 'none]
     [`(path ,name)
      (if (hash-has-key? (hash-ref globals 'skills) name)
          'unknown

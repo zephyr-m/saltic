@@ -1,10 +1,14 @@
 #lang racket
 
-(require "s-parser.rkt")
+(require racket/string
+         "s-parser.rkt")
 
 (provide run-s-file
+         run-s-file/args
          run-s-string
+         run-s-string/args
          run-s-datum
+         run-s-datum/args
          s-none?
          s-error?
          s-enum?)
@@ -20,16 +24,25 @@
 (define missing-value (gensym 'missing))
 
 (define (run-s-file path [out (current-output-port)])
-  (run-s-datum (ast->datum (parse-s-file path)) out))
+  (run-s-file/args path '() out))
+
+(define (run-s-file/args path program-args [out (current-output-port)])
+  (run-s-datum/args (ast->datum (parse-s-file path)) program-args out))
 
 (define (run-s-string source [out (current-output-port)])
-  (run-s-datum (ast->datum (parse-s-string source)) out))
+  (run-s-string/args source '() out))
+
+(define (run-s-string/args source program-args [out (current-output-port)])
+  (run-s-datum/args (ast->datum (parse-s-string source)) program-args out))
 
 (define (run-s-datum ast [out (current-output-port)])
+  (run-s-datum/args ast '() out))
+
+(define (run-s-datum/args ast program-args [out (current-output-port)])
   (define rt (build-runtime ast))
   (unless (hash-has-key? (runtime-skills rt) "main")
     (runtime-error "missing skill 'main'"))
-  (call-skill rt "main" '() out))
+  (call-skill rt "main" program-args out))
 
 (define (build-runtime ast)
   (match ast
@@ -189,19 +202,106 @@
         (s-error variant)]
        [else
         `(path ,@parts)])]
-    [(list "std" _ ...) `(path ,@parts)]
-    [(list "core" _ ...) `(path ,@parts)]
+    [(list "host" _ ...) `(path ,@parts)]
     [_ `(path ,@parts)]))
 
 (define (eval-call rt scope callee args out)
   (match callee
-    [`(path "std" "io" "println")
+    [`(path "host" "io" "println")
+     (fprintf out "~a\n" (string-join (map value->string args) ""))
+     none-value]
+    [`(path "host" "file" "read")
+     (expect-arg-count "host.file.read" args 1)
+     (define path (first args))
+     (unless (string? path)
+       (runtime-error "host.file.read expects string path"))
+     (file->string path)]
+    [`(path "host" "str" "lines_count")
+     (expect-arg-count "host.str.lines_count" args 1)
+     (define text (first args))
+     (unless (string? text)
+       (runtime-error "host.str.lines_count expects string"))
+     (count-lines text)]
+    [`(path "host" "str" "len")
+     (expect-arg-count "host.str.len" args 1)
+     (define text (first args))
+     (unless (string? text)
+       (runtime-error "host.str.len expects string"))
+     (string-length text)]
+    [`(path "host" "str" "join")
+     (string-join (map value->string args) "")]
+    [`(path "host" "str" "add")
+     (string-join (map value->string args) "")]
+    [`(path "host" "str" "eq")
+     (expect-arg-count "host.str.eq" args 2)
+     (equal? (first args) (second args))]
+    [`(path "host" "str" "contains")
+     (expect-arg-count "host.str.contains" args 2)
+     (define text (first args))
+     (define needle (second args))
+     (unless (and (string? text) (string? needle))
+       (runtime-error "host.str.contains expects strings"))
+     (not (not (string-contains? text needle)))]
+    [`(path "host" "str" "trim")
+     (expect-arg-count "host.str.trim" args 1)
+     (define text (first args))
+     (unless (string? text)
+       (runtime-error "host.str.trim expects string"))
+     (string-trim text)]
+    [`(path "host" "str" "upper")
+     (expect-arg-count "host.str.upper" args 1)
+     (define text (first args))
+     (unless (string? text)
+       (runtime-error "host.str.upper expects string"))
+     (string-upcase text)]
+    [`(path "host" "str" "lower")
+     (expect-arg-count "host.str.lower" args 1)
+     (define text (first args))
+     (unless (string? text)
+       (runtime-error "host.str.lower expects string"))
+     (string-downcase text)]
+    [`(path "host" "math" "abs")
+     (expect-arg-count "host.math.abs" args 1)
+     (define value (first args))
+     (unless (number? value)
+       (runtime-error "host.math.abs expects number"))
+     (abs value)]
+    [`(path "host" "math" "min")
+     (unless (andmap number? args)
+       (runtime-error "host.math.min expects numbers"))
+     (apply min args)]
+    [`(path "host" "math" "max")
+     (unless (andmap number? args)
+       (runtime-error "host.math.max expects numbers"))
+     (apply max args)]
+    [`(path "host" "math" "round")
+     (expect-arg-count "host.math.round" args 1)
+     (define value (first args))
+     (unless (number? value)
+       (runtime-error "host.math.round expects number"))
+     (round value)]
+    [`(path "host" "debug" "show")
      (for ([arg args])
-       (fprintf out "~a\n" (value->string arg)))
+       (fprintf out "~s\n" arg))
      none-value]
     [`(path ,name)
      (call-skill rt name args out)]
     [_ (runtime-error "unsupported call target: ~s" callee)]))
+
+(define (expect-arg-count name args expected)
+  (unless (= (length args) expected)
+    (runtime-error "~a expected ~a args, got ~a" name expected (length args))))
+
+(define (count-lines text)
+  (cond
+    [(string=? text "") 0]
+    [else
+     (+ (for/sum ([ch (in-string text)]
+                  #:when (char=? ch #\newline))
+          1)
+        (if (char=? (string-ref text (sub1 (string-length text))) #\newline)
+            0
+            1))]))
 
 (define (eval-binary op left right)
   (match op

@@ -81,16 +81,16 @@ racket tools/format.rkt examples/basic.s
 just
 just parse
 just check
+just format
+just run
 just test
 just example
 just docs
 ```
 
-Заглушки под следующие этапы:
+Заглушка под следующий этап:
 
 ```bash
-just format
-just run
 just explain
 ```
 

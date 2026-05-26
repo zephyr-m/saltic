@@ -28,10 +28,13 @@ check:
     racket tools/check.rkt examples/basic.s
 
 format:
-    @echo "formatter is not implemented yet"
+    racket tools/format.rkt examples/basic.s
+
+format-file file="examples/basic.s":
+    racket tools/format.rkt {{file}}
 
 run:
     racket tools/run.rkt examples/basic.s
 
-run-file file="examples/basic.s":
-    racket tools/run.rkt {{file}}
+run-file file="examples/basic.s" *args:
+    racket tools/run.rkt {{file}} {{args}}

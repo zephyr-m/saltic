@@ -47,7 +47,7 @@ S использует блок условия без ключевого сло�
 
 ```s
 (x > 0) {
-    std.io.println("positive")
+    host.io.println("positive")
 }
 ```
 
@@ -57,9 +57,9 @@ S использует блок условия без ключевого сло�
 
 ```s
 (status) {
-    .OK => std.io.println("ok"),
-    .ERROR => std.io.println("error"),
-    .PENDING => std.io.println("pending"),
+    .OK => host.io.println("ok"),
+    .ERROR => host.io.println("error"),
+    .PENDING => host.io.println("pending"),
 }
 ```
 
@@ -73,11 +73,11 @@ drum {
 }
 
 drum (5) {
-    std.io.println("tick")
+    host.io.println("tick")
 }
 
 drum (item in items) {
-    std.io.println(item)
+    host.io.println(item)
 }
 ```
 
@@ -89,7 +89,7 @@ drum (item in items) {
 
 ```s
 use std.io
-use core.math
+use std.math
 ```
 
 ## Заметки

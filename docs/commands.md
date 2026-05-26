@@ -30,6 +30,22 @@ just check
 Парсит `examples/basic.s` и запускает первый semantic checker.
 
 ```bash
+just format
+just format-file examples/basic.s
+```
+
+Форматирует `.s` файл в официальном стиле.
+
+```bash
+just run
+just run-file examples/basic.s
+just run-file examples/count-lines.s docs/roadmap.md
+```
+
+Проверяет `.s` файл и запускает его через ранний Racket runtime.
+Аргументы после имени `.s` файла передаются в параметры `skill main(...)`.
+
+```bash
 just example
 ```
 
@@ -84,6 +100,9 @@ Preferences: File Icon Theme -> S Language Icons
 ```bash
 racket tools/parse.rkt examples/basic.s
 racket tools/check.rkt examples/basic.s
+racket tools/format.rkt examples/basic.s
+racket tools/run.rkt examples/basic.s
+racket tools/run.rkt examples/count-lines.s docs/roadmap.md
 raco test tests
 ```
 
@@ -94,16 +113,12 @@ raco test tests
 Эти команды уже есть в `justfile`, но пока являются заглушками:
 
 ```bash
-just format
-just run
 just explain
 ```
 
 Они соответствуют будущим этапам:
 
 ```text
-format  -> formatter
-run     -> interpreter
 explain -> объяснение AST/diagnostics для человека
 ```
 
@@ -116,6 +131,7 @@ s parse examples/basic.s
 s format examples/basic.s
 s check examples/basic.s
 s run examples/basic.s
+s run examples/count-lines.s docs/roadmap.md
 s test
 s docs
 s example

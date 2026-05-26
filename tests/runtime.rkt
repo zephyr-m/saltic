@@ -23,10 +23,10 @@ skill fail() {
 
 skill main() {
     @value = fail() rescue |err| {
-        std.io.println(err)
+        host.io.println(err)
         42
     }
-    std.io.println(value)
+    host.io.println(value)
     out none
 }
 S
@@ -40,9 +40,37 @@ S
       #<<S
 skill main() {
     @same = 1 == 2
-    std.io.println(same)
+    host.io.println(same)
     out none
 }
 S
       )))
  "#f\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string/args
+      #<<S
+skill main(name) {
+    host.io.println("hello, ", name)
+    out none
+}
+S
+      (list "S"))))
+ "hello, S\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string/args
+      #<<S
+skill main(path) {
+    @text = host.file.read(path)
+    @count = host.str.lines_count(text)
+    host.io.println(path, ": ", count, " lines")
+    out none
+}
+S
+      (list (path->string basic-source)))))
+ (format "~a: 39 lines\n" (path->string basic-source)))

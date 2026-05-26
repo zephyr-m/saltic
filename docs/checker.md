@@ -45,4 +45,4 @@ error: variable 'y' is not declared
 - Diagnostics пока без строк и колонок semantic-ошибок.
 - Вывод типа пока грубый: `number`, `string`, `none`, `bool`, enum и `unknown`.
 - Возвращаемые типы `skill` пока не выводятся.
-- `std.*` и `core.*` считаются внешними путями и подробно не проверяются.
+- `host.*` считается внешним bootstrap-путём и подробно не проверяется.

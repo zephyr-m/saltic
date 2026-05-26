@@ -23,20 +23,20 @@ skill main() {
     @y = add(x, 5)
 
     @safe = divide(y, 3) rescue |err| {
-        std.io.println("division failed")
+        host.io.println("division failed")
         0
     }
 
     @status = Status.OK
 
     (status) {
-        .OK => std.io.println("ok"),
-        .ERROR => std.io.println("error"),
-        .DONE => std.io.println("done"),
+        .OK => host.io.println("ok"),
+        .ERROR => host.io.println("error"),
+        .DONE => host.io.println("done"),
     }
 
     drum (MaxRetries) {
-        std.io.println("tick")
+        host.io.println("tick")
     }
 
     out none

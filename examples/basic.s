@@ -1,4 +1,5 @@
 MaxRetries = 3
+
 AppName = "S Language"
 
 Status = enum {
@@ -15,30 +16,24 @@ skill divide(a, b) {
     (b == 0) {
         out error.DivisionByZero
     }
-
     out a / b
 }
 
 skill main() {
     @x = 10
     @y = add(x, 20)
-
     @safe = divide(y, 2) rescue |err| {
-        std.io.println("division failed")
+        host.io.println("division failed")
         0
     }
-
     @status = Status.OK
-
     (status) {
-        .OK => std.io.println("ok"),
-        .ERROR => std.io.println("error"),
-        .PENDING => std.io.println("pending"),
+        .OK => host.io.println("ok"),
+        .ERROR => host.io.println("error"),
+        .PENDING => host.io.println("pending"),
     }
-
     drum (5) {
-        std.io.println("tick")
+        host.io.println("tick")
     }
-
     out none
 }
