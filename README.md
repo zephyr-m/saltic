@@ -94,6 +94,7 @@ drafts/            сырые заметки и исходный материа�
 
 ## Документация
 
+- [Индекс документации](docs/README.md)
 - [Философия](docs/philosophy.md)
 - [Грамматика](docs/grammar.md)
 - [Команды](docs/commands.md)

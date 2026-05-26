@@ -74,3 +74,20 @@ program(path) {
 S
       (list (path->string basic-source)))))
  (format "~a: 39 lines\n" (path->string basic-source)))
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string
+      #<<S
+program() {
+    @box = world.spawn("box")
+    world.place(box, 10, 20)
+    world.move(box, 5, 0)
+    world.trace()
+    world.state()
+    out none
+}
+S
+      )))
+ "spawn #1 box\nplace #1 10 20\nmove #1 5 0\n#1 box at 15 20\n")

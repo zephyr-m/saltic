@@ -11,13 +11,17 @@
          run-s-datum/args
          s-none?
          s-error?
-         s-enum?)
+         s-enum?
+         s-world-ref?)
 
-(struct runtime (constants enums skills entry) #:transparent)
+(struct runtime (constants enums skills entry world) #:transparent)
+(struct world-state (next-id objects trace) #:transparent)
+(struct world-object (kind x y) #:transparent)
 (struct env (vars parent) #:transparent)
 (struct s-none () #:transparent)
 (struct s-error (name) #:transparent)
 (struct s-enum (enum variant) #:transparent)
+(struct s-world-ref (id) #:transparent)
 (struct return-signal (value) #:transparent)
 
 (define none-value (s-none))
@@ -51,7 +55,8 @@
      (define enums (make-hash))
      (define skills (make-hash))
      (define entry #f)
-     (define rt (runtime constants enums skills #f))
+     (define world (make-world-state))
+     (define rt (runtime constants enums skills #f world))
      (for ([item items])
        (match item
          [`(const ,name ,value)
@@ -63,11 +68,14 @@
          [`(skill ,name ,params ,body)
           (hash-set! skills name (list params body))]
          [_ (runtime-error "unsupported top-level item: ~s" item)]))
-     (runtime constants enums skills entry)]
+     (runtime constants enums skills entry world)]
     [_ (runtime-error "expected program AST")]))
 
 (define (make-root-env)
   (env (make-hash) #f))
+
+(define (make-world-state)
+  (world-state (box 1) (make-hash) (box '())))
 
 (define (make-child-env parent)
   (env (make-hash) parent))
@@ -223,6 +231,7 @@
        [else
         `(path ,@parts)])]
     [(list "host" _ ...) `(path ,@parts)]
+    [(list "world" _ ...) `(path ,@parts)]
     [_ `(path ,@parts)]))
 
 (define (eval-call rt scope callee args out)
@@ -304,6 +313,23 @@
      (for ([arg args])
        (fprintf out "~s\n" arg))
      none-value]
+    [`(path "world" "spawn")
+     (expect-arg-count "world.spawn" args 1)
+     (world-spawn! rt (first args))]
+    [`(path "world" "place")
+     (expect-arg-count "world.place" args 3)
+     (world-place! rt (first args) (second args) (third args))
+     none-value]
+    [`(path "world" "move")
+     (expect-arg-count "world.move" args 3)
+     (world-move! rt (first args) (second args) (third args))
+     none-value]
+    [`(path "world" "trace")
+     (fprintf out "~a" (world-trace-string rt))
+     none-value]
+    [`(path "world" "state")
+     (fprintf out "~a" (world-state-string rt))
+     none-value]
     [`(path ,name)
      (call-skill rt name args out)]
     [_ (runtime-error "unsupported call target: ~s" callee)]))
@@ -322,6 +348,74 @@
         (if (char=? (string-ref text (sub1 (string-length text))) #\newline)
             0
             1))]))
+
+(define (world-spawn! rt kind)
+  (unless (string? kind)
+    (runtime-error "world.spawn expects string kind"))
+  (define world (runtime-world rt))
+  (define id (unbox (world-state-next-id world)))
+  (set-box! (world-state-next-id world) (add1 id))
+  (hash-set! (world-state-objects world) id (world-object kind 0 0))
+  (world-add-trace! rt (format "spawn #~a ~a" id kind))
+  (s-world-ref id))
+
+(define (world-place! rt ref x y)
+  (define object (world-object-ref rt ref))
+  (expect-number "world.place x" x)
+  (expect-number "world.place y" y)
+  (hash-set! (world-state-objects (runtime-world rt))
+             (s-world-ref-id ref)
+             (world-object (world-object-kind object) x y))
+  (world-add-trace! rt (format "place #~a ~a ~a" (s-world-ref-id ref) x y)))
+
+(define (world-move! rt ref dx dy)
+  (define object (world-object-ref rt ref))
+  (expect-number "world.move dx" dx)
+  (expect-number "world.move dy" dy)
+  (define x (+ (world-object-x object) dx))
+  (define y (+ (world-object-y object) dy))
+  (hash-set! (world-state-objects (runtime-world rt))
+             (s-world-ref-id ref)
+             (world-object (world-object-kind object) x y))
+  (world-add-trace! rt (format "move #~a ~a ~a" (s-world-ref-id ref) dx dy)))
+
+(define (world-object-ref rt ref)
+  (unless (s-world-ref? ref)
+    (runtime-error "world operation expects object handle"))
+  (define object (hash-ref (world-state-objects (runtime-world rt))
+                           (s-world-ref-id ref)
+                           #f))
+  (unless object
+    (runtime-error "world object #~a not found" (s-world-ref-id ref)))
+  object)
+
+(define (world-add-trace! rt line)
+  (define trace (world-state-trace (runtime-world rt)))
+  (set-box! trace (append (unbox trace) (list line))))
+
+(define (world-trace-string rt)
+  (define lines (unbox (world-state-trace (runtime-world rt))))
+  (if (null? lines)
+      ""
+      (string-append (string-join lines "\n") "\n")))
+
+(define (world-state-string rt)
+  (define objects (world-state-objects (runtime-world rt)))
+  (define lines
+    (for/list ([id (sort (hash-keys objects) <)])
+      (define object (hash-ref objects id))
+      (format "#~a ~a at ~a ~a"
+              id
+              (world-object-kind object)
+              (world-object-x object)
+              (world-object-y object))))
+  (if (null? lines)
+      ""
+      (string-append (string-join lines "\n") "\n")))
+
+(define (expect-number name value)
+  (unless (number? value)
+    (runtime-error "~a expects number" name)))
 
 (define (eval-binary op left right)
   (match op
@@ -362,6 +456,7 @@
      (if (s-enum-enum value)
          (format "~a.~a" (s-enum-enum value) (s-enum-variant value))
          (format ".~a" (s-enum-variant value)))]
+    [(s-world-ref? value) (format "#~a" (s-world-ref-id value))]
     [else (format "~a" value)]))
 
 (define (runtime-error message . args)

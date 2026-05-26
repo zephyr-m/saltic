@@ -226,11 +226,11 @@ Trace нужен, чтобы:
 До первого world MVP надо иметь:
 
 ```text
-[ ] value model draft: handle/ref
-[ ] namespace model fixed enough for world/tool
-[ ] action shape draft
-[ ] trace shape draft
-[ ] minimal world state model
+[x] value model draft: handle/ref
+[x] namespace model fixed enough for world/tool
+[x] action shape draft
+[x] trace shape draft
+[x] minimal world state model
 [ ] clear split: core.engine vs world.*
 ```
 
@@ -245,6 +245,36 @@ Trace нужен, чтобы:
 получить trace
 повторить trace
 получить тот же state
+```
+
+## Current Action / Trace MVP
+
+Первый runtime-срез уже есть:
+
+```s
+program() {
+    @box = world.spawn("box")
+    world.place(box, 10, 20)
+    world.move(box, 5, 0)
+    world.trace()
+    world.state()
+    out none
+}
+```
+
+Команда:
+
+```bash
+just run-file examples/world-basic.s
+```
+
+Вывод:
+
+```text
+spawn #1 box
+place #1 10 20
+move #1 5 0
+#1 box at 15 20
 ```
 
 ## Главный принцип

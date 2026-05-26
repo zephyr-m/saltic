@@ -40,6 +40,7 @@ just format-file examples/basic.s
 just run
 just run-file examples/basic.s
 just run-file examples/count-lines.s docs/roadmap.md
+just run-file examples/world-basic.s
 ```
 
 Проверяет `.s` файл и запускает его через ранний Racket runtime.

@@ -100,6 +100,26 @@ world.history
 world.save
 ```
 
+Текущее runtime-подмножество:
+
+```text
+world.spawn(kind)
+world.place(object, x, y)
+world.move(object, dx, dy)
+world.trace()
+world.state()
+```
+
+Это ещё не физика и не графика. Это первый action/trace срез:
+
+```text
+object handle
+world state
+action log
+trace output
+state output
+```
+
 ## tool.*
 
 Инструменты внутри мира:
@@ -136,6 +156,19 @@ world.place(box, point(0, 0, 0))
 world.material(box, material.aluminum)
 world.apply(box, force)
 world.simulate(seconds(1))
+```
+
+Текущий исполняемый пример:
+
+```s
+program() {
+    @box = world.spawn("box")
+    world.place(box, 10, 20)
+    world.move(box, 5, 0)
+    world.trace()
+    world.state()
+    out none
+}
 ```
 
 А может быть результатом действий в мире, которые S сохраняет как воспроизводимую историю.

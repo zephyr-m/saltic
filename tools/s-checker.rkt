@@ -251,6 +251,8 @@
         (result 'unknown '())])]
     [(list "host" _ ...)
      (result 'module-path '())]
+    [(list "world" _ ...)
+     (result 'module-path '())]
     [_ (result 'unknown '())]))
 
 (define (infer-call-type callee globals)
