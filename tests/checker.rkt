@@ -5,8 +5,10 @@
          "../tools/s-checker.rkt")
 
 (define-runtime-path basic-source "../examples/basic.s")
+(define-runtime-path try-source "../examples/try.s")
 
 (check-equal? (check-s-file basic-source) '())
+(check-equal? (check-s-file try-source) '())
 
 (check-equal?
  (check-s-string

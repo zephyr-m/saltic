@@ -31,4 +31,7 @@ format:
     @echo "formatter is not implemented yet"
 
 run:
-    @echo "interpreter is not implemented yet"
+    racket tools/run.rkt examples/basic.s
+
+run-file file="examples/basic.s":
+    racket tools/run.rkt {{file}}
