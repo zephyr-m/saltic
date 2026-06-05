@@ -231,6 +231,7 @@ Trace нужен, чтобы:
 [x] action shape draft
 [x] trace shape draft
 [x] minimal world state model
+[x] replay trace to state
 [ ] clear split: core.engine vs world.*
 ```
 
@@ -275,6 +276,29 @@ spawn #1 box
 place #1 10 20
 move #1 5 0
 #1 box at 15 20
+```
+
+Replay-срез:
+
+```s
+program() {
+    @box = world.spawn("box")
+    world.place(box, 10, 20)
+    world.move(box, 5, 0)
+
+    @trace = world.trace_text()
+    @state = world.state_text()
+    @replayed = world.replay(trace)
+
+    host.io.println(state == replayed)
+    out none
+}
+```
+
+Проверяемое свойство:
+
+```text
+actions -> trace -> replay -> same state
 ```
 
 ## Главный принцип

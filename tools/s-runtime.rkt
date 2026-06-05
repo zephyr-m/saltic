@@ -327,9 +327,18 @@
     [`(path "world" "trace")
      (fprintf out "~a" (world-trace-string rt))
      none-value]
+    [`(path "world" "trace_text")
+     (expect-arg-count "world.trace_text" args 0)
+     (world-trace-string rt)]
     [`(path "world" "state")
      (fprintf out "~a" (world-state-string rt))
      none-value]
+    [`(path "world" "state_text")
+     (expect-arg-count "world.state_text" args 0)
+     (world-state-string rt)]
+    [`(path "world" "replay")
+     (expect-arg-count "world.replay" args 1)
+     (world-replay (first args))]
     [`(path ,name)
      (call-skill rt name args out)]
     [_ (runtime-error "unsupported call target: ~s" callee)]))
@@ -400,7 +409,10 @@
       (string-append (string-join lines "\n") "\n")))
 
 (define (world-state-string rt)
-  (define objects (world-state-objects (runtime-world rt)))
+  (world-state->string (runtime-world rt)))
+
+(define (world-state->string world)
+  (define objects (world-state-objects world))
   (define lines
     (for/list ([id (sort (hash-keys objects) <)])
       (define object (hash-ref objects id))
@@ -412,6 +424,62 @@
   (if (null? lines)
       ""
       (string-append (string-join lines "\n") "\n")))
+
+(define (world-replay trace-text)
+  (unless (string? trace-text)
+    (runtime-error "world.replay expects trace string"))
+  (define world (make-world-state))
+  (for ([line (in-list (filter non-empty-string? (string-split trace-text "\n")))])
+    (world-apply-trace-line! world line))
+  (world-state->string world))
+
+(define (non-empty-string? value)
+  (not (string=? value "")))
+
+(define (world-apply-trace-line! world line)
+  (define parts (string-split line))
+  (match parts
+    [(list "spawn" id-text kind)
+     (define id (parse-world-id id-text line))
+     (hash-set! (world-state-objects world) id (world-object kind 0 0))
+     (set-box! (world-state-next-id world)
+               (max (unbox (world-state-next-id world)) (add1 id)))]
+    [(list "place" id-text x-text y-text)
+     (define id (parse-world-id id-text line))
+     (define object (hash-ref (world-state-objects world) id #f))
+     (unless object
+       (runtime-error "world.replay cannot place missing object #~a" id))
+     (hash-set! (world-state-objects world)
+                id
+                (world-object (world-object-kind object)
+                              (parse-trace-number x-text line)
+                              (parse-trace-number y-text line)))]
+    [(list "move" id-text dx-text dy-text)
+     (define id (parse-world-id id-text line))
+     (define object (hash-ref (world-state-objects world) id #f))
+     (unless object
+       (runtime-error "world.replay cannot move missing object #~a" id))
+     (hash-set! (world-state-objects world)
+                id
+                (world-object (world-object-kind object)
+                              (+ (world-object-x object) (parse-trace-number dx-text line))
+                              (+ (world-object-y object) (parse-trace-number dy-text line))))]
+    [_ (runtime-error "world.replay cannot parse trace line: ~a" line)]))
+
+(define (parse-world-id text line)
+  (unless (and (positive? (string-length text))
+               (char=? (string-ref text 0) #\#))
+    (runtime-error "world.replay expected object id in trace line: ~a" line))
+  (define value (string->number (substring text 1)))
+  (unless (and (integer? value) (positive? value))
+    (runtime-error "world.replay expected positive object id in trace line: ~a" line))
+  value)
+
+(define (parse-trace-number text line)
+  (define value (string->number text))
+  (unless (number? value)
+    (runtime-error "world.replay expected number in trace line: ~a" line))
+  value)
 
 (define (expect-number name value)
   (unless (number? value)

@@ -107,7 +107,10 @@ world.spawn(kind)
 world.place(object, x, y)
 world.move(object, dx, dy)
 world.trace()
+world.trace_text()
 world.state()
+world.state_text()
+world.replay(trace)
 ```
 
 Это ещё не физика и не графика. Это первый action/trace срез:
@@ -118,6 +121,7 @@ world state
 action log
 trace output
 state output
+replay from trace
 ```
 
 ## tool.*
@@ -167,6 +171,23 @@ program() {
     world.move(box, 5, 0)
     world.trace()
     world.state()
+    out none
+}
+```
+
+Replay MVP:
+
+```s
+program() {
+    @box = world.spawn("box")
+    world.place(box, 10, 20)
+    world.move(box, 5, 0)
+
+    @trace = world.trace_text()
+    @state = world.state_text()
+    @replayed = world.replay(trace)
+
+    host.io.println(state == replayed)
     out none
 }
 ```

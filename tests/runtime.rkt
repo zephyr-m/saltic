@@ -91,3 +91,23 @@ program() {
 S
       )))
  "spawn #1 box\nplace #1 10 20\nmove #1 5 0\n#1 box at 15 20\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string
+      #<<S
+program() {
+    @box = world.spawn("box")
+    world.place(box, 10, 20)
+    world.move(box, 5, 0)
+    @trace = world.trace_text()
+    @state = world.state_text()
+    @replayed = world.replay(trace)
+    host.io.println(state == replayed)
+    host.io.println(host.str.trim(replayed))
+    out none
+}
+S
+      )))
+ "#t\n#1 box at 15 20\n")
