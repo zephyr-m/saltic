@@ -19,6 +19,8 @@ vision/    направление и ограничения
 Эти документы задают направление проекта.
 
 ```text
+vision/digital-paper.md  главный смысл S как цифровой бумаги
+vision/ideal-system.md   целевая картина готовой системы
 start/README.md  вход в проект
 spec/README.md   язык как система
 bootstrap/README.md  временный слой исполнения

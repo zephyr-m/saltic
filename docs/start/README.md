@@ -4,6 +4,8 @@
 
 ## Читать сначала
 
+- [digital paper](../vision/digital-paper.md)
+- [ideal system](../vision/ideal-system.md)
 - [layers](layers.md)
 - [bootstrap contract](../bootstrap/bootstrap-contract.md)
 - [v0.1 core](v0.1-core.md)
