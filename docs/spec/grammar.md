@@ -7,8 +7,8 @@
 ## Поддерживаемые конструкции
 
 ```text
-program      = item*
-item         = const | enum | skill
+program      = "program" "(" params? ")" block
+item         = const | enum | skill | program
 
 const        = Ident "=" expr
 enum         = Ident "=" "enum" "{" Ident ("," Ident)* ","? "}"

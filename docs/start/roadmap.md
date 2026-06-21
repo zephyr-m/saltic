@@ -94,7 +94,7 @@ S нужен не только для написания программ. S н�
 Результат:
 
 ```text
-docs/grammar.md
+docs/spec/grammar.md
 ```
 
 Готово, когда:
@@ -202,7 +202,7 @@ just run
 Результат:
 
 ```text
-docs/foundation.md
+docs/start/foundation.md
 ```
 
 Минимальный состав:

@@ -21,8 +21,7 @@ example:
     @just parse examples/basic.s
 
 explain file="examples/basic.s":
-    @echo "explain is not implemented yet"
-    @echo "next step: build a small AST explainer for {{file}}"
+    racket tools/explain.rkt {{file}}
 
 check:
     racket tools/check.rkt examples/basic.s

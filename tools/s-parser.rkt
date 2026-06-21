@@ -2,9 +2,11 @@
 
 (provide parse-s-file
          parse-s-string
-         ast->datum)
+         ast->datum
+         ast->datum/loc)
 
 (struct tok (kind value line col) #:transparent)
+(struct located (node line col) #:transparent)
 
 (struct program (items) #:transparent)
 (struct const-decl (name value) #:transparent)
@@ -209,20 +211,23 @@
     [else (parse-error (peek tokens) "expected top-level declaration")]))
 
 (define (parse-entry tokens)
+  (define start (peek tokens))
   (define-values (_program t1) (expect tokens 'PROGRAM))
   (define-values (_lp t2) (expect t1 'LPAREN "expected ( after program"))
   (define-values (params t3) (parse-param-list t2))
   (define-values (_rp t4) (expect t3 'RPAREN))
   (define-values (body rest) (parse-block t4))
-  (values (entry-decl params body) rest))
+  (values (locate (entry-decl params body) start) rest))
 
 (define (parse-const tokens)
+  (define start (peek tokens))
   (define-values (name t1) (expect-ident tokens))
   (define-values (_eq t2) (expect t1 'ASSIGN))
   (define-values (value rest) (parse-expression t2))
-  (values (const-decl name value) rest))
+  (values (locate (const-decl name value) start) rest))
 
 (define (parse-enum tokens)
+  (define start (peek tokens))
   (define-values (name t1) (expect-ident tokens))
   (define-values (_eq t2) (expect t1 'ASSIGN))
   (define-values (_enum t3) (expect t2 'ENUM))
@@ -230,20 +235,21 @@
   (let loop ([tokens (skip-newlines t4)] [variants '()])
     (cond
       [(token? tokens 'RBRACE)
-       (values (enum-decl name (reverse variants)) (advance tokens))]
+       (values (locate (enum-decl name (reverse variants)) start) (advance tokens))]
       [else
        (define-values (variant t1) (expect-ident tokens "expected enum variant"))
        (define rest (if (token? t1 'COMMA) (advance t1) t1))
        (loop (skip-newlines rest) (cons variant variants))])))
 
 (define (parse-skill tokens)
+  (define start (peek tokens))
   (define-values (_skill t1) (expect tokens 'SKILL))
   (define-values (name t2) (expect-ident t1 "expected skill name"))
   (define-values (_lp t3) (expect t2 'LPAREN))
   (define-values (params t4) (parse-param-list t3))
   (define-values (_rp t5) (expect t4 'RPAREN))
   (define-values (body rest) (parse-block t5))
-  (values (skill-decl name params body) rest))
+  (values (locate (skill-decl name params body) start) rest))
 
 (define (parse-param-list tokens)
   (cond
@@ -258,11 +264,12 @@
           (values (reverse (cons param params)) t1)]))]))
 
 (define (parse-block tokens)
+  (define start (peek tokens))
   (define-values (_lb t1) (expect tokens 'LBRACE))
   (let loop ([tokens (skip-newlines t1)] [items '()])
     (cond
       [(token? tokens 'RBRACE)
-       (values (block-stmt (reverse items)) (advance tokens))]
+       (values (locate (block-stmt (reverse items)) start) (advance tokens))]
       [(token? tokens 'EOF)
        (parse-error (peek tokens) "expected }")]
       [else
@@ -282,62 +289,68 @@
      (values (expr-stmt expr) rest)]))
 
 (define (parse-var-decl tokens)
+  (define start (peek tokens))
   (define-values (_at t1) (expect tokens 'AT))
   (define-values (name t2) (expect-ident t1 "expected variable name"))
   (define-values (_eq t3) (expect t2 'ASSIGN "expected = after variable name"))
   (define-values (value rest) (parse-expression t3))
-  (values (var-decl name value) rest))
+  (values (locate (var-decl name value) start) rest))
 
 (define (parse-assign tokens)
+  (define start (peek tokens))
   (define-values (name t1) (expect-ident tokens))
   (define-values (_eq t2) (expect t1 'ASSIGN))
   (define-values (value rest) (parse-expression t2))
-  (values (assign-stmt name value) rest))
+  (values (locate (assign-stmt name value) start) rest))
 
 (define (parse-out tokens)
+  (define start (peek tokens))
   (define-values (_out t1) (expect tokens 'OUT))
   (define-values (value rest) (parse-expression t1))
-  (values (out-stmt value) rest))
+  (values (locate (out-stmt value) start) rest))
 
 (define (parse-drum tokens)
+  (define start (peek tokens))
   (define-values (_drum t1) (expect tokens 'DRUM))
   (define-values (_lp t2) (expect t1 'LPAREN "expected ( after drum"))
   (define-values (count t3) (parse-expression t2))
   (define-values (_rp t4) (expect t3 'RPAREN))
   (define-values (body rest) (parse-block t4))
-  (values (drum-stmt count body) rest))
+  (values (locate (drum-stmt count body) start) rest))
 
 (define (parse-paren-block-stmt tokens)
+  (define start (peek tokens))
   (define-values (_lp t1) (expect tokens 'LPAREN))
   (define-values (expr t2) (parse-expression t1))
   (define-values (_rp t3) (expect t2 'RPAREN))
   (define-values (_lb t4) (expect t3 'LBRACE))
   (define body-start (skip-newlines t4))
   (if (token? body-start 'DOT)
-      (parse-switch-tail expr body-start)
-      (parse-if-tail expr body-start)))
+      (parse-switch-tail expr body-start start)
+      (parse-if-tail expr body-start start)))
 
-(define (parse-if-tail expr tokens)
+(define (parse-if-tail expr tokens start)
   (let loop ([tokens (skip-newlines tokens)] [items '()])
     (cond
       [(token? tokens 'RBRACE)
-       (values (if-stmt expr (block-stmt (reverse items))) (advance tokens))]
+       (values (locate (if-stmt expr (locate (block-stmt (reverse items)) start)) start) (advance tokens))]
       [else
        (define-values (stmt rest) (parse-statement tokens))
        (loop (skip-newlines rest) (cons stmt items))])))
 
-(define (parse-switch-tail expr tokens)
+(define (parse-switch-tail expr tokens start)
   (let loop ([tokens (skip-newlines tokens)] [cases '()])
     (cond
       [(token? tokens 'RBRACE)
-       (values (switch-stmt expr (reverse cases)) (advance tokens))]
+       (values (locate (switch-stmt expr (reverse cases)) start) (advance tokens))]
       [else
+       (define case-start (peek tokens))
        (define-values (_dot t1) (expect tokens 'DOT))
        (define-values (tag t2) (expect-ident t1 "expected switch case tag"))
        (define-values (_arrow t3) (expect t2 'ARROW))
        (define-values (value t4) (parse-expression t3))
        (define rest (if (token? t4 'COMMA) (advance t4) t4))
-       (loop (skip-newlines rest) (cons (switch-case tag value) cases))])))
+       (loop (skip-newlines rest) (cons (locate (switch-case tag value) case-start) cases))])))
 
 (define (parse-expression tokens)
   (define-values (expr rest) (parse-binary tokens 0))
@@ -358,8 +371,9 @@
     (define kind (tok-kind (peek tokens)))
     (define prec (hash-ref precedences kind #f))
     (if (and prec (>= prec min-prec))
-        (let-values ([(right rest*) (parse-binary (advance tokens) (add1 prec))])
-          (loop (binary-expr (tok-value (peek tokens)) left right) rest*))
+        (let ([op-token (peek tokens)])
+          (let-values ([(right rest*) (parse-binary (advance tokens) (add1 prec))])
+            (loop (locate (binary-expr (tok-value op-token) left right) op-token) rest*)))
         (values left tokens))))
 
 (define (parse-postfix tokens)
@@ -367,8 +381,9 @@
   (let loop ([expr expr] [tokens rest])
     (cond
       [(token? tokens 'LPAREN)
+       (define start (peek tokens))
        (define-values (args rest*) (parse-args tokens))
-       (loop (call-expr expr args) rest*)]
+       (loop (locate (call-expr expr args) start) rest*)]
       [else
        (values expr tokens)])))
 
@@ -386,25 +401,27 @@
           (values (reverse (cons arg args)) rest)]))]))
 
 (define (parse-rescue value tokens)
+  (define start (peek tokens))
   (define-values (_rescue t1) (expect tokens 'RESCUE))
   (define-values (_pipe1 t2) (expect t1 'PIPE))
   (define-values (err t3) (expect-ident t2 "expected rescue error name"))
   (define-values (_pipe2 t4) (expect t3 'PIPE))
   (define-values (body rest) (parse-block t4))
-  (values (rescue-expr value err body) rest))
+  (values (locate (rescue-expr value err body) start) rest))
 
 (define (parse-primary tokens)
   (cond
     [(token? tokens 'NUMBER)
-     (values (number-expr (string->number (tok-value (peek tokens)))) (advance tokens))]
+     (values (locate (number-expr (string->number (tok-value (peek tokens)))) (peek tokens)) (advance tokens))]
     [(token? tokens 'STRING)
-     (values (string-expr (tok-value (peek tokens))) (advance tokens))]
+     (values (locate (string-expr (tok-value (peek tokens))) (peek tokens)) (advance tokens))]
     [(token? tokens 'NONE)
-     (values (none-expr) (advance tokens))]
+     (values (locate (none-expr) (peek tokens)) (advance tokens))]
     [(token? tokens 'DOT)
+     (define start (peek tokens))
      (define-values (_dot t1) (expect tokens 'DOT))
      (define-values (name rest) (expect-ident t1 "expected enum value"))
-     (values (enum-value-expr name) rest)]
+     (values (locate (enum-value-expr name) start) rest)]
     [(token? tokens 'IDENT)
      (parse-path tokens)]
     [(token? tokens 'LPAREN)
@@ -416,6 +433,7 @@
      (parse-error (peek tokens) "expected expression")]))
 
 (define (parse-path tokens)
+  (define start (peek tokens))
   (define-values (first t1) (expect-ident tokens))
   (let loop ([tokens t1] [parts (list first)])
     (cond
@@ -424,10 +442,14 @@
        (define-values (part t3) (expect-ident t2))
        (loop t3 (append parts (list part)))]
       [else
-       (values (path-expr parts) tokens)])))
+       (values (locate (path-expr parts) start) tokens)])))
+
+(define (locate node token)
+  (located node (tok-line token) (tok-col token)))
 
 (define (ast->datum ast)
   (cond
+    [(located? ast) (ast->datum (located-node ast))]
     [(program? ast) `(program ,@(map ast->datum (program-items ast)))]
     [(const-decl? ast) `(const ,(const-decl-name ast) ,(ast->datum (const-decl-value ast)))]
     [(enum-decl? ast) `(enum ,(enum-decl-name ast) ,@(enum-decl-variants ast))]
@@ -452,6 +474,41 @@
                                  ,(ast->datum (binary-expr-right ast)))]
     [(call-expr? ast) `(call ,(ast->datum (call-expr-callee ast))
                              ,@(map ast->datum (call-expr-args ast)))]
+    [(path-expr? ast) `(path ,@(path-expr-parts ast))]
+    [(enum-value-expr? ast) `(enum-value ,(enum-value-expr-name ast))]
+    [(number-expr? ast) `(number ,(number-expr-value ast))]
+    [(string-expr? ast) `(string ,(string-expr-value ast))]
+    [(none-expr? ast) '(none)]
+    [else ast]))
+
+(define (ast->datum/loc ast)
+  (cond
+    [(located? ast)
+     `(loc ,(located-line ast) ,(located-col ast) ,(ast->datum/loc (located-node ast)))]
+    [(program? ast) `(program ,@(map ast->datum/loc (program-items ast)))]
+    [(const-decl? ast) `(const ,(const-decl-name ast) ,(ast->datum/loc (const-decl-value ast)))]
+    [(enum-decl? ast) `(enum ,(enum-decl-name ast) ,@(enum-decl-variants ast))]
+    [(entry-decl? ast) `(entry ,(entry-decl-params ast) ,(ast->datum/loc (entry-decl-body ast)))]
+    [(skill-decl? ast) `(skill ,(skill-decl-name ast) ,(skill-decl-params ast)
+                              ,(ast->datum/loc (skill-decl-body ast)))]
+    [(var-decl? ast) `(var ,(var-decl-name ast) ,(ast->datum/loc (var-decl-value ast)))]
+    [(assign-stmt? ast) `(assign ,(assign-stmt-name ast) ,(ast->datum/loc (assign-stmt-value ast)))]
+    [(out-stmt? ast) `(out ,(ast->datum/loc (out-stmt-value ast)))]
+    [(expr-stmt? ast) `(expr ,(ast->datum/loc (expr-stmt-value ast)))]
+    [(block-stmt? ast) `(block ,@(map ast->datum/loc (block-stmt-items ast)))]
+    [(if-stmt? ast) `(if ,(ast->datum/loc (if-stmt-test ast)) ,(ast->datum/loc (if-stmt-body ast)))]
+    [(switch-stmt? ast) `(switch ,(ast->datum/loc (switch-stmt-value ast))
+                                 ,@(map ast->datum/loc (switch-stmt-cases ast)))]
+    [(switch-case? ast) `(case ,(switch-case-tag ast) ,(ast->datum/loc (switch-case-body ast)))]
+    [(drum-stmt? ast) `(drum ,(ast->datum/loc (drum-stmt-count ast)) ,(ast->datum/loc (drum-stmt-body ast)))]
+    [(rescue-expr? ast) `(rescue ,(ast->datum/loc (rescue-expr-value ast))
+                                 ,(rescue-expr-err ast)
+                                 ,(ast->datum/loc (rescue-expr-body ast)))]
+    [(binary-expr? ast) `(binary ,(binary-expr-op ast)
+                                 ,(ast->datum/loc (binary-expr-left ast))
+                                 ,(ast->datum/loc (binary-expr-right ast)))]
+    [(call-expr? ast) `(call ,(ast->datum/loc (call-expr-callee ast))
+                             ,@(map ast->datum/loc (call-expr-args ast)))]
     [(path-expr? ast) `(path ,@(path-expr-parts ast))]
     [(enum-value-expr? ast) `(enum-value ,(enum-value-expr-name ast))]
     [(number-expr? ast) `(number ,(number-expr-value ast))]

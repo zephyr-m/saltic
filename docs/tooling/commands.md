@@ -39,7 +39,8 @@ just format-file examples/basic.s
 ```bash
 just run
 just run-file examples/basic.s
-just run-file examples/count-lines.s docs/roadmap.md
+just run-file examples/count-lines.s docs/start/roadmap.md
+just run-file examples/finance-log.s
 just run-file examples/world-basic.s
 just run-file examples/world-replay.s
 ```
@@ -104,25 +105,27 @@ racket tools/parse.rkt examples/basic.s
 racket tools/check.rkt examples/basic.s
 racket tools/format.rkt examples/basic.s
 racket tools/run.rkt examples/basic.s
-racket tools/run.rkt examples/count-lines.s docs/roadmap.md
+racket tools/run.rkt examples/count-lines.s docs/start/roadmap.md
+racket tools/run.rkt examples/finance-log.s
 raco test tests
 ```
 
 Эти команды полезны, когда нужно обойти `just` и увидеть низкоуровневое поведение.
 
-## Зарезервированные команды
-
-Эти команды уже есть в `justfile`, но пока являются заглушками:
+## Explain
 
 ```bash
-just explain
+just explain examples/basic.s
+just explain examples/finance-log.s
 ```
 
-Они соответствуют будущим этапам:
+Показывает короткое человеческое описание `.s` файла:
 
-```text
-explain -> объяснение AST/diagnostics для человека
+```bash
+just explain examples/finance-log.s
 ```
+
+Это удобно, когда нужно понять программу без чтения Racket AST.
 
 ## Целевая форма будущей CLI
 
@@ -133,7 +136,7 @@ s parse examples/basic.s
 s format examples/basic.s
 s check examples/basic.s
 s run examples/basic.s
-s run examples/count-lines.s docs/roadmap.md
+s run examples/count-lines.s docs/start/roadmap.md
 s test
 s docs
 s example
