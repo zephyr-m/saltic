@@ -4,6 +4,8 @@
 
 ## Содержимое
 
+- [digital paper](digital-paper.md)
+- [ideal system](ideal-system.md)
 - [philosophy](philosophy.md)
 - [core](core.md)
 - [informatics](informatics.md)
