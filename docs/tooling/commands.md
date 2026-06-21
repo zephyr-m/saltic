@@ -42,6 +42,12 @@ just user-examples
 Проверяет обычные пользовательские примеры из `examples/user/`: они должны импортировать `std`, не использовать `host.*`, проходить checker и запускаться.
 
 ```bash
+just task tasks/001-finance-balance
+```
+
+Проверяет первое агентское задание: `task.md`, `solution.s` и опциональный `expected.txt`.
+
+```bash
 just check
 just check-file examples/canonical/text-auditor.std.s
 racket tools/check.rkt --json examples/user/finance-log.s
@@ -138,6 +144,7 @@ raco test tests
 ```bash
 just explain examples/bootstrap/basic.s
 just explain examples/user/finance-log.s
+racket tools/explain.rkt --json examples/canonical/report-generator.std.s
 ```
 
 Показывает короткое человеческое описание `.s` файла:
@@ -147,6 +154,8 @@ just explain examples/user/finance-log.s
 ```
 
 Это удобно, когда нужно понять программу без чтения Racket AST.
+
+`explain --json` печатает machine-readable summary программы: imports, top-level counts, entrypoint, skills и вызовы `std`/`host`/`world`.
 
 ## Целевая форма будущей CLI
 

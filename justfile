@@ -10,6 +10,7 @@ test:
 verify:
     just canonical
     just user-examples
+    just task tasks/001-finance-balance
     env TMPDIR=/tmp raco test tests/checker.rkt tests/explainer.rkt tests/formatter.rkt tests/parser.rkt tests/runtime.rkt
 
 canonical:
@@ -25,6 +26,9 @@ user-examples:
     racket tools/check.rkt examples/user/finance-log.s
     racket tools/run.rkt examples/user/count-lines.s docs/start/roadmap.md
     racket tools/run.rkt examples/user/finance-log.s
+
+task dir="tasks/001-finance-balance":
+    racket tools/task.rkt {{dir}}
 
 docs:
     @echo "docs are in README.md and docs/"
