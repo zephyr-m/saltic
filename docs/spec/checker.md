@@ -25,6 +25,38 @@ ok
 1:1: error: variable 'y' is not declared
 ```
 
+Для агентов есть JSON-режим:
+
+```bash
+racket tools/check.rkt --json examples/user/finance-log.s
+```
+
+Успешная проверка:
+
+```json
+{"diagnostics":[],"ok":true}
+```
+
+Ошибка:
+
+```json
+{
+  "ok": false,
+  "diagnostics": [
+    {
+      "level": "error",
+      "code": "std_not_imported",
+      "message": "module 'std' is not imported; add 'use std'",
+      "line": 2,
+      "col": 5,
+      "hint": "add `use std` at top level"
+    }
+  ]
+}
+```
+
+JSON-режим сохраняет тот же exit code: `0`, если diagnostics пустые, и `1`, если есть ошибки.
+
 ## Текущие проверки
 
 - неизвестное имя;
@@ -40,6 +72,7 @@ ok
 - enum variant должен существовать.
 
 Checker также знает позиции source-кода для semantic diagnostics и может указывать строку и колонку ошибки.
+Structured diagnostics дополнительно имеют `code` и, где возможно, `hint` для автоматического исправления.
 
 ## Намеренные ограничения
 

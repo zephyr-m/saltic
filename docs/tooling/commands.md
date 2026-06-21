@@ -44,9 +44,11 @@ just user-examples
 ```bash
 just check
 just check-file examples/canonical/text-auditor.std.s
+racket tools/check.rkt --json examples/user/finance-log.s
 ```
 
 Парсит `examples/bootstrap/basic.s` и запускает первый semantic checker.
+Флаг `--json` печатает machine-readable diagnostics для агентов.
 
 ```bash
 just format
