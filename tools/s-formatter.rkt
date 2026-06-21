@@ -119,6 +119,8 @@
     [`(string ,value) (format "~s" value)]
     [`(none) "none"]
     [`(enum-value ,name) (format ".~a" name)]
+    [`(group ,items ...)
+     (format-group items level)]
     [`(path ,parts ...) (string-join parts ".")]
     [`(call ,callee ,args ...)
      (define text
@@ -171,6 +173,20 @@
       "\n"
       (indent level)
       "}")]))
+
+(define (format-group items level)
+  (cond
+    [(null? items) "[]"]
+    [else
+     (string-append
+      "[\n"
+      (string-join
+       (for/list ([item items])
+         (format "~a~a," (indent (add1 level)) (format-expr item (add1 level))))
+       "\n")
+      "\n"
+      (indent level)
+      "]")]))
 
 (define (maybe-parenthesize text prec parent-prec side)
   (if (or (< prec parent-prec)

@@ -2,6 +2,7 @@
 
 (require racket/list
          racket/string
+         "s-modules.rkt"
          "s-parser.rkt")
 
 (provide explain-s-file
@@ -13,13 +14,13 @@
          explanation->jsexpr)
 
 (define (explain-s-file path)
-  (explain-s-datum (ast->datum (parse-s-file path)) path))
+  (explain-s-datum (load-s-file-datum path) path))
 
 (define (explain-s-string source)
   (explain-s-datum (ast->datum (parse-s-string source))))
 
 (define (explain-s-file/details path)
-  (explain-s-datum/details (ast->datum (parse-s-file path)) path))
+  (explain-s-datum/details (load-s-file-datum path) path))
 
 (define (explain-s-string/details source)
   (explain-s-datum/details (ast->datum (parse-s-string source))))

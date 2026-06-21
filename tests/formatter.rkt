@@ -78,3 +78,25 @@ S
    "\n"))
 
 (check-equal? (format-s-string box-source) formatted-box)
+
+(define group-source
+  #<<S
+program(){@items=[1,2,3]out none}
+S
+  )
+
+(define formatted-group
+  (string-append
+   #<<S
+program() {
+    @items = [
+        1,
+        2,
+        3,
+    ]
+    out none
+}
+S
+   "\n"))
+
+(check-equal? (format-s-string group-source) formatted-group)

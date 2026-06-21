@@ -1,6 +1,7 @@
 #lang racket
 
-(require "s-parser.rkt")
+(require "s-modules.rkt"
+         "s-parser.rkt")
 
 (provide check-s-file
          check-s-string
@@ -26,7 +27,7 @@
   (map diagnostic->string (check-s-datum/details ast)))
 
 (define (check-s-file/details path)
-  (check-s-datum/details (ast->datum/loc (parse-s-file path))))
+  (check-s-datum/details (load-s-file-datum/loc path)))
 
 (define (check-s-string/details source)
   (check-s-datum/details (ast->datum/loc (parse-s-string source))))
@@ -115,7 +116,7 @@
 (define (check-use parts loc)
   (match parts
     [(list "std") '()]
-    [_ (list (diagnostic loc "unsupported module '~a'" (string-join parts ".")))]))
+    [_ '()]))
 
 (define (check-box-fields box-name fields globals)
   (define seen (make-hash))
@@ -252,6 +253,8 @@
     [`(string ,_) (result 'string '())]
     [`(none) (result 'none '())]
     [`(enum-value ,_) (result 'enum-value '())]
+    [`(group ,items ...)
+     (infer-group items env globals)]
     [`(box-new ,name ,fields ...)
      (infer-box-new name fields env globals expr-loc)]
     [`(path ,parts ...)
@@ -259,7 +262,7 @@
     [`(call ,callee ,args ...)
      (define callee-result (infer-expr callee env globals))
      (define arg-results (map (lambda (arg) (infer-expr arg env globals)) args))
-     (result (infer-call-type callee globals)
+     (result (infer-call-type callee globals arg-results)
              (append (result-diagnostics callee-result)
                      (apply append (map result-diagnostics arg-results))))]
     [`(binary ,op ,left ,right)
@@ -419,7 +422,16 @@
          [_ (set! diagnostics (cons (diagnostic loc "malformed Box literal field") diagnostics))]))
      (result `(box ,name) (reverse diagnostics))]))
 
-(define (infer-call-type callee globals)
+(define (infer-group items env globals)
+  (define item-results (map (lambda (item) (infer-expr item env globals)) items))
+  (define diagnostics (apply append (map result-diagnostics item-results)))
+  (define item-type
+    (for/fold ([current 'unknown])
+              ([item-result item-results])
+      (merge-type current (result-type item-result))))
+  (result `(group ,item-type) diagnostics))
+
+(define (infer-call-type callee globals [arg-results '()])
   (match (strip-loc callee)
     [`(path "host" "io" "println") 'none]
     [`(path "host" "file" "read") 'string]
@@ -452,6 +464,12 @@
     [`(path "std" "num" "min") 'number]
     [`(path "std" "num" "max") 'number]
     [`(path "std" "num" "round") 'number]
+    [`(path "std" "group" "count") 'number]
+    [`(path "std" "group" "at")
+     (match arg-results
+       [(list (result `(group ,item-type) _) _)
+        item-type]
+       [_ 'unknown])]
     [`(path ,name)
      (if (hash-has-key? (hash-ref globals 'skills) name)
          'unknown
@@ -499,6 +517,13 @@
     [`(string ,_) 'string]
     [`(none) 'none]
     [`(box-new ,name ,_ ...) `(box ,name)]
+    [`(group ,items ...)
+     (define item-types
+       (for/list ([item items])
+         (infer-literalish-type item)))
+     `(group ,(for/fold ([current 'unknown])
+                         ([item-type item-types])
+                (merge-type current item-type)))]
     [_ 'unknown]))
 
 (define (top-level-name? globals name)
@@ -523,6 +548,7 @@
   (match type
     [`(enum ,name) (format "enum ~a" name)]
     [`(box ,name) (format "Box ~a" name)]
+    [`(group ,item-type) (format "Group ~a" (type->string item-type))]
     [_ (symbol->string type)]))
 
 (define (strip-loc node)

@@ -107,6 +107,27 @@ S
  (list "6:16: error: cannot assign string to field 'x' of Box 'Point' with type number"))
 
 (check-equal?
+ (check-s-string
+  #<<S
+use std
+
+Point = Box {
+    x = 0
+}
+
+program() {
+    @items = [
+        Point { x = 1 },
+    ]
+    @item = std.group.at(items, 0)
+    @bad = item.z
+    out none
+}
+S
+  )
+ (list "12:12: error: Box 'Point' has no field 'z'"))
+
+(check-equal?
  (check-s-datum
   '(program
     (out (none))))

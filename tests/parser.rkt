@@ -108,3 +108,19 @@ S
           (block
            (var "p" (box-new "Point" (field "x" (number 5))))
            (out (path "p" "x"))))))
+
+(check-equal?
+ (ast->datum
+  (parse-s-string
+   #<<S
+program() {
+    @items = [1, 2, 3]
+    out none
+}
+S
+   ))
+ '(program
+   (entry ()
+          (block
+           (var "items" (group (number 1) (number 2) (number 3)))
+           (out (none))))))

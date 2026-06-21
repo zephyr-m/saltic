@@ -1,6 +1,7 @@
 #lang racket
 
 (require racket/string
+         "s-modules.rkt"
          "s-parser.rkt")
 
 (provide run-s-file
@@ -22,6 +23,7 @@
 (struct s-error (name) #:transparent)
 (struct s-enum (enum variant) #:transparent)
 (struct s-box (name fields) #:transparent)
+(struct s-group (items) #:transparent)
 (struct s-world-ref (id) #:transparent)
 (struct return-signal (value) #:transparent)
 
@@ -32,7 +34,7 @@
   (run-s-file/args path '() out))
 
 (define (run-s-file/args path program-args [out (current-output-port)])
-  (run-s-datum/args (ast->datum (parse-s-file path)) program-args out))
+  (run-s-datum/args (load-s-file-datum path) program-args out))
 
 (define (run-s-string source [out (current-output-port)])
   (run-s-string/args source '() out))
@@ -194,6 +196,10 @@
     [`(string ,value) value]
     [`(none) none-value]
     [`(enum-value ,name) (s-enum #f name)]
+    [`(group ,items ...)
+     (s-group
+      (for/list ([item items])
+        (eval-expr rt scope item out)))]
     [`(box-new ,name ,fields ...)
      (eval-box-new rt scope name fields out)]
     [`(path ,parts ...) (eval-path rt scope parts)]
@@ -394,6 +400,23 @@
      (eval-call rt scope `(path "host" "math" "max") args out)]
     [`(path "std" "num" "round")
      (eval-call rt scope `(path "host" "math" "round") args out)]
+    [`(path "std" "group" "count")
+     (expect-arg-count "std.group.count" args 1)
+     (define group (first args))
+     (unless (s-group? group)
+       (runtime-error "std.group.count expects Group"))
+     (length (s-group-items group))]
+    [`(path "std" "group" "at")
+     (expect-arg-count "std.group.at" args 2)
+     (define group (first args))
+     (define index (second args))
+     (unless (s-group? group)
+       (runtime-error "std.group.at expects Group"))
+     (unless (and (number? index) (integer? index))
+       (runtime-error "std.group.at index must be integer"))
+     (unless (and (<= 0 index) (< index (length (s-group-items group))))
+       (runtime-error "std.group.at index out of range"))
+     (list-ref (s-group-items group) index)]
     [`(path "world" "spawn")
      (expect-arg-count "world.spawn" args 1)
      (world-spawn! rt (first args))]
@@ -608,6 +631,7 @@
          (format "~a.~a" (s-enum-enum value) (s-enum-variant value))
          (format ".~a" (s-enum-variant value)))]
     [(s-box? value) (format "~a {...}" (s-box-name value))]
+    [(s-group? value) (format "Group(~a)" (length (s-group-items value)))]
     [(s-world-ref? value) (format "#~a" (s-world-ref-id value))]
     [else (format "~a" value)]))
 

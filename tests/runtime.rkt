@@ -85,6 +85,26 @@ S
 (check-equal?
  (with-output-to-string
    (lambda ()
+     (run-s-string
+      #<<S
+use std
+
+program() {
+    @items = ["a", "b", "c"]
+    @index = 0
+    drum (std.group.count(items)) {
+        host.io.println(std.group.at(items, index))
+        index = index + 1
+    }
+    out none
+}
+S
+      )))
+ "a\nb\nc\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
      (run-s-string/args
       #<<S
 program(name) {

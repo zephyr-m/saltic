@@ -28,10 +28,11 @@ switch       = "(" expr ")" "{" case* "}"
 case         = "." Ident "=>" expr ","?
 drum         = "drum" "(" expr ")" block
 
-expr         = rescue | binary | call | box-new | path | literal | enum-value
+expr         = rescue | binary | call | group | box-new | path | literal | enum-value
 rescue       = expr "rescue" "|" Ident "|" block
 binary       = expr ("==" | ">" | "<" | "+" | "-" | "*" | "/") expr
 call         = expr "(" args? ")"
+group        = "[" (expr ("," expr)* ","?)? "]"
 box-new      = Ident "{" field* "}"
 args         = expr ("," expr)*
 path         = Ident ("." Ident)*
@@ -50,7 +51,7 @@ rescue
 
 ## Намеренные ограничения первого parser
 
-- `union`, typed declarations, arrays и `try` пока не входят в MVP parser.
+- `union`, typed declarations, системные arrays и `try` пока не входят в MVP parser.
 - `drum` пока поддерживает только форму `drum (N) { ... }`.
 - Комментарии и `@note` пока не финализированы и не парсятся.
 - `use std` реализован как минимальный import для `std.*` bridge.

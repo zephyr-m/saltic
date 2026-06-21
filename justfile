@@ -14,6 +14,8 @@ verify:
     just task tasks/002-energy-day
     just task tasks/003-energy-week
     just task tasks/004-render-frame
+    just task tasks/005-render-scene-group
+    just task tasks/006-object-module
     env TMPDIR=/tmp raco test tests/checker.rkt tests/explainer.rkt tests/formatter.rkt tests/parser.rkt tests/runtime.rkt tests/task.rkt
 
 canonical:

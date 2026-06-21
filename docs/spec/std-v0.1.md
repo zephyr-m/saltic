@@ -24,6 +24,7 @@ std.io
 std.file
 std.str
 std.num
+std.group
 ```
 
 `std.time` может быть следующим шагом, но не обязан быть частью первого канона.
@@ -53,6 +54,8 @@ std.num
 | `std.num.min(...)` | implemented | `host.math.min` bridge | yes |
 | `std.num.max(...)` | implemented | `host.math.max` bridge | yes |
 | `std.num.round(value)` | implemented | `host.math.round` bridge | yes |
+| `std.group.count(group)` | implemented | runtime native | yes |
+| `std.group.at(group, index)` | implemented | runtime native | yes |
 
 Отложено за пределы первого фактического набора:
 
@@ -117,7 +120,7 @@ examples/canonical/report-generator.std.s
 - process management;
 - CLI framework;
 - logging framework;
-- collections beyond строковых операций;
+- collection operations beyond `std.group.count` and `std.group.at`;
 - package manager;
 - domain-specific libraries;
 - любое API, которое существует только ради одного примера.

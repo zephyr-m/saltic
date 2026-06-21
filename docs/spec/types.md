@@ -53,6 +53,32 @@ Player = Box {
 - как `none` работает внутри полей;
 - как задаются layout, alignment и ABI для низкоуровневого кода.
 
+## Group
+
+`Group` — конечная группа значений.
+
+Текущий канон формы описан отдельно: [Group v0](group-v0.md).
+
+```s
+@objects = [
+    Object { name = "PLAYER" },
+    Object { name = "LIGHT" },
+    Object { name = "WALL" },
+]
+```
+
+`Group v0` сохраняет порядок записи для детерминированного обхода через `drum`.
+
+```s
+@index = 0
+drum (std.group.count(objects)) {
+    @object = std.group.at(objects, index)
+    index = index + 1
+}
+```
+
+`Group` не является системным `Array`. Layout памяти, capacity, slices и pointer semantics остаются отдельным будущим решением.
+
 ## Enum
 
 ```s
@@ -82,4 +108,4 @@ Response = union {
 @arr = i32[1, 2, 3, 4, 5]
 ```
 
-Нотация массивов, slices, строк и указателей ещё не финализирована.
+Системные массивы, slices, строки и указатели ещё не финализированы. `Group v0` закрывает только высокоуровневую запись группы значений.

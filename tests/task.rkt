@@ -9,6 +9,8 @@
 (define-runtime-path energy-task "../tasks/002-energy-day")
 (define-runtime-path energy-week-task "../tasks/003-energy-week")
 (define-runtime-path render-frame-task "../tasks/004-render-frame")
+(define-runtime-path render-scene-group-task "../tasks/005-render-scene-group")
+(define-runtime-path object-module-task "../tasks/006-object-module")
 
 (define (task-json-cli task-dir)
   (define-values (proc out in err)
@@ -42,3 +44,5 @@
 (check-task energy-task "end: 5700 Wh\ncharge: 95/2 %\nstatus: SAFE\n")
 (check-task energy-week-task "day 1: 8200 Wh\nday 2: 7400 Wh\nday 3: 6600 Wh\nfinal charge: 55 %\nstatus: SAFE\n")
 (check-task render-frame-task "frame: 20x10\ncamera: 0,0\nPLAYER visible at 5,4\nLIGHT visible at 2,2\nWALL hidden at 10,4\n")
+(check-task render-scene-group-task "frame: 20x10\ncamera: 0,0\nPLAYER visible at 5,4\nLIGHT visible at 2,2\nWALL hidden at 10,4\n")
+(check-task object-module-task "PLAYER\nPlayerState.MOVED\n6,4\n")

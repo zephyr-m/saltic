@@ -148,12 +148,29 @@ examples/canonical/text-auditor.std.s
 examples/canonical/report-generator.std.s
 ```
 
+## Local object modules v0
+
+Для объектных листов появился минимальный локальный import:
+
+```s
+use objects.player
+```
+
+Он ищет файл рядом с текущим `.s` файлом:
+
+```text
+objects/player.s
+```
+
+Импортированный файл добавляет свои top-level объявления в программу: `enum`, `Box`, constants и `skill`.
+
+Это не package system и не полноценная namespace-модель. Это первый рабочий способ вынести объект, его состояния и реакции в отдельный лист.
+
 ## Не входит в v0.1
 
 - external packages;
 - aliases вроде `use std.str as str`;
 - wildcard imports;
-- relative imports;
-- module files;
+- arbitrary relative imports;
 - package manager;
 - public/private exports.

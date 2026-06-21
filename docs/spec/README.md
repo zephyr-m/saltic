@@ -8,6 +8,8 @@
 - [syntax](syntax.md)
 - [types](types.md)
 - [box v0](box-v0.md)
+- [group v0](group-v0.md)
+- [object module v0](object-module-v0.md)
 - [errors](errors.md)
 - [checker](checker.md)
 - [runtime](runtime.md)

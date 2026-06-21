@@ -26,6 +26,7 @@
 (struct switch-case (tag body) #:transparent)
 (struct drum-stmt (count body) #:transparent)
 
+(struct group-expr (items) #:transparent)
 (struct rescue-expr (value err body) #:transparent)
 (struct binary-expr (op left right) #:transparent)
 (struct call-expr (callee args) #:transparent)
@@ -101,6 +102,8 @@
             [(#\@) (emit 'AT "@" line col)]
             [(#\{) (emit 'LBRACE "{" line col)]
             [(#\}) (emit 'RBRACE "}" line col)]
+            [(#\[) (emit 'LBRACKET "[" line col)]
+            [(#\]) (emit 'RBRACKET "]" line col)]
             [(#\() (emit 'LPAREN "(" line col)]
             [(#\)) (emit 'RPAREN ")" line col)]
             [(#\,) (emit 'COMMA "," line col)]
@@ -470,6 +473,8 @@
      (define-values (_dot t1) (expect tokens 'DOT))
      (define-values (name rest) (expect-ident t1 "expected enum value"))
      (values (locate (enum-value-expr name) start) rest)]
+    [(token? tokens 'LBRACKET)
+     (parse-group tokens)]
     [(token? tokens 'IDENT)
      (parse-path tokens)]
     [(token? tokens 'LPAREN)
@@ -479,6 +484,20 @@
      (values expr rest)]
     [else
      (parse-error (peek tokens) "expected expression")]))
+
+(define (parse-group tokens)
+  (define start (peek tokens))
+  (define-values (_lb t1) (expect tokens 'LBRACKET))
+  (let loop ([tokens (skip-newlines t1)] [items '()])
+    (cond
+      [(token? tokens 'RBRACKET)
+       (values (locate (group-expr (reverse items)) start) (advance tokens))]
+      [(token? tokens 'EOF)
+       (parse-error (peek tokens) "expected ]")]
+      [else
+       (define-values (item t2) (parse-expression tokens))
+       (define rest (if (token? t2 'COMMA) (advance t2) t2))
+       (loop (skip-newlines rest) (cons item items))])))
 
 (define (parse-path tokens)
   (define start (peek tokens))
@@ -519,6 +538,7 @@
                                  ,@(map ast->datum (switch-stmt-cases ast)))]
     [(switch-case? ast) `(case ,(switch-case-tag ast) ,(ast->datum (switch-case-body ast)))]
     [(drum-stmt? ast) `(drum ,(ast->datum (drum-stmt-count ast)) ,(ast->datum (drum-stmt-body ast)))]
+    [(group-expr? ast) `(group ,@(map ast->datum (group-expr-items ast)))]
     [(rescue-expr? ast) `(rescue ,(ast->datum (rescue-expr-value ast))
                                  ,(rescue-expr-err ast)
                                  ,(ast->datum (rescue-expr-body ast)))]
@@ -563,6 +583,7 @@
                                  ,@(map ast->datum/loc (switch-stmt-cases ast)))]
     [(switch-case? ast) `(case ,(switch-case-tag ast) ,(ast->datum/loc (switch-case-body ast)))]
     [(drum-stmt? ast) `(drum ,(ast->datum/loc (drum-stmt-count ast)) ,(ast->datum/loc (drum-stmt-body ast)))]
+    [(group-expr? ast) `(group ,@(map ast->datum/loc (group-expr-items ast)))]
     [(rescue-expr? ast) `(rescue ,(ast->datum/loc (rescue-expr-value ast))
                                  ,(rescue-expr-err ast)
                                  ,(ast->datum/loc (rescue-expr-body ast)))]
