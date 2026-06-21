@@ -77,6 +77,6 @@ Structured diagnostics дополнительно имеют `code` и, где �
 ## Намеренные ограничения
 
 - Checker пока работает поверх printed AST, а не напрямую по typed AST structs.
-- Вывод типа пока грубый: `number`, `string`, `none`, `bool`, enum и `unknown`.
+- Вывод типа пока грубый: `number`, `string`, `none`, `yes/no`, enum и `unknown`.
 - Возвращаемые типы `skill` пока не выводятся.
 - `host.*` считается внешним bootstrap-путём; его базовые вызовы известны checker'у, но это не полноценный `std`.

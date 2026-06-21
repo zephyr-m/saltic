@@ -17,6 +17,8 @@ verify:
     just task tasks/005-render-scene-group
     just task tasks/006-object-module
     just task tasks/007-object-reaction-chain
+    just task tasks/008-object-interaction
+    just task tasks/009-laboratory-sandbox-loop
     env TMPDIR=/tmp raco test tests/checker.rkt tests/explainer.rkt tests/formatter.rkt tests/parser.rkt tests/runtime.rkt tests/task.rkt
 
 canonical:

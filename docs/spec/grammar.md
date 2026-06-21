@@ -37,7 +37,7 @@ box-new      = Ident "{" field* "}"
 args         = expr ("," expr)*
 path         = Ident ("." Ident)*
 enum-value   = "." Ident
-literal      = Number | String | "none"
+literal      = Number | String | "yes" | "no" | "none"
 ```
 
 ## Приоритеты операторов

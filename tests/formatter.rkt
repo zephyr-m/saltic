@@ -100,3 +100,22 @@ S
    "\n"))
 
 (check-equal? (format-s-string group-source) formatted-group)
+
+(define answer-source
+  #<<S
+program(){@ok=yes @stop=no out none}
+S
+  )
+
+(define formatted-answer
+  (string-append
+   #<<S
+program() {
+    @ok = yes
+    @stop = no
+    out none
+}
+S
+   "\n"))
+
+(check-equal? (format-s-string answer-source) formatted-answer)

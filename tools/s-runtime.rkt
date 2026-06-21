@@ -194,6 +194,8 @@
   (match expr
     [`(number ,value) value]
     [`(string ,value) value]
+    [`(answer "yes") #t]
+    [`(answer "no") #f]
     [`(none) none-value]
     [`(enum-value ,name) (s-enum #f name)]
     [`(group ,items ...)
@@ -625,6 +627,8 @@
 (define (value->string value)
   (cond
     [(s-none? value) "none"]
+    [(eq? value #t) "yes"]
+    [(eq? value #f) "no"]
     [(s-error? value) (format "error.~a" (s-error-name value))]
     [(s-enum? value)
      (if (s-enum-enum value)

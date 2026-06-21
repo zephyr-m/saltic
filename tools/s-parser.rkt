@@ -35,6 +35,7 @@
 (struct enum-value-expr (name) #:transparent)
 (struct number-expr (value) #:transparent)
 (struct string-expr (value) #:transparent)
+(struct answer-expr (value) #:transparent)
 (struct none-expr () #:transparent)
 
 (define keywords
@@ -46,6 +47,8 @@
          ("enum" . ENUM)
          ("drum" . DRUM)
          ("rescue" . RESCUE)
+         ("yes" . YES)
+         ("no" . NO)
          ("none" . NONE)))
 
 (define (parse-s-file path)
@@ -466,6 +469,10 @@
      (values (locate (number-expr (string->number (tok-value (peek tokens)))) (peek tokens)) (advance tokens))]
     [(token? tokens 'STRING)
      (values (locate (string-expr (tok-value (peek tokens))) (peek tokens)) (advance tokens))]
+    [(token? tokens 'YES)
+     (values (locate (answer-expr #t) (peek tokens)) (advance tokens))]
+    [(token? tokens 'NO)
+     (values (locate (answer-expr #f) (peek tokens)) (advance tokens))]
     [(token? tokens 'NONE)
      (values (locate (none-expr) (peek tokens)) (advance tokens))]
     [(token? tokens 'DOT)
@@ -555,6 +562,7 @@
     [(enum-value-expr? ast) `(enum-value ,(enum-value-expr-name ast))]
     [(number-expr? ast) `(number ,(number-expr-value ast))]
     [(string-expr? ast) `(string ,(string-expr-value ast))]
+    [(answer-expr? ast) `(answer ,(if (answer-expr-value ast) "yes" "no"))]
     [(none-expr? ast) '(none)]
     [else ast]))
 
@@ -600,5 +608,6 @@
     [(enum-value-expr? ast) `(enum-value ,(enum-value-expr-name ast))]
     [(number-expr? ast) `(number ,(number-expr-value ast))]
     [(string-expr? ast) `(string ,(string-expr-value ast))]
+    [(answer-expr? ast) `(answer ,(if (answer-expr-value ast) "yes" "no"))]
     [(none-expr? ast) '(none)]
     [else ast]))

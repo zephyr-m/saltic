@@ -54,7 +54,7 @@ program(...)
 ```text
 number
 string
-bool
+yes/no
 none
 enum
 error

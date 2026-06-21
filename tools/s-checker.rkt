@@ -251,6 +251,7 @@
   (match (strip-loc expr)
     [`(number ,_) (result 'number '())]
     [`(string ,_) (result 'string '())]
+    [`(answer ,_) (result 'answer '())]
     [`(none) (result 'none '())]
     [`(enum-value ,_) (result 'enum-value '())]
     [`(group ,items ...)
@@ -272,7 +273,7 @@
        (append (result-diagnostics left-result)
                (result-diagnostics right-result)
                (check-binary-types op (result-type left-result) (result-type right-result))))
-     (result (if (comparison-op? op) 'bool (binary-result-type op))
+     (result (if (comparison-op? op) 'answer (binary-result-type op))
              diagnostics)]
     [`(rescue ,value ,err ,body)
      (define value-result (infer-expr value env globals))
@@ -439,8 +440,8 @@
     [`(path "host" "str" "len") 'number]
     [`(path "host" "str" "join") 'string]
     [`(path "host" "str" "add") 'string]
-    [`(path "host" "str" "eq") 'bool]
-    [`(path "host" "str" "contains") 'bool]
+    [`(path "host" "str" "eq") 'answer]
+    [`(path "host" "str" "contains") 'answer]
     [`(path "host" "str" "trim") 'string]
     [`(path "host" "str" "upper") 'string]
     [`(path "host" "str" "lower") 'string]
@@ -455,8 +456,8 @@
     [`(path "std" "str" "len") 'number]
     [`(path "std" "str" "join") 'string]
     [`(path "std" "str" "add") 'string]
-    [`(path "std" "str" "eq") 'bool]
-    [`(path "std" "str" "contains") 'bool]
+    [`(path "std" "str" "eq") 'answer]
+    [`(path "std" "str" "contains") 'answer]
     [`(path "std" "str" "trim") 'string]
     [`(path "std" "str" "upper") 'string]
     [`(path "std" "str" "lower") 'string]
@@ -515,6 +516,7 @@
   (match (strip-loc expr)
     [`(number ,_) 'number]
     [`(string ,_) 'string]
+    [`(answer ,_) 'answer]
     [`(none) 'none]
     [`(box-new ,name ,_ ...) `(box ,name)]
     [`(group ,items ...)
@@ -549,6 +551,7 @@
     [`(enum ,name) (format "enum ~a" name)]
     [`(box ,name) (format "Box ~a" name)]
     [`(group ,item-type) (format "Group ~a" (type->string item-type))]
+    ['answer "yes/no"]
     [_ (symbol->string type)]))
 
 (define (strip-loc node)

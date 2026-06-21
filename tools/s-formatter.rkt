@@ -117,6 +117,7 @@
   (match expr
     [`(number ,value) (number->string value)]
     [`(string ,value) (format "~s" value)]
+    [`(answer ,value) value]
     [`(none) "none"]
     [`(enum-value ,name) (format ".~a" name)]
     [`(group ,items ...)

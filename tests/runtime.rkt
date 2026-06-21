@@ -44,7 +44,7 @@ program() {
 }
 S
       )))
- "#f\n")
+ "no\n")
 
 (check-equal?
  (with-output-to-string
@@ -59,7 +59,21 @@ program() {
 }
 S
       )))
- "#t\n#t\n#f\n")
+ "yes\nyes\nno\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string
+      #<<S
+program() {
+    host.io.println(yes)
+    host.io.println(no)
+    out none
+}
+S
+      )))
+ "yes\nno\n")
 
 (check-equal?
  (with-output-to-string
@@ -190,7 +204,7 @@ program() {
 }
 S
       )))
- "lines=2\nlen=3\njoin=a1b\nadd=xy\neq=#t\ncontains=#t\ntrim=s\nupper=S\nlower=s\nabs=7\nmin=1\nmax=3\nround=2.0\n")
+ "lines=2\nlen=3\njoin=a1b\nadd=xy\neq=yes\ncontains=yes\ntrim=s\nupper=S\nlower=s\nabs=7\nmin=1\nmax=3\nround=2.0\n")
 
 (check-equal?
  (with-output-to-string
@@ -227,4 +241,4 @@ program() {
 }
 S
       )))
- "#t\n#1 box at 15 20\n")
+ "yes\n#1 box at 15 20\n")

@@ -89,6 +89,24 @@ S
  (ast->datum
   (parse-s-string
    #<<S
+program() {
+    @ok = yes
+    @stop = no
+    out none
+}
+S
+   ))
+ '(program
+   (entry ()
+          (block
+           (var "ok" (answer "yes"))
+           (var "stop" (answer "no"))
+           (out (none))))))
+
+(check-equal?
+ (ast->datum
+  (parse-s-string
+   #<<S
 Point = Box {
     x = 0
     y = 0
