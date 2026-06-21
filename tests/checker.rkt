@@ -59,6 +59,18 @@ S
  (list "2:21: error: unknown name 'missing'"))
 
 (check-equal?
+ (check-s-string
+  #<<S
+program() {
+    @safe = 47 > 30
+    @bad = "x" > 30
+    out none
+}
+S
+  )
+ (list "error: operator '>' expects numbers, got string and number"))
+
+(check-equal?
  (check-s-datum
   '(program
     (out (none))))

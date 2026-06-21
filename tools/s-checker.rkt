@@ -243,7 +243,7 @@
        (append (result-diagnostics left-result)
                (result-diagnostics right-result)
                (check-binary-types op (result-type left-result) (result-type right-result))))
-     (result (if (equal? op "==") 'bool (binary-result-type op))
+     (result (if (comparison-op? op) 'bool (binary-result-type op))
              diagnostics)]
     [`(rescue ,value ,err ,body)
      (define value-result (infer-expr value env globals))
@@ -350,7 +350,7 @@
 
 (define (check-binary-types op left-type right-type)
   (cond
-    [(member op '("+" "-" "*" "/"))
+    [(member op '("+" "-" "*" "/" ">" "<"))
      (cond
        [(or (eq? left-type 'unknown) (eq? right-type 'unknown)) '()]
        [(and (eq? left-type 'number) (eq? right-type 'number)) '()]
@@ -364,6 +364,9 @@
 
 (define (binary-result-type op)
   (if (member op '("+" "-" "*" "/")) 'number 'unknown))
+
+(define (comparison-op? op)
+  (member op '("==" ">" "<")))
 
 (define (infer-literalish-type expr)
   (match (strip-loc expr)

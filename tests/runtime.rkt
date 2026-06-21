@@ -49,6 +49,21 @@ S
 (check-equal?
  (with-output-to-string
    (lambda ()
+     (run-s-string
+      #<<S
+program() {
+    host.io.println(47 > 30)
+    host.io.println(12 < 30)
+    host.io.println(12 > 30)
+    out none
+}
+S
+      )))
+ "#t\n#t\n#f\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
      (run-s-string/args
       #<<S
 program(name) {

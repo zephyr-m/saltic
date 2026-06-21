@@ -66,3 +66,21 @@ S
  `(program
    (use "std")
    (entry () ,_)))
+
+(check-equal?
+ (ast->datum
+  (parse-s-string
+   #<<S
+program() {
+    @safe = 47 > 30
+    @low = 12 < 30
+    out none
+}
+S
+   ))
+ '(program
+   (entry ()
+          (block
+           (var "safe" (binary ">" (number 47) (number 30)))
+           (var "low" (binary "<" (number 12) (number 30)))
+           (out (none))))))

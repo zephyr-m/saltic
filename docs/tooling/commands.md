@@ -43,9 +43,11 @@ just user-examples
 
 ```bash
 just task tasks/001-finance-balance
+racket tools/task.rkt --json tasks/001-finance-balance
 ```
 
 Проверяет первое агентское задание: `task.md`, `solution.s` и опциональный `expected.txt`.
+Флаг `--json` возвращает machine-readable результат для слабых агентов.
 
 ```bash
 just check

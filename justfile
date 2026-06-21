@@ -11,7 +11,9 @@ verify:
     just canonical
     just user-examples
     just task tasks/001-finance-balance
-    env TMPDIR=/tmp raco test tests/checker.rkt tests/explainer.rkt tests/formatter.rkt tests/parser.rkt tests/runtime.rkt
+    just task tasks/002-energy-day
+    just task tasks/003-energy-week
+    env TMPDIR=/tmp raco test tests/checker.rkt tests/explainer.rkt tests/formatter.rkt tests/parser.rkt tests/runtime.rkt tests/task.rkt
 
 canonical:
     env TMPDIR=/tmp raco test tests/canonical.rkt

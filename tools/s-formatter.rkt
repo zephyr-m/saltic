@@ -139,7 +139,7 @@
   (match op
     [(or "*" "/") 4]
     [(or "+" "-") 3]
-    ["==" 2]
+    [(or "==" ">" "<") 2]
     [_ 2]))
 
 (define (maybe-parenthesize text prec parent-prec side)

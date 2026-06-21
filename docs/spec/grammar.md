@@ -28,7 +28,7 @@ drum         = "drum" "(" expr ")" block
 
 expr         = rescue | binary | call | path | literal | enum-value
 rescue       = expr "rescue" "|" Ident "|" block
-binary       = expr ("==" | "+" | "-" | "*" | "/") expr
+binary       = expr ("==" | ">" | "<" | "+" | "-" | "*" | "/") expr
 call         = expr "(" args? ")"
 args         = expr ("," expr)*
 path         = Ident ("." Ident)*
@@ -41,7 +41,7 @@ literal      = Number | String | "none"
 ```text
 * /
 + -
-==
+== > <
 rescue
 ```
 

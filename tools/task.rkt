@@ -1,6 +1,7 @@
 #lang racket
 
-(require racket/file
+(require json
+         racket/file
          racket/path
          racket/string
          "s-checker.rkt"
@@ -9,19 +10,39 @@
 
 (define args (current-command-line-arguments))
 
-(when (not (= (vector-length args) 1))
-  (eprintf "usage: racket tools/task.rkt <task-dir>\n")
+(when (not (or (= (vector-length args) 1)
+               (and (= (vector-length args) 2)
+                    (equal? (vector-ref args 0) "--json"))))
+  (eprintf "usage: racket tools/task.rkt [--json] <task-dir>\n")
   (exit 2))
 
-(define task-dir (vector-ref args 0))
+(define json-mode? (and (= (vector-length args) 2)
+                        (equal? (vector-ref args 0) "--json")))
+(define task-dir (vector-ref args (if json-mode? 1 0)))
 (define task-path (simplify-path (string->path task-dir)))
 (define task-md (build-path task-path "task.md"))
 (define solution (build-path task-path "solution.s"))
 (define expected (build-path task-path "expected.txt"))
 
+(define (write-json-result value)
+  (write-json value)
+  (newline))
+
+(define (task-diagnostic code message)
+  (hash 'level "error"
+        'code code
+        'message message))
+
 (define (require-file path label)
   (unless (file-exists? path)
-    (eprintf "task error: missing ~a: ~a\n" label path)
+    (if json-mode?
+        (write-json-result
+         (hash 'ok #f
+               'task (path->string task-path)
+               'diagnostics
+               (list (task-diagnostic "task_missing_file"
+                                      (format "missing ~a: ~a" label path)))))
+        (eprintf "task error: missing ~a: ~a\n" label path))
     (exit 2)))
 
 (define (print-list title items)
@@ -33,6 +54,58 @@
 
 (require-file task-md "task.md")
 (require-file solution "solution.s")
+
+(define (run-task-json)
+  (define diagnostics (check-s-file/details solution))
+  (define check-result (diagnostics->jsexpr diagnostics))
+  (if (not (diagnostics-empty? diagnostics))
+      (begin
+        (write-json-result
+         (hash 'ok #f
+               'task (path->string task-path)
+               'check check-result))
+        (exit 1))
+      (with-handlers ([exn:fail?
+                       (lambda (exn)
+                         (write-json-result
+                          (hash 'ok #f
+                                'task (path->string task-path)
+                                'check check-result
+                                'run
+                                (hash 'ok #f
+                                      'diagnostics
+                                      (list (task-diagnostic "task_run_error"
+                                                             (exn-message exn))))))
+                         (exit 1))])
+        (define explanation (explanation->jsexpr (explain-s-file/details solution)))
+        (define stdout
+          (with-output-to-string
+            (lambda ()
+              (run-s-file solution))))
+        (define expected-result
+          (if (file-exists? expected)
+              (let ([expected-text (file->string expected)])
+                (hash 'present #t
+                      'ok (string=? stdout expected-text)
+                      'expected expected-text
+                      'actual stdout))
+              (hash 'present #f)))
+        (define ok? (and (hash-ref check-result 'ok)
+                         (hash-ref explanation 'ok)
+                         (hash-ref expected-result 'ok #t)))
+        (write-json-result
+         (hash 'ok ok?
+               'task (path->string task-path)
+               'check check-result
+               'explain explanation
+               'run (hash 'ok #t 'stdout stdout)
+               'expected expected-result))
+        (unless ok?
+          (exit 1)))))
+
+(when json-mode?
+  (run-task-json)
+  (exit 0))
 
 (printf "task: ~a\n" task-path)
 

@@ -527,6 +527,8 @@
          (s-error "DivisionByZero")
          (/ left right))]
     ["==" (value=? left right)]
+    [">" (> left right)]
+    ["<" (< left right)]
     [_ (runtime-error "unsupported operator '~a'" op)]))
 
 (define (truthy? value)

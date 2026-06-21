@@ -24,6 +24,7 @@ tasks/<id-name>/
 
 ```bash
 just task tasks/001-finance-balance
+racket tools/task.rkt --json tasks/001-finance-balance
 ```
 
 `task` делает:
@@ -32,5 +33,7 @@ just task tasks/001-finance-balance
 - explain summary;
 - runtime запуск;
 - сравнение stdout с `expected.txt`, если файл есть.
+
+JSON-режим нужен агентам. Он возвращает один объект с результатами `check`, `explain`, `run` и `expected`.
 
 Если задача стала полезным примером, её можно перенести в `examples/user/`, `examples/canonical/` или закрепить тестом.

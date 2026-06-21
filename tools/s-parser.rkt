@@ -104,6 +104,8 @@
             [(#\.) (emit 'DOT "." line col)]
             [(#\|) (emit 'PIPE "|" line col)]
             [(#\=) (emit 'ASSIGN "=" line col)]
+            [(#\>) (emit 'GT ">" line col)]
+            [(#\<) (emit 'LT "<" line col)]
             [(#\+) (emit 'PLUS "+" line col)]
             [(#\-) (emit 'MINUS "-" line col)]
             [(#\*) (emit 'STAR "*" line col)]
@@ -369,6 +371,8 @@
 
 (define precedences
   '#hash((EQ . 1)
+         (GT . 1)
+         (LT . 1)
          (PLUS . 2)
          (MINUS . 2)
          (STAR . 3)
