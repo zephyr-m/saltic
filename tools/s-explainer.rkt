@@ -6,7 +6,11 @@
 
 (provide explain-s-file
          explain-s-string
-         explain-s-datum)
+         explain-s-datum
+         explain-s-file/details
+         explain-s-string/details
+         explain-s-datum/details
+         explanation->jsexpr)
 
 (define (explain-s-file path)
   (explain-s-datum (ast->datum (parse-s-file path)) path))
@@ -14,24 +18,61 @@
 (define (explain-s-string source)
   (explain-s-datum (ast->datum (parse-s-string source))))
 
+(define (explain-s-file/details path)
+  (explain-s-datum/details (ast->datum (parse-s-file path)) path))
+
+(define (explain-s-string/details source)
+  (explain-s-datum/details (ast->datum (parse-s-string source))))
+
 (define (explain-s-datum ast [name #f])
+  (explanation->text (explain-s-datum/details ast name)))
+
+(define (explain-s-datum/details ast [name #f])
   (define summary (summarize-program ast))
+  (hash 'name (and name (name->string name))
+        'top-level (hash 'constants (length (hash-ref summary 'constants))
+                         'enums (length (hash-ref summary 'enums))
+                         'skills (length (hash-ref summary 'skills))
+                         'program (if (hash-ref summary 'entry) 1 0))
+        'imports (hash-ref summary 'imports)
+        'constants (hash-ref summary 'constants)
+        'enums (hash-ref summary 'enums)
+        'skills (hash-ref summary 'skills)
+        'entry (hash-ref summary 'entry)
+        'calls (hash 'std (sort (hash-ref summary 'std-calls) string<?)
+                     'host (sort (hash-ref summary 'host-calls) string<?)
+                     'world (sort (hash-ref summary 'world-actions) string<?))))
+
+(define (name->string name)
+  (cond
+    [(path? name) (path->string name)]
+    [else (format "~a" name)]))
+
+(define (explanation->jsexpr explanation)
+  (hash 'ok #t
+        'explanation explanation))
+
+(define (explanation->text explanation)
+  (define top-level (hash-ref explanation 'top-level))
+  (define calls (hash-ref explanation 'calls))
   (string-append
-   (format "S explain~a\n" (if name (format ": ~a" name) ""))
+   (format "S explain~a\n" (if (hash-ref explanation 'name)
+                                (format ": ~a" (hash-ref explanation 'name))
+                                ""))
    (format "top-level: ~a constants, ~a enums, ~a skills, ~a program\n"
-           (length (hash-ref summary 'constants))
-           (length (hash-ref summary 'enums))
-           (length (hash-ref summary 'skills))
-           (if (hash-ref summary 'entry) 1 0))
+           (hash-ref top-level 'constants)
+           (hash-ref top-level 'enums)
+           (hash-ref top-level 'skills)
+           (hash-ref top-level 'program))
    "\n"
-   (section "imports" (hash-ref summary 'imports))
-   (section "constants" (hash-ref summary 'constants))
-   (section "enums" (hash-ref summary 'enums))
-   (section "skills" (hash-ref summary 'skills))
-   (entry-section (hash-ref summary 'entry))
-   (section "std calls" (sort (hash-ref summary 'std-calls) string<?))
-   (section "host calls" (sort (hash-ref summary 'host-calls) string<?))
-   (section "world actions" (sort (hash-ref summary 'world-actions) string<?))))
+   (section "imports" (hash-ref explanation 'imports))
+   (section "constants" (hash-ref explanation 'constants))
+   (section "enums" (hash-ref explanation 'enums))
+   (section "skills" (hash-ref explanation 'skills))
+   (entry-section (hash-ref explanation 'entry))
+   (section "std calls" (hash-ref calls 'std))
+   (section "host calls" (hash-ref calls 'host))
+   (section "world actions" (hash-ref calls 'world))))
 
 (define (summarize-program ast)
   (match ast

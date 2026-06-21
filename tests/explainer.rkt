@@ -1,12 +1,14 @@
 #lang racket
 
 (require rackunit
+         json
          racket/runtime-path
          "../tools/s-explainer.rkt")
 
 (define-runtime-path basic-source "../examples/bootstrap/basic.s")
 (define-runtime-path world-source "../examples/bootstrap/world-basic.s")
 (define-runtime-path std-source "../examples/canonical/report-generator.std.s")
+(define-runtime-path explain-tool "../tools/explain.rkt")
 
 (define basic-explanation (explain-s-file basic-source))
 (define world-explanation (explain-s-file world-source))
@@ -25,3 +27,37 @@
 (check-true (regexp-match? #rx"imports:\n  - std" std-explanation))
 (check-true (regexp-match? #rx"std.io.println" std-explanation))
 (check-true (regexp-match? #rx"std.file.read_text" std-explanation))
+
+(define std-details (explain-s-file/details std-source))
+
+(check-equal? (hash-ref std-details 'imports) (list "std"))
+(check-equal? (hash-ref std-details 'entry) "program(path, needle)")
+(check-equal? (hash-ref (hash-ref std-details 'top-level) 'skills) 4)
+(check-equal? (hash-ref (hash-ref std-details 'calls) 'host) '())
+(check-not-false (member "std.io.println" (hash-ref (hash-ref std-details 'calls) 'std)))
+(check-not-false (member "std.file.read_text" (hash-ref (hash-ref std-details 'calls) 'std)))
+
+(define (explain-json-cli file)
+  (define-values (proc out in err)
+    (subprocess #f #f #f
+                (find-executable-path "racket")
+                (path->string explain-tool)
+                "--json"
+                (path->string file)))
+  (close-output-port in)
+  (define stdout-text (port->string out))
+  (define stderr-text (port->string err))
+  (subprocess-wait proc)
+  (define status (subprocess-status proc))
+  (values stdout-text stderr-text status))
+
+(define-values (std-json std-err std-status)
+  (explain-json-cli std-source))
+
+(check-equal? std-status 0)
+(check-equal? std-err "")
+
+(define parsed-std-json (string->jsexpr std-json))
+(check-equal? (hash-ref parsed-std-json 'ok) #t)
+(check-equal? (hash-ref (hash-ref parsed-std-json 'explanation) 'imports) (list "std"))
+(check-equal? (hash-ref (hash-ref parsed-std-json 'explanation) 'entry) "program(path, needle)")
