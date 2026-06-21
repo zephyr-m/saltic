@@ -5,26 +5,46 @@
 (provide check-s-file
          check-s-string
          check-s-datum
+         check-s-file/details
+         check-s-string/details
+         check-s-datum/details
          diagnostics-empty?
-         print-diagnostics)
+         print-diagnostics
+         diagnostics->jsexpr)
 
 (struct scope (vars parent) #:transparent)
 (struct result (type diagnostics) #:transparent)
+(struct s-diagnostic (level code message line col hint) #:transparent)
 
 (define (check-s-file path)
-  (check-s-datum (ast->datum/loc (parse-s-file path))))
+  (map diagnostic->string (check-s-file/details path)))
 
 (define (check-s-string source)
-  (check-s-datum (ast->datum/loc (parse-s-string source))))
+  (map diagnostic->string (check-s-string/details source)))
+
+(define (check-s-datum ast)
+  (map diagnostic->string (check-s-datum/details ast)))
+
+(define (check-s-file/details path)
+  (check-s-datum/details (ast->datum/loc (parse-s-file path))))
+
+(define (check-s-string/details source)
+  (check-s-datum/details (ast->datum/loc (parse-s-string source))))
 
 (define (diagnostics-empty? diagnostics)
   (null? diagnostics))
 
 (define (print-diagnostics diagnostics [out (current-output-port)])
   (for ([diagnostic diagnostics])
-    (fprintf out "~a\n" diagnostic)))
+    (fprintf out "~a\n" (if (s-diagnostic? diagnostic)
+                            (diagnostic->string diagnostic)
+                            diagnostic))))
 
-(define (check-s-datum ast)
+(define (diagnostics->jsexpr diagnostics)
+  (hash 'ok (diagnostics-empty? diagnostics)
+        'diagnostics (map diagnostic->jsexpr diagnostics)))
+
+(define (check-s-datum/details ast)
   (match ast
     [`(program ,items ...)
      (define-values (globals diagnostics) (collect-globals items))
@@ -32,7 +52,7 @@
              (apply append
                     (for/list ([item items])
                       (check-top-level item globals))))]
-    [_ (list "error: expected program AST")]))
+    [_ (list (diagnostic #f "expected program AST"))]))
 
 (define (collect-globals items)
   (define constants (make-hash))
@@ -46,7 +66,7 @@
             (hash-has-key? enums name)
             (hash-has-key? skills name))
         (set! diagnostics
-              (cons (format "error: duplicate top-level name '~a'" name) diagnostics))
+              (cons (diagnostic #f "duplicate top-level name '~a'" name) diagnostics))
         (hash-set! table name value)))
   (for ([item items])
     (match (strip-loc item)
@@ -58,7 +78,7 @@
        (define-global! enums 'enum name variants)]
       [`(entry ,params ,body)
        (if entry
-           (set! diagnostics (cons "error: duplicate program entry" diagnostics))
+           (set! diagnostics (cons (diagnostic #f "duplicate program entry") diagnostics))
            (set! entry (list params body)))]
       [`(skill ,name ,params ,body)
        (define-global! skills 'skill name params)]
@@ -82,7 +102,7 @@
     [`(skill ,_ ,params ,body)
      (check-skill params body globals)]
     [`(out ,_)
-     (list "error: 'out' can only be used inside skill")]
+     (list (diagnostic (node-loc item) "'out' can only be used inside skill"))]
     [_ '()]))
 
 (define (check-use parts loc)
@@ -95,7 +115,7 @@
   (define diagnostics '())
   (for ([param params])
     (if (scope-has-local? root param)
-        (set! diagnostics (cons (format "error: duplicate parameter '~a'" param) diagnostics))
+        (set! diagnostics (cons (diagnostic #f "duplicate parameter '~a'" param) diagnostics))
         (scope-define! root param 'unknown)))
   (append (reverse diagnostics)
           (check-block body root globals #t)))
@@ -136,7 +156,7 @@
        (set! diagnostics
              (append diagnostics (check-stmt item env globals in-skill?))))
      diagnostics]
-    [_ (list "error: expected block AST")]))
+    [_ (list (diagnostic #f "expected block AST"))]))
 
 (define (check-stmt stmt env globals in-skill?)
   (define stmt-loc (node-loc stmt))
@@ -178,7 +198,7 @@
                               (type->string old-type)))])]))]
     [`(out ,value)
      (append
-      (if in-skill? '() (list "error: 'out' can only be used inside skill"))
+      (if in-skill? '() (list (diagnostic stmt-loc "'out' can only be used inside skill")))
       (result-diagnostics (infer-expr value env globals)))]
     [`(expr ,value)
      (result-diagnostics (infer-expr value env globals))]
@@ -194,12 +214,12 @@
                (match (strip-loc case)
                  [`(case ,_ ,case-value)
                   (result-diagnostics (infer-expr case-value env globals))]
-                 [_ (list "error: malformed switch case")]))))]
+                 [_ (list (diagnostic #f "malformed switch case"))]))))]
     [`(drum ,count ,body)
      (append
       (result-diagnostics (infer-expr count env globals))
       (check-block body (make-child-scope env) globals in-skill?))]
-    [_ (list (format "error: unsupported statement ~s" stmt))]))
+    [_ (list (diagnostic stmt-loc "unsupported statement ~s" (strip-loc stmt)))]))
 
 (define (infer-expr expr env globals)
   (define expr-loc (node-loc expr))
@@ -326,7 +346,7 @@
          [`(out ,value) (result-type (infer-expr value env globals))]
          [_ 'none]))
      (result type diagnostics)]
-    [_ (result 'unknown (list "error: expected block AST"))]))
+    [_ (result 'unknown (list (diagnostic #f "expected block AST")))]))
 
 (define (check-binary-types op left-type right-type)
   (cond
@@ -335,10 +355,11 @@
        [(or (eq? left-type 'unknown) (eq? right-type 'unknown)) '()]
        [(and (eq? left-type 'number) (eq? right-type 'number)) '()]
        [else
-        (list (format "error: operator '~a' expects numbers, got ~a and ~a"
-                      op
-                      (type->string left-type)
-                      (type->string right-type)))])]
+        (list (diagnostic #f
+                          "operator '~a' expects numbers, got ~a and ~a"
+                          op
+                          (type->string left-type)
+                          (type->string right-type)))])]
     [else '()]))
 
 (define (binary-result-type op)
@@ -385,6 +406,64 @@
 
 (define (diagnostic loc message . args)
   (define text (apply format message args))
-  (if loc
-      (format "~a:~a: error: ~a" (car loc) (cdr loc) text)
-      (format "error: ~a" text)))
+  (define code (diagnostic-code text))
+  (s-diagnostic 'error
+                code
+                text
+                (and loc (car loc))
+                (and loc (cdr loc))
+                (diagnostic-hint code)))
+
+(define (diagnostic->string diagnostic)
+  (if (s-diagnostic? diagnostic)
+      (let ([line (s-diagnostic-line diagnostic)]
+            [col (s-diagnostic-col diagnostic)]
+            [level (s-diagnostic-level diagnostic)]
+            [message (s-diagnostic-message diagnostic)])
+        (if (and line col)
+            (format "~a:~a: ~a: ~a" line col level message)
+            (format "~a: ~a" level message)))
+      diagnostic))
+
+(define (diagnostic->jsexpr diagnostic)
+  (cond
+    [(s-diagnostic? diagnostic)
+     (define base
+       (hash 'level (symbol->string (s-diagnostic-level diagnostic))
+             'code (symbol->string (s-diagnostic-code diagnostic))
+             'message (s-diagnostic-message diagnostic)))
+     (define with-line
+       (if (s-diagnostic-line diagnostic)
+           (hash-set base 'line (s-diagnostic-line diagnostic))
+           base))
+     (define with-col
+       (if (s-diagnostic-col diagnostic)
+           (hash-set with-line 'col (s-diagnostic-col diagnostic))
+           with-line))
+     (if (s-diagnostic-hint diagnostic)
+         (hash-set with-col 'hint (s-diagnostic-hint diagnostic))
+         with-col)]
+    [else
+     (hash 'level "error"
+           'code "checker_error"
+           'message diagnostic)]))
+
+(define (diagnostic-code message)
+  (cond
+    [(regexp-match? #rx"^module 'std' is not imported" message) 'std_not_imported]
+    [(regexp-match? #rx"^unsupported module" message) 'unsupported_module]
+    [(regexp-match? #rx"^unknown name" message) 'unknown_name]
+    [(regexp-match? #rx"^variable '.+' is not declared" message) 'variable_not_declared]
+    [(regexp-match? #rx"^cannot assign to constant" message) 'constant_assignment]
+    [(regexp-match? #rx"^cannot assign .+ to variable" message) 'type_mismatch]
+    [(regexp-match? #rx"^duplicate" message) 'duplicate_definition]
+    [(regexp-match? #rx"^'out' can only be used inside skill" message) 'out_outside_skill]
+    [(regexp-match? #rx"^operator '.+' expects numbers" message) 'operator_type_mismatch]
+    [else 'checker_error]))
+
+(define (diagnostic-hint code)
+  (match code
+    ['std_not_imported "add `use std` at top level"]
+    ['variable_not_declared "declare the variable with `@name = value` before assigning to it"]
+    ['constant_assignment "constants are immutable; use a local variable for changing values"]
+    [_ #f]))
