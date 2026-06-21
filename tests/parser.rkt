@@ -84,3 +84,27 @@ S
            (var "safe" (binary ">" (number 47) (number 30)))
            (var "low" (binary "<" (number 12) (number 30)))
            (out (none))))))
+
+(check-equal?
+ (ast->datum
+  (parse-s-string
+   #<<S
+Point = Box {
+    x = 0
+    y = 0
+}
+
+program() {
+    @p = Point {
+        x = 5
+    }
+    out p.x
+}
+S
+   ))
+ '(program
+   (box "Point" (field "x" (number 0)) (field "y" (number 0)))
+   (entry ()
+          (block
+           (var "p" (box-new "Point" (field "x" (number 5))))
+           (out (path "p" "x"))))))

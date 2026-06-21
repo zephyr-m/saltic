@@ -64,6 +64,27 @@ S
 (check-equal?
  (with-output-to-string
    (lambda ()
+     (run-s-string
+      #<<S
+Point = Box {
+    x = 0
+    y = 0
+}
+
+program() {
+    @p = Point {
+        x = 5
+    }
+    host.io.println(p.x, ",", p.y)
+    out none
+}
+S
+      )))
+ "5,0\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
      (run-s-string/args
       #<<S
 program(name) {

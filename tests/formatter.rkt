@@ -52,3 +52,29 @@ S
 (check-equal?
  (ast->datum (parse-s-string (format-s-file basic-source)))
  (ast->datum (parse-s-file basic-source)))
+
+(define box-source
+  #<<S
+Point=Box{x=0,y=0}
+program(){@p=Point{x=5}out p.x}
+S
+  )
+
+(define formatted-box
+  (string-append
+   #<<S
+Point = Box {
+    x = 0
+    y = 0
+}
+
+program() {
+    @p = Point {
+        x = 5
+    }
+    out p.x
+}
+S
+   "\n"))
+
+(check-equal? (format-s-string box-source) formatted-box)

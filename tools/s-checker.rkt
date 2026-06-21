@@ -58,12 +58,14 @@
   (define constants (make-hash))
   (define enums (make-hash))
   (define skills (make-hash))
+  (define boxes (make-hash))
   (define imports (make-hash))
   (define entry #f)
   (define diagnostics '())
   (define (define-global! table kind name value)
     (if (or (hash-has-key? constants name)
             (hash-has-key? enums name)
+            (hash-has-key? boxes name)
             (hash-has-key? skills name))
         (set! diagnostics
               (cons (diagnostic #f "duplicate top-level name '~a'" name) diagnostics))
@@ -74,6 +76,8 @@
        (hash-set! imports parts #t)]
       [`(const ,name ,value)
        (define-global! constants 'const name (infer-literalish-type value))]
+      [`(box ,name ,fields ...)
+       (define-global! boxes 'box name fields)]
       [`(enum ,name ,variants ...)
        (define-global! enums 'enum name variants)]
       [`(entry ,params ,body)
@@ -85,6 +89,7 @@
       [_ (void)]))
   (values (hash 'constants constants
                 'enums enums
+                'boxes boxes
                 'skills skills
                 'imports imports
                 'entry entry)
@@ -96,6 +101,8 @@
      (check-use parts (node-loc item))]
     [`(const ,_ ,value)
      (result-diagnostics (infer-expr value (make-root-scope) globals))]
+    [`(box ,name ,fields ...)
+     (check-box-fields name fields globals)]
     [`(enum ,_ ,_ ...) '()]
     [`(entry ,params ,body)
      (check-skill params body globals)]
@@ -109,6 +116,23 @@
   (match parts
     [(list "std") '()]
     [_ (list (diagnostic loc "unsupported module '~a'" (string-join parts ".")))]))
+
+(define (check-box-fields box-name fields globals)
+  (define seen (make-hash))
+  (define diagnostics '())
+  (for ([field fields])
+    (match (strip-loc field)
+      [`(field ,name ,value)
+       (when (hash-has-key? seen name)
+         (set! diagnostics
+               (cons (diagnostic #f "duplicate field '~a' in Box '~a'" name box-name)
+                     diagnostics)))
+       (hash-set! seen name #t)
+       (set! diagnostics
+             (append (result-diagnostics (infer-expr value (make-root-scope) globals))
+                     diagnostics))]
+      [_ (set! diagnostics (cons (diagnostic #f "malformed Box field") diagnostics))]))
+  (reverse diagnostics))
 
 (define (check-skill params body globals)
   (define root (make-root-scope))
@@ -228,6 +252,8 @@
     [`(string ,_) (result 'string '())]
     [`(none) (result 'none '())]
     [`(enum-value ,_) (result 'enum-value '())]
+    [`(box-new ,name ,fields ...)
+     (infer-box-new name fields env globals expr-loc)]
     [`(path ,parts ...)
      (infer-path parts env globals expr-loc)]
     [`(call ,callee ,args ...)
@@ -266,6 +292,8 @@
         (result 'function '())]
        [(hash-has-key? (hash-ref globals 'enums) name)
         (result 'enum-type '())]
+       [(hash-has-key? (hash-ref globals 'boxes) name)
+        (result 'box-type '())]
        [(equal? name "error")
         (result 'error '())]
        [else
@@ -282,8 +310,21 @@
                                       enum-name variant))))]
        [(equal? enum-name "error")
         (result 'error '())]
+       [(scope-ref env enum-name)
+        => (lambda (type)
+             (infer-field-path type (list variant) globals loc))]
        [else
         (result 'unknown '())])]
+    [(list name fields ...)
+     (cond
+       [(member name '("host" "std" "world"))
+        (infer-module-path parts globals loc)]
+       [(scope-ref env name)
+        => (lambda (type)
+             (infer-field-path type fields globals loc))]
+       [(hash-has-key? (hash-ref globals 'constants) name)
+        (infer-field-path (hash-ref (hash-ref globals 'constants) name) fields globals loc)]
+       [else (result 'unknown '())])]
     [(list "host" _ ...)
      (result 'module-path '())]
     [(list "world" _ ...)
@@ -293,6 +334,90 @@
          (result 'module-path '())
          (result 'unknown (list (diagnostic loc "module 'std' is not imported; add 'use std'"))))]
     [_ (result 'unknown '())]))
+
+(define (infer-module-path parts globals loc)
+  (match parts
+    [(list "host" _ ...) (result 'module-path '())]
+    [(list "world" _ ...) (result 'module-path '())]
+    [(list "std" _ ...)
+     (if (std-imported? globals)
+         (result 'module-path '())
+         (result 'unknown (list (diagnostic loc "module 'std' is not imported; add 'use std'"))))]
+    [_ (result 'unknown '())]))
+
+(define (infer-field-path base-type fields globals loc)
+  (let loop ([type base-type] [remaining fields])
+    (cond
+      [(null? remaining) (result type '())]
+      [(eq? type 'unknown) (result 'unknown '())]
+      [else
+       (match type
+         [`(box ,box-name)
+          (define field-name (first remaining))
+          (define field-type (box-field-type box-name field-name globals))
+          (if field-type
+              (loop field-type (rest remaining))
+              (result 'unknown
+                      (list (diagnostic loc "Box '~a' has no field '~a'" box-name field-name))))]
+         [_ (result 'unknown
+                    (list (diagnostic loc
+                                      "cannot access field '~a' on ~a"
+                                      (first remaining)
+                                      (type->string type))))])])))
+
+(define (box-field-type box-name field-name globals)
+  (define fields (hash-ref (hash-ref globals 'boxes) box-name #f))
+  (and fields
+       (for/or ([field fields])
+         (match (strip-loc field)
+           [`(field ,name ,value)
+            (and (equal? name field-name)
+                 (infer-literalish-type value))]
+           [_ #f]))))
+
+(define (infer-box-new name fields env globals loc)
+  (define box-fields (hash-ref (hash-ref globals 'boxes) name #f))
+  (cond
+    [(not box-fields)
+     (result 'unknown (list (diagnostic loc "unknown Box '~a'" name)))]
+    [else
+     (define field-types
+       (for/hash ([field box-fields])
+         (match (strip-loc field)
+           [`(field ,field-name ,value)
+            (values field-name (infer-literalish-type value))]
+           [_ (values #f 'unknown)])))
+     (define seen (make-hash))
+     (define diagnostics '())
+     (for ([field fields])
+       (match (strip-loc field)
+         [`(field ,field-name ,value)
+          (when (hash-has-key? seen field-name)
+            (set! diagnostics
+                  (cons (diagnostic loc "duplicate field '~a' in Box literal '~a'" field-name name)
+                        diagnostics)))
+          (hash-set! seen field-name #t)
+          (define inferred (infer-expr value env globals))
+          (define expected (hash-ref field-types field-name #f))
+          (set! diagnostics (append (result-diagnostics inferred) diagnostics))
+          (cond
+            [(not expected)
+             (set! diagnostics
+                   (cons (diagnostic loc "Box '~a' has no field '~a'" name field-name)
+                         diagnostics))]
+            [(type-compatible? expected (result-type inferred))
+             (void)]
+            [else
+             (set! diagnostics
+                   (cons (diagnostic loc
+                                     "cannot assign ~a to field '~a' of Box '~a' with type ~a"
+                                     (type->string (result-type inferred))
+                                     field-name
+                                     name
+                                     (type->string expected))
+                         diagnostics))])]
+         [_ (set! diagnostics (cons (diagnostic loc "malformed Box literal field") diagnostics))]))
+     (result `(box ,name) (reverse diagnostics))]))
 
 (define (infer-call-type callee globals)
   (match (strip-loc callee)
@@ -373,11 +498,13 @@
     [`(number ,_) 'number]
     [`(string ,_) 'string]
     [`(none) 'none]
+    [`(box-new ,name ,_ ...) `(box ,name)]
     [_ 'unknown]))
 
 (define (top-level-name? globals name)
   (or (hash-has-key? (hash-ref globals 'constants) name)
       (hash-has-key? (hash-ref globals 'enums) name)
+      (hash-has-key? (hash-ref globals 'boxes) name)
       (hash-has-key? (hash-ref globals 'skills) name)))
 
 (define (type-compatible? expected actual)
@@ -395,6 +522,7 @@
 (define (type->string type)
   (match type
     [`(enum ,name) (format "enum ~a" name)]
+    [`(box ,name) (format "Box ~a" name)]
     [_ (symbol->string type)]))
 
 (define (strip-loc node)

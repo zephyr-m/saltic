@@ -11,6 +11,7 @@
 (struct program (items) #:transparent)
 (struct use-decl (path) #:transparent)
 (struct const-decl (name value) #:transparent)
+(struct box-decl (name fields) #:transparent)
 (struct enum-decl (name variants) #:transparent)
 (struct entry-decl (params body) #:transparent)
 (struct skill-decl (name params body) #:transparent)
@@ -28,6 +29,7 @@
 (struct rescue-expr (value err body) #:transparent)
 (struct binary-expr (op left right) #:transparent)
 (struct call-expr (callee args) #:transparent)
+(struct box-new-expr (name fields) #:transparent)
 (struct path-expr (parts) #:transparent)
 (struct enum-value-expr (name) #:transparent)
 (struct number-expr (value) #:transparent)
@@ -38,6 +40,7 @@
   '#hash(("skill" . SKILL)
          ("program" . PROGRAM)
          ("use" . USE)
+         ("Box" . BOX)
          ("out" . OUT)
          ("enum" . ENUM)
          ("drum" . DRUM)
@@ -210,6 +213,9 @@
     [(token? tokens 'PROGRAM) (parse-entry tokens)]
     [(token? tokens 'SKILL) (parse-skill tokens)]
     [(and (token? tokens 'IDENT) (token? (advance tokens) 'ASSIGN)
+          (token? (advance (advance tokens)) 'BOX))
+     (parse-box tokens)]
+    [(and (token? tokens 'IDENT) (token? (advance tokens) 'ASSIGN)
           (token? (advance (advance tokens)) 'ENUM))
      (parse-enum tokens)]
     [(token? tokens 'IDENT) (parse-const tokens)]
@@ -236,6 +242,14 @@
   (define-values (_eq t2) (expect t1 'ASSIGN))
   (define-values (value rest) (parse-expression t2))
   (values (locate (const-decl name value) start) rest))
+
+(define (parse-box tokens)
+  (define start (peek tokens))
+  (define-values (name t1) (expect-ident tokens))
+  (define-values (_eq t2) (expect t1 'ASSIGN))
+  (define-values (_box t3) (expect t2 'BOX))
+  (define-values (fields rest) (parse-field-block t3 "expected field name"))
+  (values (locate (box-decl name fields) start) rest))
 
 (define (parse-enum tokens)
   (define start (peek tokens))
@@ -397,8 +411,29 @@
        (define start (peek tokens))
        (define-values (args rest*) (parse-args tokens))
        (loop (locate (call-expr expr args) start) rest*)]
+      [(and (path-expr? (located-node expr))
+            (= (length (path-expr-parts (located-node expr))) 1)
+            (token? tokens 'LBRACE))
+       (define start (peek tokens))
+       (define-values (fields rest*) (parse-field-block tokens "expected field name"))
+       (loop (locate (box-new-expr (first (path-expr-parts (located-node expr))) fields) start) rest*)]
       [else
        (values expr tokens)])))
+
+(define (parse-field-block tokens field-message)
+  (define-values (_lb t1) (expect tokens 'LBRACE))
+  (let loop ([tokens (skip-newlines t1)] [fields '()])
+    (cond
+      [(token? tokens 'RBRACE)
+       (values (reverse fields) (advance tokens))]
+      [(token? tokens 'EOF)
+       (parse-error (peek tokens) "expected }")]
+      [else
+       (define-values (field t2) (expect-ident tokens field-message))
+       (define-values (_eq t3) (expect t2 'ASSIGN "expected = after field name"))
+       (define-values (value t4) (parse-expression t3))
+       (define rest (if (token? t4 'COMMA) (advance t4) t4))
+       (loop (skip-newlines rest) (cons (list field value) fields))])))
 
 (define (parse-args tokens)
   (define-values (_lp t1) (expect tokens 'LPAREN))
@@ -466,6 +501,10 @@
     [(program? ast) `(program ,@(map ast->datum (program-items ast)))]
     [(use-decl? ast) `(use ,@(use-decl-path ast))]
     [(const-decl? ast) `(const ,(const-decl-name ast) ,(ast->datum (const-decl-value ast)))]
+    [(box-decl? ast) `(box ,(box-decl-name ast)
+                           ,@(map (lambda (field)
+                                     `(field ,(first field) ,(ast->datum (second field))))
+                                   (box-decl-fields ast)))]
     [(enum-decl? ast) `(enum ,(enum-decl-name ast) ,@(enum-decl-variants ast))]
     [(entry-decl? ast) `(entry ,(entry-decl-params ast) ,(ast->datum (entry-decl-body ast)))]
     [(skill-decl? ast) `(skill ,(skill-decl-name ast) ,(skill-decl-params ast)
@@ -488,6 +527,10 @@
                                  ,(ast->datum (binary-expr-right ast)))]
     [(call-expr? ast) `(call ,(ast->datum (call-expr-callee ast))
                              ,@(map ast->datum (call-expr-args ast)))]
+    [(box-new-expr? ast) `(box-new ,(box-new-expr-name ast)
+                                   ,@(map (lambda (field)
+                                           `(field ,(first field) ,(ast->datum (second field))))
+                                         (box-new-expr-fields ast)))]
     [(path-expr? ast) `(path ,@(path-expr-parts ast))]
     [(enum-value-expr? ast) `(enum-value ,(enum-value-expr-name ast))]
     [(number-expr? ast) `(number ,(number-expr-value ast))]
@@ -502,6 +545,10 @@
     [(program? ast) `(program ,@(map ast->datum/loc (program-items ast)))]
     [(use-decl? ast) `(use ,@(use-decl-path ast))]
     [(const-decl? ast) `(const ,(const-decl-name ast) ,(ast->datum/loc (const-decl-value ast)))]
+    [(box-decl? ast) `(box ,(box-decl-name ast)
+                           ,@(map (lambda (field)
+                                     `(field ,(first field) ,(ast->datum/loc (second field))))
+                                   (box-decl-fields ast)))]
     [(enum-decl? ast) `(enum ,(enum-decl-name ast) ,@(enum-decl-variants ast))]
     [(entry-decl? ast) `(entry ,(entry-decl-params ast) ,(ast->datum/loc (entry-decl-body ast)))]
     [(skill-decl? ast) `(skill ,(skill-decl-name ast) ,(skill-decl-params ast)
@@ -524,6 +571,10 @@
                                  ,(ast->datum/loc (binary-expr-right ast)))]
     [(call-expr? ast) `(call ,(ast->datum/loc (call-expr-callee ast))
                              ,@(map ast->datum/loc (call-expr-args ast)))]
+    [(box-new-expr? ast) `(box-new ,(box-new-expr-name ast)
+                                   ,@(map (lambda (field)
+                                             `(field ,(first field) ,(ast->datum/loc (second field))))
+                                           (box-new-expr-fields ast)))]
     [(path-expr? ast) `(path ,@(path-expr-parts ast))]
     [(enum-value-expr? ast) `(enum-value ,(enum-value-expr-name ast))]
     [(number-expr? ast) `(number ,(number-expr-value ast))]

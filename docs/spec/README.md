@@ -7,6 +7,7 @@
 - [grammar](grammar.md)
 - [syntax](syntax.md)
 - [types](types.md)
+- [box v0](box-v0.md)
 - [errors](errors.md)
 - [checker](checker.md)
 - [runtime](runtime.md)

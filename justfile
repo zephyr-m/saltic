@@ -13,6 +13,7 @@ verify:
     just task tasks/001-finance-balance
     just task tasks/002-energy-day
     just task tasks/003-energy-week
+    just task tasks/004-render-frame
     env TMPDIR=/tmp raco test tests/checker.rkt tests/explainer.rkt tests/formatter.rkt tests/parser.rkt tests/runtime.rkt tests/task.rkt
 
 canonical:

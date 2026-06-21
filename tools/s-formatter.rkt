@@ -30,6 +30,14 @@
      (format "use ~a" (string-join parts "."))]
     [`(const ,name ,value)
      (format "~a = ~a" name (format-expr value))]
+    [`(box ,name ,fields ...)
+     (string-append
+      (format "~a = Box {\n" name)
+      (string-join
+       (for/list ([field fields])
+         (format-box-field field 1))
+       "\n")
+      "\n}")]
     [`(enum ,name ,variants ...)
      (string-append
       (format "~a = enum {\n" name)
@@ -118,6 +126,8 @@
                (format-expr/prec callee level 5 'left)
                (string-join (map (lambda (arg) (format-expr arg level)) args) ", ")))
      (maybe-parenthesize text 5 parent-prec side)]
+    [`(box-new ,name ,fields ...)
+     (format-box-new name fields level)]
     [`(binary ,op ,left ,right)
      (define prec (binary-precedence op))
      (define text
@@ -141,6 +151,26 @@
     [(or "+" "-") 3]
     [(or "==" ">" "<") 2]
     [_ 2]))
+
+(define (format-box-field field level)
+  (match field
+    [`(field ,name ,value)
+     (format "~a~a = ~a" (indent level) name (format-expr value level))]
+    [_ (formatter-error "malformed box field: ~s" field)]))
+
+(define (format-box-new name fields level)
+  (cond
+    [(null? fields) (format "~a {}" name)]
+    [else
+     (string-append
+      (format "~a {\n" name)
+      (string-join
+       (for/list ([field fields])
+         (format-box-field field (add1 level)))
+       "\n")
+      "\n"
+      (indent level)
+      "}")]))
 
 (define (maybe-parenthesize text prec parent-prec side)
   (if (or (< prec parent-prec)

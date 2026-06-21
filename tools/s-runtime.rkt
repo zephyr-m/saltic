@@ -14,13 +14,14 @@
          s-enum?
          s-world-ref?)
 
-(struct runtime (constants enums skills entry world) #:transparent)
+(struct runtime (constants enums boxes skills entry world) #:transparent)
 (struct world-state (next-id objects trace) #:transparent)
 (struct world-object (kind x y) #:transparent)
 (struct env (vars parent) #:transparent)
 (struct s-none () #:transparent)
 (struct s-error (name) #:transparent)
 (struct s-enum (enum variant) #:transparent)
+(struct s-box (name fields) #:transparent)
 (struct s-world-ref (id) #:transparent)
 (struct return-signal (value) #:transparent)
 
@@ -53,15 +54,18 @@
     [`(program ,items ...)
      (define constants (make-hash))
      (define enums (make-hash))
+     (define boxes (make-hash))
      (define skills (make-hash))
      (define entry #f)
      (define world (make-world-state))
-     (define rt (runtime constants enums skills #f world))
+     (define rt (runtime constants enums boxes skills #f world))
      (for ([item items])
        (match item
          [`(const ,name ,value)
           (hash-set! constants name (eval-expr rt (make-root-env) value (current-output-port)))]
          [`(use ,_ ...) (void)]
+         [`(box ,name ,fields ...)
+          (hash-set! boxes name fields)]
          [`(enum ,name ,variants ...)
           (hash-set! enums name variants)]
          [`(entry ,params ,body)
@@ -69,7 +73,7 @@
          [`(skill ,name ,params ,body)
           (hash-set! skills name (list params body))]
          [_ (runtime-error "unsupported top-level item: ~s" item)]))
-     (runtime constants enums skills entry world)]
+     (runtime constants enums boxes skills entry world)]
     [_ (runtime-error "expected program AST")]))
 
 (define (make-root-env)
@@ -190,6 +194,8 @@
     [`(string ,value) value]
     [`(none) none-value]
     [`(enum-value ,name) (s-enum #f name)]
+    [`(box-new ,name ,fields ...)
+     (eval-box-new rt scope name fields out)]
     [`(path ,parts ...) (eval-path rt scope parts)]
     [`(call ,callee ,args ...)
      (define evaluated-args
@@ -229,12 +235,55 @@
         (s-enum enum-name variant)]
        [(equal? enum-name "error")
         (s-error variant)]
+       [(not (eq? (env-ref scope enum-name) missing-value))
+        (box-field-ref (env-ref scope enum-name) (list variant))]
        [else
         `(path ,@parts)])]
+    [(list name fields ...)
+     (cond
+       [(member name '("host" "std" "world")) `(path ,@parts)]
+       [(not (eq? (env-ref scope name) missing-value))
+        (box-field-ref (env-ref scope name) fields)]
+       [(not (eq? (hash-ref (runtime-constants rt) name missing-value) missing-value))
+        (box-field-ref (hash-ref (runtime-constants rt) name) fields)]
+       [else `(path ,@parts)])]
     [(list "host" _ ...) `(path ,@parts)]
     [(list "std" _ ...) `(path ,@parts)]
     [(list "world" _ ...) `(path ,@parts)]
     [_ `(path ,@parts)]))
+
+(define (eval-box-new rt scope name fields out)
+  (define defaults (hash-ref (runtime-boxes rt) name #f))
+  (unless defaults
+    (runtime-error "unknown Box '~a'" name))
+  (define values (make-hash))
+  (for ([field defaults])
+    (match field
+      [`(field ,field-name ,value)
+       (hash-set! values field-name (eval-expr rt scope value out))]
+      [_ (runtime-error "malformed Box field in '~a'" name)]))
+  (for ([field fields])
+    (match field
+      [`(field ,field-name ,value)
+       (unless (hash-has-key? values field-name)
+         (runtime-error "Box '~a' has no field '~a'" name field-name))
+       (hash-set! values field-name (eval-expr rt scope value out))]
+      [_ (runtime-error "malformed Box literal field in '~a'" name)]))
+  (s-box name values))
+
+(define (box-field-ref value fields)
+  (let loop ([current value] [remaining fields])
+    (cond
+      [(null? remaining) current]
+      [(s-box? current)
+       (define field-name (first remaining))
+       (unless (hash-has-key? (s-box-fields current) field-name)
+         (runtime-error "Box '~a' has no field '~a'" (s-box-name current) field-name))
+       (loop (hash-ref (s-box-fields current) field-name) (rest remaining))]
+      [else
+       (runtime-error "cannot access field '~a' on ~a"
+                      (first remaining)
+                      (value->string current))])))
 
 (define (eval-call rt scope callee args out)
   (match callee
@@ -558,6 +607,7 @@
      (if (s-enum-enum value)
          (format "~a.~a" (s-enum-enum value) (s-enum-variant value))
          (format ".~a" (s-enum-variant value)))]
+    [(s-box? value) (format "~a {...}" (s-box-name value))]
     [(s-world-ref? value) (format "#~a" (s-world-ref-id value))]
     [else (format "~a" value)]))
 

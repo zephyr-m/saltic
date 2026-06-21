@@ -71,6 +71,42 @@ S
  (list "error: operator '>' expects numbers, got string and number"))
 
 (check-equal?
+ (check-s-string
+  #<<S
+Point = Box {
+    x = 0
+    y = 0
+}
+
+program() {
+    @p = Point {
+        x = 5
+    }
+    @bad = p.z
+    out none
+}
+S
+  )
+ (list "10:12: error: Box 'Point' has no field 'z'"))
+
+(check-equal?
+ (check-s-string
+  #<<S
+Point = Box {
+    x = 0
+}
+
+program() {
+    @p = Point {
+        x = "bad"
+    }
+    out none
+}
+S
+  )
+ (list "6:16: error: cannot assign string to field 'x' of Box 'Point' with type number"))
+
+(check-equal?
  (check-s-datum
   '(program
     (out (none))))

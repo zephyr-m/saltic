@@ -35,9 +35,11 @@ program() {
     @usage = 3300
     @safe_min = 30
     @days = 3
+    @day = 1
     drum (days) {
         charge = apply_day(charge, solar, usage)
-        std.io.println("day charge: ", charge, " Wh")
+        std.io.println("day ", day, ": ", charge, " Wh")
+        day = day + 1
     }
     @final = percent(charge, capacity)
     @status = classify(final, safe_min)
