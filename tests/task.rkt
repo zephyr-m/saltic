@@ -11,6 +11,7 @@
 (define-runtime-path render-frame-task "../tasks/004-render-frame")
 (define-runtime-path render-scene-group-task "../tasks/005-render-scene-group")
 (define-runtime-path object-module-task "../tasks/006-object-module")
+(define-runtime-path object-reaction-chain-task "../tasks/007-object-reaction-chain")
 
 (define (task-json-cli task-dir)
   (define-values (proc out in err)
@@ -46,3 +47,4 @@
 (check-task render-frame-task "frame: 20x10\ncamera: 0,0\nPLAYER visible at 5,4\nLIGHT visible at 2,2\nWALL hidden at 10,4\n")
 (check-task render-scene-group-task "frame: 20x10\ncamera: 0,0\nPLAYER visible at 5,4\nLIGHT visible at 2,2\nWALL hidden at 10,4\n")
 (check-task object-module-task "PLAYER\nPlayerState.MOVED\n6,4\n")
+(check-task object-reaction-chain-task "PLAYER\nPlayerState.LOCKED\n6,5\n")
