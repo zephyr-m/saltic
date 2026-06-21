@@ -22,7 +22,7 @@ ok
 Ошибки печатаются по одной строке:
 
 ```text
-error: variable 'y' is not declared
+1:1: error: variable 'y' is not declared
 ```
 
 ## Текущие проверки
@@ -39,10 +39,11 @@ error: variable 'y' is not declared
 - базовая проверка арифметических операторов;
 - enum variant должен существовать.
 
+Checker также знает позиции source-кода для semantic diagnostics и может указывать строку и колонку ошибки.
+
 ## Намеренные ограничения
 
 - Checker пока работает поверх printed AST, а не напрямую по typed AST structs.
-- Diagnostics пока без строк и колонок semantic-ошибок.
 - Вывод типа пока грубый: `number`, `string`, `none`, `bool`, enum и `unknown`.
 - Возвращаемые типы `skill` пока не выводятся.
-- `host.*` считается внешним bootstrap-путём и подробно не проверяется.
+- `host.*` считается внешним bootstrap-путём; его базовые вызовы известны checker'у, но это не полноценный `std`.

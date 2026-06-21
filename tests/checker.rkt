@@ -19,7 +19,7 @@ program() {
 }
 S
   )
- (list "error: variable 'y' is not declared"))
+ (list "2:5: error: variable 'y' is not declared"))
 
 (check-equal?
  (check-s-string
@@ -31,7 +31,7 @@ program() {
 }
 S
   )
- (list "error: cannot assign to constant 'MaxRetries'"))
+ (list "3:5: error: cannot assign to constant 'MaxRetries'"))
 
 (check-equal?
  (check-s-string
@@ -43,7 +43,18 @@ program() {
 }
 S
   )
- (list "error: cannot assign string to variable 'x' of type number"))
+ (list "3:5: error: cannot assign string to variable 'x' of type number"))
+
+(check-equal?
+ (check-s-string
+  #<<S
+program() {
+    host.io.println(missing)
+    out none
+}
+S
+  )
+ (list "2:21: error: unknown name 'missing'"))
 
 (check-equal?
  (check-s-datum

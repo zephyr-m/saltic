@@ -168,4 +168,4 @@ world -> act -> observe -> modify -> simulate -> persist
 
 Код остаётся способом сделать действия точными и воспроизводимыми, но не обязан быть единственным интерфейсом.
 
-Подробнее: [Physical world emulation](world.md).
+Подробнее: [Physical world emulation](../vision/world.md).

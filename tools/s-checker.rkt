@@ -12,10 +12,10 @@
 (struct result (type diagnostics) #:transparent)
 
 (define (check-s-file path)
-  (check-s-datum (ast->datum (parse-s-file path))))
+  (check-s-datum (ast->datum/loc (parse-s-file path))))
 
 (define (check-s-string source)
-  (check-s-datum (ast->datum (parse-s-string source))))
+  (check-s-datum (ast->datum/loc (parse-s-string source))))
 
 (define (diagnostics-empty? diagnostics)
   (null? diagnostics))
@@ -48,7 +48,7 @@
               (cons (format "error: duplicate top-level name '~a'" name) diagnostics))
         (hash-set! table name value)))
   (for ([item items])
-    (match item
+    (match (strip-loc item)
       [`(const ,name ,value)
        (define-global! constants 'const name (infer-literalish-type value))]
       [`(enum ,name ,variants ...)
@@ -67,7 +67,7 @@
           (reverse diagnostics)))
 
 (define (check-top-level item globals)
-  (match item
+  (match (strip-loc item)
     [`(const ,_ ,value)
      (result-diagnostics (infer-expr value (make-root-scope) globals))]
     [`(enum ,_ ,_ ...) '()]
@@ -118,7 +118,7 @@
   owner)
 
 (define (check-block block env globals in-skill?)
-  (match block
+  (match (strip-loc block)
     [`(block ,items ...)
      (define diagnostics '())
      (for ([item items])
@@ -128,16 +128,17 @@
     [_ (list "error: expected block AST")]))
 
 (define (check-stmt stmt env globals in-skill?)
-  (match stmt
+  (define stmt-loc (node-loc stmt))
+  (match (strip-loc stmt)
     [`(var ,name ,value)
      (define inferred (infer-expr value env globals))
      (append
       (result-diagnostics inferred)
       (cond
         [(scope-has-local? env name)
-         (list (format "error: variable '~a' is already declared in this scope" name))]
+         (list (diagnostic stmt-loc "variable '~a' is already declared in this scope" name))]
         [(top-level-name? globals name)
-         (list (format "error: variable '~a' conflicts with top-level name" name))]
+         (list (diagnostic stmt-loc "variable '~a' conflicts with top-level name" name))]
         [else
          (scope-define! env name (result-type inferred))
          '()]))]
@@ -147,22 +148,23 @@
       (result-diagnostics inferred)
       (cond
         [(hash-has-key? (hash-ref globals 'constants) name)
-         (list (format "error: cannot assign to constant '~a'" name))]
+         (list (diagnostic stmt-loc "cannot assign to constant '~a'" name))]
         [(top-level-name? globals name)
-         (list (format "error: cannot assign to top-level name '~a'" name))]
+         (list (diagnostic stmt-loc "cannot assign to top-level name '~a'" name))]
         [else
          (define old-type (scope-ref env name))
          (cond
            [(not old-type)
-            (list (format "error: variable '~a' is not declared" name))]
+            (list (diagnostic stmt-loc "variable '~a' is not declared" name))]
            [(type-compatible? old-type (result-type inferred))
             (scope-set! env name (merge-type old-type (result-type inferred)))
             '()]
            [else
-            (list (format "error: cannot assign ~a to variable '~a' of type ~a"
-                          (type->string (result-type inferred))
-                          name
-                          (type->string old-type)))])]))]
+            (list (diagnostic stmt-loc
+                              "cannot assign ~a to variable '~a' of type ~a"
+                              (type->string (result-type inferred))
+                              name
+                              (type->string old-type)))])]))]
     [`(out ,value)
      (append
       (if in-skill? '() (list "error: 'out' can only be used inside skill"))
@@ -178,7 +180,7 @@
       (result-diagnostics (infer-expr value env globals))
       (apply append
              (for/list ([case cases])
-               (match case
+               (match (strip-loc case)
                  [`(case ,_ ,case-value)
                   (result-diagnostics (infer-expr case-value env globals))]
                  [_ (list "error: malformed switch case")]))))]
@@ -189,13 +191,14 @@
     [_ (list (format "error: unsupported statement ~s" stmt))]))
 
 (define (infer-expr expr env globals)
-  (match expr
+  (define expr-loc (node-loc expr))
+  (match (strip-loc expr)
     [`(number ,_) (result 'number '())]
     [`(string ,_) (result 'string '())]
     [`(none) (result 'none '())]
     [`(enum-value ,_) (result 'enum-value '())]
     [`(path ,parts ...)
-     (infer-path parts env globals)]
+     (infer-path parts env globals expr-loc)]
     [`(call ,callee ,args ...)
      (define callee-result (infer-expr callee env globals))
      (define arg-results (map (lambda (arg) (infer-expr arg env globals)) args))
@@ -219,9 +222,9 @@
      (result (merge-type (result-type value-result) (result-type body-result))
              (append (result-diagnostics value-result)
                      (result-diagnostics body-result)))]
-    [_ (result 'unknown (list (format "error: unsupported expression ~s" expr)))]))
+    [_ (result 'unknown (list (diagnostic expr-loc "unsupported expression ~s" (strip-loc expr))))]))
 
-(define (infer-path parts env globals)
+(define (infer-path parts env globals [loc #f])
   (match parts
     [(list name)
      (cond
@@ -235,7 +238,7 @@
        [(equal? name "error")
         (result 'error '())]
        [else
-        (result 'unknown (list (format "error: unknown name '~a'" name)))])]
+        (result 'unknown (list (diagnostic loc "unknown name '~a'" name)))])]
     [(list enum-name variant)
      (cond
        [(hash-has-key? (hash-ref globals 'enums) enum-name)
@@ -243,8 +246,9 @@
         (if (member variant variants)
             (result `(enum ,enum-name) '())
             (result 'unknown
-                    (list (format "error: enum '~a' has no variant '~a'"
-                                  enum-name variant))))]
+                    (list (diagnostic loc
+                                      "enum '~a' has no variant '~a'"
+                                      enum-name variant))))]
        [(equal? enum-name "error")
         (result 'error '())]
        [else
@@ -256,8 +260,23 @@
     [_ (result 'unknown '())]))
 
 (define (infer-call-type callee globals)
-  (match callee
+  (match (strip-loc callee)
     [`(path "host" "io" "println") 'none]
+    [`(path "host" "file" "read") 'string]
+    [`(path "host" "str" "lines_count") 'number]
+    [`(path "host" "str" "len") 'number]
+    [`(path "host" "str" "join") 'string]
+    [`(path "host" "str" "add") 'string]
+    [`(path "host" "str" "eq") 'bool]
+    [`(path "host" "str" "contains") 'bool]
+    [`(path "host" "str" "trim") 'string]
+    [`(path "host" "str" "upper") 'string]
+    [`(path "host" "str" "lower") 'string]
+    [`(path "host" "math" "abs") 'number]
+    [`(path "host" "math" "min") 'number]
+    [`(path "host" "math" "max") 'number]
+    [`(path "host" "math" "round") 'number]
+    [`(path "host" "debug" "show") 'none]
     [`(path ,name)
      (if (hash-has-key? (hash-ref globals 'skills) name)
          'unknown
@@ -265,11 +284,11 @@
     [_ 'unknown]))
 
 (define (infer-block-value block env globals)
-  (match block
+  (match (strip-loc block)
     [`(block ,items ...)
      (define diagnostics (check-block block env globals #t))
      (define type
-       (match (if (null? items) #f (last items))
+       (match (if (null? items) #f (strip-loc (last items)))
          [`(expr ,value) (result-type (infer-expr value env globals))]
          [`(out ,value) (result-type (infer-expr value env globals))]
          [_ 'none]))
@@ -293,7 +312,7 @@
   (if (member op '("+" "-" "*" "/")) 'number 'unknown))
 
 (define (infer-literalish-type expr)
-  (match expr
+  (match (strip-loc expr)
     [`(number ,_) 'number]
     [`(string ,_) 'string]
     [`(none) 'none]
@@ -320,3 +339,19 @@
   (match type
     [`(enum ,name) (format "enum ~a" name)]
     [_ (symbol->string type)]))
+
+(define (strip-loc node)
+  (match node
+    [`(loc ,_ ,_ ,inner) inner]
+    [_ node]))
+
+(define (node-loc node)
+  (match node
+    [`(loc ,line ,col ,_) (cons line col)]
+    [_ #f]))
+
+(define (diagnostic loc message . args)
+  (define text (apply format message args))
+  (if loc
+      (format "~a:~a: error: ~a" (car loc) (cdr loc) text)
+      (format "error: ~a" text)))

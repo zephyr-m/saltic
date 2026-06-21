@@ -5,7 +5,6 @@
          "../tools/s-runtime.rkt")
 
 (define-runtime-path basic-source "../examples/basic.s")
-
 (check-equal?
  (with-output-to-string
    (lambda ()
@@ -74,6 +73,26 @@ program(path) {
 S
       (list (path->string basic-source)))))
  (format "~a: 39 lines\n" (path->string basic-source)))
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string
+      #<<S
+skill balance(income, expenses) {
+    out income - expenses
+}
+
+program() {
+    @income = 112000
+    @expenses = 33200
+    @total = balance(income, expenses)
+    host.io.println("balance: ", total)
+    out none
+}
+S
+      )))
+ "balance: 78800\n")
 
 (check-equal?
  (with-output-to-string

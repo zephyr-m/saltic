@@ -9,6 +9,7 @@
 
 (define basic-ast (parse-s-file basic-source))
 (define basic-datum (ast->datum basic-ast))
+(define basic-loc-datum (ast->datum/loc basic-ast))
 (define try-datum (ast->datum (parse-s-file try-source)))
 
 (check-match basic-datum
@@ -44,3 +45,8 @@
  (regexp-match?
   #rx"Status"
   (format "~s" try-datum)))
+
+(check-match basic-loc-datum
+  `(program
+     (loc 1 1 (const "MaxRetries" (loc 1 14 (number 3))))
+     . ,_))
