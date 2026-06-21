@@ -9,7 +9,7 @@
 Сделать команду:
 
 ```bash
-just explain examples/basic.s
+just explain examples/bootstrap/basic.s
 ```
 
 Минимальный результат:
@@ -21,7 +21,7 @@ just explain examples/basic.s
 - показать world actions;
 - показать краткую сводку по AST без необходимости читать Racket datum.
 
-Готово: `examples/basic.s` и `examples/world-basic.s` объясняются понятным текстом через `just explain <file>`.
+Готово: `examples/bootstrap/basic.s` и `examples/bootstrap/world-basic.s` объясняются понятным текстом через `just explain <file>`.
 
 ## 2. Diagnostics v0.2 — done
 
@@ -42,17 +42,17 @@ just explain examples/basic.s
 Кандидат:
 
 ```text
-examples/finance-log.s
+examples/user/finance-log.s
 ```
 
 Минимальный результат:
 
 - программа считает итог прихода и расхода средствами S;
-- программа запускается через `just run-file examples/finance-log.s`;
-- программа объясняется через `just explain examples/finance-log.s`;
+- программа запускается через `just run-file examples/user/finance-log.s`;
+- программа объясняется через `just explain examples/user/finance-log.s`;
 - Racket bootstrap не трогаем под доменную логику.
 
-Готово: `examples/finance-log.s` считает баланс через `skill balance(income, expenses)` внутри S. Текстовый лог откладывается до появления итерации/разбора строк в самом S или будущей std.
+Готово: `examples/user/finance-log.s` считает баланс через `skill balance(income, expenses)` внутри S. Текстовый лог откладывается до появления итерации/разбора строк в самом S или будущей std.
 
 ## 4. World MVP 2
 

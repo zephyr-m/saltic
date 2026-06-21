@@ -4,8 +4,8 @@
          racket/runtime-path
          "../tools/s-checker.rkt")
 
-(define-runtime-path basic-source "../examples/basic.s")
-(define-runtime-path try-source "../examples/try.s")
+(define-runtime-path basic-source "../examples/bootstrap/basic.s")
+(define-runtime-path try-source "../examples/bootstrap/try.s")
 
 (check-equal? (check-s-file basic-source) '())
 (check-equal? (check-s-file try-source) '())
@@ -61,3 +61,27 @@ S
   '(program
     (out (none))))
  (list "error: 'out' can only be used inside skill"))
+
+(check-equal?
+ (check-s-string
+  #<<S
+program() {
+    std.io.println("missing import")
+    out none
+}
+S
+  )
+ (list "2:5: error: module 'std' is not imported; add 'use std'"))
+
+(check-equal?
+ (check-s-string
+  #<<S
+use std
+
+program() {
+    std.io.println("ok")
+    out none
+}
+S
+  )
+ '())

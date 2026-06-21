@@ -26,6 +26,8 @@
 
 (define (format-top-level item)
   (match item
+    [`(use ,parts ...)
+     (format "use ~a" (string-join parts "."))]
     [`(const ,name ,value)
      (format "~a = ~a" name (format-expr value))]
     [`(enum ,name ,variants ...)

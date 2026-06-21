@@ -28,21 +28,40 @@ std.num
 
 `std.time` может быть следующим шагом, но не обязан быть частью первого канона.
 
+Минимальный дизайн подключения принят в [Modules v0.1](modules.md): `use std`.
+
 ## Что должно уметь `std` v0.1
 
-```text
-std.io.println(...)
-std.file.read_text(path)
-std.str.lines(text)
-std.str.trim(text)
-std.str.split(text, separator)
-std.str.first_word(text)
-std.str.contains(text, needle)
-std.num.parse(text)
-std.num.abs(value)
-```
-
 Набор специально маленький. Его достаточно для простых файловых, текстовых и числовых задач.
+
+## Покрытие v0.1
+
+| API | Status | Backend сейчас | Runtime test |
+| --- | --- | --- | --- |
+| `std.io.println(...)` | implemented | `host.io.println` bridge | yes |
+| `std.file.read_text(path)` | implemented | `host.file.read` bridge | yes, через canonical |
+| `std.str.lines_count(text)` | implemented | `host.str.lines_count` bridge | yes |
+| `std.str.len(text)` | implemented | `host.str.len` bridge | yes |
+| `std.str.join(...)` | implemented | `host.str.join` bridge | yes |
+| `std.str.add(...)` | implemented | `host.str.add` bridge | yes |
+| `std.str.eq(left, right)` | implemented | `host.str.eq` bridge | yes |
+| `std.str.contains(text, needle)` | implemented | `host.str.contains` bridge | yes |
+| `std.str.trim(text)` | implemented | `host.str.trim` bridge | yes |
+| `std.str.upper(text)` | implemented | `host.str.upper` bridge | yes |
+| `std.str.lower(text)` | implemented | `host.str.lower` bridge | yes |
+| `std.num.abs(value)` | implemented | `host.math.abs` bridge | yes |
+| `std.num.min(...)` | implemented | `host.math.min` bridge | yes |
+| `std.num.max(...)` | implemented | `host.math.max` bridge | yes |
+| `std.num.round(value)` | implemented | `host.math.round` bridge | yes |
+
+Отложено за пределы первого фактического набора:
+
+| API | Status | Причина |
+| --- | --- | --- |
+| `std.str.lines(text)` | planned | нужен тип списка/коллекции или ясный строковый контракт |
+| `std.str.split(text, separator)` | planned | нужен тип списка/коллекции |
+| `std.str.first_word(text)` | planned | слишком частная операция до появления общего `split` |
+| `std.num.parse(text)` | planned | нужен дизайн ошибок конвертации |
 
 ## Что пока остаётся в host
 
@@ -67,12 +86,29 @@ host.debug.show
 
 Если функция уже нужна пользователям как обычный API, она должна иметь ясный путь из `host` в `std`.
 
+`std` подключается через:
+
+```s
+use std
+```
+
 ## Правила переноса
 
 - `host.file.read` должен стать основой для `std.file.read_text`.
 - `host.io.println` должен стать основой для `std.io.println`.
 - `host.str.*` должен постепенно уйти в `std.str.*`.
 - `host.math.*` должен стать частью `std.num` или соседнего числового модуля.
+
+Минимальный bridge уже реализован для первых canonical examples.
+
+Канонические пользовательские примеры должны писаться через `std.*`:
+
+```text
+examples/canonical/text-auditor.std.s
+examples/canonical/report-generator.std.s
+```
+
+Примеры, которые напрямую используют `host.*`, считаются bootstrap-примерами, а не целевым стилем S.
 
 ## Что не входит в v0.1
 
@@ -95,4 +131,3 @@ host.debug.show
 - считается число;
 - результат печатается через `std.io`;
 - пользователь не видит `host` в обычном коде.
-

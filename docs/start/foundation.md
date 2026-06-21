@@ -266,7 +266,7 @@ program() {
 Команда:
 
 ```bash
-just run-file examples/world-basic.s
+just run-file examples/bootstrap/world-basic.s
 ```
 
 Вывод:

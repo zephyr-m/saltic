@@ -12,7 +12,7 @@ just
 
 ```bash
 just parse
-just parse examples/basic.s
+just parse examples/bootstrap/basic.s
 ```
 
 Парсит `.s` файл и печатает AST.
@@ -24,25 +24,44 @@ just test
 Запускает тесты Racket.
 
 ```bash
-just check
+just verify
 ```
 
-Парсит `examples/basic.s` и запускает первый semantic checker.
+Запускает общий тестовый набор и проверку canonical-примеров.
+
+```bash
+just canonical
+```
+
+Проверяет архитектурный контракт canonical `*.std.s`, запускает checker и исполняет текущие эталонные примеры.
+
+```bash
+just user-examples
+```
+
+Проверяет обычные пользовательские примеры из `examples/user/`: они должны импортировать `std`, не использовать `host.*`, проходить checker и запускаться.
+
+```bash
+just check
+just check-file examples/canonical/text-auditor.std.s
+```
+
+Парсит `examples/bootstrap/basic.s` и запускает первый semantic checker.
 
 ```bash
 just format
-just format-file examples/basic.s
+just format-file examples/bootstrap/basic.s
 ```
 
 Форматирует `.s` файл в официальном стиле.
 
 ```bash
 just run
-just run-file examples/basic.s
-just run-file examples/count-lines.s docs/start/roadmap.md
-just run-file examples/finance-log.s
-just run-file examples/world-basic.s
-just run-file examples/world-replay.s
+just run-file examples/bootstrap/basic.s
+just run-file examples/user/count-lines.s docs/start/roadmap.md
+just run-file examples/user/finance-log.s
+just run-file examples/bootstrap/world-basic.s
+just run-file examples/bootstrap/world-replay.s
 ```
 
 Проверяет `.s` файл и запускает его через ранний Racket runtime.
@@ -52,7 +71,7 @@ just run-file examples/world-replay.s
 just example
 ```
 
-Показывает основной пример и парсит `examples/basic.s`.
+Показывает основной пример и парсит `examples/bootstrap/basic.s`.
 
 ```bash
 just docs
@@ -64,7 +83,7 @@ just docs
 code editors/vscode-s
 ```
 
-Открывает локальное VS Code extension project для подсветки S. В открывшемся окне нажать `F5`, затем открыть `examples/basic.s` в Extension Development Host.
+Открывает локальное VS Code extension project для подсветки S. В открывшемся окне нажать `F5`, затем открыть `examples/bootstrap/basic.s` в Extension Development Host.
 
 ```bash
 just vscode-package
@@ -101,12 +120,12 @@ Preferences: File Icon Theme -> S Language Icons
 ## Прямые Racket-команды
 
 ```bash
-racket tools/parse.rkt examples/basic.s
-racket tools/check.rkt examples/basic.s
-racket tools/format.rkt examples/basic.s
-racket tools/run.rkt examples/basic.s
-racket tools/run.rkt examples/count-lines.s docs/start/roadmap.md
-racket tools/run.rkt examples/finance-log.s
+racket tools/parse.rkt examples/bootstrap/basic.s
+racket tools/check.rkt examples/bootstrap/basic.s
+racket tools/format.rkt examples/bootstrap/basic.s
+racket tools/run.rkt examples/bootstrap/basic.s
+racket tools/run.rkt examples/user/count-lines.s docs/start/roadmap.md
+racket tools/run.rkt examples/user/finance-log.s
 raco test tests
 ```
 
@@ -115,14 +134,14 @@ raco test tests
 ## Explain
 
 ```bash
-just explain examples/basic.s
-just explain examples/finance-log.s
+just explain examples/bootstrap/basic.s
+just explain examples/user/finance-log.s
 ```
 
 Показывает короткое человеческое описание `.s` файла:
 
 ```bash
-just explain examples/finance-log.s
+just explain examples/user/finance-log.s
 ```
 
 Это удобно, когда нужно понять программу без чтения Racket AST.
@@ -132,13 +151,13 @@ just explain examples/finance-log.s
 Позже эти команды могут стать командами единой утилиты `s`:
 
 ```bash
-s parse examples/basic.s
-s format examples/basic.s
-s check examples/basic.s
-s run examples/basic.s
-s run examples/count-lines.s docs/start/roadmap.md
+s parse examples/bootstrap/basic.s
+s format examples/bootstrap/basic.s
+s check examples/bootstrap/basic.s
+s run examples/bootstrap/basic.s
+s run examples/user/count-lines.s docs/start/roadmap.md
 s test
 s docs
 s example
-s explain examples/basic.s
+s explain examples/bootstrap/basic.s
 ```
