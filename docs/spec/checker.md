@@ -9,7 +9,7 @@ Checker проверяет, что программа имеет базовый 
 ## Команда
 
 ```bash
-racket tools/check.rkt examples/basic.s
+racket tools/check.rkt examples/bootstrap/basic.s
 just check
 ```
 

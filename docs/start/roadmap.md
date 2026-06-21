@@ -17,7 +17,7 @@ just run
 Она запускает:
 
 ```bash
-racket tools/run.rkt examples/basic.s
+racket tools/run.rkt examples/bootstrap/basic.s
 ```
 
 Текущий вывод:
@@ -67,7 +67,7 @@ S нужен не только для написания программ. S н�
 
 - есть README;
 - есть философия языка;
-- есть базовый пример `examples/basic.s`;
+- есть базовый пример `examples/bootstrap/basic.s`;
 - есть документы по синтаксису, типам, ошибкам, runtime и Racket bootstrap;
 - понятно, что S является автономным и агентным системным языком.
 
@@ -99,7 +99,7 @@ docs/spec/grammar.md
 
 Готово, когда:
 
-- `examples/basic.s` покрывается грамматикой;
+- `examples/bootstrap/basic.s` покрывается грамматикой;
 - для каждой конструкции есть короткий пример;
 - спорные места вынесены в открытые вопросы.
 
@@ -110,7 +110,7 @@ docs/spec/grammar.md
 Команда:
 
 ```bash
-racket tools/parse.rkt examples/basic.s
+racket tools/parse.rkt examples/bootstrap/basic.s
 ```
 
 Результат:
@@ -121,7 +121,7 @@ racket tools/parse.rkt examples/basic.s
 
 Готово, когда:
 
-- `examples/basic.s` парсится без ошибок;
+- `examples/bootstrap/basic.s` парсится без ошибок;
 - AST выводится в читаемом виде;
 - parser показывает строку и место ошибки;
 - есть несколько негативных примеров, которые должны падать.
@@ -146,7 +146,7 @@ racket tools/parse.rkt examples/basic.s
 Команда:
 
 ```bash
-racket tools/check.rkt examples/basic.s
+racket tools/check.rkt examples/bootstrap/basic.s
 ```
 
 Готово, когда:
@@ -164,7 +164,7 @@ racket tools/check.rkt examples/basic.s
 Команда:
 
 ```bash
-racket tools/run.rkt examples/basic.s
+racket tools/run.rkt examples/bootstrap/basic.s
 ```
 
 Или:
@@ -188,7 +188,7 @@ just run
 
 Готово, когда:
 
-- `examples/basic.s` исполняется;
+- `examples/bootstrap/basic.s` исполняется;
 - есть тесты runtime;
 - ошибки исполнения понятны;
 - поведение детерминировано.
@@ -232,7 +232,7 @@ docs/start/foundation.md
 Команда:
 
 ```bash
-racket tools/format.rkt examples/basic.s
+racket tools/format.rkt examples/bootstrap/basic.s
 ```
 
 Готово, когда:
@@ -467,7 +467,7 @@ s explain
 ## Главная линия
 
 ```text
-examples/basic.s
+examples/bootstrap/basic.s
   -> grammar
   -> parser
   -> checker
@@ -497,5 +497,5 @@ just run
 Следующий лучший milestone:
 
 ```bash
-racket tools/format.rkt examples/basic.s
+racket tools/format.rkt examples/bootstrap/basic.s
 ```

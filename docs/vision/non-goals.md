@@ -155,7 +155,7 @@ S не должен соревноваться с языками, где мож�
 Не добавлять большую идею, если она не помогает ближайшему milestone:
 
 ```bash
-racket tools/parse.rkt examples/basic.s
+racket tools/parse.rkt examples/bootstrap/basic.s
 ```
 
 Пока parser не работает, все большие идеи остаются в vision, а не в реализации.

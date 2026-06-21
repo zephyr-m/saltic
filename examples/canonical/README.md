@@ -4,5 +4,9 @@
 
 Сейчас основной образец:
 
-- `text-auditor.s`
-- `report-generator.s`
+- `text-auditor.std.s`
+- `report-generator.std.s`
+
+Файлы `*.std.s` показывают пользовательский API через `std` и запускаются через текущий bootstrap bridge.
+
+Файлы без `.std` оставлены как bootstrap-варианты, где прямо видно старый слой `host.*`.

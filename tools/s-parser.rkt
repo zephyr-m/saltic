@@ -9,6 +9,7 @@
 (struct located (node line col) #:transparent)
 
 (struct program (items) #:transparent)
+(struct use-decl (path) #:transparent)
 (struct const-decl (name value) #:transparent)
 (struct enum-decl (name variants) #:transparent)
 (struct entry-decl (params body) #:transparent)
@@ -36,6 +37,7 @@
 (define keywords
   '#hash(("skill" . SKILL)
          ("program" . PROGRAM)
+         ("use" . USE)
          ("out" . OUT)
          ("enum" . ENUM)
          ("drum" . DRUM)
@@ -202,6 +204,7 @@
 
 (define (parse-top-level tokens)
   (cond
+    [(token? tokens 'USE) (parse-use tokens)]
     [(token? tokens 'PROGRAM) (parse-entry tokens)]
     [(token? tokens 'SKILL) (parse-skill tokens)]
     [(and (token? tokens 'IDENT) (token? (advance tokens) 'ASSIGN)
@@ -209,6 +212,12 @@
      (parse-enum tokens)]
     [(token? tokens 'IDENT) (parse-const tokens)]
     [else (parse-error (peek tokens) "expected top-level declaration")]))
+
+(define (parse-use tokens)
+  (define start (peek tokens))
+  (define-values (_use t1) (expect tokens 'USE))
+  (define-values (path rest) (parse-path t1))
+  (values (locate (use-decl (path-expr-parts (located-node path))) start) rest))
 
 (define (parse-entry tokens)
   (define start (peek tokens))
@@ -451,6 +460,7 @@
   (cond
     [(located? ast) (ast->datum (located-node ast))]
     [(program? ast) `(program ,@(map ast->datum (program-items ast)))]
+    [(use-decl? ast) `(use ,@(use-decl-path ast))]
     [(const-decl? ast) `(const ,(const-decl-name ast) ,(ast->datum (const-decl-value ast)))]
     [(enum-decl? ast) `(enum ,(enum-decl-name ast) ,@(enum-decl-variants ast))]
     [(entry-decl? ast) `(entry ,(entry-decl-params ast) ,(ast->datum (entry-decl-body ast)))]
@@ -486,6 +496,7 @@
     [(located? ast)
      `(loc ,(located-line ast) ,(located-col ast) ,(ast->datum/loc (located-node ast)))]
     [(program? ast) `(program ,@(map ast->datum/loc (program-items ast)))]
+    [(use-decl? ast) `(use ,@(use-decl-path ast))]
     [(const-decl? ast) `(const ,(const-decl-name ast) ,(ast->datum/loc (const-decl-value ast)))]
     [(enum-decl? ast) `(enum ,(enum-decl-name ast) ,@(enum-decl-variants ast))]
     [(entry-decl? ast) `(entry ,(entry-decl-params ast) ,(ast->datum/loc (entry-decl-body ast)))]

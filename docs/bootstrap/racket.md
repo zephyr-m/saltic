@@ -36,10 +36,10 @@ Racket должен помочь создать первую живую верс
 Первый MVP:
 
 ```text
-parse examples/basic.s
-format examples/basic.s
-check examples/basic.s
-run examples/basic.s
+parse examples/bootstrap/basic.s
+format examples/bootstrap/basic.s
+check examples/bootstrap/basic.s
+run examples/bootstrap/basic.s
 ```
 
 До этого писать полноценный компилятор рано.
@@ -66,9 +66,9 @@ S syntax
 На раннем этапе команды могут быть простыми Racket-скриптами:
 
 ```bash
-racket tools/parse.rkt examples/basic.s
-racket tools/check.rkt examples/basic.s
-racket tools/format.rkt examples/basic.s
+racket tools/parse.rkt examples/bootstrap/basic.s
+racket tools/check.rkt examples/bootstrap/basic.s
+racket tools/format.rkt examples/bootstrap/basic.s
 ```
 
 Позже вокруг этого может появиться единая CLI-утилита S.

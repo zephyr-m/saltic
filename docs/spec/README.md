@@ -10,5 +10,6 @@
 - [errors](errors.md)
 - [checker](checker.md)
 - [runtime](runtime.md)
+- [modules](modules.md)
 - [std v0.1](std-v0.1.md)
 - [stdlib](stdlib.md)

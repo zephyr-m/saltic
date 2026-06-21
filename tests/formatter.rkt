@@ -5,7 +5,7 @@
          "../tools/s-formatter.rkt"
          "../tools/s-parser.rkt")
 
-(define-runtime-path basic-source "../examples/basic.s")
+(define-runtime-path basic-source "../examples/bootstrap/basic.s")
 
 (define messy-source
   #<<S

@@ -109,7 +109,7 @@ program(path) {
 Запуск:
 
 ```bash
-just run-file examples/count-lines.s docs/start/roadmap.md
+just run-file examples/user/count-lines.s docs/start/roadmap.md
 ```
 
 ## Правила

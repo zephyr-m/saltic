@@ -4,8 +4,8 @@
          racket/runtime-path
          "../tools/s-parser.rkt")
 
-(define-runtime-path basic-source "../examples/basic.s")
-(define-runtime-path try-source "../examples/try.s")
+(define-runtime-path basic-source "../examples/bootstrap/basic.s")
+(define-runtime-path try-source "../examples/bootstrap/try.s")
 
 (define basic-ast (parse-s-file basic-source))
 (define basic-datum (ast->datum basic-ast))
@@ -50,3 +50,19 @@
   `(program
      (loc 1 1 (const "MaxRetries" (loc 1 14 (number 3))))
      . ,_))
+
+(check-match
+ (ast->datum
+  (parse-s-string
+   #<<S
+use std
+
+program() {
+    std.io.println("ok")
+    out none
+}
+S
+   ))
+ `(program
+   (use "std")
+   (entry () ,_)))

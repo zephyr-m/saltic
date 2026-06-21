@@ -61,6 +61,7 @@
        (match item
          [`(const ,name ,value)
           (hash-set! constants name (eval-expr rt (make-root-env) value (current-output-port)))]
+         [`(use ,_ ...) (void)]
          [`(enum ,name ,variants ...)
           (hash-set! enums name variants)]
          [`(entry ,params ,body)
@@ -231,6 +232,7 @@
        [else
         `(path ,@parts)])]
     [(list "host" _ ...) `(path ,@parts)]
+    [(list "std" _ ...) `(path ,@parts)]
     [(list "world" _ ...) `(path ,@parts)]
     [_ `(path ,@parts)]))
 
@@ -313,6 +315,36 @@
      (for ([arg args])
        (fprintf out "~s\n" arg))
      none-value]
+    [`(path "std" "io" "println")
+     (eval-call rt scope `(path "host" "io" "println") args out)]
+    [`(path "std" "file" "read_text")
+     (eval-call rt scope `(path "host" "file" "read") args out)]
+    [`(path "std" "str" "lines_count")
+     (eval-call rt scope `(path "host" "str" "lines_count") args out)]
+    [`(path "std" "str" "len")
+     (eval-call rt scope `(path "host" "str" "len") args out)]
+    [`(path "std" "str" "join")
+     (eval-call rt scope `(path "host" "str" "join") args out)]
+    [`(path "std" "str" "add")
+     (eval-call rt scope `(path "host" "str" "add") args out)]
+    [`(path "std" "str" "eq")
+     (eval-call rt scope `(path "host" "str" "eq") args out)]
+    [`(path "std" "str" "contains")
+     (eval-call rt scope `(path "host" "str" "contains") args out)]
+    [`(path "std" "str" "trim")
+     (eval-call rt scope `(path "host" "str" "trim") args out)]
+    [`(path "std" "str" "upper")
+     (eval-call rt scope `(path "host" "str" "upper") args out)]
+    [`(path "std" "str" "lower")
+     (eval-call rt scope `(path "host" "str" "lower") args out)]
+    [`(path "std" "num" "abs")
+     (eval-call rt scope `(path "host" "math" "abs") args out)]
+    [`(path "std" "num" "min")
+     (eval-call rt scope `(path "host" "math" "min") args out)]
+    [`(path "std" "num" "max")
+     (eval-call rt scope `(path "host" "math" "max") args out)]
+    [`(path "std" "num" "round")
+     (eval-call rt scope `(path "host" "math" "round") args out)]
     [`(path "world" "spawn")
      (expect-arg-count "world.spawn" args 1)
      (world-spawn! rt (first args))]

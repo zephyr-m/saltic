@@ -38,6 +38,7 @@
   (define constants (make-hash))
   (define enums (make-hash))
   (define skills (make-hash))
+  (define imports (make-hash))
   (define entry #f)
   (define diagnostics '())
   (define (define-global! table kind name value)
@@ -49,6 +50,8 @@
         (hash-set! table name value)))
   (for ([item items])
     (match (strip-loc item)
+      [`(use ,parts ...)
+       (hash-set! imports parts #t)]
       [`(const ,name ,value)
        (define-global! constants 'const name (infer-literalish-type value))]
       [`(enum ,name ,variants ...)
@@ -63,11 +66,14 @@
   (values (hash 'constants constants
                 'enums enums
                 'skills skills
+                'imports imports
                 'entry entry)
           (reverse diagnostics)))
 
 (define (check-top-level item globals)
   (match (strip-loc item)
+    [`(use ,parts ...)
+     (check-use parts (node-loc item))]
     [`(const ,_ ,value)
      (result-diagnostics (infer-expr value (make-root-scope) globals))]
     [`(enum ,_ ,_ ...) '()]
@@ -78,6 +84,11 @@
     [`(out ,_)
      (list "error: 'out' can only be used inside skill")]
     [_ '()]))
+
+(define (check-use parts loc)
+  (match parts
+    [(list "std") '()]
+    [_ (list (diagnostic loc "unsupported module '~a'" (string-join parts ".")))]))
 
 (define (check-skill params body globals)
   (define root (make-root-scope))
@@ -257,6 +268,10 @@
      (result 'module-path '())]
     [(list "world" _ ...)
      (result 'module-path '())]
+    [(list "std" _ ...)
+     (if (std-imported? globals)
+         (result 'module-path '())
+         (result 'unknown (list (diagnostic loc "module 'std' is not imported; add 'use std'"))))]
     [_ (result 'unknown '())]))
 
 (define (infer-call-type callee globals)
@@ -277,11 +292,29 @@
     [`(path "host" "math" "max") 'number]
     [`(path "host" "math" "round") 'number]
     [`(path "host" "debug" "show") 'none]
+    [`(path "std" "io" "println") 'none]
+    [`(path "std" "file" "read_text") 'string]
+    [`(path "std" "str" "lines_count") 'number]
+    [`(path "std" "str" "len") 'number]
+    [`(path "std" "str" "join") 'string]
+    [`(path "std" "str" "add") 'string]
+    [`(path "std" "str" "eq") 'bool]
+    [`(path "std" "str" "contains") 'bool]
+    [`(path "std" "str" "trim") 'string]
+    [`(path "std" "str" "upper") 'string]
+    [`(path "std" "str" "lower") 'string]
+    [`(path "std" "num" "abs") 'number]
+    [`(path "std" "num" "min") 'number]
+    [`(path "std" "num" "max") 'number]
+    [`(path "std" "num" "round") 'number]
     [`(path ,name)
      (if (hash-has-key? (hash-ref globals 'skills) name)
          'unknown
          'unknown)]
     [_ 'unknown]))
+
+(define (std-imported? globals)
+  (hash-has-key? (hash-ref globals 'imports) '("std")))
 
 (define (infer-block-value block env globals)
   (match (strip-loc block)

@@ -61,9 +61,9 @@ S должен как можно раньше перейти от вопроса
 Перед следующим крупным этапом S должен иметь три маленькие полезные программы:
 
 ```text
-examples/count-lines.s
+examples/user/count-lines.s
 examples/text-summary.s
-examples/finance-log.s
+examples/user/finance-log.s
 ```
 
 Смысл:

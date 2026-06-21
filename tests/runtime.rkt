@@ -4,7 +4,7 @@
          racket/runtime-path
          "../tools/s-runtime.rkt")
 
-(define-runtime-path basic-source "../examples/basic.s")
+(define-runtime-path basic-source "../examples/bootstrap/basic.s")
 (check-equal?
  (with-output-to-string
    (lambda ()
@@ -93,6 +93,48 @@ program() {
 S
       )))
  "balance: 78800\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string
+      #<<S
+use std
+
+program() {
+    std.io.println("hello, std")
+    out none
+}
+S
+      )))
+ "hello, std\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string
+      #<<S
+use std
+
+program() {
+    std.io.println("lines=", std.str.lines_count("a\nb"))
+    std.io.println("len=", std.str.len("abc"))
+    std.io.println("join=", std.str.join("a", 1, "b"))
+    std.io.println("add=", std.str.add("x", "y"))
+    std.io.println("eq=", std.str.eq("s", "s"))
+    std.io.println("contains=", std.str.contains("runtime", "time"))
+    std.io.println("trim=", std.str.trim("  s  "))
+    std.io.println("upper=", std.str.upper("s"))
+    std.io.println("lower=", std.str.lower("S"))
+    std.io.println("abs=", std.num.abs(0 - 7))
+    std.io.println("min=", std.num.min(3, 1, 2))
+    std.io.println("max=", std.num.max(3, 1, 2))
+    std.io.println("round=", std.num.round(1.6))
+    out none
+}
+S
+      )))
+ "lines=2\nlen=3\njoin=a1b\nadd=xy\neq=#t\ncontains=#t\ntrim=s\nupper=S\nlower=s\nabs=7\nmin=1\nmax=3\nround=2.0\n")
 
 (check-equal?
  (with-output-to-string
