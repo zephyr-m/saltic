@@ -258,9 +258,12 @@
 - `Fabric` пересобирается как value state;
 - нет настоящих inbox/outbox group operations;
 - направление уже читается, но код показывает будущую потребность в actor fabric layer.
+- акторы читаются лучше, когда `actor_a.s`, `actor_b.s`, `leaflet.s` и `fabric.s` разделены по файлам;
+- текущий module expander не дедуплицирует imports, поэтому общий `leaflet` должен подтягиваться через fabric, а не каждым actor module отдельно.
 
 Вывод:
 
 - `computation = interaction over time` подтверждается runnable-задачей;
 - не добавлять `actor.*` в runtime до нескольких таких tasks;
 - следующий actor step должен проверить группу leaflets или простейшую delivery очередь.
+- для actor fabric примеров участник должен иметь собственный модуль, а fabric должен оставаться средой сборки/доставки.

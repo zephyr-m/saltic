@@ -57,4 +57,4 @@
 (check-task laboratory-sandbox-loop-task "lock: LockState.INSERTED\ndoor: DoorState.CLOSED\nlock: LockState.UNLOCKED\ndoor: DoorState.CLOSED\nlock: LockState.UNLOCKED\ndoor: DoorState.OPEN\n")
 (check-task laboratory-history-task "moment 1\ninput: InputKind.INSERT_KEY\nlock: LockState.INSERTED\ndoor: DoorState.CLOSED\nmoment 2\ninput: InputKind.TURN_KEY\nlock: LockState.UNLOCKED\ndoor: DoorState.CLOSED\nmoment 3\ninput: InputKind.OPEN_DOOR\nlock: LockState.UNLOCKED\ndoor: DoorState.OPEN\n")
 (check-task visual-observation-protocol-task "sheet engineering\ngrid 24\nshape square_bipyramid crystal height 4 base 2 color cyan\nmotion rotate crystal y 1\npresent\n")
-(check-task actor-fabric-pulse-task "moment 1\nactor A received LeafletKind.PING\nactor A sent LeafletKind.PULSE to B\nactor A state ActorState.SENT\nmoment 2\nactor B received LeafletKind.PULSE\nactor B state ActorState.ACTIVE\n")
+(check-task actor-fabric-pulse-task "moment 1\nactor A received LeafletKind.PING\nactor A sent LeafletKind.PULSE to B\nactor A state ActorAState.SENT\nmoment 2\nactor B received LeafletKind.PULSE\nactor B state ActorBState.ACTIVE\n")

@@ -1,64 +1,15 @@
 use std
 
-ActorState = enum {
-    IDLE,
-    SENT,
-    ACTIVE,
-}
+use leaflet
 
-LeafletKind = enum {
-    NONE,
-    PING,
-    PULSE,
-}
+use actor_a
 
-Actor = Box {
-    name = "A"
-    state = ActorState.IDLE
-}
-
-Leaflet = Box {
-    kind = LeafletKind.NONE
-    from = ""
-    to = ""
-}
+use actor_b
 
 Fabric = Box {
-    actor_a = Actor {
-        name = "A"
-    }
-    actor_b = Actor {
-        name = "B"
-    }
+    actor_a = ActorA {}
+    actor_b = ActorB {}
     outbox = Leaflet {}
-}
-
-skill react_a(actor, leaflet) {
-    (leaflet.kind == LeafletKind.PING) {
-        out Actor {
-            name = actor.name
-            state = ActorState.SENT
-        }
-    }
-    out actor
-}
-
-skill react_b(actor, leaflet) {
-    (leaflet.kind == LeafletKind.PULSE) {
-        out Actor {
-            name = actor.name
-            state = ActorState.ACTIVE
-        }
-    }
-    out actor
-}
-
-skill emit_pulse(actor) {
-    out Leaflet {
-        kind = LeafletKind.PULSE
-        from = actor.name
-        to = "B"
-    }
 }
 
 skill moment_one(fabric, leaflet) {

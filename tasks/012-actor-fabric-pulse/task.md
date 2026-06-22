@@ -24,8 +24,8 @@ computation = interaction over time
 moment 1
 actor A received LeafletKind.PING
 actor A sent LeafletKind.PULSE to B
-actor A state ActorState.SENT
+actor A state ActorAState.SENT
 moment 2
 actor B received LeafletKind.PULSE
-actor B state ActorState.ACTIVE
+actor B state ActorBState.ACTIVE
 ```
