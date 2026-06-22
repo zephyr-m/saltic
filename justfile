@@ -21,6 +21,7 @@ verify:
     just task tasks/009-laboratory-sandbox-loop
     just task tasks/010-laboratory-history
     just task tasks/011-visual-observation-protocol
+    just task tasks/012-actor-fabric-pulse
     just effects-check
     env TMPDIR=/tmp raco test tests/checker.rkt tests/effects.rkt tests/effects-check.rkt tests/explainer.rkt tests/formatter.rkt tests/machine-trace.rkt tests/parser.rkt tests/runtime.rkt tests/task.rkt
 
