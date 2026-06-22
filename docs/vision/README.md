@@ -5,6 +5,7 @@
 ## Содержимое
 
 - [digital paper](digital-paper.md)
+- [programmable matter](programmable-matter.md)
 - [ideal system](ideal-system.md)
 - [philosophy](philosophy.md)
 - [core](core.md)
