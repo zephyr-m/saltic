@@ -69,6 +69,14 @@ tools/s-effects.rkt
 just effects
 ```
 
+Consistency check:
+
+```bash
+just effects-check
+```
+
+Он сверяет inventory с текущими `runtime` и `checker` call patterns.
+
 ## Freeze rule
 
 Новый effect нельзя добавлять только правкой runtime.
@@ -76,6 +84,7 @@ just effects
 Нужны:
 
 - обновление `tools/s-effects.rkt`;
+- зелёный `just effects-check`;
 - spec/doc;
 - runnable task или пример;
 - test;

@@ -472,6 +472,21 @@
        [(list (result `(group ,item-type) _) _)
         item-type]
        [_ 'unknown])]
+    [`(path "world" "spawn") 'unknown]
+    [`(path "world" "place") 'none]
+    [`(path "world" "move") 'none]
+    [`(path "world" "trace") 'none]
+    [`(path "world" "trace_text") 'string]
+    [`(path "world" "state") 'none]
+    [`(path "world" "state_text") 'string]
+    [`(path "world" "replay") 'string]
+    [`(path "visual" "sheet") 'none]
+    [`(path "visual" "grid") 'none]
+    [`(path "visual" "square_bipyramid") 'none]
+    [`(path "visual" "rotate") 'none]
+    [`(path "visual" "present") 'none]
+    [`(path "visual" "trace") 'none]
+    [`(path "visual" "trace_text") 'string]
     [`(path ,name)
      (if (hash-has-key? (hash-ref globals 'skills) name)
          'unknown

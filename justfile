@@ -21,7 +21,8 @@ verify:
     just task tasks/009-laboratory-sandbox-loop
     just task tasks/010-laboratory-history
     just task tasks/011-visual-observation-protocol
-    env TMPDIR=/tmp raco test tests/checker.rkt tests/effects.rkt tests/explainer.rkt tests/formatter.rkt tests/machine-trace.rkt tests/parser.rkt tests/runtime.rkt tests/task.rkt
+    just effects-check
+    env TMPDIR=/tmp raco test tests/checker.rkt tests/effects.rkt tests/effects-check.rkt tests/explainer.rkt tests/formatter.rkt tests/machine-trace.rkt tests/parser.rkt tests/runtime.rkt tests/task.rkt
 
 canonical:
     env TMPDIR=/tmp raco test tests/canonical.rkt
@@ -73,6 +74,9 @@ machine-trace file="tasks/011-visual-observation-protocol/solution.s":
 
 effects:
     racket tools/effects.rkt
+
+effects-check:
+    racket tools/effects-check.rkt
 
 run:
     racket tools/run.rkt examples/bootstrap/basic.s

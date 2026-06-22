@@ -181,6 +181,8 @@ step 3: call observe_crystal(crystal)
 ```bash
 just effects
 racket tools/effects.rkt
+just effects-check
+racket tools/effects-check.rkt
 ```
 
 Печатает текущий явный список runtime effects и protocol calls:
@@ -194,6 +196,8 @@ visual.square_bipyramid  visual     protocol-v0  effect  visual trace
 ```
 
 Этот список нужен для runtime freeze: новый effect должен появляться через inventory, spec, task и test.
+
+`effects-check` сверяет inventory с текущими call patterns в runtime и checker.
 
 ## Целевая форма будущей CLI
 
