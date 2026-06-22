@@ -14,6 +14,7 @@
 (define-runtime-path object-reaction-chain-task "../tasks/007-object-reaction-chain")
 (define-runtime-path object-interaction-task "../tasks/008-object-interaction")
 (define-runtime-path laboratory-sandbox-loop-task "../tasks/009-laboratory-sandbox-loop")
+(define-runtime-path laboratory-history-task "../tasks/010-laboratory-history")
 
 (define (task-json-cli task-dir)
   (define-values (proc out in err)
@@ -52,3 +53,4 @@
 (check-task object-reaction-chain-task "PLAYER\nPlayerState.LOCKED\n6,5\n")
 (check-task object-interaction-task "PLAYER\nPlayerState.HAS_KEY\nDOOR\nDoorState.OPEN\n")
 (check-task laboratory-sandbox-loop-task "lock: LockState.INSERTED\ndoor: DoorState.CLOSED\nlock: LockState.UNLOCKED\ndoor: DoorState.CLOSED\nlock: LockState.UNLOCKED\ndoor: DoorState.OPEN\n")
+(check-task laboratory-history-task "moment 1\ninput: InputKind.INSERT_KEY\nlock: LockState.INSERTED\ndoor: DoorState.CLOSED\nmoment 2\ninput: InputKind.TURN_KEY\nlock: LockState.UNLOCKED\ndoor: DoorState.CLOSED\nmoment 3\ninput: InputKind.OPEN_DOOR\nlock: LockState.UNLOCKED\ndoor: DoorState.OPEN\n")
