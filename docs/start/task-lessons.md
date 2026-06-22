@@ -259,7 +259,7 @@
 - нет настоящих inbox/outbox group operations;
 - направление уже читается, но код показывает будущую потребность в actor fabric layer.
 - акторы читаются лучше, когда `actor_a.s`, `actor_b.s`, `leaflet.s` и `fabric.s` разделены по файлам;
-- текущий module expander не дедуплицирует imports, поэтому общий `leaflet` должен подтягиваться через fabric, а не каждым actor module отдельно.
+- module expander должен дедуплицировать imports, чтобы общий `leaflet` мог быть зависимостью каждого actor module.
 
 Вывод:
 

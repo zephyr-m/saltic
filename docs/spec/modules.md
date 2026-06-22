@@ -166,6 +166,17 @@ objects/player.s
 
 Это не package system и не полноценная namespace-модель. Это первый рабочий способ вынести объект, его состояния и реакции в отдельный лист.
 
+Импорты дедуплицируются по файлу в рамках одного expand.
+
+Это нужно для diamond-import формы:
+
+```text
+fabric -> actor_a -> leaflet
+fabric -> actor_b -> leaflet
+```
+
+`leaflet.s` должен попасть в итоговую программу один раз.
+
 ## Не входит в v0.1
 
 - external packages;

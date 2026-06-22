@@ -1,7 +1,5 @@
 use std
 
-use leaflet
-
 use actor_a
 
 use actor_b

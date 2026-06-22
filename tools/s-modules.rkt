@@ -16,28 +16,34 @@
 
 (define (expand-file path ast->datum-proc)
   (define normalized (simplify-path path))
-  (define items (expand-file-items normalized ast->datum-proc '()))
+  (define included (make-hash))
+  (define items (expand-file-items normalized ast->datum-proc '() included))
   `(program ,@items))
 
-(define (expand-file-items path ast->datum-proc seen)
+(define (expand-file-items path ast->datum-proc stack included)
   (define normalized (simplify-path path))
-  (when (member normalized seen equal?)
+  (when (member normalized stack equal?)
     (error 'modules "cyclic import involving ~a" normalized))
-  (define ast (ast->datum-proc (parse-s-file normalized)))
-  (match ast
-    [`(program ,items ...)
-     (apply append
-            (for/list ([item items])
-              (match (strip-loc item)
-                [`(use "std") (list item)]
-                [`(use ,parts ...)
-                 (append
-                  (list item)
-                  (expand-file-items (resolve-module-path normalized parts)
-                                     ast->datum-proc
-                                     (cons normalized seen)))]
-                [_ (list item)])))]
-    [_ (error 'modules "expected program AST in ~a" normalized)]))
+  (if (hash-has-key? included normalized)
+      '()
+      (begin
+        (hash-set! included normalized #t)
+        (let ([ast (ast->datum-proc (parse-s-file normalized))])
+          (match ast
+            [`(program ,items ...)
+             (apply append
+                    (for/list ([item items])
+                      (match (strip-loc item)
+                        [`(use "std") (list item)]
+                        [`(use ,parts ...)
+                         (append
+                          (list item)
+                          (expand-file-items (resolve-module-path normalized parts)
+                                             ast->datum-proc
+                                             (cons normalized stack)
+                                             included))]
+                        [_ (list item)])))]
+            [_ (error 'modules "expected program AST in ~a" normalized)])))))
 
 (define (strip-loc item)
   (match item
