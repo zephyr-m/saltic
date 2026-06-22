@@ -139,6 +139,8 @@ S skill
 
 S Machine v0 является началом этого контракта.
 
+Правила заморозки runtime описаны отдельно: [Runtime Freeze](../start/runtime-freeze.md).
+
 ## Current Tool
 
 Текущий bootstrap tool:

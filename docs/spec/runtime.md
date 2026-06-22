@@ -10,6 +10,8 @@ S должен жить на собственном железе и собств
 
 Runtime должен быть достаточно маленьким, чтобы его можно было портировать и понимать без интернета.
 
+Правила роста и заморозки runtime описаны отдельно: [Runtime Freeze](../start/runtime-freeze.md).
+
 S Machine описывает контракт исполнения между языком, runtime, future VM и hardware backend.
 
 Подробнее: [S Machine v0](s-machine-v0.md).

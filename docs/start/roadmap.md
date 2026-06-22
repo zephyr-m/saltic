@@ -45,6 +45,7 @@ S нужен не только для написания программ. S н�
 
 - [Digital paper](../vision/digital-paper.md)
 - [Ideal system](../vision/ideal-system.md)
+- [Runtime freeze](runtime-freeze.md)
 
 ## Статусы
 
