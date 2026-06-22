@@ -291,6 +291,8 @@ S Machine должна описывать не только вычисление
 - trace;
 - observation.
 
+Первый контракт S Machine зафиксирован в [S Machine v0](../spec/s-machine-v0.md).
+
 ## Не входит в v0
 
 - финальная ISA;

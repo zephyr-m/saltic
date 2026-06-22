@@ -157,7 +157,24 @@ just explain examples/user/finance-log.s
 
 Это удобно, когда нужно понять программу без чтения Racket AST.
 
-`explain --json` печатает machine-readable summary программы: imports, top-level counts, entrypoint, skills и вызовы `std`/`host`/`world`.
+`explain --json` печатает machine-readable summary программы: imports, top-level counts, entrypoint, skills и вызовы `std`/`host`/`world`/`visual`.
+
+## Machine Trace
+
+```bash
+racket tools/machine-trace.rkt tasks/011-visual-observation-protocol/solution.s
+```
+
+Показывает первый static S Machine trace:
+
+```text
+step 1: enter program()
+step 2: bind crystal = Crystal {}
+step 3: call observe_crystal(crystal)
+...
+```
+
+Это не VM и не runtime trace. Это проверка формы шагов перед будущей S Machine/VM.
 
 ## Целевая форма будущей CLI
 
