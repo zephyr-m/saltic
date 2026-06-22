@@ -176,6 +176,25 @@ step 3: call observe_crystal(crystal)
 
 Это не VM и не runtime trace. Это проверка формы шагов перед будущей S Machine/VM.
 
+## Effects
+
+```bash
+just effects
+racket tools/effects.rkt
+```
+
+Печатает текущий явный список runtime effects и protocol calls:
+
+```text
+effect                   owner      status       kind    decision
+host.io.println          bootstrap  implemented  effect  bridge to std.io.println
+std.io.println           std        stable-v0.1  effect  user-facing print
+world.spawn              world      protocol-v0  effect  world action trace
+visual.square_bipyramid  visual     protocol-v0  effect  visual trace
+```
+
+Этот список нужен для runtime freeze: новый effect должен появляться через inventory, spec, task и test.
+
 ## Целевая форма будущей CLI
 
 Позже эти команды могут стать командами единой утилиты `s`:

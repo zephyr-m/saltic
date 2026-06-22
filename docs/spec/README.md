@@ -16,6 +16,7 @@
 - [checker](checker.md)
 - [runtime](runtime.md)
 - [S Machine v0](s-machine-v0.md)
+- [effects inventory v0](effects-inventory-v0.md)
 - [modules](modules.md)
 - [std v0.1](std-v0.1.md)
 - [stdlib](stdlib.md)

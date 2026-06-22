@@ -245,3 +245,5 @@ visual.*
 - tests;
 - docs;
 - migration/freeze decision.
+
+Текущий inventory зафиксирован в [Effects Inventory v0](../spec/effects-inventory-v0.md).
