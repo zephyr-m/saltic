@@ -15,9 +15,10 @@
          s-enum?
          s-world-ref?)
 
-(struct runtime (constants enums boxes skills entry world) #:transparent)
+(struct runtime (constants enums boxes skills entry world visual) #:transparent)
 (struct world-state (next-id objects trace) #:transparent)
 (struct world-object (kind x y) #:transparent)
+(struct visual-state (trace) #:transparent)
 (struct env (vars parent) #:transparent)
 (struct s-none () #:transparent)
 (struct s-error (name) #:transparent)
@@ -60,7 +61,8 @@
      (define skills (make-hash))
      (define entry #f)
      (define world (make-world-state))
-     (define rt (runtime constants enums boxes skills #f world))
+     (define visual (make-visual-state))
+     (define rt (runtime constants enums boxes skills #f world visual))
      (for ([item items])
        (match item
          [`(const ,name ,value)
@@ -75,7 +77,7 @@
          [`(skill ,name ,params ,body)
           (hash-set! skills name (list params body))]
          [_ (runtime-error "unsupported top-level item: ~s" item)]))
-     (runtime constants enums boxes skills entry world)]
+     (runtime constants enums boxes skills entry world visual)]
     [_ (runtime-error "expected program AST")]))
 
 (define (make-root-env)
@@ -83,6 +85,9 @@
 
 (define (make-world-state)
   (world-state (box 1) (make-hash) (box '())))
+
+(define (make-visual-state)
+  (visual-state (box '())))
 
 (define (make-child-env parent)
   (env (make-hash) parent))
@@ -249,7 +254,7 @@
         `(path ,@parts)])]
     [(list name fields ...)
      (cond
-       [(member name '("host" "std" "world")) `(path ,@parts)]
+       [(member name '("host" "std" "world" "visual")) `(path ,@parts)]
        [(not (eq? (env-ref scope name) missing-value))
         (box-field-ref (env-ref scope name) fields)]
        [(not (eq? (hash-ref (runtime-constants rt) name missing-value) missing-value))
@@ -258,6 +263,7 @@
     [(list "host" _ ...) `(path ,@parts)]
     [(list "std" _ ...) `(path ,@parts)]
     [(list "world" _ ...) `(path ,@parts)]
+    [(list "visual" _ ...) `(path ,@parts)]
     [_ `(path ,@parts)]))
 
 (define (eval-box-new rt scope name fields out)
@@ -445,6 +451,58 @@
     [`(path "world" "replay")
      (expect-arg-count "world.replay" args 1)
      (world-replay (first args))]
+    [`(path "visual" "sheet")
+     (expect-arg-count "visual.sheet" args 1)
+     (define kind (first args))
+     (unless (string? kind)
+       (runtime-error "visual.sheet expects string kind"))
+     (visual-add-trace! rt (format "sheet ~a" kind))
+     none-value]
+    [`(path "visual" "grid")
+     (expect-arg-count "visual.grid" args 1)
+     (define size (first args))
+     (expect-number "visual.grid size" size)
+     (visual-add-trace! rt (format "grid ~a" size))
+     none-value]
+    [`(path "visual" "square_bipyramid")
+     (expect-arg-count "visual.square_bipyramid" args 4)
+     (define name (first args))
+     (define height (second args))
+     (define base (third args))
+     (define color (fourth args))
+     (unless (string? name)
+       (runtime-error "visual.square_bipyramid expects string name"))
+     (expect-number "visual.square_bipyramid height" height)
+     (expect-number "visual.square_bipyramid base" base)
+     (unless (string? color)
+       (runtime-error "visual.square_bipyramid expects string color"))
+     (visual-add-trace! rt
+                        (format "shape square_bipyramid ~a height ~a base ~a color ~a"
+                                name
+                                height
+                                base
+                                color))
+     none-value]
+    [`(path "visual" "rotate")
+     (expect-arg-count "visual.rotate" args 3)
+     (define name (first args))
+     (define axis (second args))
+     (define speed (third args))
+     (unless (and (string? name) (string? axis))
+       (runtime-error "visual.rotate expects string name and axis"))
+     (expect-number "visual.rotate speed" speed)
+     (visual-add-trace! rt (format "motion rotate ~a ~a ~a" name axis speed))
+     none-value]
+    [`(path "visual" "present")
+     (expect-arg-count "visual.present" args 0)
+     (visual-add-trace! rt "present")
+     none-value]
+    [`(path "visual" "trace")
+     (fprintf out "~a" (visual-trace-string rt))
+     none-value]
+    [`(path "visual" "trace_text")
+     (expect-arg-count "visual.trace_text" args 0)
+     (visual-trace-string rt)]
     [`(path ,name)
      (call-skill rt name args out)]
     [_ (runtime-error "unsupported call target: ~s" callee)]))
@@ -510,6 +568,16 @@
 
 (define (world-trace-string rt)
   (define lines (unbox (world-state-trace (runtime-world rt))))
+  (if (null? lines)
+      ""
+      (string-append (string-join lines "\n") "\n")))
+
+(define (visual-add-trace! rt line)
+  (define trace (visual-state-trace (runtime-visual rt)))
+  (set-box! trace (append (unbox trace) (list line))))
+
+(define (visual-trace-string rt)
+  (define lines (unbox (visual-state-trace (runtime-visual rt))))
   (if (null? lines)
       ""
       (string-append (string-join lines "\n") "\n")))

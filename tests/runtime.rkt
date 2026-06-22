@@ -242,3 +242,30 @@ program() {
 S
       )))
  "yes\n#1 box at 15 20\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string
+      #<<S
+Crystal = Box {
+    name = "crystal"
+    height = 4
+    base = 2
+    color = "cyan"
+    spin = 1
+}
+
+program() {
+    @crystal = Crystal {}
+    visual.sheet("engineering")
+    visual.grid(24)
+    visual.square_bipyramid(crystal.name, crystal.height, crystal.base, crystal.color)
+    visual.rotate(crystal.name, "y", crystal.spin)
+    visual.present()
+    visual.trace()
+    out none
+}
+S
+      )))
+ "sheet engineering\ngrid 24\nshape square_bipyramid crystal height 4 base 2 color cyan\nmotion rotate crystal y 1\npresent\n")

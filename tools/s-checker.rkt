@@ -321,7 +321,7 @@
         (result 'unknown '())])]
     [(list name fields ...)
      (cond
-       [(member name '("host" "std" "world"))
+       [(member name '("host" "std" "world" "visual"))
         (infer-module-path parts globals loc)]
        [(scope-ref env name)
         => (lambda (type)
@@ -343,6 +343,7 @@
   (match parts
     [(list "host" _ ...) (result 'module-path '())]
     [(list "world" _ ...) (result 'module-path '())]
+    [(list "visual" _ ...) (result 'module-path '())]
     [(list "std" _ ...)
      (if (std-imported? globals)
          (result 'module-path '())

@@ -42,7 +42,8 @@
         'entry (hash-ref summary 'entry)
         'calls (hash 'std (sort (hash-ref summary 'std-calls) string<?)
                      'host (sort (hash-ref summary 'host-calls) string<?)
-                     'world (sort (hash-ref summary 'world-actions) string<?))))
+                     'world (sort (hash-ref summary 'world-actions) string<?)
+                     'visual (sort (hash-ref summary 'visual-actions) string<?))))
 
 (define (name->string name)
   (cond
@@ -73,7 +74,8 @@
    (entry-section (hash-ref explanation 'entry))
    (section "std calls" (hash-ref calls 'std))
    (section "host calls" (hash-ref calls 'host))
-   (section "world actions" (hash-ref calls 'world))))
+   (section "world actions" (hash-ref calls 'world))
+   (section "visual actions" (hash-ref calls 'visual))))
 
 (define (summarize-program ast)
   (match ast
@@ -86,6 +88,7 @@
      (define std-calls '())
      (define host-calls '())
      (define world-actions '())
+     (define visual-actions '())
      (for ([item items])
        (match item
          [`(use ,parts ...)
@@ -98,13 +101,15 @@
          (define calls (collect-calls body))
           (set! std-calls (append (filter std-call? calls) std-calls))
           (set! host-calls (append (filter host-call? calls) host-calls))
-          (set! world-actions (append (filter world-call? calls) world-actions))]
+          (set! world-actions (append (filter world-call? calls) world-actions))
+          (set! visual-actions (append (filter visual-call? calls) visual-actions))]
          [`(entry ,params ,body)
           (set! entry (format "program(~a)" (string-join params ", ")))
           (define calls (collect-calls body))
           (set! std-calls (append (filter std-call? calls) std-calls))
           (set! host-calls (append (filter host-call? calls) host-calls))
-          (set! world-actions (append (filter world-call? calls) world-actions))]
+          (set! world-actions (append (filter world-call? calls) world-actions))
+          (set! visual-actions (append (filter visual-call? calls) visual-actions))]
          [_ (void)]))
      (hash 'imports (reverse imports)
            'constants (reverse constants)
@@ -113,7 +118,8 @@
            'entry entry
            'std-calls (remove-duplicates std-calls string=?)
            'host-calls (remove-duplicates host-calls string=?)
-           'world-actions (remove-duplicates world-actions string=?))]
+           'world-actions (remove-duplicates world-actions string=?)
+           'visual-actions (remove-duplicates visual-actions string=?))]
     [_ (error 'explain "expected program AST")]))
 
 (define (collect-calls node)
@@ -133,6 +139,9 @@
 
 (define (world-call? call)
   (string-prefix? call "world."))
+
+(define (visual-call? call)
+  (string-prefix? call "visual."))
 
 (define (section title items)
   (string-append

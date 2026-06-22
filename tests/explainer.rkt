@@ -35,6 +35,20 @@
 (check-equal? (hash-ref (hash-ref std-details 'top-level) 'skills) 4)
 (check-equal? (hash-ref (hash-ref std-details 'calls) 'host) '())
 (check-not-false (member "std.io.println" (hash-ref (hash-ref std-details 'calls) 'std)))
+
+(define visual-details
+  (explain-s-string/details
+   #<<S
+program() {
+    visual.sheet("engineering")
+    visual.present()
+    out none
+}
+S
+   ))
+
+(check-not-false (member "visual.sheet" (hash-ref (hash-ref visual-details 'calls) 'visual)))
+(check-not-false (member "visual.present" (hash-ref (hash-ref visual-details 'calls) 'visual)))
 (check-not-false (member "std.file.read_text" (hash-ref (hash-ref std-details 'calls) 'std)))
 
 (define (explain-json-cli file)

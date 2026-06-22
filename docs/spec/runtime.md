@@ -28,6 +28,20 @@ Runtime/engine отвечает за порядок переходов, history 
 
 Подробнее: [Time and State v0](time-state-v0.md).
 
+## Visual observation
+
+S не должен считать HTML или браузер целевым renderer.
+
+Для физической ветки runtime/engine должен уметь выдавать нейтральное наблюдение:
+
+```text
+state -> visual trace -> backend
+```
+
+Текущий bootstrap поддерживает маленький `visual.*` trace API только для проверки направления.
+
+Подробнее: [Visual Observation v0](visual-observation-v0.md).
+
 ## Черновой состав L1
 
 L1 может включать:

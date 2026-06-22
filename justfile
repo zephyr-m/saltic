@@ -20,6 +20,7 @@ verify:
     just task tasks/008-object-interaction
     just task tasks/009-laboratory-sandbox-loop
     just task tasks/010-laboratory-history
+    just task tasks/011-visual-observation-protocol
     env TMPDIR=/tmp raco test tests/checker.rkt tests/explainer.rkt tests/formatter.rkt tests/parser.rkt tests/runtime.rkt tests/task.rkt
 
 canonical:
