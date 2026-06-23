@@ -6,4 +6,4 @@
 (check-not-exn check-effects-consistency)
 (check-equal?
  (effects-consistency-report)
- "effects-check: ok\ninventory: 48\nruntime: 48\nchecker: 48\n")
+ "effects-check: ok\ninventory: 62\nruntime: 62\nchecker: 62\n")

@@ -188,6 +188,8 @@ use std
 
 program() {
     std.io.println("lines=", std.str.lines_count("a\nb"))
+    @line_group = std.str.lines("a\nb")
+    @parts = std.str.split("expense 2026-06-22 12000 food", " ")
     std.io.println("len=", std.str.len("abc"))
     std.io.println("join=", std.str.join("a", 1, "b"))
     std.io.println("add=", std.str.add("x", "y"))
@@ -196,6 +198,9 @@ program() {
     std.io.println("trim=", std.str.trim("  s  "))
     std.io.println("upper=", std.str.upper("s"))
     std.io.println("lower=", std.str.lower("S"))
+    std.io.println("line0=", std.group.at(line_group, 0))
+    std.io.println("part2=", std.group.at(parts, 2))
+    std.io.println("parse=", std.num.parse("42"))
     std.io.println("abs=", std.num.abs(0 - 7))
     std.io.println("min=", std.num.min(3, 1, 2))
     std.io.println("max=", std.num.max(3, 1, 2))
@@ -204,7 +209,7 @@ program() {
 }
 S
       )))
- "lines=2\nlen=3\njoin=a1b\nadd=xy\neq=yes\ncontains=yes\ntrim=s\nupper=S\nlower=s\nabs=7\nmin=1\nmax=3\nround=2.0\n")
+ "lines=2\nlen=3\njoin=a1b\nadd=xy\neq=yes\ncontains=yes\ntrim=s\nupper=S\nlower=s\nline0=a\npart2=12000\nparse=42\nabs=7\nmin=1\nmax=3\nround=2.0\n")
 
 (check-equal?
  (with-output-to-string
@@ -269,3 +274,22 @@ program() {
 S
       )))
  "sheet engineering\ngrid 24\nshape square_bipyramid crystal height 4 base 2 color cyan\nmotion rotate crystal y 1\npresent\n")
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string
+      #<<S
+program() {
+    ui.panel("family-ledger")
+    ui.text("Family ledger")
+    ui.field("amount", "Amount")
+    ui.button("add", "Add")
+    ui.value("free", 151000)
+    ui.present()
+    ui.trace()
+    out none
+}
+S
+      )))
+ "panel family-ledger\ntext Family ledger\nfield amount label Amount\nbutton add label Add\nvalue free 151000\npresent\n")

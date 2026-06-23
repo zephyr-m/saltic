@@ -51,6 +51,20 @@ S
 (check-not-false (member "visual.present" (hash-ref (hash-ref visual-details 'calls) 'visual)))
 (check-not-false (member "std.file.read_text" (hash-ref (hash-ref std-details 'calls) 'std)))
 
+(define ui-details
+  (explain-s-string/details
+   #<<S
+program() {
+    ui.panel("family-ledger")
+    ui.present()
+    out none
+}
+S
+   ))
+
+(check-not-false (member "ui.panel" (hash-ref (hash-ref ui-details 'calls) 'ui)))
+(check-not-false (member "ui.present" (hash-ref (hash-ref ui-details 'calls) 'ui)))
+
 (define (explain-json-cli file)
   (define-values (proc out in err)
     (subprocess #f #f #f

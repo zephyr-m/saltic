@@ -6,6 +6,7 @@
 
 ```text
 start/     вход в проект
+architecture/ архитектурные границы проекта
 spec/      язык как система
 bootstrap/ временный слой исполнения
 tooling/   команды и рабочие инструменты
@@ -24,6 +25,7 @@ hardware/  целевая аппаратная среда
 vision/digital-paper.md  главный смысл S как цифровой бумаги
 vision/programmable-matter.md  дальний север S
 vision/ideal-system.md   целевая картина готовой системы
+architecture/layers.md  канонические слои S
 start/README.md  вход в проект
 spec/README.md   язык как система
 bootstrap/README.md  временный слой исполнения
@@ -53,6 +55,7 @@ spec/runtime.md
 ## Как читать дальше
 
 - если нужен язык и его поведение, идти в `spec/`
+- если нужны архитектурные границы проекта, идти в `architecture/`
 - если нужен временный runtime и bootstrap, идти в `bootstrap/`
 - если нужны команды и рабочие инструменты, идти в `tooling/`
 - если нужен смысл проекта и ограничения, идти в `vision/`

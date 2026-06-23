@@ -42,6 +42,7 @@ std.group
 | `std.io.println(...)` | implemented | `host.io.println` bridge | yes |
 | `std.file.read_text(path)` | implemented | `host.file.read` bridge | yes, через canonical |
 | `std.str.lines_count(text)` | implemented | `host.str.lines_count` bridge | yes |
+| `std.str.lines(text)` | implemented | `host.str.lines` bridge | yes |
 | `std.str.len(text)` | implemented | `host.str.len` bridge | yes |
 | `std.str.join(...)` | implemented | `host.str.join` bridge | yes |
 | `std.str.add(...)` | implemented | `host.str.add` bridge | yes |
@@ -50,6 +51,8 @@ std.group
 | `std.str.trim(text)` | implemented | `host.str.trim` bridge | yes |
 | `std.str.upper(text)` | implemented | `host.str.upper` bridge | yes |
 | `std.str.lower(text)` | implemented | `host.str.lower` bridge | yes |
+| `std.str.split(text, separator)` | implemented | `host.str.split` bridge | yes |
+| `std.num.parse(text)` | implemented | `host.math.parse` bridge | yes |
 | `std.num.abs(value)` | implemented | `host.math.abs` bridge | yes |
 | `std.num.min(...)` | implemented | `host.math.min` bridge | yes |
 | `std.num.max(...)` | implemented | `host.math.max` bridge | yes |
@@ -61,10 +64,7 @@ std.group
 
 | API | Status | Причина |
 | --- | --- | --- |
-| `std.str.lines(text)` | planned | нужен тип списка/коллекции или ясный строковый контракт |
-| `std.str.split(text, separator)` | planned | нужен тип списка/коллекции |
 | `std.str.first_word(text)` | planned | слишком частная операция до появления общего `split` |
-| `std.num.parse(text)` | planned | нужен дизайн ошибок конвертации |
 
 ## Что пока остаётся в host
 
@@ -72,6 +72,7 @@ std.group
 host.io.println
 host.file.read
 host.str.lines_count
+host.str.lines
 host.str.len
 host.str.join
 host.str.add
@@ -80,6 +81,8 @@ host.str.contains
 host.str.trim
 host.str.upper
 host.str.lower
+host.str.split
+host.math.parse
 host.math.abs
 host.math.min
 host.math.max

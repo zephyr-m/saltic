@@ -39,6 +39,21 @@ user-examples:
     racket tools/run.rkt examples/user/count-lines.s docs/start/roadmap.md
     racket tools/run.rkt examples/user/finance-log.s
 
+family-ledger:
+    racket tools/run.rkt examples/apps/family-ledger/main.s examples/apps/family-ledger/ledger.txt
+
+family-ledger-ui:
+    racket tools/run.rkt examples/apps/family-ledger/ui.s examples/apps/family-ledger/ledger.txt
+
+family-ledger-frame:
+    racket tools/ui-framebuffer.rkt --png /tmp/family-ledger-ui.png examples/apps/family-ledger/ui.s examples/apps/family-ledger/ledger.txt
+
+family-ledger-window:
+    racket tools/family-ledger-gui.rkt
+
+family-ledger-world:
+    racket tools/family-ledger-world.rkt
+
 task dir="tasks/001-finance-balance":
     racket tools/task.rkt {{dir}}
 

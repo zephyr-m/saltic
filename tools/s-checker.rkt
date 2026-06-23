@@ -321,7 +321,7 @@
         (result 'unknown '())])]
     [(list name fields ...)
      (cond
-       [(member name '("host" "std" "world" "visual"))
+       [(member name '("host" "std" "world" "visual" "ui"))
         (infer-module-path parts globals loc)]
        [(scope-ref env name)
         => (lambda (type)
@@ -344,6 +344,7 @@
     [(list "host" _ ...) (result 'module-path '())]
     [(list "world" _ ...) (result 'module-path '())]
     [(list "visual" _ ...) (result 'module-path '())]
+    [(list "ui" _ ...) (result 'module-path '())]
     [(list "std" _ ...)
      (if (std-imported? globals)
          (result 'module-path '())
@@ -438,6 +439,7 @@
     [`(path "host" "io" "println") 'none]
     [`(path "host" "file" "read") 'string]
     [`(path "host" "str" "lines_count") 'number]
+    [`(path "host" "str" "lines") '(group string)]
     [`(path "host" "str" "len") 'number]
     [`(path "host" "str" "join") 'string]
     [`(path "host" "str" "add") 'string]
@@ -446,6 +448,8 @@
     [`(path "host" "str" "trim") 'string]
     [`(path "host" "str" "upper") 'string]
     [`(path "host" "str" "lower") 'string]
+    [`(path "host" "str" "split") '(group string)]
+    [`(path "host" "math" "parse") 'number]
     [`(path "host" "math" "abs") 'number]
     [`(path "host" "math" "min") 'number]
     [`(path "host" "math" "max") 'number]
@@ -454,6 +458,7 @@
     [`(path "std" "io" "println") 'none]
     [`(path "std" "file" "read_text") 'string]
     [`(path "std" "str" "lines_count") 'number]
+    [`(path "std" "str" "lines") '(group string)]
     [`(path "std" "str" "len") 'number]
     [`(path "std" "str" "join") 'string]
     [`(path "std" "str" "add") 'string]
@@ -462,6 +467,8 @@
     [`(path "std" "str" "trim") 'string]
     [`(path "std" "str" "upper") 'string]
     [`(path "std" "str" "lower") 'string]
+    [`(path "std" "str" "split") '(group string)]
+    [`(path "std" "num" "parse") 'number]
     [`(path "std" "num" "abs") 'number]
     [`(path "std" "num" "min") 'number]
     [`(path "std" "num" "max") 'number]
@@ -487,6 +494,14 @@
     [`(path "visual" "present") 'none]
     [`(path "visual" "trace") 'none]
     [`(path "visual" "trace_text") 'string]
+    [`(path "ui" "panel") 'none]
+    [`(path "ui" "text") 'none]
+    [`(path "ui" "field") 'none]
+    [`(path "ui" "button") 'none]
+    [`(path "ui" "value") 'none]
+    [`(path "ui" "present") 'none]
+    [`(path "ui" "trace") 'none]
+    [`(path "ui" "trace_text") 'string]
     [`(path ,name)
      (if (hash-has-key? (hash-ref globals 'skills) name)
          'unknown

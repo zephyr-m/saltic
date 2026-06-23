@@ -15,10 +15,11 @@
          s-enum?
          s-world-ref?)
 
-(struct runtime (constants enums boxes skills entry world visual) #:transparent)
+(struct runtime (constants enums boxes skills entry world visual ui) #:transparent)
 (struct world-state (next-id objects trace) #:transparent)
 (struct world-object (kind x y) #:transparent)
 (struct visual-state (trace) #:transparent)
+(struct ui-state (trace) #:transparent)
 (struct env (vars parent) #:transparent)
 (struct s-none () #:transparent)
 (struct s-error (name) #:transparent)
@@ -62,7 +63,8 @@
      (define entry #f)
      (define world (make-world-state))
      (define visual (make-visual-state))
-     (define rt (runtime constants enums boxes skills #f world visual))
+     (define ui (make-ui-state))
+     (define rt (runtime constants enums boxes skills #f world visual ui))
      (for ([item items])
        (match item
          [`(const ,name ,value)
@@ -77,7 +79,7 @@
          [`(skill ,name ,params ,body)
           (hash-set! skills name (list params body))]
          [_ (runtime-error "unsupported top-level item: ~s" item)]))
-     (runtime constants enums boxes skills entry world visual)]
+     (runtime constants enums boxes skills entry world visual ui)]
     [_ (runtime-error "expected program AST")]))
 
 (define (make-root-env)
@@ -88,6 +90,9 @@
 
 (define (make-visual-state)
   (visual-state (box '())))
+
+(define (make-ui-state)
+  (ui-state (box '())))
 
 (define (make-child-env parent)
   (env (make-hash) parent))
@@ -254,7 +259,7 @@
         `(path ,@parts)])]
     [(list name fields ...)
      (cond
-       [(member name '("host" "std" "world" "visual")) `(path ,@parts)]
+       [(member name '("host" "std" "world" "visual" "ui")) `(path ,@parts)]
        [(not (eq? (env-ref scope name) missing-value))
         (box-field-ref (env-ref scope name) fields)]
        [(not (eq? (hash-ref (runtime-constants rt) name missing-value) missing-value))
@@ -264,6 +269,7 @@
     [(list "std" _ ...) `(path ,@parts)]
     [(list "world" _ ...) `(path ,@parts)]
     [(list "visual" _ ...) `(path ,@parts)]
+    [(list "ui" _ ...) `(path ,@parts)]
     [_ `(path ,@parts)]))
 
 (define (eval-box-new rt scope name fields out)
@@ -316,6 +322,12 @@
      (unless (string? text)
        (runtime-error "host.str.lines_count expects string"))
      (count-lines text)]
+    [`(path "host" "str" "lines")
+     (expect-arg-count "host.str.lines" args 1)
+     (define text (first args))
+     (unless (string? text)
+       (runtime-error "host.str.lines expects string"))
+     (s-group (text->lines text))]
     [`(path "host" "str" "len")
      (expect-arg-count "host.str.len" args 1)
      (define text (first args))
@@ -354,6 +366,22 @@
      (unless (string? text)
        (runtime-error "host.str.lower expects string"))
      (string-downcase text)]
+    [`(path "host" "str" "split")
+     (expect-arg-count "host.str.split" args 2)
+     (define text (first args))
+     (define separator (second args))
+     (unless (and (string? text) (string? separator))
+       (runtime-error "host.str.split expects strings"))
+     (s-group (string-split text separator))]
+    [`(path "host" "math" "parse")
+     (expect-arg-count "host.math.parse" args 1)
+     (define text (first args))
+     (unless (string? text)
+       (runtime-error "host.math.parse expects string"))
+     (define parsed (string->number (string-trim text)))
+     (if (number? parsed)
+         parsed
+         (s-error "InvalidNumber"))]
     [`(path "host" "math" "abs")
      (expect-arg-count "host.math.abs" args 1)
      (define value (first args))
@@ -384,6 +412,8 @@
      (eval-call rt scope `(path "host" "file" "read") args out)]
     [`(path "std" "str" "lines_count")
      (eval-call rt scope `(path "host" "str" "lines_count") args out)]
+    [`(path "std" "str" "lines")
+     (eval-call rt scope `(path "host" "str" "lines") args out)]
     [`(path "std" "str" "len")
      (eval-call rt scope `(path "host" "str" "len") args out)]
     [`(path "std" "str" "join")
@@ -400,6 +430,10 @@
      (eval-call rt scope `(path "host" "str" "upper") args out)]
     [`(path "std" "str" "lower")
      (eval-call rt scope `(path "host" "str" "lower") args out)]
+    [`(path "std" "str" "split")
+     (eval-call rt scope `(path "host" "str" "split") args out)]
+    [`(path "std" "num" "parse")
+     (eval-call rt scope `(path "host" "math" "parse") args out)]
     [`(path "std" "num" "abs")
      (eval-call rt scope `(path "host" "math" "abs") args out)]
     [`(path "std" "num" "min")
@@ -503,6 +537,54 @@
     [`(path "visual" "trace_text")
      (expect-arg-count "visual.trace_text" args 0)
      (visual-trace-string rt)]
+    [`(path "ui" "panel")
+     (expect-arg-count "ui.panel" args 1)
+     (define name (first args))
+     (unless (string? name)
+       (runtime-error "ui.panel expects string name"))
+     (ui-add-trace! rt (format "panel ~a" name))
+     none-value]
+    [`(path "ui" "text")
+     (expect-arg-count "ui.text" args 1)
+     (define value (first args))
+     (unless (string? value)
+       (runtime-error "ui.text expects string"))
+     (ui-add-trace! rt (format "text ~a" value))
+     none-value]
+    [`(path "ui" "field")
+     (expect-arg-count "ui.field" args 2)
+     (define name (first args))
+     (define label (second args))
+     (unless (and (string? name) (string? label))
+       (runtime-error "ui.field expects string name and label"))
+     (ui-add-trace! rt (format "field ~a label ~a" name label))
+     none-value]
+    [`(path "ui" "button")
+     (expect-arg-count "ui.button" args 2)
+     (define name (first args))
+     (define label (second args))
+     (unless (and (string? name) (string? label))
+       (runtime-error "ui.button expects string name and label"))
+     (ui-add-trace! rt (format "button ~a label ~a" name label))
+     none-value]
+    [`(path "ui" "value")
+     (expect-arg-count "ui.value" args 2)
+     (define name (first args))
+     (define value (second args))
+     (unless (string? name)
+       (runtime-error "ui.value expects string name"))
+     (ui-add-trace! rt (format "value ~a ~a" name (value->string value)))
+     none-value]
+    [`(path "ui" "present")
+     (expect-arg-count "ui.present" args 0)
+     (ui-add-trace! rt "present")
+     none-value]
+    [`(path "ui" "trace")
+     (fprintf out "~a" (ui-trace-string rt))
+     none-value]
+    [`(path "ui" "trace_text")
+     (expect-arg-count "ui.trace_text" args 0)
+     (ui-trace-string rt)]
     [`(path ,name)
      (call-skill rt name args out)]
     [_ (runtime-error "unsupported call target: ~s" callee)]))
@@ -521,6 +603,11 @@
         (if (char=? (string-ref text (sub1 (string-length text))) #\newline)
             0
             1))]))
+
+(define (text->lines text)
+  (cond
+    [(string=? text "") '()]
+    [else (filter non-empty-string? (string-split text "\n"))]))
 
 (define (world-spawn! rt kind)
   (unless (string? kind)
@@ -578,6 +665,16 @@
 
 (define (visual-trace-string rt)
   (define lines (unbox (visual-state-trace (runtime-visual rt))))
+  (if (null? lines)
+      ""
+      (string-append (string-join lines "\n") "\n")))
+
+(define (ui-add-trace! rt line)
+  (define trace (ui-state-trace (runtime-ui rt)))
+  (set-box! trace (append (unbox trace) (list line))))
+
+(define (ui-trace-string rt)
+  (define lines (unbox (ui-state-trace (runtime-ui rt))))
   (if (null? lines)
       ""
       (string-append (string-join lines "\n") "\n")))

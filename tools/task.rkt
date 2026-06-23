@@ -125,6 +125,7 @@
 (print-list "host calls" (hash-ref calls 'host))
 (print-list "world calls" (hash-ref calls 'world))
 (print-list "visual calls" (hash-ref calls 'visual))
+(print-list "ui calls" (hash-ref calls 'ui))
 
 (define stdout
   (with-output-to-string

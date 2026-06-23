@@ -44,7 +44,7 @@ S не должен считать HTML или браузер целевым ren
 state -> visual trace -> backend
 ```
 
-Текущий bootstrap поддерживает маленький `visual.*` trace API только для проверки направления.
+Текущий bootstrap поддерживает маленькие trace API `visual.*` и `ui.*` только для проверки направления.
 
 Подробнее: [Visual Observation v0](visual-observation-v0.md).
 
