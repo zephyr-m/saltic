@@ -2,15 +2,15 @@
 
 Этот документ фиксирует первый контракт исполнения S.
 
-Статус: архитектурный контракт, не полноценная VM.
+Статус: архитектурный контракт и первый маленький VM-контур.
 
 ## Зачем
 
 S не должен навсегда оставаться тем, что случайно умеет Racket bootstrap runtime.
 
-Но писать полноценную VM сейчас рано.
+Полноценную VM писать сразу рано.
 
-Поэтому сначала фиксируется S Machine:
+Поэтому сначала фиксируется S Machine и маленький bytecode subset:
 
 ```text
 S source -> S Machine steps -> effects/traces/messages -> backend
@@ -86,6 +86,70 @@ step 13: halt
 Это ещё не runtime trace.
 
 Это первый static machine trace: программа разбирается, skills раскрываются, protocol calls видны как effects.
+
+## Bytecode VM v0
+
+Первый исполняемый VM-контур реализован отдельно от основного runtime:
+
+```text
+tools/s-vm.rkt
+tools/vm-run.rkt
+tests/vm.rkt
+```
+
+Запуск:
+
+```bash
+just vm-run
+just vm-bytecode
+```
+
+Поддерживаемый subset v0.3:
+
+- number/string/yes/no/none literals;
+- локальные переменные через `@name = ...`;
+- assignment;
+- arithmetic/comparison binary ops: `+`, `-`, `*`, `/`, `==`, `>`, `<`;
+- local `skill` calls;
+- `Box` construction with defaults and overrides;
+- field access through `object.field`;
+- `Group` literals;
+- `std.group.count(...)`;
+- `std.group.at(...)`;
+- `drum`;
+- `std.io.println(...)`;
+- `out`.
+
+Пока не входит:
+
+- `switch`;
+- `rescue`;
+- modules beyond what compiler can load as ordinary top-level declarations;
+- general `std.*` calls beyond the current VM whitelist.
+
+Минимальные opcodes:
+
+```text
+push
+push-none
+load
+store
+add/sub/mul/div
+eq/gt/lt
+call
+pop
+box-new
+field
+group
+drum
+return
+```
+
+Эта VM пока написана на Racket, но она уже отделяет S source от tree-walking runtime:
+
+```text
+S source -> AST -> S bytecode -> S VM
+```
 
 ## Effects
 

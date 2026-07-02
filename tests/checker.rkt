@@ -128,6 +128,77 @@ S
  (list "12:12: error: Box 'Point' has no field 'z'"))
 
 (check-equal?
+ (check-s-string
+  #<<S
+use std
+
+Point = Box {
+    x = 0
+    y = 0
+}
+
+Shape = Box {
+    points = []
+}
+
+program() {
+    @points = [
+        Point { x = 1 y = 2 },
+        Point { x = 3 y = 4 },
+    ]
+    @shape = Shape {
+        points = points
+    }
+    @count = std.group.count(shape.points)
+    out none
+}
+S
+  )
+ '())
+
+(check-equal?
+ (check-s-string
+  #<<S
+use std
+
+Point = Box {
+    x = 0
+}
+
+program() {
+    @items = []
+    items = [
+        Point { x = 1 },
+    ]
+    @item = std.group.at(items, 0)
+    @x = item.x
+    out none
+}
+S
+  )
+ '())
+
+(check-equal?
+ (check-s-string
+  #<<S
+use std
+
+Point = Box {
+    x = 0
+}
+
+program() {
+    @json = std.json.encode([
+        Point { x = 1 },
+    ])
+    std.file.write_text("out.json", json)
+    out none
+}
+S
+  )
+ '())
+
+(check-equal?
  (check-s-datum
   '(program
     (out (none))))

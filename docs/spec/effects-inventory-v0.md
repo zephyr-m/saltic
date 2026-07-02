@@ -54,6 +54,7 @@ visual
 Owner не всегда равен текущей реализации.
 
 Например, `std.file.read_text` сейчас реализован через `host.file.read`, но owner у него `std`.
+Так же `std.file.write_text` и `std.json.encode` остаются пользовательским API, даже если текущий bootstrap исполняет их через host.
 
 ## Current Inventory
 
@@ -125,7 +126,7 @@ just effects-check
 
 - actor fabric effects;
 - hardware effects;
-- storage effects beyond `host.file.read`/`std.file.read_text`;
+- storage effects beyond `host.file.read`/`std.file.read_text`/`host.file.write`/`std.file.write_text`;
 - network effects;
 - permissions;
 - effect capabilities;

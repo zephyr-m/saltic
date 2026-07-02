@@ -88,6 +88,24 @@ format-file file="examples/bootstrap/basic.s":
 machine-trace file="tasks/011-visual-observation-protocol/solution.s":
     racket tools/machine-trace.rkt {{file}}
 
+vm-run file="examples/bootstrap/vm-basic.s":
+    racket tools/vm-run.rkt {{file}}
+
+vm-bytecode file="examples/bootstrap/vm-basic.s":
+    racket tools/vm-run.rkt --bytecode {{file}}
+
+vm-box:
+    racket tools/vm-run.rkt examples/bootstrap/vm-box.s
+
+vm-box-bytecode:
+    racket tools/vm-run.rkt --bytecode examples/bootstrap/vm-box.s
+
+vm-group:
+    racket tools/vm-run.rkt examples/bootstrap/vm-group.s
+
+vm-group-bytecode:
+    racket tools/vm-run.rkt --bytecode examples/bootstrap/vm-group.s
+
 effects:
     racket tools/effects.rkt
 

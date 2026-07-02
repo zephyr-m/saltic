@@ -2,17 +2,31 @@
 
 (require racket/list
          racket/path
+         racket/runtime-path
          racket/string
          "s-parser.rkt")
 
 (provide load-s-file-datum
-         load-s-file-datum/loc)
+         load-s-file-datum/loc
+         std-module-paths)
 
 (define (load-s-file-datum path)
   (expand-file path ast->datum))
 
 (define (load-s-file-datum/loc path)
   (expand-file path ast->datum/loc))
+
+(define-runtime-path std-root "../std")
+
+(define std-module-files
+  '("file.s"
+    "json.s"
+    "str.s"
+    "num.s"))
+
+(define (std-module-paths)
+  (for/list ([std-file std-module-files])
+    (build-path std-root std-file)))
 
 (define (expand-file path ast->datum-proc)
   (define normalized (simplify-path path))
@@ -34,7 +48,15 @@
              (apply append
                     (for/list ([item items])
                       (match (strip-loc item)
-                        [`(use "std") (list item)]
+                        [`(use "std")
+                         (append
+                          (list item)
+                          (apply append
+                                 (for/list ([std-path (std-module-paths)])
+                                   (expand-file-items std-path
+                                                      ast->datum-proc
+                                                      (cons normalized stack)
+                                                      included))))]
                         [`(use ,parts ...)
                          (append
                           (list item)

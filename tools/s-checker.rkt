@@ -438,11 +438,12 @@
   (match (strip-loc callee)
     [`(path "host" "io" "println") 'none]
     [`(path "host" "file" "read") 'string]
+    [`(path "host" "file" "write") 'none]
+    [`(path "host" "json" "encode") 'string]
     [`(path "host" "str" "lines_count") 'number]
     [`(path "host" "str" "lines") '(group string)]
     [`(path "host" "str" "len") 'number]
     [`(path "host" "str" "join") 'string]
-    [`(path "host" "str" "add") 'string]
     [`(path "host" "str" "eq") 'answer]
     [`(path "host" "str" "contains") 'answer]
     [`(path "host" "str" "trim") 'string]
@@ -457,6 +458,8 @@
     [`(path "host" "debug" "show") 'none]
     [`(path "std" "io" "println") 'none]
     [`(path "std" "file" "read_text") 'string]
+    [`(path "std" "file" "write_text") 'none]
+    [`(path "std" "json" "encode") 'string]
     [`(path "std" "str" "lines_count") 'number]
     [`(path "std" "str" "lines") '(group string)]
     [`(path "std" "str" "len") 'number]
@@ -568,13 +571,22 @@
 (define (type-compatible? expected actual)
   (or (eq? expected 'unknown)
       (eq? actual 'unknown)
-      (equal? expected actual)))
+      (equal? expected actual)
+      (match (list expected actual)
+        [(list `(group ,expected-item) `(group ,actual-item))
+         (type-compatible? expected-item actual-item)]
+        [_ #f])))
 
 (define (merge-type left right)
   (cond
     [(eq? left 'unknown) right]
     [(eq? right 'unknown) left]
     [(equal? left right) left]
+    [(and (pair? left)
+          (pair? right)
+          (eq? (first left) 'group)
+          (eq? (first right) 'group))
+     `(group ,(merge-type (second left) (second right)))]
     [else 'unknown]))
 
 (define (type->string type)

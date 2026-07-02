@@ -47,7 +47,7 @@ AppName = "S Language"
 use std
 ```
 
-`use std` разрешает явные пути `std.io.*`, `std.file.*`, `std.str.*` и `std.num.*`.
+`use std` разрешает явные пути `std.io.*`, `std.file.*`, `std.str.*`, `std.num.*`, `std.group.*` и `std.json.*`.
 
 Короткие имена не импортируются.
 

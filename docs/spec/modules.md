@@ -99,7 +99,7 @@ use std
 
 Правило:
 
-- `use std` разрешает пути `std.io.*`, `std.file.*`, `std.str.*`, `std.num.*`;
+- `use std` разрешает пути `std.io.*`, `std.file.*`, `std.str.*`, `std.num.*`, `std.group.*`, `std.json.*`;
 - короткие имена не импортируются;
 - `std` не является частью language core;
 - `host.*` остаётся доступен только для bootstrap examples и tests.
@@ -123,11 +123,22 @@ use std
 
 ```text
 std.io.println        -> host.io.println
-std.file.read_text    -> host.file.read
-std.str.lines_count   -> host.str.lines_count
-std.str.len           -> host.str.len
+std.file.read_text    -> std/file.s -> host.file.read
+std.file.write_text   -> std/file.s -> host.file.write
+std.json.encode       -> std/json.s -> host.json.encode
+std.str.lines_count   -> std/str.s -> host.str.lines_count
+std.str.len           -> std/str.s -> host.str.len
 std.str.join          -> host.str.join
-std.str.add           -> host.str.add
+std.str.add           -> std/str.s -> host.str.join
+std.str.eq            -> std/str.s -> host.str.eq
+std.str.contains      -> std/str.s -> host.str.contains
+std.str.trim          -> std/str.s -> host.str.trim
+std.str.upper         -> std/str.s -> host.str.upper
+std.str.lower         -> std/str.s -> host.str.lower
+std.str.split         -> std/str.s -> host.str.split
+std.num.parse         -> std/num.s -> host.math.parse
+std.num.abs           -> std/num.s -> host.math.abs
+std.num.round         -> std/num.s -> host.math.round
 std.str.eq            -> host.str.eq
 std.str.contains      -> host.str.contains
 std.str.trim          -> host.str.trim

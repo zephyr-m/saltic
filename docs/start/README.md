@@ -11,6 +11,7 @@
 - [v0.1 core](v0.1-core.md)
 - [practice first](practice-first.md)
 - [runtime freeze](runtime-freeze.md)
+- [self-hosting roadmap](self-hosting-roadmap.md)
 - [task lessons](task-lessons.md)
 - [roadmap](roadmap.md)
 - [today](today.md)

@@ -72,3 +72,24 @@ S
       [_ 0])))
 
 (check-equal? leaflet-count 1)
+
+(define std-main-path
+  (write-module
+   module-dir
+   "std_main.s"
+   #<<S
+use std
+
+program() {
+    out none
+}
+S
+   ))
+
+(define std-expanded (load-s-file-datum std-main-path))
+
+(check-true
+ (for/or ([item (cdr std-expanded)])
+   (match item
+     [`(skill "std_str_add" . ,_) #t]
+     [_ #f])))

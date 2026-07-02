@@ -97,6 +97,66 @@ S
  "5,0\n")
 
 (check-equal?
+ (s-value->jsexpr
+  (run-s-string
+   #<<S
+Kind = enum {
+    POINT,
+}
+
+Point = Box {
+    kind = Kind.POINT
+    x = 0
+    y = 0
+}
+
+program() {
+    out [
+        Point { x = 5 y = 7 },
+    ]
+}
+S
+   ))
+ (list (hash 'kind "POINT" 'x 5 'y 7)))
+
+(check-equal?
+ (with-output-to-string
+   (lambda ()
+     (run-s-string
+      #<<S
+use std
+
+Point = Box {
+    x = 0
+    y = 0
+}
+
+program() {
+    @json = std.json.encode([
+        Point { x = 5 y = 7 },
+    ])
+    std.io.println(json)
+    out none
+}
+S
+      )))
+ "[{\"x\":5,\"y\":7}]\n")
+
+(let ([temp (make-temporary-file "s-write-text-~a.txt")])
+  (run-s-string/args
+   #<<S
+use std
+
+program(path) {
+    std.file.write_text(path, "written by S")
+    out none
+}
+S
+   (list (path->string temp)))
+  (check-equal? (file->string temp) "written by S")
+  (delete-file temp))
+
+(check-equal?
  (with-output-to-string
    (lambda ()
      (run-s-string

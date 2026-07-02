@@ -1,6 +1,7 @@
 #lang racket
 
-(require racket/string
+(require json
+         racket/string
          "s-modules.rkt"
          "s-parser.rkt")
 
@@ -10,6 +11,7 @@
          run-s-string/args
          run-s-datum
          run-s-datum/args
+         s-value->jsexpr
          s-none?
          s-error?
          s-enum?
@@ -56,6 +58,10 @@
 (define (build-runtime ast)
   (match ast
     [`(program ,items ...)
+     (define expanded-items
+       (if (uses-std? items)
+           (append (standard-runtime-items) items)
+           items))
      (define constants (make-hash))
      (define enums (make-hash))
      (define boxes (make-hash))
@@ -65,7 +71,7 @@
      (define visual (make-visual-state))
      (define ui (make-ui-state))
      (define rt (runtime constants enums boxes skills #f world visual ui))
-     (for ([item items])
+     (for ([item expanded-items])
        (match item
          [`(const ,name ,value)
           (hash-set! constants name (eval-expr rt (make-root-env) value (current-output-port)))]
@@ -81,6 +87,19 @@
          [_ (runtime-error "unsupported top-level item: ~s" item)]))
      (runtime constants enums boxes skills entry world visual ui)]
     [_ (runtime-error "expected program AST")]))
+
+(define (uses-std? items)
+  (for/or ([item items])
+    (match item
+      [`(use "std") #t]
+      [_ #f])))
+
+(define (standard-runtime-items)
+  (apply append
+         (for/list ([path (std-module-paths)])
+           (match (load-s-file-datum path)
+             [`(program ,items ...) items]
+             [_ (runtime-error "expected std module AST in ~a" path)]))))
 
 (define (make-root-env)
   (env (make-hash) #f))
@@ -306,7 +325,10 @@
                       (value->string current))])))
 
 (define (eval-call rt scope callee args out)
-  (match callee
+  (define std-skill-name (std-call-skill-name callee))
+  (if std-skill-name
+      (call-skill rt (symbol->string std-skill-name) args out)
+      (match callee
     [`(path "host" "io" "println")
      (fprintf out "~a\n" (string-join (map value->string args) ""))
      none-value]
@@ -316,6 +338,22 @@
      (unless (string? path)
        (runtime-error "host.file.read expects string path"))
      (file->string path)]
+    [`(path "host" "file" "write")
+     (expect-arg-count "host.file.write" args 2)
+     (define path (first args))
+     (define text (second args))
+     (unless (and (string? path) (string? text))
+       (runtime-error "host.file.write expects string path and text"))
+     (define output-dir (path-only path))
+     (when output-dir
+       (make-directory* output-dir))
+     (call-with-output-file path
+       (lambda (out) (display text out))
+       #:exists 'truncate)
+     none-value]
+    [`(path "host" "json" "encode")
+     (expect-arg-count "host.json.encode" args 1)
+     (jsexpr->string (s-value->jsexpr (first args)))]
     [`(path "host" "str" "lines_count")
      (expect-arg-count "host.str.lines_count" args 1)
      (define text (first args))
@@ -335,8 +373,6 @@
        (runtime-error "host.str.len expects string"))
      (string-length text)]
     [`(path "host" "str" "join")
-     (string-join (map value->string args) "")]
-    [`(path "host" "str" "add")
      (string-join (map value->string args) "")]
     [`(path "host" "str" "eq")
      (expect-arg-count "host.str.eq" args 2)
@@ -408,40 +444,12 @@
      none-value]
     [`(path "std" "io" "println")
      (eval-call rt scope `(path "host" "io" "println") args out)]
-    [`(path "std" "file" "read_text")
-     (eval-call rt scope `(path "host" "file" "read") args out)]
-    [`(path "std" "str" "lines_count")
-     (eval-call rt scope `(path "host" "str" "lines_count") args out)]
-    [`(path "std" "str" "lines")
-     (eval-call rt scope `(path "host" "str" "lines") args out)]
-    [`(path "std" "str" "len")
-     (eval-call rt scope `(path "host" "str" "len") args out)]
     [`(path "std" "str" "join")
      (eval-call rt scope `(path "host" "str" "join") args out)]
-    [`(path "std" "str" "add")
-     (eval-call rt scope `(path "host" "str" "add") args out)]
-    [`(path "std" "str" "eq")
-     (eval-call rt scope `(path "host" "str" "eq") args out)]
-    [`(path "std" "str" "contains")
-     (eval-call rt scope `(path "host" "str" "contains") args out)]
-    [`(path "std" "str" "trim")
-     (eval-call rt scope `(path "host" "str" "trim") args out)]
-    [`(path "std" "str" "upper")
-     (eval-call rt scope `(path "host" "str" "upper") args out)]
-    [`(path "std" "str" "lower")
-     (eval-call rt scope `(path "host" "str" "lower") args out)]
-    [`(path "std" "str" "split")
-     (eval-call rt scope `(path "host" "str" "split") args out)]
-    [`(path "std" "num" "parse")
-     (eval-call rt scope `(path "host" "math" "parse") args out)]
-    [`(path "std" "num" "abs")
-     (eval-call rt scope `(path "host" "math" "abs") args out)]
     [`(path "std" "num" "min")
      (eval-call rt scope `(path "host" "math" "min") args out)]
     [`(path "std" "num" "max")
      (eval-call rt scope `(path "host" "math" "max") args out)]
-    [`(path "std" "num" "round")
-     (eval-call rt scope `(path "host" "math" "round") args out)]
     [`(path "std" "group" "count")
      (expect-arg-count "std.group.count" args 1)
      (define group (first args))
@@ -587,7 +595,27 @@
      (ui-trace-string rt)]
     [`(path ,name)
      (call-skill rt name args out)]
-    [_ (runtime-error "unsupported call target: ~s" callee)]))
+    [_ (runtime-error "unsupported call target: ~s" callee)])))
+
+(define (std-call-skill-name callee)
+  (match callee
+    [`(path "std" "file" "read_text") 'std_file_read_text]
+    [`(path "std" "file" "write_text") 'std_file_write_text]
+    [`(path "std" "json" "encode") 'std_json_encode]
+    [`(path "std" "str" "lines_count") 'std_str_lines_count]
+    [`(path "std" "str" "lines") 'std_str_lines]
+    [`(path "std" "str" "len") 'std_str_len]
+    [`(path "std" "str" "add") 'std_str_add]
+    [`(path "std" "str" "eq") 'std_str_eq]
+    [`(path "std" "str" "contains") 'std_str_contains]
+    [`(path "std" "str" "trim") 'std_str_trim]
+    [`(path "std" "str" "upper") 'std_str_upper]
+    [`(path "std" "str" "lower") 'std_str_lower]
+    [`(path "std" "str" "split") 'std_str_split]
+    [`(path "std" "num" "parse") 'std_num_parse]
+    [`(path "std" "num" "abs") 'std_num_abs]
+    [`(path "std" "num" "round") 'std_num_round]
+    [_ #f]))
 
 (define (expect-arg-count name args expected)
   (unless (= (length args) expected)
@@ -788,6 +816,21 @@
      (and (equal? (s-enum-enum left) (s-enum-enum right))
           (equal? (s-enum-variant left) (s-enum-variant right)))]
     [else (equal? left right)]))
+
+(define (s-value->jsexpr value)
+  (cond
+    [(s-none? value) 'null]
+    [(or (number? value) (string? value) (boolean? value)) value]
+    [(s-error? value) (s-error-name value)]
+    [(s-enum? value) (s-enum-variant value)]
+    [(s-group? value)
+     (for/list ([item (s-group-items value)])
+       (s-value->jsexpr item))]
+    [(s-box? value)
+     (for/hash ([(name field-value) (in-hash (s-box-fields value))])
+       (values (string->symbol name) (s-value->jsexpr field-value)))]
+    [(s-world-ref? value) (s-world-ref-id value)]
+    [else (runtime-error "cannot convert value to JSON: ~a" (value->string value))]))
 
 (define (value->string value)
   (cond

@@ -100,13 +100,14 @@
          [`(enum ,name ,variants ...)
           (set! enums (cons (format "~a {~a}" name (string-join variants ", ")) enums))]
          [`(skill ,name ,params ,body)
-         (set! skills (cons (format "~a(~a)" name (string-join params ", ")) skills))
-         (define calls (collect-calls body))
-          (set! std-calls (append (filter std-call? calls) std-calls))
-          (set! host-calls (append (filter host-call? calls) host-calls))
-          (set! world-actions (append (filter world-call? calls) world-actions))
-          (set! visual-actions (append (filter visual-call? calls) visual-actions))
-          (set! ui-actions (append (filter ui-call? calls) ui-actions))]
+          (unless (std-internal-skill? name)
+            (set! skills (cons (format "~a(~a)" name (string-join params ", ")) skills))
+            (define calls (collect-calls body))
+            (set! std-calls (append (filter std-call? calls) std-calls))
+            (set! host-calls (append (filter host-call? calls) host-calls))
+            (set! world-actions (append (filter world-call? calls) world-actions))
+            (set! visual-actions (append (filter visual-call? calls) visual-actions))
+            (set! ui-actions (append (filter ui-call? calls) ui-actions)))]
          [`(entry ,params ,body)
           (set! entry (format "program(~a)" (string-join params ", ")))
           (define calls (collect-calls body))
@@ -139,6 +140,9 @@
 
 (define (host-call? call)
   (string-prefix? call "host."))
+
+(define (std-internal-skill? name)
+  (string-prefix? name "std_"))
 
 (define (std-call? call)
   (string-prefix? call "std."))
