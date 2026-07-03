@@ -6,7 +6,7 @@ S — экспериментальный системный язык для ав
 
 S берёт Zig как инженерную отправную точку, но не стремится быть просто переименованным Zig. Цель — первая итерация замены C для своей архитектуры, своих железок и агентной среды.
 
-Так как собственной архитектуры пока нет, первая практическая цель — вырастить S внутри Racket: описать синтаксис, parser, AST, checker, formatter и раннее исполнение. Backend под свою архитектуру остаётся долгосрочной целью.
+Так как собственной архитектуры пока нет, первая практическая цель — вырастить S внутри Racket: описать синтаксис, parser, AST, checker, formatter, раннее исполнение и bytecode VM. Backend под свою архитектуру остаётся долгосрочной целью.
 
 Долгосрочная цель шире обычного языка программирования: S должен стать основой эмуляции физического мира, где работа происходит через действия, наблюдение, измерение, симуляцию и воспроизводимую историю изменений.
 
@@ -14,12 +14,27 @@ S берёт Zig как инженерную отправную точку, но
 
 S находится в исследовательской фазе `v0.1`.
 
+Текущая практическая картина:
+
+```text
+S source
+-> Racket parser/checker/runtime
+
+S source
+-> Racket parser/checker/compiler
+-> S bytecode
+-> Racket VM
+-> S-side tiny VM semantics subset
+```
+
+Оценка автономности: около `40%`.
+
 Пока ничего не стабильно:
 
 - синтаксис может меняться;
 - терминология может меняться;
 - модель runtime может меняться;
-- Racket является bootstrap-платформой для ранних версий S.
+- Racket является bootstrap-платформой и reference implementation для ранних версий S.
 
 ## Две главные цели
 
@@ -96,7 +111,7 @@ drafts/            сырые заметки и исходный материа�
 
 - [Индекс документации](docs/README.md)
 - [Философия](docs/vision/philosophy.md)
-- [Layers](docs/start/layers.md)
+- [Layers](docs/architecture/layers.md)
 - [Bootstrap Contract](docs/bootstrap/bootstrap-contract.md)
 - [v0.1 Core](docs/start/v0.1-core.md)
 - [Грамматика](docs/spec/grammar.md)
@@ -112,7 +127,7 @@ drafts/            сырые заметки и исходный материа�
 - [sys](docs/bootstrap/sys.md)
 - [Host intrinsics](docs/bootstrap/host.md)
 - [Стандартная библиотека](docs/spec/stdlib.md)
-- [std v0.1](docs/spec/std-v0.1.md)
+- [core v0.1](docs/spec/core-v0.1.md)
 - [core](docs/vision/core.md)
 - [core.informatics](docs/vision/informatics.md)
 - [core.engine](docs/vision/engine.md)
@@ -120,8 +135,10 @@ drafts/            сырые заметки и исходный материа�
 - [agent](docs/vision/agent.md)
 - [Racket Bootstrap](docs/bootstrap/racket.md)
 - [Practice-first ограничения](docs/start/practice-first.md)
+- [Self-hosting roadmap](docs/start/self-hosting-roadmap.md)
+- [Autonomy score](docs/start/autonomy-score.md)
 - [Дорожная карта](docs/start/roadmap.md)
-- [План на сегодня](docs/start/today.md)
+- [Текущий рабочий план](docs/start/today.md)
 - [Не цели](docs/vision/non-goals.md)
 
 ## Девиз

@@ -1,13 +1,13 @@
-use std
+use core
 
 skill amount(line) {
-    @parts = std.str.split(line, " ")
-    out std.num.parse(std.group.at(parts, 2))
+    @parts = core.str.split(line, " ")
+    out core.num.parse(core.group.at(parts, 2))
 }
 
 skill kind(line) {
-    @parts = std.str.split(line, " ")
-    out std.group.at(parts, 0)
+    @parts = core.str.split(line, " ")
+    out core.group.at(parts, 0)
 }
 
 skill status(free) {
@@ -18,28 +18,28 @@ skill status(free) {
 }
 
 skill show_panel(path) {
-    @text = std.file.read_text(path)
-    @lines = std.str.lines(text)
+    @text = core.file.read_text(path)
+    @lines = core.str.lines(text)
 
     @income = 0
     @expenses = 0
     @debt = 0
     @index = 0
 
-    drum (std.group.count(lines)) {
-        @line = std.group.at(lines, index)
+    drum (core.group.count(lines)) {
+        @line = core.group.at(lines, index)
         @line_kind = kind(line)
         @line_amount = amount(line)
 
-        (std.str.eq(line_kind, "income")) {
+        (core.str.eq(line_kind, "income")) {
             income = income + line_amount
         }
 
-        (std.str.eq(line_kind, "expense")) {
+        (core.str.eq(line_kind, "expense")) {
             expenses = expenses + line_amount
         }
 
-        (std.str.eq(line_kind, "debt")) {
+        (core.str.eq(line_kind, "debt")) {
             debt = debt + line_amount
         }
 

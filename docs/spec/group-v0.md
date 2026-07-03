@@ -61,8 +61,8 @@ Shape = Box {
 
 ```s
 @index = 0
-drum (std.group.count(objects)) {
-    @object = std.group.at(objects, index)
+drum (core.group.count(objects)) {
+    @object = core.group.at(objects, index)
     index = index + 1
 }
 ```
@@ -74,8 +74,8 @@ drum (std.group.count(objects)) {
 Минимальная поверхность:
 
 ```s
-std.group.count(group)
-std.group.at(group, index)
+core.group.count(group)
+core.group.at(group, index)
 ```
 
 `index` в v0 начинается с `0`.

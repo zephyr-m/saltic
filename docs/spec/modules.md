@@ -2,11 +2,11 @@
 
 Этот документ фиксирует принятое решение по module/import системе S v0.1.
 
-Цель: выбрать минимальный путь к `std`, не ломая текущий язык и не превращая bootstrap `host.*` в пользовательский API.
+Цель: выбрать минимальный путь к `core`, не ломая текущий язык и не превращая bootstrap `host.*` в пользовательский API.
 
 ## Зачем нужны modules
 
-Без module/import системы `std` остаётся только документом.
+Без module/import системы `core` остаётся только документом.
 
 S должен уметь отличать:
 
@@ -18,14 +18,14 @@ S должен уметь отличать:
 ## Вариант A: явный `use`
 
 ```s
-use std.io
-use std.file
-use std.str
+use core.io
+use core.file
+use core.str
 
 program(path, needle) {
-    @text = std.file.read_text(path)
-    @ok = std.str.contains(text, needle)
-    std.io.println(ok)
+    @text = core.file.read_text(path)
+    @ok = core.str.contains(text, needle)
+    core.io.println(ok)
     out none
 }
 ```
@@ -42,13 +42,13 @@ program(path, needle) {
 - появляется новый top-level item;
 - нужно решить, что делает `use`: только разрешает путь или ещё импортирует короткие имена.
 
-## Вариант B: `std.*` всегда доступен
+## Вариант B: `core.*` всегда доступен
 
 ```s
 program(path, needle) {
-    @text = std.file.read_text(path)
-    @ok = std.str.contains(text, needle)
-    std.io.println(ok)
+    @text = core.file.read_text(path)
+    @ok = core.str.contains(text, needle)
+    core.io.println(ok)
     out none
 }
 ```
@@ -57,7 +57,7 @@ program(path, needle) {
 
 - минимально для пользователя;
 - не требует нового syntax прямо сейчас;
-- `std.*` ведёт себя как встроенный namespace.
+- `core.*` ведёт себя как встроенный namespace.
 
 Минусы:
 
@@ -65,15 +65,15 @@ program(path, needle) {
 - сложнее отделить ядро языка от библиотеки;
 - может стать скрытой магией.
 
-## Вариант C: `use std`
+## Вариант C: `use core`
 
 ```s
-use std
+use core
 
 program(path, needle) {
-    @text = std.file.read_text(path)
-    @ok = std.str.contains(text, needle)
-    std.io.println(ok)
+    @text = core.file.read_text(path)
+    @ok = core.str.contains(text, needle)
+    core.io.println(ok)
     out none
 }
 ```
@@ -86,7 +86,7 @@ program(path, needle) {
 
 Минусы:
 
-- менее точно, чем `use std.file`;
+- менее точно, чем `use core.file`;
 - позже всё равно может понадобиться module-level import.
 
 ## Решение
@@ -94,14 +94,14 @@ program(path, needle) {
 Для S v0.1 выбран Вариант C:
 
 ```s
-use std
+use core
 ```
 
 Правило:
 
-- `use std` разрешает пути `std.io.*`, `std.file.*`, `std.str.*`, `std.num.*`, `std.group.*`, `std.json.*`;
+- `use core` разрешает пути `core.io.*`, `core.file.*`, `core.str.*`, `core.num.*`, `core.group.*`, `core.json.*`;
 - короткие имена не импортируются;
-- `std` не является частью language core;
+- `core` не является частью language core;
 - `host.*` остаётся доступен только для bootstrap examples и tests.
 
 Так S получает видимый пользовательский API без преждевременного package manager.
@@ -110,53 +110,57 @@ use std
 
 Минимальный порядок:
 
-1. [x] Parser: добавить top-level item `use std`.
-2. [x] AST: представить import как `(use "std")`.
-3. [x] Checker: разрешать `std.*` только если файл содержит `use std`.
+1. [x] Parser: добавить top-level item `use core`.
+2. [x] AST: представить import как `(use "core")`.
+3. [x] Checker: разрешать `core.*` только если файл содержит `use core`.
 4. [x] Runtime: сделать временный std bridge поверх `host.*`.
-5. [x] Formatter: печатать `use std` в верхней части файла.
-6. [x] Explain: показывать подключённые модули и `std` calls.
+5. [x] Formatter: печатать `use core` в верхней части файла.
+6. [x] Explain: показывать подключённые модули и `core` calls.
 
 ## Std bridge
 
 Первый bridge может быть временным:
 
 ```text
-std.io.println        -> host.io.println
-std.file.read_text    -> std/file.s -> host.file.read
-std.file.write_text   -> std/file.s -> host.file.write
-std.json.encode       -> std/json.s -> host.json.encode
-std.str.lines_count   -> std/str.s -> host.str.lines_count
-std.str.len           -> std/str.s -> host.str.len
-std.str.join          -> host.str.join
-std.str.add           -> std/str.s -> host.str.join
-std.str.eq            -> std/str.s -> host.str.eq
-std.str.contains      -> std/str.s -> host.str.contains
-std.str.trim          -> std/str.s -> host.str.trim
-std.str.upper         -> std/str.s -> host.str.upper
-std.str.lower         -> std/str.s -> host.str.lower
-std.str.split         -> std/str.s -> host.str.split
-std.num.parse         -> std/num.s -> host.math.parse
-std.num.abs           -> std/num.s -> host.math.abs
-std.num.round         -> std/num.s -> host.math.round
-std.str.eq            -> host.str.eq
-std.str.contains      -> host.str.contains
-std.str.trim          -> host.str.trim
-std.str.upper         -> host.str.upper
-std.str.lower         -> host.str.lower
-std.num.abs           -> host.math.abs
-std.num.min           -> host.math.min
-std.num.max           -> host.math.max
-std.num.round         -> host.math.round
+core.io.println        -> host.io.println
+core.file.read_text    -> std/file.s -> host.file.read
+core.file.write_text   -> std/file.s -> host.file.write
+core.json.encode       -> std/json.s -> host.json.encode
+core.str.lines_count   -> std/str.s algorithm over len/at
+core.str.len           -> std/str.s -> host.str.len
+core.str.at            -> std/str.s -> host.str.at
+core.str.slice         -> std/str.s -> host.str.slice
+core.str.join          -> host.str.join
+core.str.add           -> std/str.s -> host.str.join
+core.str.eq            -> std/str.s -> host.str.eq
+core.str.is_empty      -> std/str.s algorithm over len
+core.str.starts_with   -> std/str.s algorithm over len/slice/eq
+core.str.ends_with     -> std/str.s algorithm over len/slice/eq
+core.str.contains      -> std/str.s algorithm over len/slice/eq
+core.str.trim          -> std/str.s -> host.str.trim
+core.str.upper         -> std/str.s -> host.str.upper
+core.str.lower         -> std/str.s -> host.str.lower
+core.str.split         -> std/str.s -> host.str.split
+core.num.parse         -> std/num.s -> host.math.parse
+core.num.abs           -> std/num.s -> host.math.abs
+core.num.round         -> std/num.s -> host.math.round
+core.str.eq            -> host.str.eq
+core.str.trim          -> host.str.trim
+core.str.upper         -> host.str.upper
+core.str.lower         -> host.str.lower
+core.num.abs           -> host.math.abs
+core.num.min           -> host.math.min
+core.num.max           -> host.math.max
+core.num.round         -> host.math.round
 ```
 
-Это не перенос доменной логики в Racket. Это адаптер имён, чтобы пользовательский код писал `std.*`, а bootstrap runtime временно исполнял это через `host.*`.
+Это не перенос доменной логики в Racket. Это адаптер имён, чтобы пользовательский код писал `core.*`, а bootstrap runtime временно исполнял это через `host.*`.
 
 Текущий bridge уже позволяет запускать:
 
 ```text
-examples/canonical/text-auditor.std.s
-examples/canonical/report-generator.std.s
+examples/canonical/text-auditor.core.s
+examples/canonical/report-generator.core.s
 ```
 
 ## Local object modules v0
@@ -191,7 +195,7 @@ fabric -> actor_b -> leaflet
 ## Не входит в v0.1
 
 - external packages;
-- aliases вроде `use std.str as str`;
+- aliases вроде `use core.str as str`;
 - wildcard imports;
 - arbitrary relative imports;
 - package manager;

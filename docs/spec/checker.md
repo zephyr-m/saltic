@@ -45,11 +45,11 @@ racket tools/check.rkt --json examples/user/finance-log.s
   "diagnostics": [
     {
       "level": "error",
-      "code": "std_not_imported",
-      "message": "module 'std' is not imported; add 'use std'",
+      "code": "core_not_imported",
+      "message": "module 'core' is not imported; add 'use core'",
       "line": 2,
       "col": 5,
-      "hint": "add `use std` at top level"
+      "hint": "add `use core` at top level"
     }
   ]
 }
@@ -79,4 +79,4 @@ Structured diagnostics дополнительно имеют `code` и, где �
 - Checker пока работает поверх printed AST, а не напрямую по typed AST structs.
 - Вывод типа пока грубый: `number`, `string`, `none`, `yes/no`, enum и `unknown`.
 - Возвращаемые типы `skill` пока не выводятся.
-- `host.*` считается внешним bootstrap-путём; его базовые вызовы известны checker'у, но это не полноценный `std`.
+- `host.*` считается внешним bootstrap-путём; его базовые вызовы известны checker'у, но это не полноценный `core`.

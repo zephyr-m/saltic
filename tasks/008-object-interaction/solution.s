@@ -1,4 +1,4 @@
-use std
+use core
 
 use objects.player
 
@@ -16,9 +16,9 @@ program() {
         actor_key_state = next_player.state
     }
     @next_door = react_door(door, door_event)
-    std.io.println(next_player.name)
-    std.io.println(next_player.state)
-    std.io.println(next_door.name)
-    std.io.println(next_door.state)
+    core.io.println(next_player.name)
+    core.io.println(next_player.state)
+    core.io.println(next_door.name)
+    core.io.println(next_door.state)
     out none
 }

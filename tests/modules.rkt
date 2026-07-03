@@ -78,7 +78,7 @@ S
    module-dir
    "std_main.s"
    #<<S
-use std
+use core
 
 program() {
     out none

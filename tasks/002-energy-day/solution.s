@@ -1,4 +1,4 @@
-use std
+use core
 
 Status = enum {
     SAFE,
@@ -22,8 +22,8 @@ skill classify(charge, safe_min) {
 
 skill print_status(status) {
     (status) {
-        .SAFE => std.io.println("status: SAFE"),
-        .LOW => std.io.println("status: LOW"),
+        .SAFE => core.io.println("status: SAFE"),
+        .LOW => core.io.println("status: LOW"),
     }
     out none
 }
@@ -37,8 +37,8 @@ program() {
     @end = end_energy(start, solar, usage)
     @charge = percent(end, capacity)
     @status = classify(charge, safe_min)
-    std.io.println("end: ", end, " Wh")
-    std.io.println("charge: ", charge, " %")
+    core.io.println("end: ", end, " Wh")
+    core.io.println("charge: ", charge, " %")
     print_status(status)
     out none
 }

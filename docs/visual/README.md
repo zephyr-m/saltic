@@ -39,7 +39,7 @@ S не должен оставаться только текстом.
 
 Пока не зафиксировано:
 
-- `std.render`;
+- `core.render`;
 - canvas API;
 - 3D API;
 - material model;

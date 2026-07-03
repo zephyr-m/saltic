@@ -131,7 +131,7 @@
          (trace-block body skills))])]
     [(list "host" _ ...)
      (list (format "effect ~a(~a)" name args-text))]
-    [(list "std" _ ...)
+    [(list "core" _ ...)
      (list (format "effect ~a(~a)" name args-text))]
     [(list "world" _ ...)
      (list (format "effect ~a(~a)" name args-text))]

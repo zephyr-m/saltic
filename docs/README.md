@@ -27,6 +27,9 @@ vision/programmable-matter.md  дальний север S
 vision/ideal-system.md   целевая картина готовой системы
 architecture/layers.md  канонические слои S
 start/README.md  вход в проект
+start/today.md  текущий рабочий план
+start/self-hosting-roadmap.md  маршрут bytecode VM и self-hosting
+start/autonomy-score.md  текущая оценка автономности
 spec/README.md   язык как система
 bootstrap/README.md  временный слой исполнения
 tooling/README.md    команды и рабочие инструменты
@@ -48,6 +51,9 @@ spec/types.md
 spec/errors.md
 spec/checker.md
 spec/runtime.md
+spec/bytecode-v0.md
+spec/vm-step-v0.md
+spec/s-machine-v0.md
 ```
 
 Они должны оставаться ближе к тому, что реально парсится, проверяется и запускается.

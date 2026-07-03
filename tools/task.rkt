@@ -121,7 +121,7 @@
 (define calls (hash-ref explanation 'calls))
 (printf "entry: ~a\n" (or (hash-ref explanation 'entry) "none"))
 (print-list "skills" (hash-ref explanation 'skills))
-(print-list "std calls" (hash-ref calls 'std))
+(print-list "core calls" (hash-ref calls 'core))
 (print-list "host calls" (hash-ref calls 'host))
 (print-list "world calls" (hash-ref calls 'world))
 (print-list "visual calls" (hash-ref calls 'visual))

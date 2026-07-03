@@ -88,7 +88,7 @@ L3 — большая идея, но не первая реализация.
 
 - `core.math`;
 - `core.logic`.
-- `core.informatics` как место будущей std.
+- `core.informatics` как место будущей core.
 - `core.engine` как будущий фундамент для игр, симуляций и CAD-like tooling.
 
 Остальные домены не должны мешать MVP языка.

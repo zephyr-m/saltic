@@ -1,4 +1,4 @@
-use std
+use core
 
 Visibility = enum {
     VISIBLE,
@@ -38,8 +38,8 @@ skill visibility(object, camera) {
 
 skill print_object(object, visibility) {
     (visibility) {
-        .VISIBLE => std.io.println(object.name, " visible at ", object.position.x, ",", object.position.y),
-        .HIDDEN => std.io.println(object.name, " hidden at ", object.position.x, ",", object.position.y),
+        .VISIBLE => core.io.println(object.name, " visible at ", object.position.x, ",", object.position.y),
+        .HIDDEN => core.io.println(object.name, " hidden at ", object.position.x, ",", object.position.y),
     }
     out none
 }
@@ -80,8 +80,8 @@ program() {
     @player_visibility = visibility(player, camera)
     @light_visibility = visibility(light, camera)
     @wall_visibility = visibility(wall, camera)
-    std.io.println("frame: ", frame.width, "x", frame.height)
-    std.io.println("camera: ", camera.position.x, ",", camera.position.y)
+    core.io.println("frame: ", frame.width, "x", frame.height)
+    core.io.println("camera: ", camera.position.x, ",", camera.position.y)
     print_object(player, player_visibility)
     print_object(light, light_visibility)
     print_object(wall, wall_visibility)

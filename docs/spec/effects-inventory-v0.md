@@ -22,7 +22,7 @@ just effects
 
 ```text
 host.*    bootstrap-only
-std.*     user-facing standard library
+core.*     user-facing standard library
 world.*   world protocol
 visual.*  observation protocol
 ```
@@ -38,7 +38,7 @@ pure    возвращает значение без внешнего trace/outp
 
 Это v0-разделение.
 
-Например, `std.str.len` является pure, а `visual.sheet` является effect, потому что пишет visual trace.
+Например, `core.str.len` является pure, а `visual.sheet` является effect, потому что пишет visual trace.
 
 ## Owner
 
@@ -53,8 +53,8 @@ visual
 
 Owner не всегда равен текущей реализации.
 
-Например, `std.file.read_text` сейчас реализован через `host.file.read`, но owner у него `std`.
-Так же `std.file.write_text` и `std.json.encode` остаются пользовательским API, даже если текущий bootstrap исполняет их через host.
+Например, `core.file.read_text` сейчас реализован через `host.file.read`, но owner у него `core`.
+Так же `core.file.write_text` и `core.json.encode` остаются пользовательским API, даже если текущий bootstrap исполняет их через host.
 
 ## Current Inventory
 
@@ -102,11 +102,11 @@ just effects-check
 
 Он не должен быть целевым стилем пользовательского S.
 
-План: переносить user-facing возможности в `std.*`.
+План: переносить user-facing возможности в `core.*`.
 
-### std.*
+### core.*
 
-`std.*` является user-facing API.
+`core.*` является user-facing API.
 
 Текущий статус v0.1: stable для уже перечисленных функций.
 
@@ -115,6 +115,17 @@ just effects-check
 `world.*` является protocol-v0.
 
 Он отвечает за воспроизводимые world actions, state, trace и replay.
+
+Новый канонический путь для действий мира:
+
+```text
+world.emit(...)
+world.step()
+```
+
+`world.emit(target, skill, ...)` кладёт в очередь вызов skill у объекта.
+
+Прямые `world.place` и `world.move` остаются bootstrap/runtime surface, но развитие должно идти в сторону skill-вызовов, которые применяются шагом мира.
 
 ### visual.*
 
@@ -126,7 +137,7 @@ just effects-check
 
 - actor fabric effects;
 - hardware effects;
-- storage effects beyond `host.file.read`/`std.file.read_text`/`host.file.write`/`std.file.write_text`;
+- storage effects beyond `host.file.read`/`core.file.read_text`/`host.file.write`/`core.file.write_text`;
 - network effects;
 - permissions;
 - effect capabilities;

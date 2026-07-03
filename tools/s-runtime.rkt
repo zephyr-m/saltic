@@ -18,7 +18,7 @@
          s-world-ref?)
 
 (struct runtime (constants enums boxes skills entry world visual ui) #:transparent)
-(struct world-state (next-id objects trace) #:transparent)
+(struct world-state (next-id objects trace events) #:transparent)
 (struct world-object (kind x y) #:transparent)
 (struct visual-state (trace) #:transparent)
 (struct ui-state (trace) #:transparent)
@@ -91,7 +91,7 @@
 (define (uses-std? items)
   (for/or ([item items])
     (match item
-      [`(use "std") #t]
+      [(or `(use "core") `(use "std")) #t]
       [_ #f])))
 
 (define (standard-runtime-items)
@@ -105,7 +105,7 @@
   (env (make-hash) #f))
 
 (define (make-world-state)
-  (world-state (box 1) (make-hash) (box '())))
+  (world-state (box 1) (make-hash) (box '()) (box '())))
 
 (define (make-visual-state)
   (visual-state (box '())))
@@ -278,14 +278,14 @@
         `(path ,@parts)])]
     [(list name fields ...)
      (cond
-       [(member name '("host" "std" "world" "visual" "ui")) `(path ,@parts)]
+       [(member name '("host" "core" "world" "visual" "ui")) `(path ,@parts)]
        [(not (eq? (env-ref scope name) missing-value))
         (box-field-ref (env-ref scope name) fields)]
        [(not (eq? (hash-ref (runtime-constants rt) name missing-value) missing-value))
         (box-field-ref (hash-ref (runtime-constants rt) name) fields)]
        [else `(path ,@parts)])]
     [(list "host" _ ...) `(path ,@parts)]
-    [(list "std" _ ...) `(path ,@parts)]
+    [(list "core" _ ...) `(path ,@parts)]
     [(list "world" _ ...) `(path ,@parts)]
     [(list "visual" _ ...) `(path ,@parts)]
     [(list "ui" _ ...) `(path ,@parts)]
@@ -372,6 +372,30 @@
      (unless (string? text)
        (runtime-error "host.str.len expects string"))
      (string-length text)]
+    [`(path "host" "str" "at")
+     (expect-arg-count "host.str.at" args 2)
+     (define text (first args))
+     (define index (second args))
+     (unless (string? text)
+       (runtime-error "host.str.at expects string"))
+     (unless (and (number? index) (integer? index))
+       (runtime-error "host.str.at index must be integer"))
+     (unless (and (<= 0 index) (< index (string-length text)))
+       (runtime-error "host.str.at index out of range"))
+     (string (string-ref text index))]
+    [`(path "host" "str" "slice")
+     (expect-arg-count "host.str.slice" args 3)
+     (define text (first args))
+     (define start (second args))
+     (define end (third args))
+     (unless (string? text)
+       (runtime-error "host.str.slice expects string"))
+     (unless (and (number? start) (integer? start)
+                  (number? end) (integer? end))
+       (runtime-error "host.str.slice indexes must be integers"))
+     (unless (and (<= 0 start) (<= start end) (<= end (string-length text)))
+       (runtime-error "host.str.slice range out of bounds"))
+     (substring text start end)]
     [`(path "host" "str" "join")
      (string-join (map value->string args) "")]
     [`(path "host" "str" "eq")
@@ -442,30 +466,30 @@
      (for ([arg args])
        (fprintf out "~s\n" arg))
      none-value]
-    [`(path "std" "io" "println")
+    [`(path "core" "io" "println")
      (eval-call rt scope `(path "host" "io" "println") args out)]
-    [`(path "std" "str" "join")
+    [`(path "core" "str" "join")
      (eval-call rt scope `(path "host" "str" "join") args out)]
-    [`(path "std" "num" "min")
+    [`(path "core" "num" "min")
      (eval-call rt scope `(path "host" "math" "min") args out)]
-    [`(path "std" "num" "max")
+    [`(path "core" "num" "max")
      (eval-call rt scope `(path "host" "math" "max") args out)]
-    [`(path "std" "group" "count")
-     (expect-arg-count "std.group.count" args 1)
+    [`(path "core" "group" "count")
+     (expect-arg-count "core.group.count" args 1)
      (define group (first args))
      (unless (s-group? group)
-       (runtime-error "std.group.count expects Group"))
+       (runtime-error "core.group.count expects Group"))
      (length (s-group-items group))]
-    [`(path "std" "group" "at")
-     (expect-arg-count "std.group.at" args 2)
+    [`(path "core" "group" "at")
+     (expect-arg-count "core.group.at" args 2)
      (define group (first args))
      (define index (second args))
      (unless (s-group? group)
-       (runtime-error "std.group.at expects Group"))
+       (runtime-error "core.group.at expects Group"))
      (unless (and (number? index) (integer? index))
-       (runtime-error "std.group.at index must be integer"))
+       (runtime-error "core.group.at index must be integer"))
      (unless (and (<= 0 index) (< index (length (s-group-items group))))
-       (runtime-error "std.group.at index out of range"))
+       (runtime-error "core.group.at index out of range"))
      (list-ref (s-group-items group) index)]
     [`(path "world" "spawn")
      (expect-arg-count "world.spawn" args 1)
@@ -477,6 +501,13 @@
     [`(path "world" "move")
      (expect-arg-count "world.move" args 3)
      (world-move! rt (first args) (second args) (third args))
+     none-value]
+    [`(path "world" "emit")
+     (world-emit! rt args)
+     none-value]
+    [`(path "world" "step")
+     (expect-arg-count "world.step" args 0)
+     (world-step! rt)
      none-value]
     [`(path "world" "trace")
      (fprintf out "~a" (world-trace-string rt))
@@ -599,22 +630,27 @@
 
 (define (std-call-skill-name callee)
   (match callee
-    [`(path "std" "file" "read_text") 'std_file_read_text]
-    [`(path "std" "file" "write_text") 'std_file_write_text]
-    [`(path "std" "json" "encode") 'std_json_encode]
-    [`(path "std" "str" "lines_count") 'std_str_lines_count]
-    [`(path "std" "str" "lines") 'std_str_lines]
-    [`(path "std" "str" "len") 'std_str_len]
-    [`(path "std" "str" "add") 'std_str_add]
-    [`(path "std" "str" "eq") 'std_str_eq]
-    [`(path "std" "str" "contains") 'std_str_contains]
-    [`(path "std" "str" "trim") 'std_str_trim]
-    [`(path "std" "str" "upper") 'std_str_upper]
-    [`(path "std" "str" "lower") 'std_str_lower]
-    [`(path "std" "str" "split") 'std_str_split]
-    [`(path "std" "num" "parse") 'std_num_parse]
-    [`(path "std" "num" "abs") 'std_num_abs]
-    [`(path "std" "num" "round") 'std_num_round]
+    [`(path "core" "file" "read_text") 'std_file_read_text]
+    [`(path "core" "file" "write_text") 'std_file_write_text]
+    [`(path "core" "json" "encode") 'std_json_encode]
+    [`(path "core" "str" "lines_count") 'std_str_lines_count]
+    [`(path "core" "str" "lines") 'std_str_lines]
+    [`(path "core" "str" "len") 'std_str_len]
+    [`(path "core" "str" "at") 'std_str_at]
+    [`(path "core" "str" "slice") 'std_str_slice]
+    [`(path "core" "str" "add") 'std_str_add]
+    [`(path "core" "str" "eq") 'std_str_eq]
+    [`(path "core" "str" "is_empty") 'std_str_is_empty]
+    [`(path "core" "str" "starts_with") 'std_str_starts_with]
+    [`(path "core" "str" "ends_with") 'std_str_ends_with]
+    [`(path "core" "str" "contains") 'std_str_contains]
+    [`(path "core" "str" "trim") 'std_str_trim]
+    [`(path "core" "str" "upper") 'std_str_upper]
+    [`(path "core" "str" "lower") 'std_str_lower]
+    [`(path "core" "str" "split") 'std_str_split]
+    [`(path "core" "num" "parse") 'std_num_parse]
+    [`(path "core" "num" "abs") 'std_num_abs]
+    [`(path "core" "num" "round") 'std_num_round]
     [_ #f]))
 
 (define (expect-arg-count name args expected)
@@ -666,6 +702,31 @@
              (s-world-ref-id ref)
              (world-object (world-object-kind object) x y))
   (world-add-trace! rt (format "move #~a ~a ~a" (s-world-ref-id ref) dx dy)))
+
+(define (world-emit! rt args)
+  (when (< (length args) 2)
+    (runtime-error "world.emit expects target and skill name"))
+  (define target (first args))
+  (define skill (second args))
+  (unless (s-world-ref? target)
+    (runtime-error "world.emit expects object handle target"))
+  (unless (string? skill)
+    (runtime-error "world.emit expects string skill name"))
+  (define events (world-state-events (runtime-world rt)))
+  (set-box! events (append (unbox events) (list (list* target skill (drop args 2))))))
+
+(define (world-step! rt)
+  (define events (world-state-events (runtime-world rt)))
+  (define queued (unbox events))
+  (set-box! events '())
+  (for ([event queued])
+    (match event
+      [(list ref "place" x y)
+       (world-place! rt ref x y)]
+      [(list ref "move" dx dy)
+       (world-move! rt ref dx dy)]
+      [(list _ skill _ ...)
+       (runtime-error "world.step cannot apply skill '~a'" skill)])))
 
 (define (world-object-ref rt ref)
   (unless (s-world-ref? ref)

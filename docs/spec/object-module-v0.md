@@ -75,7 +75,7 @@ objects/player.s
 - `Box`;
 - `skill`;
 - constants;
-- `use std`, если он нужен модулю.
+- `use core`, если он нужен модулю.
 
 Вызов skill пока остаётся обычным:
 

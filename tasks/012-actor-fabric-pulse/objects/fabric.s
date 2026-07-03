@@ -1,4 +1,4 @@
-use std
+use core
 
 use actor_a
 
@@ -29,16 +29,16 @@ skill moment_two(fabric) {
 }
 
 skill observe_moment_one(fabric, leaflet) {
-    std.io.println("moment 1")
-    std.io.println("actor ", fabric.actor_a.name, " received ", leaflet.kind)
-    std.io.println("actor ", fabric.actor_a.name, " sent ", fabric.outbox.kind, " to ", fabric.outbox.to)
-    std.io.println("actor ", fabric.actor_a.name, " state ", fabric.actor_a.state)
+    core.io.println("moment 1")
+    core.io.println("actor ", fabric.actor_a.name, " received ", leaflet.kind)
+    core.io.println("actor ", fabric.actor_a.name, " sent ", fabric.outbox.kind, " to ", fabric.outbox.to)
+    core.io.println("actor ", fabric.actor_a.name, " state ", fabric.actor_a.state)
     out none
 }
 
 skill observe_moment_two(fabric) {
-    std.io.println("moment 2")
-    std.io.println("actor ", fabric.actor_b.name, " received ", fabric.outbox.kind)
-    std.io.println("actor ", fabric.actor_b.name, " state ", fabric.actor_b.state)
+    core.io.println("moment 2")
+    core.io.println("actor ", fabric.actor_b.name, " received ", fabric.outbox.kind)
+    core.io.println("actor ", fabric.actor_b.name, " state ", fabric.actor_b.state)
     out none
 }

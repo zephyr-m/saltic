@@ -109,7 +109,7 @@ S
 (check-equal?
  (check-s-string
   #<<S
-use std
+use core
 
 Point = Box {
     x = 0
@@ -119,7 +119,7 @@ program() {
     @items = [
         Point { x = 1 },
     ]
-    @item = std.group.at(items, 0)
+    @item = core.group.at(items, 0)
     @bad = item.z
     out none
 }
@@ -130,7 +130,7 @@ S
 (check-equal?
  (check-s-string
   #<<S
-use std
+use core
 
 Point = Box {
     x = 0
@@ -149,7 +149,7 @@ program() {
     @shape = Shape {
         points = points
     }
-    @count = std.group.count(shape.points)
+    @count = core.group.count(shape.points)
     out none
 }
 S
@@ -159,7 +159,7 @@ S
 (check-equal?
  (check-s-string
   #<<S
-use std
+use core
 
 Point = Box {
     x = 0
@@ -170,7 +170,7 @@ program() {
     items = [
         Point { x = 1 },
     ]
-    @item = std.group.at(items, 0)
+    @item = core.group.at(items, 0)
     @x = item.x
     out none
 }
@@ -181,17 +181,17 @@ S
 (check-equal?
  (check-s-string
   #<<S
-use std
+use core
 
 Point = Box {
     x = 0
 }
 
 program() {
-    @json = std.json.encode([
+    @json = core.json.encode([
         Point { x = 1 },
     ])
-    std.file.write_text("out.json", json)
+    core.file.write_text("out.json", json)
     out none
 }
 S
@@ -208,19 +208,19 @@ S
  (check-s-string
   #<<S
 program() {
-    std.io.println("missing import")
+    core.io.println("missing import")
     out none
 }
 S
   )
- (list "2:5: error: module 'std' is not imported; add 'use std'"))
+ (list "2:5: error: module 'core' is not imported; add 'use core'"))
 
 (check-equal?
  (diagnostics->jsexpr
   (check-s-string/details
    #<<S
 program() {
-    std.io.println("missing import")
+    core.io.println("missing import")
     out none
 }
 S
@@ -229,11 +229,11 @@ S
        'diagnostics
        (list
         (hash 'level "error"
-              'code "std_not_imported"
-              'message "module 'std' is not imported; add 'use std'"
+              'code "core_not_imported"
+              'message "module 'core' is not imported; add 'use core'"
               'line 2
               'col 5
-              'hint "add `use std` at top level"))))
+              'hint "add `use core` at top level"))))
 
 (define (check-json-cli source)
   (define temp (make-temporary-file "s-check-json-~a.s"))
@@ -257,10 +257,10 @@ S
 (define-values (ok-json ok-err ok-status)
   (check-json-cli
    #<<S
-use std
+use core
 
 program() {
-    std.io.println("ok")
+    core.io.println("ok")
     out none
 }
 S
@@ -274,7 +274,7 @@ S
   (check-json-cli
    #<<S
 program() {
-    std.io.println("missing import")
+    core.io.println("missing import")
     out none
 }
 S
@@ -288,19 +288,19 @@ S
          'diagnostics
          (list
           (hasheq 'level "error"
-                  'code "std_not_imported"
-                  'message "module 'std' is not imported; add 'use std'"
+                  'code "core_not_imported"
+                  'message "module 'core' is not imported; add 'use core'"
                   'line 2
                   'col 5
-                  'hint "add `use std` at top level"))))
+                  'hint "add `use core` at top level"))))
 
 (check-equal?
  (check-s-string
   #<<S
-use std
+use core
 
 program() {
-    std.io.println("ok")
+    core.io.println("ok")
     out none
 }
 S

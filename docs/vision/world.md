@@ -119,6 +119,8 @@ world.save
 
 ```text
 world.spawn(kind)
+world.emit(object, skill, ...)
+world.step()
 world.place(object, x, y)
 world.move(object, dx, dy)
 world.trace()
@@ -138,6 +140,19 @@ trace output
 state output
 replay from trace
 ```
+
+Канонический путь развития:
+
+```s
+@box = world.spawn("box")
+world.emit(box, "place", 10, 20)
+world.emit(box, "move", 5, 0)
+world.step()
+```
+
+`place` и `move` здесь являются skills объекта.
+
+Старые прямые вызовы `world.place` и `world.move` остаются bootstrap surface, но не должны становиться основной моделью.
 
 ## tool.*
 
@@ -171,10 +186,10 @@ tool.trace
 
 ```s
 @box = world.spawn(Box)
-world.place(box, point(0, 0, 0))
-world.material(box, material.aluminum)
-world.apply(box, force)
-world.simulate(seconds(1))
+world.emit(box, "place", point(0, 0, 0))
+world.emit(box, "material", material.aluminum)
+world.emit(box, "apply", force)
+world.step()
 ```
 
 Текущий исполняемый пример:
@@ -182,8 +197,9 @@ world.simulate(seconds(1))
 ```s
 program() {
     @box = world.spawn("box")
-    world.place(box, 10, 20)
-    world.move(box, 5, 0)
+    world.emit(box, "place", 10, 20)
+    world.emit(box, "move", 5, 0)
+    world.step()
     world.trace()
     world.state()
     out none
@@ -195,8 +211,9 @@ Replay MVP:
 ```s
 program() {
     @box = world.spawn("box")
-    world.place(box, 10, 20)
-    world.move(box, 5, 0)
+    world.emit(box, "place", 10, 20)
+    world.emit(box, "move", 5, 0)
+    world.step()
 
     @trace = world.trace_text()
     @state = world.state_text()

@@ -8,6 +8,8 @@
 
 S уже прошёл первый важный рубеж: `.s` файл можно не только распарсить и проверить, но и выполнить внутри Racket.
 
+После этого проект начал переход от Racket-only runtime к bytecode VM и S-side bootstrap VM.
+
 Рабочая демонстрация:
 
 ```bash
@@ -31,7 +33,23 @@ tick
 tick
 ```
 
-Сейчас S — это маленький исполняемый прототип языка, а не только набор документов.
+Сейчас S — это маленький исполняемый прототип языка с ранним self-hosting контуром:
+
+```text
+S source
+-> Racket parser/checker
+-> Racket tree runtime
+
+S source
+-> Racket parser/checker/compiler
+-> S bytecode
+-> Racket VM
+-> S-side tiny VM semantics subset
+```
+
+Текущая автономность: около `40%`.
+
+Подробно: [Autonomy score](autonomy-score.md) и [Self-hosting roadmap](self-hosting-roadmap.md).
 
 Долгосрочный центр проекта:
 
@@ -56,14 +74,19 @@ S нужен не только для написания программ. S н�
 [done]    Этап 2. Parser на Racket
 [done]    Этап 3. Checker
 [done]    Этап 4. Интерпретатор первого подмножества
-[next]    Этап 5. Foundation перед world MVP
-[next]    Этап 6. Удобство письма: formatter, diagnostics, examples
-[next]    Этап 7. Runtime и core.informatics.std
-[future]  Этап 8. World MVP
-[future]  Этап 9. Offline cookbook
-[future]  Этап 10. IR
-[future]  Этап 11. Первый внешний backend
-[future]  Этап 12+. Реальные проекты, toolchain, bootstrap, self-hosting
+[done]    Этап 5. Foundation перед world MVP
+[done]    Этап 6. Удобство письма: formatter, diagnostics, examples
+[done]    Этап 7. Runtime и первые std modules
+[done]    Этап 8. World/visual protocol slices
+[active]  Этап 9. Bytecode VM
+[active]  Этап 10. S-side tiny VM bootstrap
+[next]    Этап 11. Boundary table expansion
+[future]  Этап 12. Offline cookbook
+[future]  Этап 13. IR
+[future]  Этап 14. S toolchain wrapper
+[future]  Этап 15. Parser/checker/compiler fragments on S
+[future]  Этап 16. Self-hosting chain
+[future]  Этап 17. Backend под собственную архитектуру
 ```
 
 ## Этап 0. Черновик языка
@@ -299,7 +322,83 @@ racket tools/format.rkt examples/bootstrap/basic.s
 - replay даёт тот же state;
 - графика не обязательна.
 
-## Этап 9. Offline cookbook
+## Этап 9. Bytecode VM
+
+Цель: отделить runtime semantics от tree-walking Racket runtime.
+
+Текущий результат:
+
+```text
+S source -> Racket parser/checker/compiler -> S bytecode -> Racket VM
+```
+
+Готово сейчас:
+
+- bytecode dump;
+- VM execution for core examples;
+- numbers, strings, variables, calls, arithmetic, `out`;
+- `Box`, field access, `Group`;
+- `if`, `drum`, `switch`, `rescue`;
+- visual/world protocol slices;
+- object skill calls.
+
+Остаётся:
+
+- запускать больше canonical/user examples через VM;
+- держать bytecode v0 contract ближе к implementation;
+- не превращать Racket VM в единственный источник смысла.
+
+## Этап 10. S-side tiny VM bootstrap
+
+Цель: начать переносить смысл VM instructions в S-код.
+
+Текущий результат:
+
+```text
+examples/bootstrap/tiny_vm/core.s
+```
+
+Покрыто:
+
+- Group A: stack/load/store/pop;
+- Group B: arithmetic and compare;
+- Group C: `group`, `box-new`, `field`;
+- Group D: `if`, `drum`, `switch`, `rescue`, `return`;
+- Group E: local calls and first boundary table for `core.io.println`.
+
+Готово, когда:
+
+- tiny VM examples проходят и через tree runtime, и через bytecode VM;
+- `step_tiny` остаётся маленькой переносимой моделью;
+- новые semantics добавляются в S model, а не только в Racket `step!`.
+
+## Этап 11. Boundary table expansion
+
+Цель: сделать host/protocol calls явной моделью, а не набором special cases.
+
+Текущий next action:
+
+```text
+Extend S VM Step Group E boundary table
+```
+
+Кандидаты:
+
+- `core.group.count`;
+- `core.group.at`;
+- `core.str.add`;
+- `visual.trace_text`;
+- `world.trace_text`.
+
+Готово, когда:
+
+- выбран следующий boundary handler;
+- он представлен в S-side `BoundaryTable`;
+- есть runnable example;
+- есть runtime/vm tests;
+- docs updated.
+
+## Этап 12. Offline cookbook
 
 Цель: сделать S пригодным для разработки без интернета.
 
@@ -314,7 +413,7 @@ docs/cookbook/
 - вывести строку;
 - прочитать файл;
 - записать файл;
-- пройти по массиву;
+- пройти по группе;
 - сделать CLI;
 - обработать ошибку;
 - написать state machine;
@@ -326,68 +425,39 @@ docs/cookbook/
 - каждый рецепт короткий;
 - рецепты отвечают на реальные задачи, а не демонстрируют синтаксис ради синтаксиса.
 
-## Этап 10. IR
+## Этап 13. IR
 
-Цель: отделить S от Racket как среды исполнения.
+Цель: отделить модель программы от конкретного bootstrap backend.
 
-Результат:
+Bytecode VM сейчас является практическим ранним контрактом исполнения:
 
 ```text
-S AST -> S IR
+S AST -> S bytecode -> VM
+```
+
+Но отдельный IR всё ещё нужен как более общий слой для анализа, оптимизации, compiler passes и будущих backend-ов:
+
+```text
+S AST -> checked AST -> IR -> bytecode/native/hardware backend
 ```
 
 IR должен быть:
 
 - маленьким;
 - явным;
-- удобным для backend;
+- backend-neutral;
 - удобным для анализа агентами;
-- независимым от синтаксического сахара.
+- независимым от синтаксического сахара;
+- совместимым с текущим bytecode v0, но не обязанным быть тем же самым форматом.
 
 Готово, когда:
 
-- `basic.s` проходит путь до IR;
+- `basic.s` и несколько canonical examples проходят путь до IR;
 - IR можно вывести в текстовом виде;
-- понятно, как в IR представлены функции, блоки, условия, циклы и ошибки.
+- понятно, как в IR представлены функции, блоки, условия, циклы, ошибки и effects;
+- описано отношение `IR -> bytecode v0`.
 
-## Этап 11. Первый внешний backend
-
-Цель: получить исполнение вне Racket-интерпретатора.
-
-Возможные варианты:
-
-- transpile в C;
-- transpile в Zig;
-- bytecode VM;
-- простой native backend.
-
-Рекомендуемый ранний вариант: выбрать самый простой путь, который позволит запускать программы и проверять модель языка. Производительность пока не главный критерий.
-
-Готово, когда:
-
-- один backend запускает `basic.s`;
-- есть понятная команда сборки;
-- поведение совпадает с Racket-интерпретатором на тестовых примерах.
-
-## Этап 12. Первый реальный проект на S
-
-Цель: проверить язык задачей, а не демо.
-
-Кандидаты:
-
-- маленький CLI;
-- генератор документации;
-- parser конфигов;
-- agent task runner;
-- часть tooling для самого S.
-
-Готово, когда:
-
-- проект реально используется;
-- найденные проблемы возвращаются в спецификацию;
-- язык начинает формироваться от практики.
-
-## Этап 13. S toolchain
+## Этап 14. S toolchain wrapper
 
 Цель: собрать отдельную CLI-утилиту вокруг языка.
 
@@ -410,17 +480,17 @@ s explain
 - toolchain помогает писать без интернета;
 - diagnostics становятся частью UX языка.
 
-## Этап 14. Bootstrap на S
+## Этап 15. Parser/checker/compiler fragments on S
 
-Цель: начать переносить части tooling с Racket на S.
+Цель: начать переносить части tooling с Racket на S без остановки разработки.
 
 Порядок переноса:
 
-1. formatter;
-2. diagnostics helpers;
-3. простые std-модули;
-4. parser helpers;
-5. checker fragments;
+1. diagnostics helpers;
+2. bytecode/debug helpers;
+3. parser helpers;
+4. checker fragments;
+5. compiler fragments;
 6. больше runtime/tooling.
 
 Готово, когда:
@@ -429,7 +499,7 @@ s explain
 - Racket всё ещё может оставаться host-средой;
 - перенос не ломает скорость разработки.
 
-## Этап 15. Самохостинг
+## Этап 16. Self-hosting chain
 
 Цель: S способен собирать существенную часть себя.
 
@@ -448,7 +518,7 @@ s explain
 - bootstrap chain документирована;
 - есть rollback path.
 
-## Этап 16. Backend под собственную архитектуру
+## Этап 17. Backend под собственную архитектуру
 
 Цель: S становится системным языком для своей ISA.
 
@@ -481,12 +551,14 @@ examples/bootstrap/basic.s
   -> interpreter
   -> formatter + diagnostics
   -> runtime + core.informatics.std
+  -> world/visual slices
+  -> bytecode VM
+  -> S-side tiny VM
+  -> boundary table
   -> cookbook
   -> IR
-  -> backend
-  -> real project
   -> S toolchain
-  -> partial self-hosting
+  -> parser/checker/compiler fragments on S
   -> self-hosting
   -> own ISA backend
 ```
@@ -498,11 +570,11 @@ examples/bootstrap/basic.s
 Лучший ближайший milestone:
 
 ```bash
-just run
+just s-vm-step-boundary-vm
 ```
 
 Следующий лучший milestone:
 
 ```bash
-racket tools/format.rkt examples/bootstrap/basic.s
+just verify
 ```

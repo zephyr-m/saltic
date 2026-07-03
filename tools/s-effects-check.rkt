@@ -27,7 +27,7 @@
      (define parts
        (regexp-match* #px"\"([^\"]+)\"" (second path-match) #:match-select cadr))
      (if (and (>= (length parts) 2)
-              (member (first parts) '("host" "std" "world" "visual" "ui")))
+              (member (first parts) '("host" "core" "world" "visual" "ui")))
          (list (string-join parts "."))
          '())]))
 

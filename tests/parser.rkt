@@ -55,16 +55,16 @@
  (ast->datum
   (parse-s-string
    #<<S
-use std
+use core
 
 program() {
-    std.io.println("ok")
+    core.io.println("ok")
     out none
 }
 S
    ))
  `(program
-   (use "std")
+   (use "core")
    (entry () ,_)))
 
 (check-equal?

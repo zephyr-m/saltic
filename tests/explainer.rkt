@@ -7,7 +7,7 @@
 
 (define-runtime-path basic-source "../examples/bootstrap/basic.s")
 (define-runtime-path world-source "../examples/bootstrap/world-basic.s")
-(define-runtime-path std-source "../examples/canonical/report-generator.std.s")
+(define-runtime-path std-source "../examples/canonical/report-generator.core.s")
 (define-runtime-path explain-tool "../tools/explain.rkt")
 
 (define basic-explanation (explain-s-file basic-source))
@@ -24,17 +24,17 @@
 (check-true (regexp-match? #rx"world.move" world-explanation))
 (check-true (regexp-match? #rx"world.trace" world-explanation))
 
-(check-true (regexp-match? #rx"imports:\n  - std" std-explanation))
-(check-true (regexp-match? #rx"std.io.println" std-explanation))
-(check-true (regexp-match? #rx"std.file.read_text" std-explanation))
+(check-true (regexp-match? #rx"imports:\n  - core" std-explanation))
+(check-true (regexp-match? #rx"core.io.println" std-explanation))
+(check-true (regexp-match? #rx"core.file.read_text" std-explanation))
 
 (define std-details (explain-s-file/details std-source))
 
-(check-equal? (hash-ref std-details 'imports) (list "std"))
+(check-equal? (hash-ref std-details 'imports) (list "core"))
 (check-equal? (hash-ref std-details 'entry) "program(path, needle)")
 (check-equal? (hash-ref (hash-ref std-details 'top-level) 'skills) 4)
 (check-equal? (hash-ref (hash-ref std-details 'calls) 'host) '())
-(check-not-false (member "std.io.println" (hash-ref (hash-ref std-details 'calls) 'std)))
+(check-not-false (member "core.io.println" (hash-ref (hash-ref std-details 'calls) 'core)))
 
 (define visual-details
   (explain-s-string/details
@@ -49,7 +49,7 @@ S
 
 (check-not-false (member "visual.sheet" (hash-ref (hash-ref visual-details 'calls) 'visual)))
 (check-not-false (member "visual.present" (hash-ref (hash-ref visual-details 'calls) 'visual)))
-(check-not-false (member "std.file.read_text" (hash-ref (hash-ref std-details 'calls) 'std)))
+(check-not-false (member "core.file.read_text" (hash-ref (hash-ref std-details 'calls) 'core)))
 
 (define ui-details
   (explain-s-string/details
@@ -87,5 +87,5 @@ S
 
 (define parsed-std-json (string->jsexpr std-json))
 (check-equal? (hash-ref parsed-std-json 'ok) #t)
-(check-equal? (hash-ref (hash-ref parsed-std-json 'explanation) 'imports) (list "std"))
+(check-equal? (hash-ref (hash-ref parsed-std-json 'explanation) 'imports) (list "core"))
 (check-equal? (hash-ref (hash-ref parsed-std-json 'explanation) 'entry) "program(path, needle)")

@@ -1,4 +1,4 @@
-use std
+use core
 
 use objects.laboratory
 
@@ -16,8 +16,8 @@ program() {
         },
     ]
     @index = 0
-    drum (std.group.count(inputs)) {
-        @input = std.group.at(inputs, index)
+    drum (core.group.count(inputs)) {
+        @input = core.group.at(inputs, index)
         lab = dispatch(lab, input)
         render(lab)
         index = index + 1

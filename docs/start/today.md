@@ -1,117 +1,107 @@
-# План на сегодня
+# Текущий рабочий план
 
-Цель: превратить текущий вертикальный срез S в более удобный рабочий инструмент и подготовить следующий маленький шаг к `world MVP`.
+Этот файл фиксирует ближайшую реальную линию работы, а не исторический план первого вертикального среза.
 
-Практическое ограничение: после `explain` и diagnostics следующий шаг должен дать полезную программу на S. Не начинать новый большой слой языка, пока не появится новый runnable пример из `docs/start/practice-first.md`.
+## Текущее состояние
 
-## 1. `explain` — done
+S уже вышел за пределы первого `parse -> check -> run` прототипа.
 
-Сделать команду:
+Сейчас есть:
 
-```bash
-just explain examples/bootstrap/basic.s
-```
+- parser/checker/runtime на Racket;
+- formatter, diagnostics, `explain`;
+- runnable user examples и task pack;
+- `core` modules на S для части строк, чисел, файлов и JSON;
+- bytecode VM на Racket;
+- bytecode v0 contract;
+- S Machine / VM Step v0 docs;
+- S-side tiny VM bootstrap interpreter;
+- VM Step Group A/B/C/D в tiny VM;
+- Group E local calls и первый S-side boundary dispatch table для `core.io.println`;
+- std autonomy pass 1: `core.str.at/slice` and S-side string algorithms `contains/lines_count/is_empty/starts_with/ends_with`;
+- world/visual protocol slices;
+- object skill call model and runnable VM example.
 
-Минимальный результат:
-
-- показать top-level declarations;
-- показать `program(...)`;
-- показать `skill`-и и параметры;
-- показать host/world вызовы;
-- показать world actions;
-- показать краткую сводку по AST без необходимости читать Racket datum.
-
-Готово: `examples/bootstrap/basic.s` и `examples/bootstrap/world-basic.s` объясняются понятным текстом через `just explain <file>`.
-
-## 2. Diagnostics v0.2 — done
-
-Цель: начать сохранять позиции source-кода в ошибках checker.
-
-Минимальный результат:
-
-- parser уже знает `line` и `col`;
-- нужно не терять их при переходе к AST/datum;
-- checker diagnostics должны указывать строку и колонку хотя бы для неизвестного имени и неверного присваивания.
-
-Готово: checker для файлов/строк теперь использует loc-AST и показывает `line:col` для неизвестного имени и неверного присваивания.
-
-## 3. Практическая программа 1
-
-Сделать первый новый полезный пример из текущего цикла.
-
-Кандидат:
+Практическая оценка автономности:
 
 ```text
-examples/user/finance-log.s
+S autonomy: about 40%
+Racket dependency: about 60%
 ```
 
-Минимальный результат:
+Подробная шкала: [Autonomy score](autonomy-score.md).
 
-- программа считает итог прихода и расхода средствами S;
-- программа запускается через `just run-file examples/user/finance-log.s`;
-- программа объясняется через `just explain examples/user/finance-log.s`;
-- Racket bootstrap не трогаем под доменную логику.
+## Выполнено из старого плана
 
-Готово: `examples/user/finance-log.s` считает баланс через `skill balance(income, expenses)` внутри S. Текстовый лог откладывается до появления итерации/разбора строк в самом S или будущей std.
+Старый план был про удобство первого вертикального среза.
 
-## 4. World MVP 2
+Готово:
 
-Расширить текущий action/trace срез.
+- `just explain <file>`;
+- diagnostics с `line:col` для важных checker errors;
+- `examples/user/finance-log.s`;
+- task runner и первые задачи;
+- formatter/runtime/checker/parser tests;
+- world event protocol through `world.emit` + `world.step`;
+- syntax decision: текущая конструкция называется `switch`.
+
+Старые пункты `World MVP 2` и `Examples pack` не удалены как направление, но они больше не являются главным next action.
+
+## Current next action
+
+```text
+Extend S VM Step Group E boundary table
+```
+
+Почему это следующий шаг:
+
+- Group A/B/C/D уже перенесены в tiny VM bootstrap form;
+- local calls уже отделены от boundary calls через `CallKind`;
+- `core.io.println` уже проходит через S-side `BoundaryTable`;
+- остальные `core.*`, `host.*`, `visual.*`, `world.*` boundary effects всё ещё в основном живут в Racket;
+- без явной boundary table следующий перенос снова превратится в список special cases внутри `step_tiny`.
+
+Готово, когда:
+
+- выбран следующий boundary handler;
+- handler представлен в S-side boundary table/model;
+- есть runnable example через tree runtime и bytecode VM;
+- есть runtime/vm test coverage;
+- docs обновлены в [VM Step v0](../spec/vm-step-v0.md) и [Self-hosting roadmap](self-hosting-roadmap.md).
+
+## Candidate next handlers
 
 Кандидаты:
 
 ```text
-world.observe()
-world.measure(a, b)
-world.step()
-world.remove(object)
+core.group.count
+core.group.at
+core.str.lines
+core.str.split
+world.trace_text
+visual.trace_text
 ```
 
-Минимальный результат:
-
-- добавить один новый action;
-- добавить trace-запись;
-- добавить replay;
-- добавить runtime test;
-- добавить пример в `examples/`.
-
-## 5. Examples pack
-
-Добавить маленькие программы, которые учат языку без чтения документации.
-
-Кандидаты:
+Наиболее прагматичный следующий шаг:
 
 ```text
-examples/math.s
-examples/strings.s
-examples/errors.s
-examples/world-measure.s
-examples/world-step.s
+core.group.count / core.group.at
 ```
 
-Готово, когда каждый пример запускается через:
+Причина: они уже широко используются в examples/tasks и помогут tiny VM выполнять больше S-side программ без расширения world/visual протоколов.
+
+## Команды проверки
+
+Минимум для текущей линии:
 
 ```bash
-just run-file examples/<name>.s
+just s-vm-step-boundary
+just s-vm-step-boundary-vm
+env TMPDIR=/tmp raco test tests/runtime.rkt tests/vm.rkt
 ```
 
-## 6. Зафиксировать syntax decision
+Полный локальный контракт:
 
-Текущий блок:
-
-```s
-(status) {
-    .OK => host.io.println("ok"),
-}
+```bash
+just verify
 ```
-
-Нужно решить, как это называется в документации:
-
-```text
-switch
-match
-case block
-choice
-```
-
-Готово, когда название и правило зафиксированы в `docs/spec/syntax.md` и `docs/spec/grammar.md`.

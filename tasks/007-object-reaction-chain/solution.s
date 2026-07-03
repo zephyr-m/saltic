@@ -1,4 +1,4 @@
-use std
+use core
 
 use objects.player
 
@@ -31,13 +31,13 @@ program() {
     ]
     @index = 0
     @current = player
-    drum (std.group.count(events)) {
-        @event = std.group.at(events, index)
+    drum (core.group.count(events)) {
+        @event = core.group.at(events, index)
         current = react(current, event)
         index = index + 1
     }
-    std.io.println(current.name)
-    std.io.println(current.state)
-    std.io.println(current.position.x, ",", current.position.y)
+    core.io.println(current.name)
+    core.io.println(current.state)
+    core.io.println(current.position.x, ",", current.position.y)
     out none
 }

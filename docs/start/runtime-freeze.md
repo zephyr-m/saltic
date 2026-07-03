@@ -47,7 +47,7 @@ Group
 
 ```text
 host.*
-std.*
+core.*
 world.*
 visual.*
 ```
@@ -146,13 +146,13 @@ Bootstrap-only.
 host.* must not become user-facing S style
 ```
 
-Пользовательские примеры должны постепенно переходить на `std.*`.
+Пользовательские примеры должны постепенно переходить на `core.*`.
 
-### std.*
+### core.*
 
 Обычная стандартная библиотека.
 
-`std.*` должен быть маленьким, очевидным и переносимым.
+`core.*` должен быть маленьким, очевидным и переносимым.
 
 Если функция может быть обычной библиотекой, она не должна становиться runtime intrinsic без причины.
 
@@ -200,7 +200,7 @@ Actor Fabric v0 -> S Machine mapping -> task -> test
 Если хочется добавить runtime-фичу, сначала проверить альтернативы:
 
 - можно ли написать это на S?
-- можно ли оформить это как `std.*`?
+- можно ли оформить это как `core.*`?
 - можно ли сделать tool?
 - можно ли сделать task без новой фичи?
 - можно ли выразить это через `world.*` или `visual.*` trace?
@@ -213,7 +213,7 @@ Actor Fabric v0 -> S Machine mapping -> task -> test
 - effects inventory;
 - S Machine trace для ключевых tasks;
 - documented `host.*` migration plan;
-- stable `std v0.1`;
+- stable `core v0.1`;
 - clear `world.*` boundary;
 - clear `visual.*` boundary;
 - no accidental browser dependency;
@@ -233,7 +233,7 @@ effects inventory
 
 ```text
 host.*
-std.*
+core.*
 world.*
 visual.*
 ```

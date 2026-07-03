@@ -41,7 +41,7 @@ observation наблюдение состояния
 
 Время не является loop index.
 
-Время не является `std.time` helper.
+Время не является `core.time` helper.
 
 Время является базовым свойством engine/runtime-среды: она упорядочивает переходы, хранит причинность и даёт возможность наблюдать состояние как последовательность моментов.
 
@@ -56,8 +56,8 @@ state(t) + input(t) -> state(t + 1)
 ```s
 @lab = Laboratory {}
 
-drum (std.group.count(inputs)) {
-    @input = std.group.at(inputs, index)
+drum (core.group.count(inputs)) {
+    @input = core.group.at(inputs, index)
     lab = dispatch(lab, input)
     render(lab)
     index = index + 1
@@ -226,6 +226,17 @@ Identity-object должен отвечать не только:
 ```
 
 До этого момента `Box` остаётся value container для состояния.
+
+Поведение identity-object должно идти через object skill calls:
+
+```text
+world.emit(target, skill, ...)
+world.step()
+```
+
+Будущий sugar `target.skill(args...)` должен понижаться в этот механизм, а не превращать `Box` в mutable object.
+
+См. [Object Skill Call v0](object-skill-call-v0.md).
 
 ## Не входит в v0
 

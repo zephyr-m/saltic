@@ -1,4 +1,4 @@
-use std
+use core
 
 Status = enum {
     SAFE,
@@ -22,8 +22,8 @@ skill classify(charge, safe_min) {
 
 skill print_status(status) {
     (status) {
-        .SAFE => std.io.println("status: SAFE"),
-        .LOW => std.io.println("status: LOW"),
+        .SAFE => core.io.println("status: SAFE"),
+        .LOW => core.io.println("status: LOW"),
     }
     out none
 }
@@ -38,12 +38,12 @@ program() {
     @day = 1
     drum (days) {
         charge = apply_day(charge, solar, usage)
-        std.io.println("day ", day, ": ", charge, " Wh")
+        core.io.println("day ", day, ": ", charge, " Wh")
         day = day + 1
     }
     @final = percent(charge, capacity)
     @status = classify(final, safe_min)
-    std.io.println("final charge: ", final, " %")
+    core.io.println("final charge: ", final, " %")
     print_status(status)
     out none
 }

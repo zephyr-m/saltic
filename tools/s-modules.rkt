@@ -48,7 +48,7 @@
              (apply append
                     (for/list ([item items])
                       (match (strip-loc item)
-                        [`(use "std")
+                        [(or `(use "core") `(use "std"))
                          (append
                           (list item)
                           (apply append

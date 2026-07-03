@@ -115,7 +115,7 @@
 
 (define (check-use parts loc)
   (match parts
-    [(list "std") '()]
+    [(or (list "core") (list "std")) '()]
     [_ '()]))
 
 (define (check-box-fields box-name fields globals)
@@ -321,7 +321,7 @@
         (result 'unknown '())])]
     [(list name fields ...)
      (cond
-       [(member name '("host" "std" "world" "visual" "ui"))
+       [(member name '("host" "core" "world" "visual" "ui"))
         (infer-module-path parts globals loc)]
        [(scope-ref env name)
         => (lambda (type)
@@ -333,10 +333,10 @@
      (result 'module-path '())]
     [(list "world" _ ...)
      (result 'module-path '())]
-    [(list "std" _ ...)
+    [(list "core" _ ...)
      (if (std-imported? globals)
          (result 'module-path '())
-         (result 'unknown (list (diagnostic loc "module 'std' is not imported; add 'use std'"))))]
+         (result 'unknown (list (diagnostic loc "module 'core' is not imported; add 'use core'"))))]
     [_ (result 'unknown '())]))
 
 (define (infer-module-path parts globals loc)
@@ -345,10 +345,10 @@
     [(list "world" _ ...) (result 'module-path '())]
     [(list "visual" _ ...) (result 'module-path '())]
     [(list "ui" _ ...) (result 'module-path '())]
-    [(list "std" _ ...)
+    [(list "core" _ ...)
      (if (std-imported? globals)
          (result 'module-path '())
-         (result 'unknown (list (diagnostic loc "module 'std' is not imported; add 'use std'"))))]
+         (result 'unknown (list (diagnostic loc "module 'core' is not imported; add 'use core'"))))]
     [_ (result 'unknown '())]))
 
 (define (infer-field-path base-type fields globals loc)
@@ -443,6 +443,8 @@
     [`(path "host" "str" "lines_count") 'number]
     [`(path "host" "str" "lines") '(group string)]
     [`(path "host" "str" "len") 'number]
+    [`(path "host" "str" "at") 'string]
+    [`(path "host" "str" "slice") 'string]
     [`(path "host" "str" "join") 'string]
     [`(path "host" "str" "eq") 'answer]
     [`(path "host" "str" "contains") 'answer]
@@ -456,28 +458,33 @@
     [`(path "host" "math" "max") 'number]
     [`(path "host" "math" "round") 'number]
     [`(path "host" "debug" "show") 'none]
-    [`(path "std" "io" "println") 'none]
-    [`(path "std" "file" "read_text") 'string]
-    [`(path "std" "file" "write_text") 'none]
-    [`(path "std" "json" "encode") 'string]
-    [`(path "std" "str" "lines_count") 'number]
-    [`(path "std" "str" "lines") '(group string)]
-    [`(path "std" "str" "len") 'number]
-    [`(path "std" "str" "join") 'string]
-    [`(path "std" "str" "add") 'string]
-    [`(path "std" "str" "eq") 'answer]
-    [`(path "std" "str" "contains") 'answer]
-    [`(path "std" "str" "trim") 'string]
-    [`(path "std" "str" "upper") 'string]
-    [`(path "std" "str" "lower") 'string]
-    [`(path "std" "str" "split") '(group string)]
-    [`(path "std" "num" "parse") 'number]
-    [`(path "std" "num" "abs") 'number]
-    [`(path "std" "num" "min") 'number]
-    [`(path "std" "num" "max") 'number]
-    [`(path "std" "num" "round") 'number]
-    [`(path "std" "group" "count") 'number]
-    [`(path "std" "group" "at")
+    [`(path "core" "io" "println") 'none]
+    [`(path "core" "file" "read_text") 'string]
+    [`(path "core" "file" "write_text") 'none]
+    [`(path "core" "json" "encode") 'string]
+    [`(path "core" "str" "lines_count") 'number]
+    [`(path "core" "str" "lines") '(group string)]
+    [`(path "core" "str" "len") 'number]
+    [`(path "core" "str" "at") 'string]
+    [`(path "core" "str" "slice") 'string]
+    [`(path "core" "str" "join") 'string]
+    [`(path "core" "str" "add") 'string]
+    [`(path "core" "str" "eq") 'answer]
+    [`(path "core" "str" "is_empty") 'answer]
+    [`(path "core" "str" "starts_with") 'answer]
+    [`(path "core" "str" "ends_with") 'answer]
+    [`(path "core" "str" "contains") 'answer]
+    [`(path "core" "str" "trim") 'string]
+    [`(path "core" "str" "upper") 'string]
+    [`(path "core" "str" "lower") 'string]
+    [`(path "core" "str" "split") '(group string)]
+    [`(path "core" "num" "parse") 'number]
+    [`(path "core" "num" "abs") 'number]
+    [`(path "core" "num" "min") 'number]
+    [`(path "core" "num" "max") 'number]
+    [`(path "core" "num" "round") 'number]
+    [`(path "core" "group" "count") 'number]
+    [`(path "core" "group" "at")
      (match arg-results
        [(list (result `(group ,item-type) _) _)
         item-type]
@@ -485,6 +492,8 @@
     [`(path "world" "spawn") 'unknown]
     [`(path "world" "place") 'none]
     [`(path "world" "move") 'none]
+    [`(path "world" "emit") 'none]
+    [`(path "world" "step") 'none]
     [`(path "world" "trace") 'none]
     [`(path "world" "trace_text") 'string]
     [`(path "world" "state") 'none]
@@ -512,7 +521,8 @@
     [_ 'unknown]))
 
 (define (std-imported? globals)
-  (hash-has-key? (hash-ref globals 'imports) '("std")))
+  (or (hash-has-key? (hash-ref globals 'imports) '("core"))
+      (hash-has-key? (hash-ref globals 'imports) '("std"))))
 
 (define (infer-block-value block env globals)
   (match (strip-loc block)
@@ -653,7 +663,7 @@
 
 (define (diagnostic-code message)
   (cond
-    [(regexp-match? #rx"^module 'std' is not imported" message) 'std_not_imported]
+    [(regexp-match? #rx"^module 'core' is not imported" message) 'core_not_imported]
     [(regexp-match? #rx"^unsupported module" message) 'unsupported_module]
     [(regexp-match? #rx"^unknown name" message) 'unknown_name]
     [(regexp-match? #rx"^variable '.+' is not declared" message) 'variable_not_declared]
@@ -666,7 +676,7 @@
 
 (define (diagnostic-hint code)
   (match code
-    ['std_not_imported "add `use std` at top level"]
+    ['core_not_imported "add `use core` at top level"]
     ['variable_not_declared "declare the variable with `@name = value` before assigning to it"]
     ['constant_assignment "constants are immutable; use a local variable for changing values"]
     [_ #f]))

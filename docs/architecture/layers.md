@@ -59,12 +59,12 @@ Std не должен знать доменную физику мира. Он д
 
 Примеры:
 
-- `std.io`
-- `std.file`
-- `std.time`
-- `std.math`
-- `std.str`
-- `std.group`
+- `core.io`
+- `core.file`
+- `core.time`
+- `core.math`
+- `core.str`
+- `core.group`
 
 ### L3 core
 

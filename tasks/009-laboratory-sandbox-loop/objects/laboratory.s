@@ -1,4 +1,4 @@
-use std
+use core
 
 LockState = enum {
     EMPTY,
@@ -95,7 +95,7 @@ skill dispatch(lab, input) {
 }
 
 skill render(lab) {
-    std.io.println("lock: ", lab.lock.state)
-    std.io.println("door: ", lab.door.state)
+    core.io.println("lock: ", lab.lock.state)
+    core.io.println("door: ", lab.door.state)
     out none
 }

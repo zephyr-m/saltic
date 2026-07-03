@@ -21,6 +21,11 @@
 
 Подробнее: [Time and State v0](time-state-v0.md).
 
+Поведение объекта не живёт внутри `Box`.
+
+`Box` описывает форму состояния.
+Object skill calls описаны отдельно: [Object Skill Call v0](object-skill-call-v0.md).
+
 ## Объявление
 
 ```s

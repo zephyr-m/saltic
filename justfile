@@ -27,10 +27,10 @@ verify:
 
 canonical:
     env TMPDIR=/tmp raco test tests/canonical.rkt
-    racket tools/check.rkt examples/canonical/text-auditor.std.s
-    racket tools/check.rkt examples/canonical/report-generator.std.s
-    racket tools/run.rkt examples/canonical/text-auditor.std.s docs/start/roadmap.md roadmap
-    racket tools/run.rkt examples/canonical/report-generator.std.s examples/canonical/report-target.txt runtime
+    racket tools/check.rkt examples/canonical/text-auditor.core.s
+    racket tools/check.rkt examples/canonical/report-generator.core.s
+    racket tools/run.rkt examples/canonical/text-auditor.core.s docs/start/roadmap.md roadmap
+    racket tools/run.rkt examples/canonical/report-generator.core.s examples/canonical/report-target.txt runtime
 
 user-examples:
     env TMPDIR=/tmp raco test tests/user-examples.rkt
@@ -105,6 +105,96 @@ vm-group:
 
 vm-group-bytecode:
     racket tools/vm-run.rkt --bytecode examples/bootstrap/vm-group.s
+
+vm-rescue:
+    racket tools/vm-run.rkt examples/bootstrap/vm-rescue.s
+
+vm-rescue-bytecode:
+    racket tools/vm-run.rkt --bytecode examples/bootstrap/vm-rescue.s
+
+vm-control:
+    racket tools/vm-run.rkt examples/bootstrap/vm-control.s
+
+vm-control-bytecode:
+    racket tools/vm-run.rkt --bytecode examples/bootstrap/vm-control.s
+
+vm-visual:
+    racket tools/vm-run.rkt examples/bootstrap/vm-visual.s
+
+vm-visual-bytecode:
+    racket tools/vm-run.rkt --bytecode examples/bootstrap/vm-visual.s
+
+vm-world:
+    racket tools/vm-run.rkt examples/bootstrap/vm-world-emit.s
+
+vm-world-bytecode:
+    racket tools/vm-run.rkt --bytecode examples/bootstrap/vm-world-emit.s
+
+object-skill-calls:
+    racket tools/run.rkt examples/bootstrap/object-skill-calls.s
+
+object-skill-calls-vm:
+    racket tools/vm-run.rkt examples/bootstrap/object-skill-calls.s
+
+s-vm-tiny:
+    racket tools/run.rkt examples/bootstrap/s-vm-tiny.s
+
+s-vm-tiny-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-tiny.s
+
+s-vm-tiny-traced:
+    racket tools/run.rkt examples/bootstrap/s-vm-tiny-traced.s
+
+s-vm-tiny-traced-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-tiny-traced.s
+
+s-vm-step-ab:
+    racket tools/run.rkt examples/bootstrap/s-vm-step-ab.s
+
+s-vm-step-ab-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-step-ab.s
+
+s-vm-step-c:
+    racket tools/run.rkt examples/bootstrap/s-vm-step-c.s
+
+s-vm-step-c-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-step-c.s
+
+s-vm-step-d:
+    racket tools/run.rkt examples/bootstrap/s-vm-step-d.s
+
+s-vm-step-d-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-step-d.s
+
+s-vm-step-drum:
+    racket tools/run.rkt examples/bootstrap/s-vm-step-drum.s
+
+s-vm-step-drum-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-step-drum.s
+
+s-vm-step-switch:
+    racket tools/run.rkt examples/bootstrap/s-vm-step-switch.s
+
+s-vm-step-switch-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-step-switch.s
+
+s-vm-step-rescue:
+    racket tools/run.rkt examples/bootstrap/s-vm-step-rescue.s
+
+s-vm-step-rescue-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-step-rescue.s
+
+s-vm-step-call:
+    racket tools/run.rkt examples/bootstrap/s-vm-step-call.s
+
+s-vm-step-call-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-step-call.s
+
+s-vm-step-boundary:
+    racket tools/run.rkt examples/bootstrap/s-vm-step-boundary.s
+
+s-vm-step-boundary-vm:
+    racket tools/vm-run.rkt examples/bootstrap/s-vm-step-boundary.s
 
 effects:
     racket tools/effects.rkt

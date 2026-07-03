@@ -17,7 +17,7 @@ world -> act -> observe -> modify -> simulate -> persist
 - непонятно, что такое значение;
 - непонятно, что такое объект мира;
 - непонятно, как хранить ссылку на объект;
-- непонятно, где `std`, где `sys`, где `c`;
+- непонятно, где `core`, где `sys`, где `c`;
 - непонятно, что такое действие;
 - непонятно, как повторить историю действий.
 
@@ -123,14 +123,14 @@ core.*   фундаментальные дисциплины и инструме
 world.*  поверхность физической эмуляции
 tool.*   инструменты действия внутри world
 agent.*  агенты, которые наблюдают, планируют и действуют
-std.*    будущий alias к core.informatics.std.*
+core.*    будущий alias к core.informatics.core.*
 ```
 
 Важно:
 
 ```text
-std.* не является самостоятельным слоем
-core.informatics.std.* — реальное концептуальное место стандартной библиотеки
+core.* не является самостоятельным слоем
+core.informatics.core.* — реальное концептуальное место стандартной библиотеки
 ```
 
 ## Interop model
@@ -148,7 +148,7 @@ host.* и c.* помогают bootstrap, но не являются идент�
 Будущий путь:
 
 ```text
-host.* -> c.* -> sys.* -> core.informatics.std.* -> std alias
+host.* -> c.* -> sys.* -> core.informatics.core.* -> std alias
 ```
 
 ## Library model
@@ -161,7 +161,7 @@ host.*
 sys.*
 core.*
 core.informatics.*
-core.informatics.std.*
+core.informatics.core.*
 world.*
 tool.*
 agent.*
@@ -178,15 +178,15 @@ agent.*
 World должен строиться вокруг действий.
 
 ```text
-action = намеренное изменение world state
+action = применённый skill call объекта, меняющий world state
 ```
 
 Примеры:
 
 ```text
 spawn object
-place object
-move object
+object.place
+object.move
 set material
 apply force
 measure distance
@@ -201,6 +201,15 @@ Action должен быть:
 - сериализуемым;
 - наблюдаемым;
 - пригодным для replay.
+
+Текущая каноническая форма до появления `target.skill(args...)`:
+
+```s
+world.emit(target, "skill", ...)
+world.step()
+```
+
+То есть `move` является skill объекта, а не отдельным event object.
 
 ## Trace model
 
@@ -255,8 +264,9 @@ Trace нужен, чтобы:
 ```s
 program() {
     @box = world.spawn("box")
-    world.place(box, 10, 20)
-    world.move(box, 5, 0)
+    world.emit(box, "place", 10, 20)
+    world.emit(box, "move", 5, 0)
+    world.step()
     world.trace()
     world.state()
     out none
@@ -283,8 +293,9 @@ Replay-срез:
 ```s
 program() {
     @box = world.spawn("box")
-    world.place(box, 10, 20)
-    world.move(box, 5, 0)
+    world.emit(box, "place", 10, 20)
+    world.emit(box, "move", 5, 0)
+    world.step()
 
     @trace = world.trace_text()
     @state = world.state_text()

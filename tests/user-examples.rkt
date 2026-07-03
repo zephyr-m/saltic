@@ -24,7 +24,7 @@
     [`(program ,items ...)
      (for/or ([item items])
        (match item
-         [`(use "std") #t]
+         [`(use "core") #t]
          [_ #f]))]
     [_ #f]))
 
@@ -40,8 +40,8 @@
   (define ast (ast->datum (parse-s-file file)))
   (check-true
    (imports-std? ast)
-   (format "~a must import std" file))
+   (format "~a must import core" file))
   (check-equal?
    (remove-duplicates (collect-host-paths ast) string=?)
    '()
-   (format "~a must use std.*, not host.*" file)))
+   (format "~a must use core.*, not host.*" file)))

@@ -1,4 +1,4 @@
-use std
+use core
 
 LockState = enum {
     EMPTY,
@@ -95,9 +95,9 @@ skill dispatch(lab, input) {
 }
 
 skill observe(moment, input, lab) {
-    std.io.println("moment ", moment)
-    std.io.println("input: ", input.kind)
-    std.io.println("lock: ", lab.lock.state)
-    std.io.println("door: ", lab.door.state)
+    core.io.println("moment ", moment)
+    core.io.println("input: ", input.kind)
+    core.io.println("lock: ", lab.lock.state)
+    core.io.println("door: ", lab.door.state)
     out none
 }

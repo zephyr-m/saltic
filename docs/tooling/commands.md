@@ -33,13 +33,13 @@ just verify
 just canonical
 ```
 
-Проверяет архитектурный контракт canonical `*.std.s`, запускает checker и исполняет текущие эталонные примеры.
+Проверяет архитектурный контракт canonical `*.core.s`, запускает checker и исполняет текущие эталонные примеры.
 
 ```bash
 just user-examples
 ```
 
-Проверяет обычные пользовательские примеры из `examples/user/`: они должны импортировать `std`, не использовать `host.*`, проходить checker и запускаться.
+Проверяет обычные пользовательские примеры из `examples/user/`: они должны импортировать `core`, не использовать `host.*`, проходить checker и запускаться.
 
 ```bash
 just task tasks/001-finance-balance
@@ -51,7 +51,7 @@ racket tools/task.rkt --json tasks/001-finance-balance
 
 ```bash
 just check
-just check-file examples/canonical/text-auditor.std.s
+just check-file examples/canonical/text-auditor.core.s
 racket tools/check.rkt --json examples/user/finance-log.s
 ```
 
@@ -146,7 +146,7 @@ raco test tests
 ```bash
 just explain examples/bootstrap/basic.s
 just explain examples/user/finance-log.s
-racket tools/explain.rkt --json examples/canonical/report-generator.std.s
+racket tools/explain.rkt --json examples/canonical/report-generator.core.s
 ```
 
 Показывает короткое человеческое описание `.s` файла:
@@ -157,7 +157,7 @@ just explain examples/user/finance-log.s
 
 Это удобно, когда нужно понять программу без чтения Racket AST.
 
-`explain --json` печатает machine-readable summary программы: imports, top-level counts, entrypoint, skills и вызовы `std`/`host`/`world`/`visual`.
+`explain --json` печатает machine-readable summary программы: imports, top-level counts, entrypoint, skills и вызовы `core`/`host`/`world`/`visual`.
 
 ## Machine Trace
 
@@ -189,8 +189,8 @@ racket tools/effects-check.rkt
 
 ```text
 effect                   owner      status       kind    decision
-host.io.println          bootstrap  implemented  effect  bridge to std.io.println
-std.io.println           std        stable-v0.1  effect  user-facing print
+host.io.println          bootstrap  implemented  effect  bridge to core.io.println
+core.io.println           std        stable-v0.1  effect  user-facing print
 world.spawn              world      protocol-v0  effect  world action trace
 visual.square_bipyramid  visual     protocol-v0  effect  visual trace
 ```

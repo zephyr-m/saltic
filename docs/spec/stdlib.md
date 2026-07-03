@@ -6,7 +6,7 @@
 core.informatics.std
 ```
 
-Короткое имя `std.*` может стать alias к `core.informatics.std.*`.
+Короткое имя `core.*` может стать alias к `core.informatics.core.*`.
 
 Она содержит базовые инструменты, необходимые почти любой программе.
 
@@ -22,54 +22,54 @@ core.informatics.std
 ## Черновые модули
 
 ```text
-core.informatics.std.io
-core.informatics.std.file
-core.informatics.std.path
-core.informatics.std.time
-core.informatics.std.str
-core.informatics.std.mem
-core.informatics.std.net
-core.informatics.std.json
-core.informatics.std.process
-core.informatics.std.cli
-core.informatics.std.test
-core.informatics.std.log
+core.informatics.core.io
+core.informatics.core.file
+core.informatics.core.path
+core.informatics.core.time
+core.informatics.core.str
+core.informatics.core.mem
+core.informatics.core.net
+core.informatics.core.json
+core.informatics.core.process
+core.informatics.core.cli
+core.informatics.core.test
+core.informatics.core.log
 ```
 
 В обычном коде после появления imports это может сокращаться до:
 
 ```text
-std.io
-std.file
-std.str
-std.cli
+core.io
+core.file
+core.str
+core.cli
 ```
 
 ## Пример
 
 ```s
 program() {
-    std.io.println("hello, S")
+    core.io.println("hello, S")
     out none
 }
 ```
 
 ## Статус v0.1
 
-`std.*` пока не реализована как настоящая библиотека S.
+`core.*` пока не реализована как настоящая библиотека S.
 
-Черновик канона v0.1 описан в [std v0.1](std-v0.1.md).
+Черновик канона v0.1 описан в [core v0.1](core-v0.1.md).
 Это тот документ, который задаёт будущий пользовательский API; `host.md` описывает только временный bootstrap слой.
 
 В текущем Racket bootstrap есть отдельный слой `host.*`. Это не стандартная библиотека языка, а временные intrinsics текущей host-среды, чтобы ранние `.s` программы могли читать файлы, печатать текст и проверять модель исполнения.
 
-Будущая `std` должна быть написана и оформлена как часть `core.informatics` поверх стабильных низкоуровневых возможностей. До появления module/import системы нельзя честно говорить, что `std` уже существует.
+Будущая `core` должна быть написана и оформлена как часть `core.informatics` поверх стабильных низкоуровневых возможностей. До появления module/import системы нельзя честно говорить, что `core` уже существует.
 
 Ожидаемый путь реализации:
 
 ```text
-core.informatics.std.* -> sys.* -> c.* или native backend
-std.*                  -> alias к core.informatics.std.*
+core.informatics.core.* -> sys.* -> c.* или native backend
+core.*                  -> alias к core.informatics.core.*
 ```
 
 ## Текущее host-подмножество
@@ -113,8 +113,8 @@ just run-file examples/user/count-lines.s docs/start/roadmap.md
 
 ## Правила
 
-- `core.informatics.std.*` может зависеть от `sys.*`.
-- `std.*` должно быть коротким alias, а не отдельной архитектурой.
+- `core.informatics.core.*` может зависеть от `sys.*`.
+- `core.*` должно быть коротким alias, а не отдельной архитектурой.
 - Доменные знания должны жить в `core.*`, а не раздувать стандартную библиотеку.
 
 ## Offline cookbook

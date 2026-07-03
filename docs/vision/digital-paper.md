@@ -112,4 +112,4 @@ S развивается не через накопление фич, а чер�
 - repairable — diagnostics достаточно структурированы, чтобы агент мог исправлять код;
 - portable — программа не зависит от случайного bootstrap API.
 
-Поэтому `std`, `check --json`, `explain`, canonical examples и разделение `user/bootstrap` — не отдельные мелочи, а первые слои цифровой бумаги.
+Поэтому `core`, `check --json`, `explain`, canonical examples и разделение `user/bootstrap` — не отдельные мелочи, а первые слои цифровой бумаги.

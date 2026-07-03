@@ -14,10 +14,10 @@
 core.informatics.std
 ```
 
-Короткое имя `std.*` может появиться позже как alias:
+Короткое имя `core.*` может появиться позже как alias:
 
 ```text
-std.* == core.informatics.std.*
+core.* == core.informatics.core.*
 ```
 
 ## Черновая карта
@@ -39,22 +39,22 @@ core.informatics.std
 Практический toolkit для обычных программ:
 
 ```text
-core.informatics.std.io
-core.informatics.std.file
-core.informatics.std.path
-core.informatics.std.str
-core.informatics.std.mem
-core.informatics.std.cli
-core.informatics.std.test
-core.informatics.std.log
-core.informatics.std.time
-core.informatics.std.process
+core.informatics.core.io
+core.informatics.core.file
+core.informatics.core.path
+core.informatics.core.str
+core.informatics.core.mem
+core.informatics.core.cli
+core.informatics.core.test
+core.informatics.core.log
+core.informatics.core.time
+core.informatics.core.process
 ```
 
 ## Отношение к sys и c
 
 ```text
-core.informatics.std.file.read_text(path)
+core.informatics.core.file.read_text(path)
   -> sys.fs.read(path)
   -> c.fopen/c.fread/c.fclose или native backend
 ```
@@ -63,4 +63,4 @@ core.informatics.std.file.read_text(path)
 
 `sys.*` даёт низкий системный слой.
 
-`core.informatics.std.*` даёт нормальный API для программ.
+`core.informatics.core.*` даёт нормальный API для программ.

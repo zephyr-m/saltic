@@ -36,7 +36,7 @@ x = 20
 
 ```s
 @safe = charge > min
-std.io.println(safe)
+core.io.println(safe)
 ```
 
 В S для ответа используются только `yes` и `no`.
@@ -92,8 +92,8 @@ Player = Box {
 
 ```s
 @index = 0
-drum (std.group.count(objects)) {
-    @object = std.group.at(objects, index)
+drum (core.group.count(objects)) {
+    @object = core.group.at(objects, index)
     index = index + 1
 }
 ```

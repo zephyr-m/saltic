@@ -104,7 +104,7 @@ just vm-run
 just vm-bytecode
 ```
 
-Поддерживаемый subset v0.3:
+Поддерживаемый subset v0.7:
 
 - number/string/yes/no/none literals;
 - локальные переменные через `@name = ...`;
@@ -114,24 +114,63 @@ just vm-bytecode
 - `Box` construction with defaults and overrides;
 - field access through `object.field`;
 - `Group` literals;
-- `std.group.count(...)`;
-- `std.group.at(...)`;
+- `core.group.count(...)`;
+- `core.group.at(...)`;
 - `drum`;
-- `std.io.println(...)`;
+- enum declarations and enum values;
+- `switch`;
+- `error.Name` values;
+- `rescue |err| { ... }`;
+- visual protocol calls: `visual.sheet/grid/square_bipyramid/rotate/present/trace/trace_text`;
+- world event protocol calls: `world.spawn/emit/step/trace/trace_text/state/state_text/replay`;
+- `core.io.println(...)`;
 - `out`.
 
 Пока не входит:
 
-- `switch`;
-- `rescue`;
 - modules beyond what compiler can load as ordinary top-level declarations;
-- general `std.*` calls beyond the current VM whitelist.
+- general `core.*` calls beyond the current VM whitelist.
+
+## Error Values
+
+В VM v0.4 ошибка не является скрытым исключением VM.
+
+Она является обычным значением:
+
+```s
+error.DivisionByZero
+```
+
+Если выражение возвращает `error.*`, значение может:
+
+- пройти дальше по стеку;
+- быть напечатано как `error.Name`;
+- быть обработано через `rescue`.
+
+```s
+@value = 10 / 0 rescue |err| {
+    0
+}
+```
+
+Это временно простая модель, но она согласуется с будущей физикой языка:
+
+```text
+error value now
+-> world event later
+-> actor/message reaction later
+```
+
+Ошибка не должна быть магией, спрятанной внутри host runtime.
+Она должна быть наблюдаемой частью мира исполнения.
 
 Минимальные opcodes:
 
 ```text
 push
 push-none
+push-error
+push-enum
 load
 store
 add/sub/mul/div
@@ -141,9 +180,14 @@ pop
 box-new
 field
 group
+if
 drum
+switch
+rescue
 return
 ```
+
+Подробный контракт bytecode описан отдельно: [Bytecode v0](bytecode-v0.md).
 
 Эта VM пока написана на Racket, но она уже отделяет S source от tree-walking runtime:
 
@@ -155,11 +199,70 @@ S source -> AST -> S bytecode -> S VM
 
 Effect — это выход S Machine за пределы чистого вычисления.
 
+VM v0.6 поддерживает первый исполняемый effect/protocol контур:
+
+```text
+visual.sheet(kind)
+visual.grid(size)
+visual.square_bipyramid(name, height, base, color)
+visual.rotate(name, axis, speed)
+visual.present()
+visual.trace()
+visual.trace_text()
+```
+
+Эти вызовы пишут backend-neutral visual trace.
+
+Пример:
+
+```text
+sheet engineering
+grid 24
+shape square_bipyramid crystal height 4 base 2 color cyan
+motion rotate crystal y 1
+present
+```
+
+VM v0.7 добавляет минимальный world event protocol:
+
+```text
+world.spawn(kind)
+world.emit(target, skill, ...)
+world.step()
+world.trace()
+world.trace_text()
+world.state()
+world.state_text()
+world.replay(trace)
+```
+
+`world.emit` не меняет состояние сразу.
+Он кладет в очередь мира вызов skill у конкретного объекта.
+
+`world.step` применяет очередь событий и пишет воспроизводимый trace:
+
+```s
+@box = world.spawn("box")
+world.emit(box, "place", 10, 20)
+world.emit(box, "move", 5, 0)
+world.step()
+```
+
+Результирующий trace:
+
+```text
+spawn #1 box
+place #1 10 20
+move #1 5 0
+```
+
+Старые прямые вызовы `world.place` и `world.move` остаются bootstrap/runtime API, но канонический путь развития мира теперь идет через `emit/step`, где `place` и `move` понимаются как skills объекта.
+
 Текущие группы effects:
 
 ```text
 host.*
-std.*
+core.*
 world.*
 visual.*
 ```

@@ -44,10 +44,10 @@ AppName = "S Language"
 Для v0.1 принят минимальный импорт стандартной библиотеки:
 
 ```s
-use std
+use core
 ```
 
-`use std` разрешает явные пути `std.io.*`, `std.file.*`, `std.str.*`, `std.num.*`, `std.group.*` и `std.json.*`.
+`use core` разрешает явные пути `core.io.*`, `core.file.*`, `core.str.*`, `core.num.*`, `core.group.*` и `core.json.*`.
 
 Короткие имена не импортируются.
 

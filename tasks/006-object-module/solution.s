@@ -1,4 +1,4 @@
-use std
+use core
 
 use objects.player
 
@@ -14,8 +14,8 @@ program() {
         dy = 0
     }
     @next = react(player, move)
-    std.io.println(next.name)
-    std.io.println(next.state)
-    std.io.println(next.position.x, ",", next.position.y)
+    core.io.println(next.name)
+    core.io.println(next.state)
+    core.io.println(next.position.x, ",", next.position.y)
     out none
 }
