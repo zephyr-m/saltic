@@ -83,7 +83,6 @@ tree
                 gc.s
             runtime/
                 runtime.s
-                core.s
                 values.s
                 calls.s
                 scopes.s
@@ -97,7 +96,8 @@ tree
                 world.s
                 visual.s
                 debug.s
-            std/
+            core/
+                core.s
                 str.s
                 num.s
                 math.s

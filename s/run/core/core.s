@@ -17,11 +17,11 @@ CoreContract = Box {
     output = CoreOut {}
 }
 
-skill s_runtime_core_contract() {
+skill s_core_contract() {
     out CoreContract {}
 }
 
-skill s_runtime_core_stub(in) {
+skill s_core_stub(in) {
     out CoreOut {
         value = none
         handled = no
