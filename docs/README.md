@@ -7,12 +7,12 @@
 ```text
 start/     вход в проект
 architecture/ архитектурные границы проекта
-spec/      язык как система
+current/      язык как система
 bootstrap/ временный слой исполнения
 tooling/   команды и рабочие инструменты
 vision/    направление и ограничения
-visual/    визуальные ориентиры и render-наброски
-hardware/  целевая аппаратная среда
+archive/vision/visual/    визуальные ориентиры и render-наброски
+archive/vision/hardware/  целевая аппаратная среда
 ```
 
 Не все файлы имеют одинаковый статус. Часть документов является каноном текущего направления, часть — рабочей спецификацией, часть — черновыми деталями.
@@ -30,12 +30,12 @@ start/README.md  вход в проект
 start/today.md  текущий рабочий план
 start/self-hosting-roadmap.md  маршрут bytecode VM и self-hosting
 start/autonomy-score.md  текущая оценка автономности
-spec/README.md   язык как система
+current/README.md   язык как система
 bootstrap/README.md  временный слой исполнения
 tooling/README.md    команды и рабочие инструменты
 vision/README.md     направление и ограничения
-visual/README.md     первые визуальные ориентиры
-hardware/README.md   целевая аппаратная среда S
+archive/vision/visual/README.md     первые визуальные ориентиры
+archive/vision/hardware/README.md   целевая аппаратная среда S
 ```
 
 Если нужно быстро понять, куда идёт S, читать в этом порядке.
@@ -45,28 +45,28 @@ hardware/README.md   целевая аппаратная среда S
 Эти документы описывают текущий язык и его поведение.
 
 ```text
-spec/grammar.md
-spec/syntax.md
-spec/types.md
-spec/errors.md
-spec/checker.md
-spec/runtime.md
-spec/bytecode-v0.md
-spec/vm-step-v0.md
-spec/s-machine-v0.md
+current/grammar.md
+current/syntax.md
+current/types.md
+current/errors.md
+current/checker.md
+current/runtime.md
+current/bytecode-v0.md
+current/vm-step-v0.md
+current/s-machine-v0.md
 ```
 
 Они должны оставаться ближе к тому, что реально парсится, проверяется и запускается.
 
 ## Как читать дальше
 
-- если нужен язык и его поведение, идти в `spec/`
+- если нужен язык и его поведение, идти в `current/`
 - если нужны архитектурные границы проекта, идти в `architecture/`
 - если нужен временный runtime и bootstrap, идти в `bootstrap/`
 - если нужны команды и рабочие инструменты, идти в `tooling/`
 - если нужен смысл проекта и ограничения, идти в `vision/`
-- если нужен визуальный ориентир для render/observe слоя, идти в `visual/`
-- если нужна целевая машина и аппаратные ограничения, идти в `hardware/`
+- если нужен визуальный ориентир для render/observe слоя, идти в `archive/vision/visual/`
+- если нужна целевая машина и аппаратные ограничения, идти в `archive/vision/hardware/`
 - если нужен маршрут, начинать со `start/`
 
 ## Правило

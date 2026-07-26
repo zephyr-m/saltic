@@ -88,7 +88,7 @@ examples/user/finance-log.s
 - внешний backend;
 - самохостинг;
 - package manager;
-- большую std;
+- большую core;
 - большую `core.*` карту;
 - сложную систему типов;
 - новые доменные ядра;

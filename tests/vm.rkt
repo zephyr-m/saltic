@@ -36,7 +36,7 @@
 (check-equal? (vm-run-result-value result) 5)
 (check-equal? (vm-run-result-output result) "x=5\n")
 
-(define std-result
+(define core-result
   (run-s-datum/vm
    '(program
      (use "core")
@@ -46,10 +46,10 @@
              (expr (call (path "core" "io" "println") (path "text")))
              (out (call (path "core" "str" "len") (path "text"))))))))
 
-(check-equal? (vm-run-result-value std-result) 4)
-(check-equal? (vm-run-result-output std-result) "S VM\n")
+(check-equal? (vm-run-result-value core-result) 4)
+(check-equal? (vm-run-result-output core-result) "S VM\n")
 
-(define std-string-result
+(define core-string-result
   (run-s-datum/vm
    '(program
      (use "core")
@@ -75,8 +75,8 @@
                          (call (path "core" "str" "lines_count") (string "a\nb\n"))))
              (out (call (path "core" "str" "contains") (string "runtime") (string "room"))))))))
 
-(check-equal? (vm-run-result-value std-string-result) #f)
-(check-equal? (vm-run-result-output std-string-result) "at=b\nslice=bcd\ncontains=yes\nstarts=yes\nends=yes\nlines=2\n")
+(check-equal? (vm-run-result-value core-string-result) #f)
+(check-equal? (vm-run-result-output core-string-result) "at=b\nslice=bcd\ncontains=yes\nstarts=yes\nends=yes\nlines=2\n")
 
 (define box-source
   '(program
@@ -257,7 +257,7 @@
   (run-s-file/vm step-boundary-path))
 
 (check-equal? (vm-run-result-value step-boundary-result) #t)
-(check-equal? (vm-run-result-output step-boundary-result) "boundary result=42\nstep-boundary result=yes\n")
+(check-equal? (vm-run-result-output step-boundary-result) "boundary result=42\nboundary count=2\nboundary picked=beta\nboundary visual=sheet boundary\npresent\n\nboundary world=spawn #1 box\nplace #1 1 2\n\nboundary trim=s\nboundary upper=S\nboundary lower=s\nstep-boundary result=yes\n")
 
 (define error-switch-result
   (run-s-datum/vm

@@ -56,6 +56,7 @@
     (core.num.round core stable-v0.1 pure "S core module numeric round")
     (core.group.count core stable-v0.1 pure "Group count")
     (core.group.at core stable-v0.1 pure "Group indexed access")
+    (core.group.append core stable-v0.1 pure "Group append")
     (world.spawn world protocol-v0 effect "world action trace")
     (world.place world protocol-v0 effect "world action trace")
     (world.move world protocol-v0 effect "world action trace")

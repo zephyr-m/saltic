@@ -59,7 +59,7 @@
   (match ast
     [`(program ,items ...)
      (define expanded-items
-       (if (uses-std? items)
+       (if (uses-core? items)
            (append (standard-runtime-items) items)
            items))
      (define constants (make-hash))
@@ -88,18 +88,18 @@
      (runtime constants enums boxes skills entry world visual ui)]
     [_ (runtime-error "expected program AST")]))
 
-(define (uses-std? items)
+(define (uses-core? items)
   (for/or ([item items])
     (match item
-      [(or `(use "core") `(use "std")) #t]
+      [(or `(use "core") `(use "core")) #t]
       [_ #f])))
 
 (define (standard-runtime-items)
   (apply append
-         (for/list ([path (std-module-paths)])
+         (for/list ([path (core-module-paths)])
            (match (load-s-file-datum path)
              [`(program ,items ...) items]
-             [_ (runtime-error "expected std module AST in ~a" path)]))))
+             [_ (runtime-error "expected core module AST in ~a" path)]))))
 
 (define (make-root-env)
   (env (make-hash) #f))
@@ -325,9 +325,9 @@
                       (value->string current))])))
 
 (define (eval-call rt scope callee args out)
-  (define std-skill-name (std-call-skill-name callee))
-  (if std-skill-name
-      (call-skill rt (symbol->string std-skill-name) args out)
+  (define core-skill-name (core-call-skill-name callee))
+  (if core-skill-name
+      (call-skill rt (symbol->string core-skill-name) args out)
       (match callee
     [`(path "host" "io" "println")
      (fprintf out "~a\n" (string-join (map value->string args) ""))
@@ -468,6 +468,8 @@
      none-value]
     [`(path "core" "io" "println")
      (eval-call rt scope `(path "host" "io" "println") args out)]
+    [`(path "core" "io" "show")
+     (eval-call rt scope `(path "host" "io" "println") args out)]
     [`(path "core" "str" "join")
      (eval-call rt scope `(path "host" "str" "join") args out)]
     [`(path "core" "num" "min")
@@ -491,6 +493,13 @@
      (unless (and (<= 0 index) (< index (length (s-group-items group))))
        (runtime-error "core.group.at index out of range"))
      (list-ref (s-group-items group) index)]
+    [`(path "core" "group" "append")
+     (expect-arg-count "core.group.append" args 2)
+     (define group (first args))
+     (define value (second args))
+     (unless (s-group? group)
+       (runtime-error "core.group.append expects Group"))
+     (s-group (append (s-group-items group) (list value)))]
     [`(path "world" "spawn")
      (expect-arg-count "world.spawn" args 1)
      (world-spawn! rt (first args))]
@@ -628,29 +637,33 @@
      (call-skill rt name args out)]
     [_ (runtime-error "unsupported call target: ~s" callee)])))
 
-(define (std-call-skill-name callee)
+(define (core-call-skill-name callee)
   (match callee
-    [`(path "core" "file" "read_text") 'std_file_read_text]
-    [`(path "core" "file" "write_text") 'std_file_write_text]
-    [`(path "core" "json" "encode") 'std_json_encode]
-    [`(path "core" "str" "lines_count") 'std_str_lines_count]
-    [`(path "core" "str" "lines") 'std_str_lines]
-    [`(path "core" "str" "len") 'std_str_len]
-    [`(path "core" "str" "at") 'std_str_at]
-    [`(path "core" "str" "slice") 'std_str_slice]
-    [`(path "core" "str" "add") 'std_str_add]
-    [`(path "core" "str" "eq") 'std_str_eq]
-    [`(path "core" "str" "is_empty") 'std_str_is_empty]
-    [`(path "core" "str" "starts_with") 'std_str_starts_with]
-    [`(path "core" "str" "ends_with") 'std_str_ends_with]
-    [`(path "core" "str" "contains") 'std_str_contains]
-    [`(path "core" "str" "trim") 'std_str_trim]
-    [`(path "core" "str" "upper") 'std_str_upper]
-    [`(path "core" "str" "lower") 'std_str_lower]
-    [`(path "core" "str" "split") 'std_str_split]
-    [`(path "core" "num" "parse") 'std_num_parse]
-    [`(path "core" "num" "abs") 'std_num_abs]
-    [`(path "core" "num" "round") 'std_num_round]
+    [`(path "core" "file" "read_text") 'core_file_read_text]
+    [`(path "core" "file" "write_text") 'core_file_write_text]
+    [`(path "core" "json" "encode") 'core_json_encode]
+    [`(path "core" "str" "lines_count") 'core_str_lines_count]
+    [`(path "core" "str" "lines") 'core_str_lines]
+    [`(path "core" "str" "len") 'core_str_len]
+    [`(path "core" "str" "at") 'core_str_at]
+    [`(path "core" "str" "slice") 'core_str_slice]
+    [`(path "core" "str" "add") 'core_str_add]
+    [`(path "core" "str" "eq") 'core_str_eq]
+    [`(path "core" "str" "is_empty") 'core_str_is_empty]
+    [`(path "core" "str" "starts_with") 'core_str_starts_with]
+    [`(path "core" "str" "ends_with") 'core_str_ends_with]
+    [`(path "core" "str" "contains") 'core_str_contains]
+    [`(path "core" "str" "trim") 'core_str_trim]
+    [`(path "core" "str" "upper") 'core_str_upper]
+    [`(path "core" "str" "lower") 'core_str_lower]
+    [`(path "core" "str" "split") 'core_str_split]
+    [`(path "core" "group" "add") 'core_group_add]
+    [`(path "core" "group" "size") 'core_group_size]
+    [`(path "core" "group" "item") 'core_group_item]
+    [`(path "core" "group" "empty") 'core_group_empty]
+    [`(path "core" "num" "parse") 'core_num_parse]
+    [`(path "core" "num" "abs") 'core_num_abs]
+    [`(path "core" "num" "round") 'core_num_round]
     [_ #f]))
 
 (define (expect-arg-count name args expected)

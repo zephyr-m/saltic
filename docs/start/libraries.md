@@ -28,7 +28,7 @@ core.*
 core.informatics.*
   инструменты вычислений, программирования и данных
 
-core.informatics.core.*
+core.informatics.base.*
   практический toolkit для обычного кода
 
 core.engine.*
@@ -41,7 +41,7 @@ tool.*
   инструменты действия внутри world
 
 core.*
-  короткий alias к core.informatics.core.*, а не отдельный слой
+  короткий alias к core.informatics.base.*, а не отдельный слой
 ```
 
 ## Правило
@@ -49,8 +49,8 @@ core.*
 Каждый слой должен иметь понятный источник ответственности.
 
 ```text
-c.*     не является std
-host.*  не является std
+c.*     не является core
+host.*  не является core
 sys.*   не является удобным пользовательским API
 core.*   не является отдельной сущностью вне информатики
 agent.* не должен быть частью базового языка
@@ -68,9 +68,9 @@ S может быть полезным до полной стандартной 
 v0.1  host.* через Racket bootstrap
 v0.2  c.* как явный C interop
 v0.3  sys.* как низкий слой S
-v0.4  core.informatics.core.* как удобная оболочка
-v0.x  core.* как короткий alias к core.informatics.core.*
-own   sys/core.informatics.std получают native implementation под свою платформу
+v0.4  core.informatics.base.* как удобная оболочка
+v0.x  core.* как короткий alias к core.informatics.base.*
+own   sys/core.informatics.base получают native implementation под свою платформу
 ```
 
 ## Пример эволюции
@@ -86,23 +86,23 @@ own   sys/core.informatics.std получают native implementation под с�
   sys.fs.read(path)
 
 нормальный пользовательский API:
-  core.informatics.core.file.read_text(path)
+  core.informatics.base.file.read_text(path)
 
 короткий alias:
   core.file.read_text(path)
 
 дальше:
-  core.informatics.core.file.read_text реализуется на S или через native sys backend
+  core.informatics.base.file.read_text реализуется на S или через native sys backend
 ```
 
-## std как часть информатики
+## core как часть информатики
 
 `core` не должна быть отдельной магической областью.
 
 Её концептуальное место:
 
 ```text
-core.informatics.std
+core.informatics.base
 ```
 
 Почему:
@@ -116,7 +116,7 @@ core.informatics.std
 
 ```text
 реальное место:
-  core.informatics.core.file.read_text(path)
+  core.informatics.base.file.read_text(path)
 
 короткое имя:
   core.file.read_text(path)

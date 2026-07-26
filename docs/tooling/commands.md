@@ -190,7 +190,7 @@ racket tools/effects-check.rkt
 ```text
 effect                   owner      status       kind    decision
 host.io.println          bootstrap  implemented  effect  bridge to core.io.println
-core.io.println           std        stable-v0.1  effect  user-facing print
+core.io.println           core        stable-v0.1  effect  user-facing print
 world.spawn              world      protocol-v0  effect  world action trace
 visual.square_bipyramid  visual     protocol-v0  effect  visual trace
 ```

@@ -123,14 +123,14 @@ core.*   фундаментальные дисциплины и инструме
 world.*  поверхность физической эмуляции
 tool.*   инструменты действия внутри world
 agent.*  агенты, которые наблюдают, планируют и действуют
-core.*    будущий alias к core.informatics.core.*
+core.*    будущий alias к core.informatics.base.*
 ```
 
 Важно:
 
 ```text
 core.* не является самостоятельным слоем
-core.informatics.core.* — реальное концептуальное место стандартной библиотеки
+core.informatics.base.* — реальное концептуальное место стандартной библиотеки
 ```
 
 ## Interop model
@@ -148,7 +148,7 @@ host.* и c.* помогают bootstrap, но не являются идент�
 Будущий путь:
 
 ```text
-host.* -> c.* -> sys.* -> core.informatics.core.* -> std alias
+host.* -> c.* -> sys.* -> core.informatics.base.* -> core alias
 ```
 
 ## Library model
@@ -161,7 +161,7 @@ host.*
 sys.*
 core.*
 core.informatics.*
-core.informatics.core.*
+core.informatics.base.*
 world.*
 tool.*
 agent.*

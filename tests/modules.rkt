@@ -73,10 +73,10 @@ S
 
 (check-equal? leaflet-count 1)
 
-(define std-main-path
+(define core-main-path
   (write-module
    module-dir
-   "std_main.s"
+   "core_main.s"
    #<<S
 use core
 
@@ -86,10 +86,31 @@ program() {
 S
    ))
 
-(define std-expanded (load-s-file-datum std-main-path))
+(define core-expanded (load-s-file-datum core-main-path))
 
 (check-true
- (for/or ([item (cdr std-expanded)])
+ (for/or ([item (cdr core-expanded)])
    (match item
-     [`(skill "std_str_add" . ,_) #t]
+     [`(skill "core_str_add" . ,_) #t]
+     [_ #f])))
+
+(define system-main-path
+  (write-module
+   module-dir
+   "system_main.s"
+   #<<S
+use s.run.vm.core
+
+program() {
+    out none
+}
+S
+   ))
+
+(define system-expanded (load-s-file-datum system-main-path))
+
+(check-true
+ (for/or ([item (cdr system-expanded)])
+   (match item
+     [`(skill "instr_push_number" . ,_) #t]
      [_ #f])))

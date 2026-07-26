@@ -1,5 +1,5 @@
 use core
-use tiny_vm.core
+use s.run.vm.core
 
 program() {
     @then_body = body_two(instr_push_number(41), instr_store("value"))

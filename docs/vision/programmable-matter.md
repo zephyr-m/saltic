@@ -68,7 +68,7 @@ object = stable pattern of matter
 tool = temporary matter organization for a task
 ```
 
-Это продолжает [Actor Fabric v0](../hardware/actor-fabric-v0.md).
+Это продолжает [Actor Fabric v0](../archive/vision/hardware/actor-fabric-v0.md).
 
 Актор не является CPU.
 

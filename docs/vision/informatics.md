@@ -4,20 +4,20 @@
 
 Это место для инструментов программирования, данных, алгоритмов, памяти, файлов, процессов и сетей.
 
-## Почему std здесь
+## Почему core здесь
 
 Стандартная библиотека S не должна быть отдельной магической областью.
 
 Она относится к информатике:
 
 ```text
-core.informatics.std
+core.informatics.base
 ```
 
 Короткое имя `core.*` может появиться позже как alias:
 
 ```text
-core.* == core.informatics.core.*
+core.* == core.informatics.base.*
 ```
 
 ## Черновая карта
@@ -31,30 +31,30 @@ core.informatics.process
 core.informatics.network
 core.informatics.encoding
 core.informatics.security
-core.informatics.std
+core.informatics.base
 ```
 
-## core.informatics.std
+## core.informatics.base
 
 Практический toolkit для обычных программ:
 
 ```text
-core.informatics.core.io
-core.informatics.core.file
-core.informatics.core.path
-core.informatics.core.str
-core.informatics.core.mem
-core.informatics.core.cli
-core.informatics.core.test
-core.informatics.core.log
-core.informatics.core.time
-core.informatics.core.process
+core.informatics.base.io
+core.informatics.base.file
+core.informatics.base.path
+core.informatics.base.str
+core.informatics.base.mem
+core.informatics.base.cli
+core.informatics.base.test
+core.informatics.base.log
+core.informatics.base.time
+core.informatics.base.process
 ```
 
 ## Отношение к sys и c
 
 ```text
-core.informatics.core.file.read_text(path)
+core.informatics.base.file.read_text(path)
   -> sys.fs.read(path)
   -> c.fopen/c.fread/c.fclose или native backend
 ```
@@ -63,4 +63,4 @@ core.informatics.core.file.read_text(path)
 
 `sys.*` даёт низкий системный слой.
 
-`core.informatics.core.*` даёт нормальный API для программ.
+`core.informatics.base.*` даёт нормальный API для программ.

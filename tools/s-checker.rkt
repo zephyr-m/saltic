@@ -115,7 +115,7 @@
 
 (define (check-use parts loc)
   (match parts
-    [(or (list "core") (list "std")) '()]
+    [(or (list "core") (list "core")) '()]
     [_ '()]))
 
 (define (check-box-fields box-name fields globals)
@@ -334,7 +334,7 @@
     [(list "world" _ ...)
      (result 'module-path '())]
     [(list "core" _ ...)
-     (if (std-imported? globals)
+     (if (core-imported? globals)
          (result 'module-path '())
          (result 'unknown (list (diagnostic loc "module 'core' is not imported; add 'use core'"))))]
     [_ (result 'unknown '())]))
@@ -346,7 +346,7 @@
     [(list "visual" _ ...) (result 'module-path '())]
     [(list "ui" _ ...) (result 'module-path '())]
     [(list "core" _ ...)
-     (if (std-imported? globals)
+     (if (core-imported? globals)
          (result 'module-path '())
          (result 'unknown (list (diagnostic loc "module 'core' is not imported; add 'use core'"))))]
     [_ (result 'unknown '())]))
@@ -489,6 +489,11 @@
        [(list (result `(group ,item-type) _) _)
         item-type]
        [_ 'unknown])]
+    [`(path "core" "group" "append")
+     (match arg-results
+       [(list (result `(group ,item-type) _) (result value-type _))
+        `(group ,(merge-type item-type value-type))]
+       [_ '(group unknown)])]
     [`(path "world" "spawn") 'unknown]
     [`(path "world" "place") 'none]
     [`(path "world" "move") 'none]
@@ -520,9 +525,9 @@
          'unknown)]
     [_ 'unknown]))
 
-(define (std-imported? globals)
+(define (core-imported? globals)
   (or (hash-has-key? (hash-ref globals 'imports) '("core"))
-      (hash-has-key? (hash-ref globals 'imports) '("std"))))
+      (hash-has-key? (hash-ref globals 'imports) '("core"))))
 
 (define (infer-block-value block env globals)
   (match (strip-loc block)

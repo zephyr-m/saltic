@@ -7,6 +7,12 @@ parse file="examples/bootstrap/basic.s":
 test:
     raco test tests
 
+native-test:
+    racket tools/run.rkt s/tests/native-numbers.s
+    racket tools/run.rkt s/tests/native-structures.s
+    racket tools/run.rkt s/tests/native-strings.s
+    nix-shell -p llvmPackages.clang --run 'bash s/tests/native.sh'
+
 verify:
     just canonical
     just user-examples
@@ -59,6 +65,9 @@ task dir="tasks/001-finance-balance":
 
 docs:
     @echo "docs are in README.md and docs/"
+
+sandbox-web port="8090":
+    racket tools/sandbox-web.rkt {{port}}
 
 vscode-package:
     racket tools/package-vscode.rkt

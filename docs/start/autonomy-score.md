@@ -11,7 +11,7 @@ S autonomy: about 40%
 Racket dependency: about 60%
 ```
 
-After std autonomy pass 1, this is still best described as `about 40%`, but it is closer to the upper side of that estimate because user-facing string algorithms started moving into S.
+After core autonomy pass 1, this is still best described as `about 40%`, but it is closer to the upper side of that estimate because user-facing string algorithms started moving into S.
 
 ## Шкала
 
@@ -19,8 +19,8 @@ After std autonomy pass 1, this is still best described as `about 40%`, but it i
 0%    только документы и примеры синтаксиса
 10%   parser/checker/runtime существуют, но всё поведение host-side
 25%   можно писать и запускать полезные маленькие программы на S
-40%   есть S std modules, bytecode contract и S-side VM semantics subset
-60%   большая часть VM/std semantics живёт в S, Racket в основном host/reference
+40%   есть S core modules, bytecode contract и S-side VM semantics subset
+60%   большая часть VM/core semantics живёт в S, Racket в основном host/reference
 80%   parser/checker/compiler/tooling частично или в основном написаны на S
 100%  S может поддерживать и собирать свой основной toolchain
 ```
@@ -30,7 +30,7 @@ After std autonomy pass 1, this is still best described as `about 40%`, but it i
 ```text
 Source language usability          60%
 Examples/tasks/docs                55%
-S std modules                      35%
+S core modules                      35%
 Bytecode contract                  55%
 S-side VM semantics                35%
 Runtime implementation             30%
@@ -68,9 +68,10 @@ Self-hosting chain                  5%
   - `switch`;
   - `rescue`;
   - local calls;
-  - first boundary table for `core.io.println`.
+  - boundary table for `core.io.println` and `core.group.count/at`.
 - `core.str.contains` is now an S algorithm over `core.str.len/slice/eq`.
 - `core.str.lines_count` is now an S algorithm over `core.str.len/at`.
+- `core.str.lines/split` are now S algorithms over low-level string/group primitives.
 - `core.str.is_empty/starts_with/ends_with` are now S algorithms over string primitives.
 - `core.str.at/slice` are explicit minimal host primitives for future lexer/parser work.
 
@@ -78,9 +79,8 @@ Self-hosting chain                  5%
 
 Ближайшие приросты:
 
-- расширить S-side `BoundaryTable` за пределы `core.io.println`;
-- перенести `core.group.count/at` в explicit boundary model;
-- move more `core.str.*` algorithms from host wrappers into S;
+- расширить S-side `BoundaryTable` для string/protocol helpers;
+- move remaining `core.str.trim/upper/lower` from host wrappers into S or mark them as host-specific text operations;
 - сделать bytecode dump стабильным debugging artifact для большего числа examples;
 - запускать больше canonical/user examples через VM;
 - начать перенос маленьких compiler/runtime helper-ов в S.

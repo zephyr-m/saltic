@@ -64,7 +64,7 @@ return
 halt
 ```
 
-Подробнее: [S Machine v0](../spec/s-machine-v0.md).
+Подробнее: [S Machine v0](../current/s-machine-v0.md).
 
 ## Freeze levels
 
@@ -74,11 +74,11 @@ halt
 
 Runtime можно менять, но только если изменение проходит gate:
 
-- есть spec/doc;
+- есть current/doc;
 - есть runnable task или пример;
 - есть test;
 - есть machine trace или понятное effect-объяснение;
-- понятно, почему это runtime, а не std/tool/backend;
+- понятно, почему это runtime, а не core/tool/backend;
 - понятно, как это не ломает будущую actor fabric.
 
 ### Contract freeze
@@ -104,7 +104,7 @@ Racket runtime перестаёт расширяться.
 
 Новые возможности идут через:
 
-- S std;
+- S core;
 - world engine;
 - visual backend;
 - actor fabric simulator;
@@ -120,7 +120,7 @@ Racket остаётся bootstrap implementation, а не местом рост�
 ```text
 1. Какую боль он закрывает?
 2. Почему это не S-код?
-3. Почему это не std?
+3. Почему это не core?
 4. Почему это не backend/tooling?
 5. Какой task доказывает необходимость?
 6. Какой test держит поведение?
@@ -246,4 +246,4 @@ visual.*
 - docs;
 - migration/freeze decision.
 
-Текущий inventory зафиксирован в [Effects Inventory v0](../spec/effects-inventory-v0.md).
+Текущий inventory зафиксирован в [Effects Inventory v0](../current/effects-inventory-v0.md).

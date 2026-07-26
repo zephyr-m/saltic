@@ -17,8 +17,11 @@ S уже вышел за пределы первого `parse -> check -> run` �
 - S Machine / VM Step v0 docs;
 - S-side tiny VM bootstrap interpreter;
 - VM Step Group A/B/C/D в tiny VM;
-- Group E local calls и первый S-side boundary dispatch table для `core.io.println`;
-- std autonomy pass 1: `core.str.at/slice` and S-side string algorithms `contains/lines_count/is_empty/starts_with/ends_with`;
+- Group E local calls и S-side boundary dispatch table для `core.io.println`;
+- S-side boundary handlers for `core.group.count/at`;
+- S-side protocol boundary handlers for `visual.trace_text` and `world.trace_text`;
+- S-side string boundary handlers for `core.str.trim/upper/lower`;
+- core autonomy pass 1: `core.str.at/slice` and S-side string algorithms `contains/lines_count/lines/split/is_empty/starts_with/ends_with`;
 - world/visual protocol slices;
 - object skill call model and runnable VM example.
 
@@ -50,14 +53,14 @@ Racket dependency: about 60%
 ## Current next action
 
 ```text
-Extend S VM Step Group E boundary table
+Extend S VM Step Group E boundary table for string/protocol helpers
 ```
 
 Почему это следующий шаг:
 
 - Group A/B/C/D уже перенесены в tiny VM bootstrap form;
 - local calls уже отделены от boundary calls через `CallKind`;
-- `core.io.println` уже проходит через S-side `BoundaryTable`;
+- `core.io.println`, `core.group.count/at`, `visual.trace_text`, `world.trace_text` и `core.str.trim/upper/lower` уже проходят через S-side `BoundaryTable`;
 - остальные `core.*`, `host.*`, `visual.*`, `world.*` boundary effects всё ещё в основном живут в Racket;
 - без явной boundary table следующий перенос снова превратится в список special cases внутри `step_tiny`.
 
@@ -67,28 +70,25 @@ Extend S VM Step Group E boundary table
 - handler представлен в S-side boundary table/model;
 - есть runnable example через tree runtime и bytecode VM;
 - есть runtime/vm test coverage;
-- docs обновлены в [VM Step v0](../spec/vm-step-v0.md) и [Self-hosting roadmap](self-hosting-roadmap.md).
+- docs обновлены в [VM Step v0](../current/vm-step-v0.md) и [Self-hosting roadmap](self-hosting-roadmap.md).
 
 ## Candidate next handlers
 
 Кандидаты:
 
 ```text
-core.group.count
-core.group.at
-core.str.lines
-core.str.split
-world.trace_text
-visual.trace_text
+core.str.join
+core.num.min
+core.num.max
 ```
 
 Наиболее прагматичный следующий шаг:
 
 ```text
-core.group.count / core.group.at
+bytecode-as-data для tiny VM или remaining varargs helpers
 ```
 
-Причина: они уже широко используются в examples/tasks и помогут tiny VM выполнять больше S-side программ без расширения world/visual протоколов.
+Причина: основные unary/string/protocol boundary handlers уже проверены; дальше либо приближать tiny VM к реальному bytecode input, либо закрывать varargs helpers.
 
 ## Команды проверки
 

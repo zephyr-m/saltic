@@ -1,353 +1,229 @@
-# Self-hosting roadmap
+# Saltic self-hosting roadmap
 
-Этот документ фиксирует путь от текущего Racket bootstrap к состоянию, где рабочий контур S состоит из самого S.
+Updated: 2026-07-26
+Current progress: [Self-hosting progress](self-hosting-progress.md)
 
-Цель не в том, чтобы переписать всё сразу.
+## Goal
 
-Цель:
+The working Saltic toolchain must no longer require Racket:
 
 ```text
-S source -> S compiler -> S bytecode -> S VM -> S std/tools
+Saltic source
+  → native Saltic compiler
+  → LLVM IR
+  → native executable
 ```
 
-Racket должен постепенно стать только историческим bootstrap, а не рабочей средой языка.
+Self-hosting is complete only when a native Saltic compiler can build the next
+native Saltic compiler and the cycle remains stable.
 
-## Текущее состояние
+## Chosen path
 
-Сейчас:
+The active bootstrap path is LLVM:
 
 ```text
-S source
--> Racket parser/checker
--> Racket tree-walking runtime
+Saltic frontend → Saltic IR → LLVM IR → native code
 ```
 
-Уже начат переход:
+The bytecode VM remains useful as:
+
+- an executable semantics reference;
+- a debugging and differential-testing tool;
+- a possible portable runtime target.
+
+It is no longer the critical path to the first independent native compiler.
+
+## Rules
+
+Every self-hosting step must:
+
+- move language meaning into Saltic, IR or the native backend;
+- avoid adding new behavior to the Racket bootstrap;
+- end with a permanent Saltic regression test;
+- end with a native integration test when executable behavior changes;
+- preserve one canonical path for each operation;
+- remove superseded bootstrap code when the replacement is proven.
+
+Racket may launch existing Saltic bootstrap code until the native compiler
+exists. It must not gain new language semantics.
+
+## Phase 1. Native computational core
+
+Status: **bootstrap subset complete**.
 
 ```text
-S source
--> Racket parser/checker
--> S bytecode
--> Racket implementation of S VM
-```
-
-Готово:
-
-- S std modules: `std/file.s`, `std/json.s`, `std/num.s`, `std/str.s`;
-- S tools in real projects: `geometry-paper/s/export_scene.s`;
-- domain encoder on S: `geometry-paper/s/scene_json.s`;
-- VM v0: numbers, strings, variables, skills, calls, arithmetic, `out`;
-- VM v0.2: `Box` construction and field access;
-- VM v0.3: `Group`, `core.group.count/at`, `drum`;
-- VM v0.4: `error.*` values and `rescue`;
-- VM v0.5: enum values and `switch`;
-- VM v0.6: visual protocol effects;
-- VM v0.7: world event protocol through `world.emit` + `world.step`;
-- object skill call model v0 fixed in docs;
-- bytecode v0 contract fixed in docs;
-- first tiny VM interpreter sketch written in S: `examples/bootstrap/s-vm-tiny.s`;
-- `just s-vm-tiny-vm` runs that S interpreter on the bytecode VM;
-- tiny VM v0.2 covers `PUSH/LOAD/STORE/ADD/SUB/MUL/DIV/RETURN`;
-- tiny VM v0.3 uses `Env` as an S `Box` with `env_load/env_store`;
-- tiny VM v0.4 uses `Stack` as an S `Box` with stack helper skills;
-- tiny VM v0.5 covers a minimal `CALL` convention for `core.io.println`;
-- tiny VM v0.6 uses typed instruction payload: `PayloadKind`, `number_value`, `text_value`, `target`;
-- tiny VM core moved into local S module: `examples/bootstrap/tiny_vm/core.s`;
-- tiny VM v0.7 uses explicit `Frame` and `step_tiny(frame, instr)`;
-- tiny VM debug layer moved into local S module: `examples/bootstrap/tiny_vm/debug.s`;
-- VM step transfer contract fixed in docs: [VM Step v0](../spec/vm-step-v0.md);
-- tiny VM v0.8 covers VM Step Group A/B subset: stack ops, math, compare, return, error/enum payloads;
-- tiny VM v0.9 replaces hardcoded `Env { x, y }` with named S-side bindings;
-- tiny VM v0.10 covers VM Step Group C bootstrap subset: `group`, `box-new`, `field`;
-- tiny VM v0.11 starts VM Step Group D with `if` and `TinyBody`;
-- tiny VM v0.12 adds bootstrap `drum` over `TinyBody`;
-- tiny VM v0.13 adds bootstrap `switch` over `TinyEnum`/`TinyError`;
-- tiny VM v0.14 closes VM Step Group D bootstrap subset with `rescue`;
-- tiny VM v0.15 starts VM Step Group E with local tiny function calls;
-- tiny VM v0.16 separates local calls from boundary calls with `CallKind`;
-- tiny VM v0.17 adds an S-side boundary dispatch table for `core.io.println`;
-- `just vm-run`, `just vm-bytecode`, `just vm-box`, `just vm-box-bytecode`, `just vm-group`, `just vm-group-bytecode`, `just vm-rescue`, `just vm-rescue-bytecode`, `just vm-control`, `just vm-control-bytecode`, `just vm-visual`, `just vm-visual-bytecode`, `just vm-world`, `just vm-world-bytecode`.
-
-Оценка автономности на этом этапе:
-
-```text
-S autonomy: about 40%
-Racket dependency: about 60%
-```
-
-Это не точная метрика, а рабочая оценка направления. Подробная шкала: [Autonomy score](autonomy-score.md).
-
-## Principle
-
-Каждый шаг self-hosting должен:
-
-- уменьшать количество пользовательской логики в Racket;
-- добавлять запускаемый пример или тест;
-- не ломать основной runtime;
-- фиксировать контракт в docs;
-- переносить поведение в S, а не прятать его за wrapper.
-
-Wrapper над host primitive не считается полноценным переносом, если смысл функции остаётся в Racket.
-
-Нормальный перенос:
-
-```text
-std API -> S module -> minimal host primitive
-```
-
-Плохой перенос:
-
-```text
-std API -> renamed wrapper -> same Racket behavior
-```
-
-## Stage 1. VM becomes useful
-
-Цель: VM должна исполнять не игрушечный subset, а основные формы S.
-
-Статус:
-
-```text
-[done] numbers / strings / yes-no / none
-[done] variables
-[done] assignment
-[done] skill calls
-[done] arithmetic and comparisons
-[done] core.io.println
-[done] Box construction
-[done] field access
-[done] Group
-[done] core.group.count / core.group.at
-[done] if blocks
+[done] numeric and string literals
+[done] LLVM string escaping
+[done] variables and reassignment
+[done] compositional LLVM modules
+[done] native skill and call
+[done] string and numeric arguments
+[done] local numeric calculations
+[done] add / sub / mul / div
+[done] gt / lt / eq
+[done] if
 [done] drum
-[done] error values
-[done] rescue
-[done] enum values
-[done] switch
-[done] visual effects/protocol calls
-[done] world event protocol calls
-[done] object skill calls
-[next] boundary table expansion beyond core.io.println
-[future] enough modules for project-scale code
+[done] mutable loop value through phi
+[done] process execution
 ```
 
-Готово, когда:
+This phase proves functions, memory, computation, branches and loops in native
+Saltic programs.
 
-- VM запускает отдельный набор canonical examples;
-- VM запускает object examples с `Box` + `Group` + `drum`;
-- VM может выполнить полезный tool вроде простого exporter-а.
+## Phase 2. Native data model
 
-Следующий практический шаг:
+Status: **in progress**.
 
 ```text
-Boundary table expansion beyond core.io.println
+[done] numeric Group literal
+[done] Group count
+[done] Group item
+[done] immutable Group add
+[done] numeric Box layout
+[done] Box construction and defaults
+[done] field read
+[done] field update
+[done] return Box from skill
+[done] pass, mutate and return a live Box
+[done] multiple field updates
+[done] compose Box through multiple skills
+[current] explicit native value kinds
+[next] string and Group fields in Box
+[next] heterogeneous Group values
+[future] dynamically growing Group storage
 ```
 
-## Stage 2. std moves to S
+Current Group is a fixed bootstrap layout:
 
-Цель:
+```llvm
+%Group = type { i32, [16 x i32] }
+```
+
+Phase 2 is complete when compiler AST, tokens, diagnostics and scopes can be
+represented without host-owned values.
+
+## Phase 3. General LLVM lowering
+
+Status: **not started as a general system**.
+
+Current LLVM generation supports proven bootstrap shapes. It must become a
+typed lowering pipeline that composes arbitrary valid IR:
 
 ```text
-core.* = S code
-host.* = minimal primitives
+[next] explicit native value kinds
+[next] typed local environment
+[next] arbitrary nested calls
+[next] arbitrary expression composition
+[next] general control-flow blocks
+[done] multiple skills and simple call chains
+[next] general call graph
+[next] predictable unsupported-form diagnostics
 ```
 
-Статус:
+Phase 3 is complete when LLVM generation is driven by IR semantics rather than
+recognizing specific source-program shapes.
+
+## Phase 4. Native core boundary
+
+Status: **partially available through libc**.
 
 ```text
-[done] core.str.add
-[done] core.str.len
-[done] core.str.trim
-[done] core.str.upper/lower
-[done] core.str.contains/eq/split/lines/lines_count
-[done] core.num.parse/abs/round
-[done] core.file.read_text/write_text
-[done] core.json.encode
-[pending] core.io.println, blocked by varargs
-[pending] core.str.join, treated as low-level string primitive
-[pending] core.num.min/max, blocked by varargs
-[done] core.group.count/at in VM
-[pending] core.group.* as S std module, blocked by Group being native storage
+[done] string output bootstrap
+[done] process execution bootstrap
+[next] file read
+[next] file write
+[next] command-line arguments
+[next] allocation boundary
+[next] native error and exit convention
+[future] replace libc helpers where Saltic ownership is valuable
 ```
 
-Готово, когда:
+The boundary must remain small. Core algorithms belong in Saltic; only effects
+that require the operating system belong at the native boundary.
 
-- adding a user-facing std function usually means editing `.s`, not `s-runtime.rkt`;
-- Racket runtime mostly contains `host.*`, VM, parser/checker/tooling;
-- std modules are visible in docs and tests.
+## Phase 5. Modules and compiler artifacts
 
-## Stage 3. Bytecode is the contract
-
-Цель: S bytecode перестаёт быть внутренней деталью `tools/s-vm.rkt`.
-
-Нужно зафиксировать:
-
-- opcode list;
-- instruction encoding;
-- function layout;
-- call convention;
-- `Box` layout;
-- `Group` layout;
-- effect convention;
-- error convention.
-
-Текущие opcodes:
+Status: **pending**.
 
 ```text
-push
-push-none
-push-error
-push-enum
-load
-store
-add/sub/mul/div
-eq/gt/lt
-call
-pop
-box-new
-field
-group
-if
-drum
-switch
-rescue
-return
+[next] lower `use` to a deterministic module graph
+[next] compile multiple Saltic files as one unit
+[next] stable symbol naming
+[next] stable ABI between Saltic modules
+[next] emit diagnostics without the bootstrap runtime
+[next] native `saltic build source.s -o app`
 ```
 
-Готово, когда:
+Phase 5 is complete when a user can compile a multi-file Saltic program without
+calling Racket directly.
 
-- bytecode spec is stable enough to implement a second VM;
-- bytecode dump can be used as a debugging artifact;
-- runtime behavior is described through S Machine, not Racket implementation details.
+## Phase 6. Compile the compiler
 
-Текущий контракт: [Bytecode v0](../spec/bytecode-v0.md).
+Status: **pending native coverage**.
 
-## Stage 4. S VM in S
+The compiler is already written in Saltic. The remaining work is to make every
+construct it uses available in the LLVM backend.
 
-Цель: написать простой interpreter bytecode на S.
+Recommended order:
 
-Первый вариант может быть медленным.
+1. token and diagnostic Boxes;
+2. heterogeneous Groups;
+3. scanner string/group operations;
+4. parser AST construction;
+5. checker scopes and diagnostics;
+6. IR emitter;
+7. LLVM emitter;
+8. compiler CLI.
 
-Контур:
+The first milestone is not the entire repository. It is one native compiler
+binary capable of compiling the exact Saltic subset used by itself.
+
+## Phase 7. Bootstrap closure
+
+Status: **future**.
 
 ```text
-Racket VM runs vm/interpreter.s
-vm/interpreter.s runs S bytecode as data
+compiler A (bootstrap)
+  → compiler B (native Saltic)
+  → compiler C (built by B)
 ```
 
-Это будет первая настоящая self-hosting петля исполнения.
+Closure requires:
 
-Перед этим нужны:
-
-- enough structured data to represent bytecode;
-- file/text primitives stable enough for tools;
-- error handling or at least predictable failure model.
-
-Готово, когда:
-
-- один и тот же bytecode можно выполнить Racket VM и S VM;
-- результаты совпадают на тестовом наборе;
-- S VM живёт в repo как обычная S-программа.
-
-## Stage 5. Compiler pieces in S
-
-Цель: переносить compiler pipeline:
-
-```text
-tokens -> AST -> checked AST -> bytecode
-```
-
-Порядок:
-
-1. bytecode emitter on S;
-2. simple AST transforms on S;
-3. parser helpers on S;
-4. checker helpers on S;
-5. enough compiler to compile a subset of S.
-
-Не начинать с полного parser rewrite.
-
-Сначала нужно, чтобы S удобно работал с:
-
-- text;
-- groups;
-- boxes;
-- errors;
-- files;
-- deterministic tools.
-
-Готово, когда:
-
-- часть compiler pipeline запускается как S-tool;
-- Racket compiler вызывает S-coded compiler steps;
-- S-coded steps покрыты tests.
-
-## Stage 6. Bootstrap closure
-
-Цель:
-
-```text
-old compiler -> new compiler
-new compiler -> new compiler
-```
-
-Если новый S compiler может собрать себя и свою std/VM, Racket больше не нужен в обычном рабочем контуре.
-
-Racket может остаться как:
-
-- historical bootstrap;
-- compatibility runner;
-- emergency reference implementation.
-
-Рабочий контур должен стать:
-
-```text
-S compiler
-S bytecode
-S VM
-S std
-S tools
-```
+- B builds C successfully;
+- B and C pass the same permanent tests;
+- generated behavior is equivalent;
+- ordinary Saltic builds no longer invoke Racket;
+- Racket can be archived as the historical seed.
 
 ## Current next action
 
-Следующий конкретный шаг:
-
 ```text
-Extend S VM Step Group E boundary table
+Explicit native value kinds for structured data
 ```
 
-Group A/B/C уже покрыты в tiny VM bootstrap form:
+Why this is next:
 
-```text
-push / load / store / pop
-add / sub / mul / div
-eq / gt / lt
-return
-group / box-new / field
+- numeric Box behavior is now proven end to end;
+- compiler Boxes contain strings, Groups, none and nested structured values;
+- current mutation lowering still infers a Box type from recognized fields;
+- explicit value kinds remove that inference and unlock real compiler data.
+
+Completion criterion:
+
+```s
+Token = Box {
+    kind = ""
+    value = ""
+    line = 0
+}
+
+program() {
+    @token = Token { kind = "NAME", value = "candy", line = 7 }
+    out token.line
+}
 ```
 
-Следующий слой:
-
-```text
-VM Step Group E: boundary table beyond core.io.println
-```
-
-Контракт: [VM Step v0](../spec/vm-step-v0.md).
-
-Почему:
-
-- Group A/B/C/D уже покрыты в tiny VM bootstrap form;
-- tiny VM уже умеет local function call mechanics;
-- local/boundary calls уже разделены явно;
-- `core.io.println` уже проходит через S-side boundary table;
-- Racket всё ещё хранит смысл остальных std/protocol/host boundary effects;
-- без расширения boundary table новые host calls снова начнут расползаться в `step_tiny`.
-
-Готово, когда:
-
-- tiny VM имеет отдельную boundary dispatch table/model;
-- `core.io.println` перестаёт быть hardcoded branch прямо внутри `step_tiny`;
-- есть пример, где boundary call проходит через boundary model;
-- следующий boundary handler выбран явно;
-- Racket `step!` остаётся reference implementation, а не единственным носителем смысла этих инструкций.
+The program must preserve all three fields through construction, a skill call
+and a field update. LLVM lowering must use explicit field kinds rather than
+guessing the Box type from a field name.

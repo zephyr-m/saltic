@@ -76,7 +76,7 @@ S нужен не только для написания программ. S н�
 [done]    Этап 4. Интерпретатор первого подмножества
 [done]    Этап 5. Foundation перед world MVP
 [done]    Этап 6. Удобство письма: formatter, diagnostics, examples
-[done]    Этап 7. Runtime и первые std modules
+[done]    Этап 7. Runtime и первые core modules
 [done]    Этап 8. World/visual protocol slices
 [active]  Этап 9. Bytecode VM
 [active]  Этап 10. S-side tiny VM bootstrap
@@ -124,7 +124,7 @@ S нужен не только для написания программ. S н�
 Результат:
 
 ```text
-docs/spec/grammar.md
+docs/current/grammar.md
 ```
 
 Готово, когда:
@@ -279,7 +279,7 @@ racket tools/format.rkt examples/bootstrap/basic.s
 - единый стиль для документации и примеров;
 - команда `just run-file <file>` как основной способ пробовать свои программы.
 
-## Этап 7. Runtime и будущая core.informatics.std
+## Этап 7. Runtime и будущая core.informatics.base
 
 Цель: сделать S полезным для нескольких простых задач, а не только для `basic.s`.
 
@@ -297,7 +297,7 @@ racket tools/format.rkt examples/bootstrap/basic.s
 Готово, когда:
 
 - можно написать несколько маленьких инструментов;
-- ясно отделены `host.*` intrinsics, `sys.*` и будущая `core.informatics.std`;
+- ясно отделены `host.*` intrinsics, `sys.*` и будущая `core.informatics.base`;
 - API остаётся коротким и запоминаемым;
 - runtime покрыт тестами.
 
@@ -531,7 +531,7 @@ s explain
 - calling convention draft;
 - error model;
 - runtime boundaries;
-- std/kernel split;
+- core/kernel split;
 - embedded profile.
 
 Готово, когда:
@@ -550,7 +550,7 @@ examples/bootstrap/basic.s
   -> checker
   -> interpreter
   -> formatter + diagnostics
-  -> runtime + core.informatics.std
+  -> runtime + core.informatics.base
   -> world/visual slices
   -> bytecode VM
   -> S-side tiny VM

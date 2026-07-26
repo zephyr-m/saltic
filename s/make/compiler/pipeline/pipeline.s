@@ -1,4 +1,5 @@
 use core
+use s.make.compiler.compiler
 
 PipelineIn = Box {
     source = ""
@@ -28,5 +29,15 @@ skill s_compiler_pipeline_stub(in) {
         checked = none
         bytecode = []
         diagnostics = []
+    }
+}
+
+skill compiler_pipeline(source, path) {
+    @compiled = compiler_compile(source, path)
+    out PipelineOut {
+        ast = compiled.ast
+        checked = compiled.ast
+        bytecode = compiled.ir
+        diagnostics = compiled.diagnostics
     }
 }

@@ -1,5 +1,5 @@
 use core
-use tiny_vm.core
+use s.run.vm.core
 
 program() {
     @loop_body = body_four(instr_load("sum"), instr_push_number(2), instr_add(), instr_store("sum"))

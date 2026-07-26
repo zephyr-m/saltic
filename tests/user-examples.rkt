@@ -19,7 +19,7 @@
 
 (check-false (empty? user-files))
 
-(define (imports-std? ast)
+(define (imports-core? ast)
   (match ast
     [`(program ,items ...)
      (for/or ([item items])
@@ -39,7 +39,7 @@
 (for ([file user-files])
   (define ast (ast->datum (parse-s-file file)))
   (check-true
-   (imports-std? ast)
+   (imports-core? ast)
    (format "~a must import core" file))
   (check-equal?
    (remove-duplicates (collect-host-paths ast) string=?)

@@ -1,5 +1,5 @@
 use core
-use tiny_vm.core
+use s.run.vm.core
 
 program() {
     @add_body = body_four(instr_load("a"), instr_load("b"), instr_add(), instr_return())

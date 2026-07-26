@@ -55,7 +55,7 @@ S должен помогать строить системы без посто�
 Внутри неё живёт будущая стандартная библиотека:
 
 ```text
-core.informatics.std
+core.informatics.base
 ```
 
 Подробнее: [core.informatics](informatics.md).

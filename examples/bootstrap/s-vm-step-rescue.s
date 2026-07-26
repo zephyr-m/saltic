@@ -1,5 +1,5 @@
 use core
-use tiny_vm.core
+use s.run.vm.core
 
 program() {
     @rescue_body = body_one(instr_push_number(42))

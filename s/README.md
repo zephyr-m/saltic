@@ -1,13 +1,23 @@
-# S-owned code skeleton
+# S-owned system
 
-This directory is the future S-owned system.
+This directory is the S-owned system surface.
 
-Current bootstrap still lives mostly in:
+The first working component is `s/run/vm`: a small VM written in S and
+loadable through the system import path:
+
+```s
+use s.run.vm.core
+```
+
+It is intentionally small, but it is real code: the bootstrap examples and
+VM tests execute it through the current Racket reference VM.
+
+The remaining reference/bootstrap implementation still lives mostly in:
 
 ```text
 tools/*.rkt
-examples/bootstrap/tiny_vm/core.s
-std/*.s
+examples/bootstrap/*.s
+core/*.s
 ```
 
 tree
@@ -61,6 +71,7 @@ tree
                 debug_info.s
 
         run/
+            vm/              working S-owned VM boundary
             bytecode/
                 instruction.s
                 literal.s

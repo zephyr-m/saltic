@@ -13,7 +13,6 @@
 - [runtime freeze](runtime-freeze.md)
 - [self-hosting roadmap](self-hosting-roadmap.md)
 - [autonomy score](autonomy-score.md)
-- [task lessons](task-lessons.md)
 - [roadmap](roadmap.md)
 - [current working plan](today.md)
 - [foundation](foundation.md)

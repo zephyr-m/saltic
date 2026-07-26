@@ -1,32 +1,43 @@
 use core
+use s.make.compiler.pipeline.pipeline
 
-CompilerIn = Box {
+MainCompilerIn = Box {
     source = ""
     path = ""
     mode = "compile"
 }
 
-CompilerOut = Box {
+MainCompilerOut = Box {
     ast = none
     checked = none
     bytecode = []
     diagnostics = []
 }
 
-CompilerContract = Box {
-    input = CompilerIn {}
-    output = CompilerOut {}
+MainCompilerContract = Box {
+    input = MainCompilerIn {}
+    output = MainCompilerOut {}
 }
 
 skill s_compiler_main_contract() {
-    out CompilerContract {}
+    out MainCompilerContract {}
 }
 
 skill s_compiler_main_stub(in) {
-    out CompilerOut {
+    out MainCompilerOut {
         ast = none
         checked = none
         bytecode = []
         diagnostics = []
+    }
+}
+
+skill compiler_main(source, path) {
+    @pipeline = compiler_pipeline(source, path)
+    out MainCompilerOut {
+        ast = pipeline.ast
+        checked = pipeline.checked
+        bytecode = pipeline.bytecode
+        diagnostics = pipeline.diagnostics
     }
 }

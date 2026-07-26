@@ -1,5 +1,5 @@
 use core
-use tiny_vm.core
+use s.run.vm.core
 
 program() {
     @bytecode = [

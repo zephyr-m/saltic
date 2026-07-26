@@ -100,7 +100,7 @@
          [`(enum ,name ,variants ...)
           (set! enums (cons (format "~a {~a}" name (string-join variants ", ")) enums))]
          [`(skill ,name ,params ,body)
-          (unless (std-internal-skill? name)
+          (unless (core-internal-skill? name)
             (set! skills (cons (format "~a(~a)" name (string-join params ", ")) skills))
             (define calls (collect-calls body))
             (set! core-calls (append (filter core-call? calls) core-calls))
@@ -141,8 +141,8 @@
 (define (host-call? call)
   (string-prefix? call "host."))
 
-(define (std-internal-skill? name)
-  (string-prefix? name "std_"))
+(define (core-internal-skill? name)
+  (string-prefix? name "core_"))
 
 (define (core-call? call)
   (string-prefix? call "core."))

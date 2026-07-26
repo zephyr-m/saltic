@@ -51,9 +51,9 @@ actor = участник вычисления
 message = причина изменения между участниками
 ```
 
-Подробнее: [Time and State v0](../spec/time-state-v0.md).
+Подробнее: [Time and State v0](../current/time-state-v0.md).
 
-Аппаратное направление actor fabric описано отдельно: [Actor Fabric v0](../hardware/actor-fabric-v0.md).
+Аппаратное направление actor fabric описано отдельно: [Actor Fabric v0](../archive/vision/hardware/actor-fabric-v0.md).
 
 Затем программирование становится одним из способов воздействовать на этот мир, а не единственным способом существования системы.
 

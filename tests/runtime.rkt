@@ -73,7 +73,7 @@
  (with-output-to-string
    (lambda ()
      (run-s-file step-boundary-source)))
- "boundary result=42\nstep-boundary result=yes\n")
+ "boundary result=42\nboundary count=2\nboundary picked=beta\nboundary visual=sheet boundary\npresent\n\nboundary world=spawn #1 box\nplace #1 1 2\n\nstep-boundary result=yes\n")
 
 (check-equal?
  (with-output-to-string
@@ -296,12 +296,12 @@ S
 use core
 
 program() {
-    core.io.println("hello, std")
+    core.io.println("hello, core")
     out none
 }
 S
       )))
- "hello, std\n")
+ "hello, core\n")
 
 (check-equal?
  (with-output-to-string

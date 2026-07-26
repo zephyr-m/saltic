@@ -1,4 +1,5 @@
-use tiny_vm.debug
+use s.run.vm.core
+use s.run.vm.debug
 
 program() {
     @bytecode = [

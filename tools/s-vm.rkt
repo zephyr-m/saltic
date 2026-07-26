@@ -39,7 +39,7 @@
   (match ast
     [`(program ,items ...)
      (define expanded-items
-       (if (uses-std? items)
+       (if (uses-core? items)
            (append (standard-vm-items) items)
            items))
      (define boxes (collect-boxes expanded-items))
@@ -76,18 +76,18 @@
       [_ (void)]))
   enums)
 
-(define (uses-std? items)
+(define (uses-core? items)
   (for/or ([item items])
     (match item
-      [(or `(use "core") `(use "std")) #t]
+      [(or `(use "core") `(use "core")) #t]
       [_ #f])))
 
 (define (standard-vm-items)
   (apply append
-         (for/list ([path (std-module-paths)])
+         (for/list ([path (core-module-paths)])
            (match (load-s-file-datum path)
              [`(program ,items ...) items]
-             [_ (vm-error "expected std module AST in ~a" path)]))))
+             [_ (vm-error "expected core module AST in ~a" path)]))))
 
 (define (compile-function name params body boxes enums)
   (vm-function name params (append (compile-block body boxes enums) (list '(push-none) '(return)))))
@@ -357,10 +357,13 @@
 
 (define (call-vm-function program name args output state)
   (cond
-    [(std-call-skill-name name)
+    [(core-call-skill-name name)
      => (lambda (skill-name)
           (call-vm-function program skill-name args output state))]
     [(equal? name "core.io.println")
+     (fprintf output "~a\n" (string-join (map value->text args) ""))
+     none-value]
+    [(equal? name "core.io.show")
      (fprintf output "~a\n" (string-join (map value->text args) ""))
      none-value]
     [(equal? name "core.group.count")
@@ -379,6 +382,13 @@
      (unless (and (<= 0 index) (< index (length (vm-group-value-items group))))
        (vm-error "core.group.at index out of range"))
      (list-ref (vm-group-value-items group) index)]
+    [(equal? name "core.group.append")
+     (expect-vm-arg-count name args 2)
+     (define group (first args))
+     (define value (second args))
+     (unless (vm-group-value? group)
+       (vm-error "core.group.append expects Group"))
+     (vm-group-value (append (vm-group-value-items group) (list value)))]
     [(equal? name "host.str.join")
      (string-join (map value->text args) "")]
     [(equal? name "host.str.len")
@@ -502,20 +512,29 @@
        (run-function program (hash-ref (vm-program-functions program) name) args output state))]
     [else (vm-error "VM v0 unknown call '~a'" name)]))
 
-(define (std-call-skill-name name)
+(define (core-call-skill-name name)
   (match name
-    ["core.str.lines_count" "std_str_lines_count"]
-    ["core.str.add" "std_str_add"]
-    ["core.str.len" "std_str_len"]
-    ["core.str.at" "std_str_at"]
-    ["core.str.slice" "std_str_slice"]
-    ["core.str.eq" "std_str_eq"]
-    ["core.str.is_empty" "std_str_is_empty"]
-    ["core.str.starts_with" "std_str_starts_with"]
-    ["core.str.ends_with" "std_str_ends_with"]
-    ["core.str.contains" "std_str_contains"]
-    ["core.num.abs" "std_num_abs"]
-    ["core.num.round" "std_num_round"]
+    ["core.str.lines_count" "core_str_lines_count"]
+    ["core.str.lines" "core_str_lines"]
+    ["core.str.add" "core_str_add"]
+    ["core.str.len" "core_str_len"]
+    ["core.str.at" "core_str_at"]
+    ["core.str.slice" "core_str_slice"]
+    ["core.str.eq" "core_str_eq"]
+    ["core.str.is_empty" "core_str_is_empty"]
+    ["core.str.starts_with" "core_str_starts_with"]
+    ["core.str.ends_with" "core_str_ends_with"]
+    ["core.str.contains" "core_str_contains"]
+    ["core.str.split" "core_str_split"]
+    ["core.str.trim" "core_str_trim"]
+    ["core.str.upper" "core_str_upper"]
+    ["core.str.lower" "core_str_lower"]
+    ["core.group.add" "core_group_add"]
+    ["core.group.size" "core_group_size"]
+    ["core.group.item" "core_group_item"]
+    ["core.group.empty" "core_group_empty"]
+    ["core.num.abs" "core_num_abs"]
+    ["core.num.round" "core_num_round"]
     [_ #f]))
 
 (define (expect-vm-arg-count name args expected)
