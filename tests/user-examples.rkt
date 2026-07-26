@@ -5,7 +5,7 @@
          racket/path
          racket/runtime-path
          racket/string
-         "../tools/s-parser.rkt")
+         "../racket/bootstrap/1-parser.rkt")
 
 (define-runtime-path user-dir "../examples/user")
 

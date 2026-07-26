@@ -15,30 +15,6 @@ S-native UI trace:
 just family-ledger-ui
 ```
 
-Framebuffer-style preview image:
-
-```bash
-just family-ledger-frame
-```
-
-It writes:
-
-```text
-/tmp/family-ledger-ui.png
-```
-
-Temporary desktop window, with S logic under the hood:
-
-```bash
-just family-ledger-window
-```
-
-Interactive surface inside a temporary game-like world canvas:
-
-```bash
-just family-ledger-world
-```
-
 Прямой запуск через runner:
 
 ```bash

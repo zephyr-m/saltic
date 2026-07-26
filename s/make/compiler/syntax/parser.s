@@ -85,13 +85,28 @@ skill parser_read_group(tokens, start, end) {
                 done = yes
             }
             (done == no) {
-                items = core.group.add(items, parser_expression(token))
-                @separator = core.group.item(tokens, cursor + 1)
+                @item_expression = parser_expression(token)
+                @item_next = cursor + 1
+                (token.kind == "LBRACKET") {
+                    @nested = parser_read_group(tokens, cursor, end)
+                    item_expression = nested.expression
+                    item_next = nested.next
+                }
+                (token.kind == "IDENT") {
+                    @item_part = core.group.item(tokens, cursor + 1)
+                    (item_part.kind == "LBRACE") {
+                        @box = parser_read_box(tokens, cursor, end)
+                        item_expression = box.expression
+                        item_next = box.next
+                    }
+                }
+                items = core.group.add(items, item_expression)
+                @separator = core.group.item(tokens, item_next)
                 (separator.kind == "COMMA") {
-                    cursor = cursor + 2
+                    cursor = item_next + 1
                 }
                 (separator.kind == "RBRACKET") {
-                    cursor = cursor + 2
+                    cursor = item_next + 1
                     done = yes
                 }
             }
@@ -114,8 +129,15 @@ skill parser_read_box_fields(tokens, start, end) {
                 @eq = core.group.item(tokens, cursor + 1)
                 (eq.kind == "ASSIGN") {
                     @value = core.group.item(tokens, cursor + 2)
-                    fields = core.group.add(fields, ast_assign(name.value, parser_expression(value)))
-                    cursor = cursor + 3
+                    @field_expression = parser_expression(value)
+                    @field_next = cursor + 3
+                    (value.kind == "LBRACKET") {
+                        @group = parser_read_group(tokens, cursor + 2, end)
+                        field_expression = group.expression
+                        field_next = group.next
+                    }
+                    fields = core.group.add(fields, ast_assign(name.value, field_expression))
+                    cursor = field_next
                     (cursor < end) {
                         @separator = core.group.item(tokens, cursor)
                         (separator.kind == "COMMA") {
@@ -215,13 +237,23 @@ skill parser_read_call(tokens, start, end) {
                             done = yes
                         }
                         (args_done == no) {
-                            args = core.group.add(args, parser_expression(arg))
-                            @separator = core.group.item(tokens, cursor + 1)
+                            @arg_expression = parser_expression(arg)
+                            @arg_size = 1
+                            (arg.kind == "IDENT") {
+                                @arg_part = core.group.item(tokens, cursor + 1)
+                                (arg_part.kind == "DOT") {
+                                    @field = core.group.item(tokens, cursor + 2)
+                                    arg_expression = ast_field(parser_expression(arg), field.value)
+                                    arg_size = 3
+                                }
+                            }
+                            args = core.group.add(args, arg_expression)
+                            @separator = core.group.item(tokens, cursor + arg_size)
                             (separator.kind == "COMMA") {
-                                cursor = cursor + 2
+                                cursor = cursor + arg_size + 1
                             }
                             (separator.kind == "RPAREN") {
-                                cursor = cursor + 2
+                                cursor = cursor + arg_size + 1
                                 args_done = yes
                                 done = yes
                             }
@@ -500,8 +532,15 @@ skill parser_collect_body(tokens, start, end) {
                         @field_eq = core.group.item(tokens, cursor + 3)
                         (field_eq.kind == "ASSIGN") {
                             @field_value = core.group.item(tokens, cursor + 4)
-                            items = core.group.add(items, ast_field_set(parser_expression(token), field.value, parser_expression(field_value)))
-                            cursor = cursor + 5
+                            @field_expression = parser_expression(field_value)
+                            @field_next = cursor + 5
+                            (field_value.kind == "LBRACKET") {
+                                @group = parser_read_group(tokens, cursor + 4, end)
+                                field_expression = group.expression
+                                field_next = group.next
+                            }
+                            items = core.group.add(items, ast_field_set(parser_expression(token), field.value, field_expression))
+                            cursor = field_next
                             handled = yes
                         }
                     }

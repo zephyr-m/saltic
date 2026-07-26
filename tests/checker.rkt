@@ -3,11 +3,11 @@
 (require rackunit
          json
          racket/runtime-path
-         "../tools/s-checker.rkt")
+         "../racket/bootstrap/2-checker.rkt")
 
 (define-runtime-path basic-source "../examples/bootstrap/basic.s")
 (define-runtime-path try-source "../examples/bootstrap/try.s")
-(define-runtime-path check-tool "../tools/check.rkt")
+(define-runtime-path check-tool "../racket/bootstrap/2-checker.rkt")
 
 (check-equal? (check-s-file basic-source) '())
 (check-equal? (check-s-file try-source) '())

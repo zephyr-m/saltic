@@ -2,7 +2,8 @@
 
 (require rackunit
          racket/runtime-path
-         "../tools/s-vm.rkt")
+         "../racket/bootstrap/3-compiler.rkt"
+         "../racket/bootstrap/4-vm.rkt")
 
 (define-runtime-path tiny-vm-path "../examples/bootstrap/s-vm-tiny.s")
 (define-runtime-path step-ab-path "../examples/bootstrap/s-vm-step-ab.s")

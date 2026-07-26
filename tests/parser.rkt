@@ -2,7 +2,7 @@
 
 (require rackunit
          racket/runtime-path
-         "../tools/s-parser.rkt")
+         "../racket/bootstrap/1-parser.rkt")
 
 (define-runtime-path basic-source "../examples/bootstrap/basic.s")
 (define-runtime-path try-source "../examples/bootstrap/try.s")

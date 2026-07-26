@@ -1,5 +1,4 @@
 use core
-use s.run.core.num
 use s.make.runtime.registry
 use s.make.compiler.semantics.scope
 use s.run.runtime.syscall

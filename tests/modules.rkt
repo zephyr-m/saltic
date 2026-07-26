@@ -2,7 +2,7 @@
 
 (require rackunit
          racket/file
-         "../tools/s-modules.rkt")
+         "../racket/bootstrap/1-parser.rkt")
 
 (define (write-module dir name text)
   (define path (build-path dir name))
