@@ -184,7 +184,7 @@ const coreFiles = ['file.s','json.s','str.s','num.s','group.s']
 
 function modulePath(sourcePath, parts, root) {
   const relative = pathTools.join(...parts.slice(0,-1), `${parts.at(-1)}.s`)
-  const result = pathTools.resolve(parts[0] === 's' ? root : pathTools.dirname(sourcePath), relative)
+  const result = pathTools.resolve(['s','s2'].includes(parts[0]) ? root : pathTools.dirname(sourcePath), relative)
   if (!fs.existsSync(result)) throw Error(`modules: module '${parts.join('.')}' not found at ${result}`)
   return result
 }

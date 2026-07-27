@@ -685,7 +685,7 @@
     [_ item]))
 
 (define (resolve-module-path source-path parts)
-  (if (equal? (first parts) "s")
+  (if (member (first parts) '("s" "s2"))
       (resolve-system-module parts)
       (resolve-local-module source-path parts)))
 
