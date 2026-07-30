@@ -1,89 +1,88 @@
 module logos_test;
-    localparam logic [1:0] UP = 2'b00;
-    localparam logic [1:0] DOWN = 2'b01;
-    localparam logic [1:0] DONE = 2'b10;
+    localparam logic [1:0] NOP  = 2'b00;
+    localparam logic [1:0] INC  = 2'b01;
+    localparam logic [1:0] DEC  = 2'b10;
+    localparam logic [1:0] HALT = 2'b11;
 
     logic clock = 0;
     logic reset = 1;
     logic configure = 0;
-    logic [1:0] configure_at = 0;
-    logic [31:0] configure_counter = 0;
-    logic [1:0] configure_up_kind = DONE;
-    logic [1:0] configure_up_target = 0;
-    logic [1:0] configure_down_kind = DONE;
-    logic [1:0] configure_down_target = 0;
-    logic [1:0] configure_zero_kind = DONE;
-    logic [1:0] configure_zero_target = 0;
-    logic inject = 0;
-    logic [1:0] inject_at = 0;
-    logic [1:0] inject_kind = DOWN;
-    logic [1:0] probe_at = 0;
-    logic [31:0] probe_counter;
-    logic done;
-    logic [31:0] pulses;
-    logic collision;
+    logic [63:0] configure_counter = 0;
+    logic configure_inc_valid = 1;
+    logic [1:0] configure_inc_opcode = DEC;
+    logic [7:0] configure_inc_target = 8'd9;
+    logic configure_dec_valid = 1;
+    logic [1:0] configure_dec_opcode = INC;
+    logic [7:0] configure_dec_target = 8'd10;
+    logic configure_zero_valid = 1;
+    logic [1:0] configure_zero_opcode = HALT;
+    logic [7:0] configure_zero_target = 8'd11;
+    logic inbox_valid = 0;
+    logic inbox_ready;
+    logic [1:0] inbox_opcode = NOP;
+    logic [63:0] inbox_data = 0;
+    logic outbox_valid;
+    logic outbox_ready = 1;
+    logic [1:0] outbox_opcode;
+    logic [63:0] outbox_data;
+    logic [7:0] outbox_target;
+    logic [63:0] counter;
+    logic halted;
 
-    logos_fabric #(.CELLS(4)) fabric (.*);
-
+    logos_cell dut (.*);
     always #5 clock = ~clock;
 
-    task set_cell(
-        input [1:0] at,
-        input [31:0] value,
-        input [1:0] up_kind,
-        input [1:0] up_target,
-        input [1:0] down_kind,
-        input [1:0] down_target,
-        input [1:0] zero_kind,
-        input [1:0] zero_target
-    );
+    task automatic send(input [1:0] opcode, input [63:0] data);
         @(negedge clock);
-        configure = 1;
-        configure_at = at;
-        configure_counter = value;
-        configure_up_kind = up_kind;
-        configure_up_target = up_target;
-        configure_down_kind = down_kind;
-        configure_down_target = down_target;
-        configure_zero_kind = zero_kind;
-        configure_zero_target = zero_target;
+        inbox_valid = 1;
+        inbox_opcode = opcode;
+        inbox_data = data;
         @(negedge clock);
-        configure = 0;
+        inbox_valid = 0;
     endtask
 
     initial begin
-        @(negedge clock);
+        repeat (2) @(negedge clock);
         reset = 0;
+        configure = 1;
+        configure_counter = 64'd1;
+        @(negedge clock);
+        configure = 0;
 
-        // Logos 0 owns 3. Every UP asks Logos 1 for the next unit.
-        set_cell(0, 3, DOWN, 1, DONE, 0, DONE, 0);
-        // Logos 1 owns 2. DOWN transfers one unit to Logos 0; zero ends.
-        set_cell(1, 2, DONE, 0, UP, 0, DONE, 0);
-        // Logos 2 and 3 remain free mass.
-        set_cell(2, 0, DONE, 0, DONE, 0, DONE, 0);
-        set_cell(3, 0, DONE, 0, DONE, 0, DONE, 0);
+        send(INC, 64'h1234);
+        if (counter != 2 || !outbox_valid || outbox_opcode != DEC ||
+            outbox_target != 9 || outbox_data != 64'h1234)
+            $fatal(1, "INC contract failed");
+
+        outbox_ready = 0;
+        inbox_valid = 1;
+        inbox_opcode = DEC;
+        inbox_data = 64'h5678;
+        repeat (2) @(negedge clock);
+        if (inbox_ready || counter != 2 || outbox_data != 64'h1234)
+            $fatal(1, "backpressure contract failed");
+
+        outbox_ready = 1;
+        @(negedge clock);
+        inbox_valid = 0;
+        if (counter != 1 || !outbox_valid || outbox_opcode != INC ||
+            outbox_target != 10 || outbox_data != 64'h5678)
+            $fatal(1, "DEC contract failed");
 
         @(negedge clock);
-        inject = 1;
-        inject_at = 1;
-        inject_kind = DOWN;
+        send(DEC, 64'h9abc);
+        if (counter != 0) $fatal(1, "DEC to zero failed");
         @(negedge clock);
-        inject = 0;
+        send(DEC, 64'hdef0);
+        if (counter != 0 || !outbox_valid || outbox_opcode != HALT ||
+            outbox_target != 11 || outbox_data != 64'hdef0)
+            $fatal(1, "zero reaction failed");
 
-        wait (done);
-        probe_at = 0;
-        #1;
-        if (probe_counter != 5) $fatal(1, "expected Logos 0 = 5, got %0d", probe_counter);
-        probe_at = 1;
-        #1;
-        if (probe_counter != 0) $fatal(1, "expected Logos 1 = 0, got %0d", probe_counter);
-        if (collision) $fatal(1, "unexpected fabric collision");
-        $display("ok logos0=5 logos1=0 pulses=%0d", pulses);
+        @(negedge clock);
+        send(HALT, 0);
+        if (!halted || inbox_ready) $fatal(1, "HALT contract failed");
+
+        $display("ok logos v0 counter=%0d halted=%0d", counter, halted);
         $finish;
-    end
-
-    initial begin
-        repeat (100) @(posedge clock);
-        $fatal(1, "Logos timeout");
     end
 endmodule

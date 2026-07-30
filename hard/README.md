@@ -66,9 +66,33 @@ racket racket/bootstrap/4-vm.rkt hard/mass-sort.s
 
 ## Logos
 
-`logos.sv` — первая физическая клетка Candy. У неё есть собственный счётчик, inbox, outbox и локальные правила реакции на `up`, `down` и `zero`. В тесте две Logos складывают `3 + 2` передачей импульсов без центрального счётчика команд.
+`LOGOS_SPEC.md` фиксирует Logos v0: 66-битный стикер, команды `NOP/INC/DEC/HALT`, 64-битный счётчик, таблицу реакций и lossless `valid/ready` handshake.
+
+`logos.sv` — синтезируемая реализация одной клетки. `logos_vm.py` — независимая эталонная VM, `logos-v0.s` — модель на S. `logos-v0.csv` фиксирует общую тактовую трассу. `logos_test.sv` проверяет арифметику, zero-ветку, сохранение данных, остановку и backpressure.
 
 ```bash
 verilator --binary --timing --top logos_test hard/logos.sv hard/logos_test.sv
 ./obj_dir/Vlogos_test
 ```
+
+Эталонная VM и модель S:
+
+```bash
+python3 hard/logos_vm.py
+racket racket/bootstrap/4-vm.rkt hard/logos-v0.s
+```
+
+## Fixed Logos addition protocol
+
+Two unmodified Logos cells calculate `5+3=8` by exchanging only `DEC`, `INC`
+and `HALT` stickers. The Python run prints every transfer; the RTL test applies
+the same configuration directly to two `logos_cell` instances.
+
+```bash
+python3 hard/logos_add.py
+verilator --binary --timing --top logos_add_test hard/logos.sv hard/logos_add_test.sv
+./obj_dir/Vlogos_add_test
+```
+
+The abandoned Lafont compiler branch is preserved in
+`archive/lafont-attempt/`; it is not part of the active path.

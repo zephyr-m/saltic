@@ -32,9 +32,7 @@
   (run-vm (compile-s-file/vm path)))
 
 (define (run-s-file/args path args [out (current-output-port)])
-  (define result (run-vm (compile-s-file/vm path) args))
-  (display (vm-run-result-output result) out)
-  (vm-run-result-value result))
+  (run-vm/stream (compile-s-file/vm path) args out))
 
 (define (run-s-string source [out (current-output-port)])
   (run-s-string/args source '() out))
@@ -58,6 +56,12 @@
       (run-function program (vm-program-entry program) args output state)
       none-value))
   (vm-run-result value (get-output-string output)))
+
+(define (run-vm/stream program args output)
+  (define state (vm-state (box '()) (box 1) (make-hash) (box '()) (box '())))
+  (with-handlers ([return-value? return-value-value])
+    (run-function program (vm-program-entry program) args output state)
+    none-value))
 
 (define (run-function program fn args output state)
   (unless (= (length args) (length (vm-function-params fn)))
@@ -195,6 +199,11 @@
     [(equal? name "core.io.show")
      (fprintf output "~a\n" (string-join (map value->text args) ""))
      none-value]
+    [(equal? name "core.io.clear")
+     (expect-vm-arg-count name args 0)
+     (fprintf output "\u001b[2J\u001b[H")
+     (flush-output output)
+     none-value]
     [(equal? name "host.io.println")
      (fprintf output "~a\n" (string-join (map value->text args) ""))
      none-value]
@@ -271,6 +280,14 @@
      (unless (string? text)
        (vm-error "host.str.lower expects string"))
      (string-downcase text)]
+    [(equal? name "host.time.sleep")
+     (expect-vm-arg-count name args 1)
+     (define milliseconds (first args))
+     (unless (and (real? milliseconds) (>= milliseconds 0))
+       (vm-error "host.time.sleep expects non-negative milliseconds"))
+     (flush-output output)
+     (sleep (/ milliseconds 1000.0))
+     none-value]
     [(equal? name "host.math.abs")
      (expect-vm-arg-count name args 1)
      (abs (first args))]
