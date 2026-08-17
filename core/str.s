@@ -1,4 +1,4 @@
-skill core_str_lines_count(text) {
+skill core_str_line_count(text) {
     @length = core_str_len(text)
     (length == 0) {
         out 0

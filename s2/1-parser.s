@@ -57,9 +57,9 @@ skill parser_token(kind, value, line, col) {
 
 skill parser_diagnostic(path, line, col, message) {
     @where = core.str.add(path, ":")
-    where = core.str.add(where, core_num_text(line))
+    where = core.str.add(where, core.num.text(line))
     where = core.str.add(where, ":")
-    where = core.str.add(where, core_num_text(col))
+    where = core.str.add(where, core.num.text(col))
     where = core.str.add(where, ": ")
     out core.str.add(where, message)
 }
@@ -1048,7 +1048,7 @@ skill parser_expand_file(path, root, locations, included, stack) {
     (parser_group_contains(stack, path) == yes) { out parser_load_error(path, "cyclic import involving ", included) }
     (parser_group_contains(included, path) == yes) { out SalticLoad { ast = parser_group1("program") included = included diagnostics = [] } }
     @next_included = core.group.add(included, path)
-    @source = core_file_read_text(path) rescue |error| {
+    @source = core.file.read(path) rescue |error| {
         out parser_load_error(path, "module not found at ", next_included)
     }
     @parsed = parser_parse_string(source, path)
@@ -1116,4 +1116,18 @@ skill parser_load_file(path, root) {
 
 skill parser_load_file_loc(path, root) {
     out parser_expand_file(path, root, yes, [], [])
+}
+
+program(path) {
+    @parsed = parser_load_file(path, ".")
+    @diagnostic_count = core.group.count(parsed.diagnostics)
+
+    core.io.show("ast items: ", core.group.count(parsed.ast))
+    core.io.show("diagnostics: ", diagnostic_count)
+
+    (diagnostic_count > 0) {
+        out error.ParseFailed
+    }
+
+    out none
 }

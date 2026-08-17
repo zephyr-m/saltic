@@ -45,13 +45,13 @@ skill spend(actor, cost) {
 
 skill show(actor) {
     (actor.state) {
-        .READY => core.io.println(actor.name, " is ready"),
-        .ACTIVE => core.io.println(actor.name, " is active"),
-        .FAILED => core.io.println(actor.name, " needs rescue"),
+        .READY => core.io.show(actor.name, " is ready"),
+        .ACTIVE => core.io.show(actor.name, " is active"),
+        .FAILED => core.io.show(actor.name, " needs rescue"),
     }
 
-    core.io.println("energy: ", actor.energy)
-    core.io.println("position: ", actor.position.x, ",", actor.position.y)
+    core.io.show("energy: ", actor.energy)
+    core.io.show("position: ", actor.position.x, ",", actor.position.y)
     out none
 }
 
@@ -68,7 +68,7 @@ program() {
     drum (core.group.count(costs)) {
         @cost = core.group.at(costs, index)
         actor = spend(actor, cost) rescue |err| {
-            core.io.println("failed: ", err)
+            core.io.show("failed: ", err)
             actor
         }
         index = index + 1
