@@ -79,7 +79,18 @@ class Parser {
   skill(){this.take();const n=this.ident('expected skill name');this.expect('LPAREN');const p=this.params();this.expect('RPAREN');return ['skill',n,p,this.block()]}
   params(){const p=[];if(this.is('RPAREN'))return p;while(true){p.push(this.ident('expected parameter name'));if(!this.is('COMMA'))return p;this.take()}}
   constant(){const n=this.ident();this.expect('ASSIGN');return ['const',n,this.expression()]}
-  box(){const n=this.ident();this.expect('ASSIGN');this.expect('BOX');return ['box',n,...this.fields()]}
+  box(){const n=this.ident();this.expect('ASSIGN');this.expect('BOX');return ['box',n,...this.boxMembers()]}
+  boxMembers(){
+    this.expect('LBRACE');const a=[];this.lines()
+    while(!this.is('RBRACE')){
+      if(this.is('EOF'))this.error('expected }')
+      if(this.is('SKILL'))a.push(this.subjectSkill())
+      else {const n=this.ident('expected field or skill');this.expect('ASSIGN','expected = after field name');a.push(['field',n,this.expression()])}
+      if(this.is('COMMA'))this.take();this.lines()
+    }
+    this.take();return a
+  }
+  subjectSkill(){this.take();const n=this.ident('expected skill name');this.expect('LPAREN');const p=this.params();this.expect('RPAREN');return ['subject-skill',n,p,this.block()]}
   enum(){
     const n=this.ident();this.expect('ASSIGN');this.expect('ENUM');this.expect('LBRACE');const v=[];this.lines()
     while(!this.is('RBRACE')){v.push(this.ident('expected enum variant'));if(this.is('COMMA'))this.take();this.lines()}
@@ -95,9 +106,14 @@ class Parser {
     if(this.is('OUT')){this.take();return ['out',this.expression()]}
     if(this.is('DRUM'))return this.drum()
     if(this.is('LPAREN'))return this.parenBlock()
-    if(this.is('IDENT')&&this.is('ASSIGN',1)){const n=this.ident();this.take();return ['assign',n,this.expression()]}
+    if(this.assignmentAhead()){
+      const target=this.pathExpr();this.expect('ASSIGN')
+      if(target.length===2)return ['assign',target[1],this.expression()]
+      return ['field-assign',target,this.expression()]
+    }
     return ['expr',this.expression()]
   }
+  assignmentAhead(){let n=1;while(this.is('DOT',n)&&this.is('IDENT',n+1))n+=2;return this.is('ASSIGN',n)}
   variable(){this.take();const n=this.ident('expected variable name');this.expect('ASSIGN','expected = after variable name');return ['var',n,this.expression()]}
   drum(){this.take();this.expect('LPAREN','expected ( after drum');const n=this.expression();this.expect('RPAREN');return ['drum',n,this.block()]}
   parenBlock(){
@@ -153,7 +169,7 @@ class Parser {
   pathExpr(){const a=[this.ident()];while(this.is('DOT')&&this.is('IDENT',1)){this.take();a.push(this.ident())}return ['path',...a]}
 }
 
-for (const name of ['use','entry','skill','constant','box','enum','block','variable','drum','parenBlock','group','pathExpr','primary']) {
+for (const name of ['use','entry','skill','subjectSkill','constant','box','enum','block','variable','drum','parenBlock','group','pathExpr','primary']) {
   const parse = Parser.prototype[name]
   Parser.prototype[name] = function (...args) {
     const start = this.peek()
@@ -165,7 +181,7 @@ const originalStatement = Parser.prototype.statement
 Parser.prototype.statement = function (...args) {
   const start = this.peek()
   const node = originalStatement.apply(this, args)
-  if (node[0] === 'assign' || node[0] === 'out') locate(node, start)
+  if (node[0] === 'assign' || node[0] === 'field-assign' || node[0] === 'out') locate(node, start)
   return node
 }
 

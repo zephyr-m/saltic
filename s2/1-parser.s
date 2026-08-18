@@ -1,7 +1,40 @@
 use core
 
+TokenKind = enum {
+    INVALID, IDENT, NUMBER, STRING, NEWLINE, EOF,
+    SKILL, PROGRAM, USE, BOX, OUT, ENUM, DRUM, RESCUE,
+    YES, NO, NONE,
+    AT, LBRACE, RBRACE, LBRACKET, RBRACKET, LPAREN, RPAREN,
+    COMMA, DOT, PIPE, ASSIGN, EQ, ARROW,
+    GT, LT, PLUS, MINUS, STAR, SLASH,
+}
+
+Newline = "\n"
+Tab = "\t"
+Quote = "\""
+Escape = "\\"
+EscapeNewline = "n"
+EscapeTab = "t"
+
+Signs = ["@", "{", "}", "[", "]", "(", ")", ",", ".", "|", "=", ">", "<", "+", "-", "*", "/"]
+
+SignKinds = [
+    TokenKind.AT, TokenKind.LBRACE, TokenKind.RBRACE,
+    TokenKind.LBRACKET, TokenKind.RBRACKET, TokenKind.LPAREN, TokenKind.RPAREN,
+    TokenKind.COMMA, TokenKind.DOT, TokenKind.PIPE, TokenKind.ASSIGN,
+    TokenKind.GT, TokenKind.LT, TokenKind.PLUS, TokenKind.MINUS, TokenKind.STAR, TokenKind.SLASH,
+]
+
+Keywords = ["skill", "program", "use", "Box", "out", "enum", "drum", "rescue", "yes", "no", "none"]
+
+KeywordKinds = [
+    TokenKind.SKILL, TokenKind.PROGRAM, TokenKind.USE, TokenKind.BOX,
+    TokenKind.OUT, TokenKind.ENUM, TokenKind.DRUM, TokenKind.RESCUE,
+    TokenKind.YES, TokenKind.NO, TokenKind.NONE,
+]
+
 SalticToken = Box {
-    kind = ""
+    kind = TokenKind.INVALID
     value = ""
     line = 1
     col = 1
@@ -10,6 +43,884 @@ SalticToken = Box {
 SalticScan = Box {
     tokens = []
     diagnostics = []
+}
+
+SalticLexeme = Box {
+    token = none
+    next = 0
+    line = 1
+    col = 1
+    diagnostics = []
+}
+
+SalticLexer = Box {
+    source = ""
+    path = ""
+
+    skill token(kind, value, line, col) {
+        out SalticToken { kind = kind value = value line = line col = col }
+    }
+
+    skill ascii_letter(ch) {
+        out core.str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", ch)
+    }
+
+    skill ident_start(ch) {
+        (ascii_letter(ch) == yes) { out yes }
+        (ch == "_") { out yes }
+        @upper = core.str.upper(ch)
+        @lower = core.str.lower(ch)
+        (upper == lower) { out no }
+        out yes
+    }
+
+    skill ident_part(ch) {
+        (ident_start(ch) == yes) { out yes }
+        out parser_is_digit(ch)
+    }
+
+    skill word(start, line, col) {
+        @index = start
+        @next_col = col
+        @length = core.str.len(source)
+        @reading = yes
+        drum (length) {
+            (reading == yes) {
+                (index < length) {
+                    @part = core.str.at(source, index)
+                    (ident_part(part) == yes) { index = index + 1 next_col = next_col + 1 }
+                    (ident_part(part) == no) { reading = no }
+                }
+                (index == length) { reading = no }
+            }
+        }
+        @value = core.str.slice(source, start, index)
+        out SalticLexeme {
+            token = token(word_kind(value), value, line, col)
+            next = index
+            line = line
+            col = next_col
+        }
+    }
+
+    skill number(start, line, col) {
+        @index = start
+        @next_col = col
+        @length = core.str.len(source)
+        @dot = no
+        @reading = yes
+        drum (length) {
+            (reading == yes) {
+                (index < length) {
+                    @digit = core.str.at(source, index)
+                    @take = parser_is_digit(digit)
+                    (digit == ".") {
+                        (dot == no) {
+                            (index + 1 < length) {
+                                (parser_is_digit(core.str.at(source, index + 1)) == yes) { take = yes dot = yes }
+                            }
+                        }
+                    }
+                    (take == yes) { index = index + 1 next_col = next_col + 1 }
+                    (take == no) { reading = no }
+                }
+                (index == length) { reading = no }
+            }
+        }
+        out SalticLexeme {
+            token = token(TokenKind.NUMBER, core.str.slice(source, start, index), line, col)
+            next = index
+            line = line
+            col = next_col
+        }
+    }
+
+    skill text(start, line, col) {
+        @index = start + 1
+        @next_line = line
+        @next_col = col + 1
+        @length = core.str.len(source)
+        @value = ""
+        @closed = no
+        @diagnostics = []
+        drum (length) {
+            (closed == no) {
+                (index < length) {
+                    @ch = core.str.at(source, index)
+                    (ch == Quote) { closed = yes index = index + 1 next_col = next_col + 1 }
+                    (ch == Escape) {
+                        (closed == no) {
+                            (index + 1 < length) {
+                                @escape = core.str.at(source, index + 1)
+                                @decoded = escape
+                                (escape == EscapeNewline) { decoded = Newline }
+                                (escape == EscapeTab) { decoded = Tab }
+                                (escape == Quote) { decoded = Quote }
+                                (escape == Escape) { decoded = Escape }
+                                value = core.str.add(value, decoded)
+                                index = index + 2
+                                next_col = next_col + 2
+                            }
+                            (index + 1 == length) {
+                                diagnostics = core.group.add(diagnostics, parser_diagnostic(path, next_line, next_col, "unterminated escape"))
+                                closed = yes
+                            }
+                        }
+                    }
+                    (closed == no) {
+                        (ch == Newline) { value = core.str.add(value, ch) index = index + 1 next_line = next_line + 1 next_col = 1 }
+                        @ordinary = yes
+                        (ch == Newline) { ordinary = no }
+                        (ch == Quote) { ordinary = no }
+                        (ch == Escape) { ordinary = no }
+                        (ordinary == yes) { value = core.str.add(value, ch) index = index + 1 next_col = next_col + 1 }
+                    }
+                }
+                (closed == no) {
+                    (index == length) {
+                        diagnostics = core.group.add(diagnostics, parser_diagnostic(path, line, col, "unterminated string"))
+                        closed = yes
+                    }
+                }
+            }
+        }
+        @result_token = none
+        (parser_has_diagnostics(diagnostics) == no) { result_token = token(TokenKind.STRING, value, line, col) }
+        out SalticLexeme {
+            token = result_token
+            next = index
+            line = next_line
+            col = next_col
+            diagnostics = diagnostics
+        }
+    }
+
+    skill table_kind(values, kinds, value, fallback) {
+        @index = 0
+        @count = core.group.count(values)
+        drum (count) {
+            (index < count) {
+                (core.group.item(values, index) == value) { out core.group.item(kinds, index) }
+                index = index + 1
+            }
+        }
+        out fallback
+    }
+
+    skill word_kind(word) {
+        out table_kind(Keywords, KeywordKinds, word, TokenKind.IDENT)
+    }
+
+    skill sign_kind(ch) {
+        out table_kind(Signs, SignKinds, ch, TokenKind.INVALID)
+    }
+
+    skill scan() {
+        @tokens = []
+        @diagnostics = []
+        @index = 0
+        @line = 1
+        @col = 1
+        @length = core.str.len(source)
+        @active = yes
+        drum (length + 1) {
+            (active == yes) {
+                (index < length) {
+                    @ch = core.str.at(source, index)
+                    @handled = no
+                    (ch == " ") { index = index + 1 col = col + 1 handled = yes }
+                    (ch == Tab) { index = index + 1 col = col + 1 handled = yes }
+                    (ch == Newline) {
+                        tokens = core.group.add(tokens, token(TokenKind.NEWLINE, Newline, line, col))
+                        index = index + 1
+                        line = line + 1
+                        col = 1
+                        handled = yes
+                    }
+                    (handled == no) {
+                        (ident_start(ch) == yes) {
+                            @lexeme = word(index, line, col)
+                            tokens = core.group.add(tokens, lexeme.token)
+                            index = lexeme.next
+                            line = lexeme.line
+                            col = lexeme.col
+                            handled = yes
+                        }
+                    }
+                    (handled == no) {
+                        (parser_is_digit(ch) == yes) {
+                            @lexeme = number(index, line, col)
+                            tokens = core.group.add(tokens, lexeme.token)
+                            index = lexeme.next
+                            line = lexeme.line
+                            col = lexeme.col
+                            handled = yes
+                        }
+                    }
+                    (handled == no) {
+                        (ch == Quote) {
+                            @lexeme = text(index, line, col)
+                            index = lexeme.next
+                            line = lexeme.line
+                            col = lexeme.col
+                            diagnostics = lexeme.diagnostics
+                            (parser_has_diagnostics(diagnostics) == no) { tokens = core.group.add(tokens, lexeme.token) }
+                            (parser_has_diagnostics(diagnostics) == yes) { active = no }
+                            handled = yes
+                        }
+                    }
+                    (handled == no) {
+                        @pair = ""
+                        (index + 1 < length) { pair = core.str.slice(source, index, index + 2) }
+                        (pair == "==") { tokens = core.group.add(tokens, token(TokenKind.EQ, pair, line, col)) index = index + 2 col = col + 2 handled = yes }
+                        (pair == "=>") { tokens = core.group.add(tokens, token(TokenKind.ARROW, pair, line, col)) index = index + 2 col = col + 2 handled = yes }
+                    }
+                    (handled == no) {
+                        @sign = sign_kind(ch)
+                        @valid_sign = yes
+                        (sign == TokenKind.INVALID) {
+                            @message = core.str.add("unexpected character ", ch)
+                            diagnostics = core.group.add(diagnostics, parser_diagnostic(path, line, col, message))
+                            active = no
+                            valid_sign = no
+                        }
+                        (valid_sign == yes) {
+                            tokens = core.group.add(tokens, token(sign, ch, line, col))
+                            index = index + 1
+                            col = col + 1
+                            handled = yes
+                        }
+                    }
+                }
+                (index == length) { active = no }
+            }
+        }
+        tokens = core.group.add(tokens, token(TokenKind.EOF, "", line, col))
+        out SalticScan { tokens = tokens diagnostics = diagnostics }
+    }
+}
+
+SalticCursor = Box {
+    tokens = []
+    index = 0
+
+    skill at(offset) {
+        out core.group.item(tokens, index + offset)
+    }
+
+    skill peek() {
+        @token = at(0)
+        out token
+    }
+
+    skill is(kind) {
+        @token = peek()
+        out token.kind == kind
+    }
+
+    skill is_at(offset, kind) {
+        @token = at(offset)
+        out token.kind == kind
+    }
+
+    skill next() {
+        @cursor = SalticCursor()
+        cursor.tokens = tokens
+        cursor.index = index + 1
+        out cursor
+    }
+
+    skill move(count) {
+        @cursor = SalticCursor()
+        cursor.tokens = tokens
+        cursor.index = index + count
+        out cursor
+    }
+}
+
+SalticParser = Box {
+    tokens = []
+    path = ""
+    locations = no
+
+    skill at(index) {
+        out core.group.item(tokens, index)
+    }
+
+    skill is(index, kind) {
+        @token = at(index)
+        out token.kind == kind
+    }
+
+    skill skip_lines(index) {
+        @next = index
+        @count = core.group.count(tokens)
+        drum (count) {
+            (next < count) {
+                (is(next, TokenKind.NEWLINE) == yes) { next = next + 1 }
+            }
+        }
+        out next
+    }
+
+    skill fail(index, message) {
+        @token = at(index)
+        @tail = core.str.add(message, ", got ")
+        tail = core.str.add(tail, token.kind)
+        out SalticRead {
+            node = parser_node("", [])
+            next = index
+            diagnostics = parser_group1(parser_diagnostic(path, token.line, token.col, tail))
+        }
+    }
+
+    skill expect(index, kind, message) {
+        @token = at(index)
+        (is(index, kind) == yes) { out parser_ok("token", parser_group1(token.value), index + 1) }
+        out fail(index, message)
+    }
+
+    skill field_item(start, item_message) {
+        (is(start, TokenKind.IDENT) == no) { out fail(start, item_message) }
+        @name_token = at(start)
+        @eq = expect(start + 1, TokenKind.ASSIGN, "expected = after field name")
+        (parser_has_diagnostics(eq.diagnostics) == yes) { out eq }
+        @value = expression(eq.next)
+        (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+        out parser_ok("field", parser_group3("field", name_token.value, value.node.datum), value.next)
+    }
+
+    skill sequence_item(start, item_kind, item_message) {
+        (item_kind == "name") {
+            (is(start, TokenKind.IDENT) == no) { out fail(start, item_message) }
+            @token = at(start)
+            out parser_ok("name", token.value, start + 1)
+        }
+        (item_kind == "expression") {
+            @value = expression(start)
+            (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+            out parser_ok("expression", value.node.datum, value.next)
+        }
+        (item_kind == "field") { out field_item(start, item_message) }
+        (item_kind == "member") {
+            (is(start, TokenKind.SKILL) == yes) {
+                @member_skill = subject_skill(start)
+                (parser_has_diagnostics(member_skill.diagnostics) == yes) { out member_skill }
+                out parser_ok("member", member_skill.node.datum, member_skill.next)
+            }
+            out field_item(start, item_message)
+        }
+        (item_kind == "statement") {
+            @value = statement(start)
+            (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+            out parser_ok("statement", value.node.datum, value.next)
+        }
+        out fail(start, item_message)
+    }
+
+    skill sequence(start, end_kind, item_kind, item_message, eof_message, require_separator, allow_comma) {
+        @items = []
+        @next = skip_lines(start)
+        @done = no
+        @diagnostics = []
+        @count = core.group.count(tokens)
+        drum (count) {
+            (done == no) {
+                (is(next, end_kind) == yes) {
+                    next = next + 1
+                    done = yes
+                }
+                (done == no) {
+                    (is(next, TokenKind.EOF) == yes) {
+                        @failure = fail(next, eof_message)
+                        diagnostics = failure.diagnostics
+                        done = yes
+                    }
+                }
+                (done == no) {
+                    @item = sequence_item(next, item_kind, item_message)
+                    (parser_has_diagnostics(item.diagnostics) == yes) { diagnostics = item.diagnostics done = yes }
+                    (done == no) {
+                        items = core.group.add(items, item.node.datum)
+                        next = item.next
+                        @separated = no
+                        (allow_comma == yes) {
+                            (is(next, TokenKind.COMMA) == yes) {
+                                next = next + 1
+                                separated = yes
+                            }
+                        }
+                        @before_lines = next
+                        next = skip_lines(next)
+                        (next > before_lines) { separated = yes }
+                        (is(next, end_kind) == no) {
+                            (require_separator == yes) {
+                                (separated == no) {
+                                    @separator_failure = fail(next, "expected separator")
+                                    diagnostics = separator_failure.diagnostics
+                                    done = yes
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out SalticRead { node = parser_node("sequence", items) next = next diagnostics = diagnostics }
+    }
+
+    skill names(start, end_kind, item_message) {
+        @items = sequence(start, end_kind, "name", item_message, item_message, yes, yes)
+        out SalticRead { node = parser_node("names", items.node.datum) next = items.next diagnostics = items.diagnostics }
+    }
+
+    skill params(start) {
+        @parsed_names = names(start, TokenKind.RPAREN, "expected parameter name")
+        out SalticRead { node = parser_node("params", parsed_names.node.datum) next = parsed_names.next diagnostics = parsed_names.diagnostics }
+    }
+
+    skill module(start) {
+        @cursor = SalticCursor()
+        cursor.tokens = tokens
+        cursor.index = start
+        @token = cursor.peek()
+        cursor = cursor.next()
+        @module = path_at(cursor.index, no)
+        (parser_has_diagnostics(module.diagnostics) == yes) { out module }
+        @parts = module.node.datum
+        @datum = parser_group1("use")
+        datum = parser_append_tail(datum, parts, 1)
+        out parser_ok("use", parser_loc(datum, token, locations), module.next)
+    }
+
+    skill constant(start) {
+        @token = at(start)
+        @value = expression(start + 2)
+        (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+        out parser_ok("const", parser_loc(parser_group3("const", token.value, value.node.datum), token, locations), value.next)
+    }
+
+    skill entry(start) {
+        @token = at(start)
+        @open = expect(start + 1, TokenKind.LPAREN, "expected ( after program")
+        (parser_has_diagnostics(open.diagnostics) == yes) { out open }
+        @params = params(open.next)
+        (parser_has_diagnostics(params.diagnostics) == yes) { out params }
+        @body = block(params.next)
+        (parser_has_diagnostics(body.diagnostics) == yes) { out body }
+        out parser_ok("entry", parser_loc(parser_group3("entry", params.node.datum, body.node.datum), token, locations), body.next)
+    }
+
+    skill named_skill(start) {
+        @token = at(start)
+        (is(start + 1, TokenKind.IDENT) == no) { out fail(start + 1, "expected skill name") }
+        @name_token = at(start + 1)
+        @name = name_token.value
+        @open = expect(start + 2, TokenKind.LPAREN, "expected LPAREN")
+        (parser_has_diagnostics(open.diagnostics) == yes) { out open }
+        @params = params(open.next)
+        (parser_has_diagnostics(params.diagnostics) == yes) { out params }
+        @body = block(params.next)
+        (parser_has_diagnostics(body.diagnostics) == yes) { out body }
+        out parser_ok("skill", parser_loc(parser_group4("skill", name, params.node.datum, body.node.datum), token, locations), body.next)
+    }
+
+    skill subject_skill(start) {
+        @token = at(start)
+        (is(start + 1, TokenKind.IDENT) == no) { out fail(start + 1, "expected skill name") }
+        @name_token = at(start + 1)
+        @open = expect(start + 2, TokenKind.LPAREN, "expected LPAREN")
+        (parser_has_diagnostics(open.diagnostics) == yes) { out open }
+        @params = params(open.next)
+        (parser_has_diagnostics(params.diagnostics) == yes) { out params }
+        @body = block(params.next)
+        (parser_has_diagnostics(body.diagnostics) == yes) { out body }
+        out parser_ok("subject-skill", parser_loc(parser_group4("subject-skill", name_token.value, params.node.datum, body.node.datum), token, locations), body.next)
+    }
+
+    skill box_members(start) {
+        @open = expect(start, TokenKind.LBRACE, "expected LBRACE")
+        (parser_has_diagnostics(open.diagnostics) == yes) { out open }
+        @members = sequence(open.next, TokenKind.RBRACE, "member", "expected field or skill", "expected }", no, yes)
+        out SalticRead { node = parser_node("box-members", members.node.datum) next = members.next diagnostics = members.diagnostics }
+    }
+
+    skill enumeration(start) {
+        @token = at(start)
+        @open = expect(start + 3, TokenKind.LBRACE, "expected LBRACE")
+        (parser_has_diagnostics(open.diagnostics) == yes) { out open }
+        @datum = parser_group2("enum", token.value)
+        @variants = names(open.next, TokenKind.RBRACE, "expected enum variant")
+        (parser_has_diagnostics(variants.diagnostics) == yes) { out variants }
+        datum = parser_append_tail(datum, variants.node.datum, 0)
+        out parser_ok("enum", parser_loc(datum, token, locations), variants.next)
+    }
+
+    skill box(start) {
+        @token = at(start)
+        @members = box_members(start + 3)
+        (parser_has_diagnostics(members.diagnostics) == yes) { out members }
+        @datum = parser_group2("box", token.value)
+        datum = parser_append_tail(datum, members.node.datum, 0)
+        out parser_ok("box", parser_loc(datum, token, locations), members.next)
+    }
+
+    skill top(start) {
+        @token = at(start)
+        (token.kind == TokenKind.USE) { out module(start) }
+        (token.kind == TokenKind.PROGRAM) { out entry(start) }
+        (token.kind == TokenKind.SKILL) { out named_skill(start) }
+        (token.kind == TokenKind.IDENT) {
+            (is(start + 1, TokenKind.ASSIGN) == yes) {
+                (is(start + 2, TokenKind.BOX) == yes) { out box(start) }
+                (is(start + 2, TokenKind.ENUM) == yes) { out enumeration(start) }
+                out constant(start)
+            }
+        }
+        out fail(start, "expected top-level declaration")
+    }
+
+    skill parse_tokens() {
+        @ast = parser_group1("program")
+        @next = skip_lines(0)
+        @diagnostics = []
+        @done = no
+        @count = core.group.count(tokens)
+        drum (count) {
+            (done == no) {
+                (is(next, TokenKind.EOF) == yes) { done = yes }
+                (done == no) {
+                    @item = top(next)
+                    (parser_has_diagnostics(item.diagnostics) == yes) { diagnostics = item.diagnostics done = yes }
+                    (done == no) { ast = core.group.add(ast, item.node.datum) next = skip_lines(item.next) }
+                }
+            }
+        }
+        out SalticParse { ast = ast tokens = tokens diagnostics = diagnostics }
+    }
+
+    skill path_at(start, with_locations) {
+        @cursor = SalticCursor()
+        cursor.tokens = tokens
+        cursor.index = start
+        (cursor.is(TokenKind.IDENT) == no) { out fail(cursor.index, "expected identifier") }
+        @token = cursor.peek()
+        @parts = parser_group2("path", token.value)
+        cursor = cursor.next()
+        @count = core.group.count(tokens)
+        @active = yes
+        drum (count) {
+            (active == yes) {
+                (cursor.index + 1 < count) {
+                    (cursor.is(TokenKind.DOT) == yes) {
+                        @has_part = cursor.is_at(1, TokenKind.IDENT)
+                        (has_part == yes) {
+                            @part_token = cursor.at(1)
+                            parts = core.group.add(parts, part_token.value)
+                            cursor = cursor.move(2)
+                        }
+                        (has_part == no) { active = no }
+                    }
+                    (cursor.is(TokenKind.DOT) == no) { active = no }
+                }
+                (cursor.index + 1 == count) { active = no }
+            }
+        }
+        out parser_ok("path", parser_loc(parts, token, with_locations), cursor.index)
+    }
+
+    skill expressions(start, end_kind) {
+        @items = sequence(start, end_kind, "expression", "expected expression", "expected closing token", no, yes)
+        out SalticRead { node = parser_node("expressions", items.node.datum) next = items.next diagnostics = items.diagnostics }
+    }
+
+    skill primary(start) {
+        @token = at(start)
+        (token.kind == TokenKind.NUMBER) { out parser_ok("number", parser_loc(parser_group2("number", parser_number_value(token.value)), token, locations), start + 1) }
+        (token.kind == TokenKind.STRING) { out parser_ok("string", parser_loc(parser_group2("string", token.value), token, locations), start + 1) }
+        (token.kind == TokenKind.YES) { out parser_ok("answer", parser_loc(parser_group2("answer", "yes"), token, locations), start + 1) }
+        (token.kind == TokenKind.NO) { out parser_ok("answer", parser_loc(parser_group2("answer", "no"), token, locations), start + 1) }
+        (token.kind == TokenKind.NONE) { out parser_ok("none", parser_loc(parser_group1("none"), token, locations), start + 1) }
+        (token.kind == TokenKind.DOT) {
+            (is(start + 1, TokenKind.IDENT) == no) { out fail(start + 1, "expected enum value") }
+            @name_token = at(start + 1)
+            out parser_ok("enum-value", parser_loc(parser_group2("enum-value", name_token.value), token, locations), start + 2)
+        }
+        (token.kind == TokenKind.LBRACKET) { out group(start) }
+        (token.kind == TokenKind.IDENT) { out path_at(start, locations) }
+        (token.kind == TokenKind.LPAREN) {
+            @inside = expression(start + 1)
+            (parser_has_diagnostics(inside.diagnostics) == yes) { out inside }
+            @close = expect(inside.next, TokenKind.RPAREN, "expected RPAREN")
+            (parser_has_diagnostics(close.diagnostics) == yes) { out close }
+            out SalticRead { node = inside.node next = close.next diagnostics = [] }
+        }
+        out fail(start, "expected expression")
+    }
+
+    skill args(start) {
+        @expressions = expressions(start + 1, TokenKind.RPAREN)
+        out SalticRead { node = parser_node("args", expressions.node.datum) next = expressions.next diagnostics = expressions.diagnostics }
+    }
+
+    skill fields(start) {
+        @open = expect(start, TokenKind.LBRACE, "expected LBRACE")
+        (parser_has_diagnostics(open.diagnostics) == yes) { out open }
+        @fields = sequence(open.next, TokenKind.RBRACE, "field", "expected field name", "expected }", no, yes)
+        out SalticRead { node = parser_node("fields", fields.node.datum) next = fields.next diagnostics = fields.diagnostics }
+    }
+
+    skill postfix(start) {
+        @base = primary(start)
+        (parser_has_diagnostics(base.diagnostics) == yes) { out base }
+        @node = base.node
+        @next = base.next
+        @active = yes
+        @diagnostics = []
+        @count = core.group.count(tokens)
+        drum (count) {
+            (active == yes) {
+                (is(next, TokenKind.LPAREN) == yes) {
+                    @call_token = at(next)
+                    @args = args(next)
+                    (parser_has_diagnostics(args.diagnostics) == yes) { diagnostics = args.diagnostics active = no }
+                    (parser_has_diagnostics(args.diagnostics) == no) {
+                        @call = parser_group2("call", node.datum)
+                        call = parser_append_tail(call, args.node.datum, 0)
+                        node = parser_node("call", parser_loc(call, call_token, locations))
+                        next = args.next
+                    }
+                }
+                (is(next, TokenKind.LPAREN) == no) {
+                    @box_candidate = no
+                    (node.tag == "path") {
+                        @plain_path = node.datum
+                        (locations == yes) { plain_path = core.group.item(node.datum, 3) }
+                        (core.group.count(plain_path) == 2) {
+                            (is(next, TokenKind.LBRACE) == yes) { box_candidate = yes }
+                        }
+                    }
+                    (box_candidate == yes) {
+                        @box_token = at(next)
+                        @fields = fields(next)
+                        (parser_has_diagnostics(fields.diagnostics) == yes) { diagnostics = fields.diagnostics active = no }
+                        (parser_has_diagnostics(fields.diagnostics) == no) {
+                            @plain_name = node.datum
+                            (locations == yes) { plain_name = core.group.item(node.datum, 3) }
+                            @box = parser_group2("box-new", core.group.item(plain_name, 1))
+                            box = parser_append_tail(box, fields.node.datum, 0)
+                            node = parser_node("box-new", parser_loc(box, box_token, locations))
+                            next = fields.next
+                        }
+                    }
+                    (box_candidate == no) { active = no }
+                }
+            }
+        }
+        out SalticRead { node = node next = next diagnostics = diagnostics }
+    }
+
+    skill precedence(kind) {
+        (kind == TokenKind.EQ) { out 1 }
+        (kind == TokenKind.GT) { out 1 }
+        (kind == TokenKind.LT) { out 1 }
+        (kind == TokenKind.PLUS) { out 2 }
+        (kind == TokenKind.MINUS) { out 2 }
+        (kind == TokenKind.STAR) { out 3 }
+        (kind == TokenKind.SLASH) { out 3 }
+        out 0
+    }
+
+    skill binary(start, minimum) {
+        @first = postfix(start)
+        (parser_has_diagnostics(first.diagnostics) == yes) { out first }
+        @left = first.node
+        @next = first.next
+        @active = yes
+        @diagnostics = []
+        @count = core.group.count(tokens)
+        drum (count) {
+            (active == yes) {
+                @operator = at(next)
+                @level = precedence(operator.kind)
+                (level < minimum) { active = no }
+                (level == 0) { active = no }
+                (active == yes) {
+                    @right = binary(next + 1, level + 1)
+                    (parser_has_diagnostics(right.diagnostics) == yes) { diagnostics = right.diagnostics active = no }
+                    (parser_has_diagnostics(right.diagnostics) == no) {
+                        left = parser_node("binary", parser_loc(parser_group4("binary", operator.value, left.datum, right.node.datum), operator, locations))
+                        next = right.next
+                    }
+                }
+            }
+        }
+        out SalticRead { node = left next = next diagnostics = diagnostics }
+    }
+
+    skill expression(start) {
+        @value = binary(start, 0)
+        (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+        (is(value.next, TokenKind.RESCUE) == yes) {
+            @rescue_token = at(value.next)
+            @pipe = expect(value.next + 1, TokenKind.PIPE, "expected PIPE")
+            (parser_has_diagnostics(pipe.diagnostics) == yes) { out pipe }
+            (is(pipe.next, TokenKind.IDENT) == no) { out fail(pipe.next, "expected rescue error name") }
+            @error_token = at(pipe.next)
+            @error_name = error_token.value
+            @pipe2 = expect(pipe.next + 1, TokenKind.PIPE, "expected PIPE")
+            (parser_has_diagnostics(pipe2.diagnostics) == yes) { out pipe2 }
+            @body = block(pipe2.next)
+            (parser_has_diagnostics(body.diagnostics) == yes) { out body }
+            out parser_ok("rescue", parser_loc(parser_group4("rescue", value.node.datum, error_name, body.node.datum), rescue_token, locations), body.next)
+        }
+        out value
+    }
+
+    skill group(start) {
+        @token = at(start)
+        @expressions = expressions(start + 1, TokenKind.RBRACKET)
+        (parser_has_diagnostics(expressions.diagnostics) == yes) { out expressions }
+        @items = parser_group1("group")
+        items = parser_append_tail(items, expressions.node.datum, 0)
+        out parser_ok("group", parser_loc(items, token, locations), expressions.next)
+    }
+
+    skill block(start) {
+        @token = at(start)
+        @open = expect(start, TokenKind.LBRACE, "expected LBRACE")
+        (parser_has_diagnostics(open.diagnostics) == yes) { out open }
+        @statements = sequence(open.next, TokenKind.RBRACE, "statement", "expected statement", "expected }", no, no)
+        @items = parser_group1("block")
+        items = parser_append_tail(items, statements.node.datum, 0)
+        out SalticRead { node = parser_node("block", parser_loc(items, token, locations)) next = statements.next diagnostics = statements.diagnostics }
+    }
+
+    skill variable(start) {
+        @token = at(start)
+        (is(start + 1, TokenKind.IDENT) == no) { out fail(start + 1, "expected variable name") }
+        @name_token = at(start + 1)
+        @name = name_token.value
+        @eq = expect(start + 2, TokenKind.ASSIGN, "expected = after variable name")
+        (parser_has_diagnostics(eq.diagnostics) == yes) { out eq }
+        @value = expression(eq.next)
+        (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+        out parser_ok("var", parser_loc(parser_group3("var", name, value.node.datum), token, locations), value.next)
+    }
+
+    skill assign(start) {
+        @token = at(start)
+        @value = expression(start + 2)
+        (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+        out parser_ok("assign", parser_loc(parser_group3("assign", token.value, value.node.datum), token, locations), value.next)
+    }
+
+    skill field_assign(start) {
+        @token = at(start)
+        @target = path_at(start, locations)
+        (parser_has_diagnostics(target.diagnostics) == yes) { out target }
+        @eq = expect(target.next, TokenKind.ASSIGN, "expected ASSIGN")
+        (parser_has_diagnostics(eq.diagnostics) == yes) { out eq }
+        @value = expression(eq.next)
+        (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+        out parser_ok("field-assign", parser_loc(parser_group3("field-assign", target.node.datum, value.node.datum), token, locations), value.next)
+    }
+
+    skill out_statement(start) {
+        @token = at(start)
+        @value = expression(start + 1)
+        (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+        out parser_ok("out", parser_loc(parser_group2("out", value.node.datum), token, locations), value.next)
+    }
+
+    skill drum_statement(start) {
+        @token = at(start)
+        @open = expect(start + 1, TokenKind.LPAREN, "expected ( after drum")
+        (parser_has_diagnostics(open.diagnostics) == yes) { out open }
+        @count = expression(open.next)
+        (parser_has_diagnostics(count.diagnostics) == yes) { out count }
+        @close = expect(count.next, TokenKind.RPAREN, "expected RPAREN")
+        (parser_has_diagnostics(close.diagnostics) == yes) { out close }
+        @body = block(close.next)
+        (parser_has_diagnostics(body.diagnostics) == yes) { out body }
+        out parser_ok("drum", parser_loc(parser_group3("drum", count.node.datum, body.node.datum), token, locations), body.next)
+    }
+
+    skill paren_statement(start) {
+        @token = at(start)
+        @value = expression(start + 1)
+        (parser_has_diagnostics(value.diagnostics) == yes) { out value }
+        @close = expect(value.next, TokenKind.RPAREN, "expected RPAREN")
+        (parser_has_diagnostics(close.diagnostics) == yes) { out close }
+        @open = expect(close.next, TokenKind.LBRACE, "expected LBRACE")
+        (parser_has_diagnostics(open.diagnostics) == yes) { out open }
+        @next = skip_lines(open.next)
+        (is(next, TokenKind.DOT) == yes) {
+            @cases = parser_group2("switch", value.node.datum)
+            @done = no
+            @diagnostics = []
+            @count = core.group.count(tokens)
+            drum (count) {
+                (done == no) {
+                    (is(next, TokenKind.RBRACE) == yes) { next = next + 1 done = yes }
+                    (done == no) {
+                        @case_token = at(next)
+                        @dot = expect(next, TokenKind.DOT, "expected DOT")
+                        (parser_has_diagnostics(dot.diagnostics) == yes) { diagnostics = dot.diagnostics done = yes }
+                        (done == no) {
+                            (is(dot.next, TokenKind.IDENT) == no) { @failure = fail(dot.next, "expected switch case tag") diagnostics = failure.diagnostics done = yes }
+                        }
+                        (done == no) {
+                            @tag_token = at(dot.next)
+                            @tag = tag_token.value
+                            @arrow = expect(dot.next + 1, TokenKind.ARROW, "expected ARROW")
+                            (parser_has_diagnostics(arrow.diagnostics) == yes) { diagnostics = arrow.diagnostics done = yes }
+                            (done == no) {
+                                @body = expression(arrow.next)
+                                (parser_has_diagnostics(body.diagnostics) == yes) { diagnostics = body.diagnostics done = yes }
+                                (done == no) {
+                                    cases = core.group.add(cases, parser_loc(parser_group3("case", tag, body.node.datum), case_token, locations))
+                                    next = body.next
+                                    (is(next, TokenKind.COMMA) == yes) { next = next + 1 }
+                                    next = skip_lines(next)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            out SalticRead { node = parser_node("switch", parser_loc(cases, token, locations)) next = next diagnostics = diagnostics }
+        }
+        @statements = sequence(next, TokenKind.RBRACE, "statement", "expected statement", "expected }", no, no)
+        @items = parser_group1("block")
+        items = parser_append_tail(items, statements.node.datum, 0)
+        @located_body = parser_loc(items, token, locations)
+        out SalticRead { node = parser_node("if", parser_loc(parser_group3("if", value.node.datum, located_body), token, locations)) next = statements.next diagnostics = statements.diagnostics }
+    }
+
+    skill statement(start) {
+        @token = at(start)
+        (token.kind == TokenKind.AT) { out variable(start) }
+        (token.kind == TokenKind.OUT) { out out_statement(start) }
+        (token.kind == TokenKind.DRUM) { out drum_statement(start) }
+        (token.kind == TokenKind.LPAREN) { out paren_statement(start) }
+        (token.kind == TokenKind.IDENT) {
+            (is(start + 1, TokenKind.ASSIGN) == yes) { out assign(start) }
+            @target = path_at(start, no)
+            (is(target.next, TokenKind.ASSIGN) == yes) { out field_assign(start) }
+        }
+        @expression = expression(start)
+        (parser_has_diagnostics(expression.diagnostics) == yes) { out expression }
+        out parser_ok("expr", parser_group2("expr", expression.node.datum), expression.next)
+    }
+
+}
+
+SalticLoader = Box {
+    root = ""
+    locations = no
+    included = []
+    stack = []
 }
 
 SalticNode = Box {
@@ -49,10 +960,6 @@ skill parser_group3(a, b, c) {
 
 skill parser_group4(a, b, c, d) {
     out core.group.add(parser_group3(a, b, c), d)
-}
-
-skill parser_token(kind, value, line, col) {
-    out SalticToken { kind = kind value = value line = line col = col }
 }
 
 skill parser_diagnostic(path, line, col, message) {
@@ -106,250 +1013,11 @@ skill parser_number_value(text) {
     out whole + fraction / scale
 }
 
-skill parser_is_ascii_letter(ch) {
-    out core.str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", ch)
-}
-
-skill parser_is_ident_start(ch) {
-    (parser_is_ascii_letter(ch) == yes) { out yes }
-    (ch == "_") { out yes }
-    @upper = core.str.upper(ch)
-    @lower = core.str.lower(ch)
-    (upper == lower) { out no }
-    out yes
-}
-
-skill parser_is_ident_part(ch) {
-    (parser_is_ident_start(ch) == yes) { out yes }
-    out parser_is_digit(ch)
-}
-
-skill parser_word_kind(word) {
-    (word == "skill") { out "SKILL" }
-    (word == "program") { out "PROGRAM" }
-    (word == "use") { out "USE" }
-    (word == "Box") { out "BOX" }
-    (word == "out") { out "OUT" }
-    (word == "enum") { out "ENUM" }
-    (word == "drum") { out "DRUM" }
-    (word == "rescue") { out "RESCUE" }
-    (word == "yes") { out "YES" }
-    (word == "no") { out "NO" }
-    (word == "none") { out "NONE" }
-    out "IDENT"
-}
-
-skill parser_sign_kind(ch) {
-    (ch == "@") { out "AT" }
-    (ch == "{") { out "LBRACE" }
-    (ch == "}") { out "RBRACE" }
-    (ch == "[") { out "LBRACKET" }
-    (ch == "]") { out "RBRACKET" }
-    (ch == "(") { out "LPAREN" }
-    (ch == ")") { out "RPAREN" }
-    (ch == ",") { out "COMMA" }
-    (ch == ".") { out "DOT" }
-    (ch == "|") { out "PIPE" }
-    (ch == "=") { out "ASSIGN" }
-    (ch == ">") { out "GT" }
-    (ch == "<") { out "LT" }
-    (ch == "+") { out "PLUS" }
-    (ch == "-") { out "MINUS" }
-    (ch == "*") { out "STAR" }
-    (ch == "/") { out "SLASH" }
-    out ""
-}
-
 skill parser_lex(source, path) {
-    @tokens = []
-    @diagnostics = []
-    @index = 0
-    @line = 1
-    @col = 1
-    @length = core.str.len(source)
-    @active = yes
-    drum (length + 1) {
-        (active == yes) {
-            (index < length) {
-                @ch = core.str.at(source, index)
-                @handled = no
-                (ch == " ") { index = index + 1 col = col + 1 handled = yes }
-                (ch == "\t") { index = index + 1 col = col + 1 handled = yes }
-                (ch == "\n") {
-                    tokens = core.group.add(tokens, parser_token("NEWLINE", "\n", line, col))
-                    index = index + 1
-                    line = line + 1
-                    col = 1
-                    handled = yes
-                }
-                (handled == no) {
-                    (parser_is_ident_start(ch) == yes) {
-                        @start = index
-                        @start_col = col
-                        @reading = yes
-                        drum (length) {
-                            (reading == yes) {
-                                (index < length) {
-                                    @part = core.str.at(source, index)
-                                    (parser_is_ident_part(part) == yes) { index = index + 1 col = col + 1 }
-                                    (parser_is_ident_part(part) == no) { reading = no }
-                                }
-                                (index == length) { reading = no }
-                            }
-                        }
-                        @word = core.str.slice(source, start, index)
-                        tokens = core.group.add(tokens, parser_token(parser_word_kind(word), word, line, start_col))
-                        handled = yes
-                    }
-                }
-                (handled == no) {
-                    (parser_is_digit(ch) == yes) {
-                        @number_start = index
-                        @number_col = col
-                        @dot = no
-                        @number_reading = yes
-                        drum (length) {
-                            (number_reading == yes) {
-                                (index < length) {
-                                    @digit = core.str.at(source, index)
-                                    @take = parser_is_digit(digit)
-                                    (digit == ".") {
-                                        (dot == no) {
-                                            (index + 1 < length) {
-                                                (parser_is_digit(core.str.at(source, index + 1)) == yes) { take = yes dot = yes }
-                                            }
-                                        }
-                                    }
-                                    (take == yes) { index = index + 1 col = col + 1 }
-                                    (take == no) { number_reading = no }
-                                }
-                                (index == length) { number_reading = no }
-                            }
-                        }
-                        tokens = core.group.add(tokens, parser_token("NUMBER", core.str.slice(source, number_start, index), line, number_col))
-                        handled = yes
-                    }
-                }
-                (handled == no) {
-                    (ch == "\"") {
-                        @string_line = line
-                        @string_col = col
-                        @value = ""
-                        @closed = no
-                        index = index + 1
-                        col = col + 1
-                        drum (length) {
-                            (closed == no) {
-                                (index < length) {
-                                    @string_ch = core.str.at(source, index)
-                                    (string_ch == "\"") { closed = yes index = index + 1 col = col + 1 }
-                                    (string_ch == "\\") {
-                                        (closed == no) {
-                                            (index + 1 < length) {
-                                                @escape = core.str.at(source, index + 1)
-                                                @decoded = escape
-                                                (escape == "n") { decoded = "\n" }
-                                                (escape == "t") { decoded = "\t" }
-                                                (escape == "\"") { decoded = "\"" }
-                                                (escape == "\\") { decoded = "\\" }
-                                                value = core.str.add(value, decoded)
-                                                index = index + 2
-                                                col = col + 2
-                                            }
-                                            (index + 1 == length) {
-                                                diagnostics = core.group.add(diagnostics, parser_diagnostic(path, line, col, "unterminated escape"))
-                                                active = no
-                                                closed = yes
-                                            }
-                                        }
-                                    }
-                                    (closed == no) {
-                                        (string_ch == "\n") { value = core.str.add(value, string_ch) index = index + 1 line = line + 1 col = 1 }
-                                        @ordinary = yes
-                                        (string_ch == "\n") { ordinary = no }
-                                        (string_ch == "\"") { ordinary = no }
-                                        (string_ch == "\\") { ordinary = no }
-                                        (ordinary == yes) { value = core.str.add(value, string_ch) index = index + 1 col = col + 1 }
-                                    }
-                                }
-                                (closed == no) {
-                                  (index == length) {
-                                    diagnostics = core.group.add(diagnostics, parser_diagnostic(path, string_line, string_col, "unterminated string"))
-                                    active = no
-                                    closed = yes
-                                  }
-                                }
-                            }
-                        }
-                        (parser_has_diagnostics(diagnostics) == no) {
-                            tokens = core.group.add(tokens, parser_token("STRING", value, string_line, string_col))
-                        }
-                        handled = yes
-                    }
-                }
-                (handled == no) {
-                    @pair = ""
-                    (index + 1 < length) { pair = core.str.slice(source, index, index + 2) }
-                    (pair == "==") { tokens = core.group.add(tokens, parser_token("EQ", pair, line, col)) index = index + 2 col = col + 2 handled = yes }
-                    (pair == "=>") { tokens = core.group.add(tokens, parser_token("ARROW", pair, line, col)) index = index + 2 col = col + 2 handled = yes }
-                }
-                (handled == no) {
-                    @sign = parser_sign_kind(ch)
-                    (sign == "") {
-                        @message = core.str.add("unexpected character ", ch)
-                        diagnostics = core.group.add(diagnostics, parser_diagnostic(path, line, col, message))
-                        active = no
-                    }
-                    (sign == "") { }
-                    (sign == "AT") { handled = yes }
-                    (sign == "LBRACE") { handled = yes }
-                    (sign == "RBRACE") { handled = yes }
-                    (sign == "LBRACKET") { handled = yes }
-                    (sign == "RBRACKET") { handled = yes }
-                    (sign == "LPAREN") { handled = yes }
-                    (sign == "RPAREN") { handled = yes }
-                    (sign == "COMMA") { handled = yes }
-                    (sign == "DOT") { handled = yes }
-                    (sign == "PIPE") { handled = yes }
-                    (sign == "ASSIGN") { handled = yes }
-                    (sign == "GT") { handled = yes }
-                    (sign == "LT") { handled = yes }
-                    (sign == "PLUS") { handled = yes }
-                    (sign == "MINUS") { handled = yes }
-                    (sign == "STAR") { handled = yes }
-                    (sign == "SLASH") { handled = yes }
-                    (handled == yes) {
-                        tokens = core.group.add(tokens, parser_token(sign, ch, line, col))
-                        index = index + 1
-                        col = col + 1
-                    }
-                }
-            }
-            (index == length) { active = no }
-        }
-    }
-    tokens = core.group.add(tokens, parser_token("EOF", "", line, col))
-    out SalticScan { tokens = tokens diagnostics = diagnostics }
-}
-
-skill parser_at(tokens, index) {
-    out core.group.item(tokens, index)
-}
-
-skill parser_is(tokens, index, kind) {
-    @token = parser_at(tokens, index)
-    out token.kind == kind
-}
-
-skill parser_skip_lines(tokens, index) {
-    @next = index
-    @count = core.group.count(tokens)
-    drum (count) {
-        (next < count) {
-            (parser_is(tokens, next, "NEWLINE") == yes) { next = next + 1 }
-        }
-    }
-    out next
+    @lexer = SalticLexer()
+    lexer.source = source
+    lexer.path = path
+    out lexer.scan()
 }
 
 skill parser_loc(datum, token, locations) {
@@ -365,23 +1033,6 @@ skill parser_ok(tag, datum, next) {
     out SalticRead { node = parser_node(tag, datum) next = next diagnostics = [] }
 }
 
-skill parser_fail(tokens, index, message, path) {
-    @token = parser_at(tokens, index)
-    @tail = core.str.add(message, ", got ")
-    tail = core.str.add(tail, token.kind)
-    out SalticRead {
-        node = parser_node("", [])
-        next = index
-        diagnostics = parser_group1(parser_diagnostic(path, token.line, token.col, tail))
-    }
-}
-
-skill parser_expect(tokens, index, kind, message, path) {
-    @token = parser_at(tokens, index)
-    (parser_is(tokens, index, kind) == yes) { out parser_ok("token", parser_group1(token.value), index + 1) }
-    out parser_fail(tokens, index, message, path)
-}
-
 skill parser_append_tail(head, tail, start) {
     @result = head
     @cursor = start
@@ -392,544 +1043,12 @@ skill parser_append_tail(head, tail, start) {
     out result
 }
 
-skill parser_path(tokens, start, path, locations) {
-    (parser_is(tokens, start, "IDENT") == no) { out parser_fail(tokens, start, "expected identifier", path) }
-    @token = parser_at(tokens, start)
-    @parts = parser_group2("path", token.value)
-    @next = start + 1
-    @count = core.group.count(tokens)
-    @active = yes
-    drum (count) {
-        (active == yes) {
-            (next + 1 < count) {
-                (parser_is(tokens, next, "DOT") == yes) {
-                    (parser_is(tokens, next + 1, "IDENT") == yes) {
-                        @part_token = parser_at(tokens, next + 1)
-                        parts = core.group.add(parts, part_token.value)
-                        next = next + 2
-                    }
-                    (parser_is(tokens, next + 1, "IDENT") == no) { active = no }
-                }
-                (parser_is(tokens, next, "DOT") == no) { active = no }
-            }
-            (next + 1 == count) { active = no }
-        }
-    }
-    out parser_ok("path", parser_loc(parts, token, locations), next)
-}
-
-skill parser_params(tokens, start, path) {
-    @params = []
-    @next = start
-    @done = parser_is(tokens, next, "RPAREN")
-    @diagnostics = []
-    @count = core.group.count(tokens)
-    drum (count) {
-        (done == no) {
-            (parser_is(tokens, next, "IDENT") == no) {
-                @failure = parser_fail(tokens, next, "expected parameter name", path)
-                diagnostics = failure.diagnostics
-                done = yes
-            }
-            (parser_has_diagnostics(diagnostics) == no) {
-                @param_token = parser_at(tokens, next)
-                params = core.group.add(params, param_token.value)
-                next = next + 1
-                @comma = parser_is(tokens, next, "COMMA")
-                (comma == yes) { next = next + 1 }
-                (comma == no) { done = yes }
-            }
-        }
-    }
-    out SalticRead { node = parser_node("params", params) next = next diagnostics = diagnostics }
-}
-
-skill parser_primary(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    (token.kind == "NUMBER") { out parser_ok("number", parser_loc(parser_group2("number", parser_number_value(token.value)), token, locations), start + 1) }
-    (token.kind == "STRING") { out parser_ok("string", parser_loc(parser_group2("string", token.value), token, locations), start + 1) }
-    (token.kind == "YES") { out parser_ok("answer", parser_loc(parser_group2("answer", "yes"), token, locations), start + 1) }
-    (token.kind == "NO") { out parser_ok("answer", parser_loc(parser_group2("answer", "no"), token, locations), start + 1) }
-    (token.kind == "NONE") { out parser_ok("none", parser_loc(parser_group1("none"), token, locations), start + 1) }
-    (token.kind == "DOT") {
-        (parser_is(tokens, start + 1, "IDENT") == no) { out parser_fail(tokens, start + 1, "expected enum value", path) }
-        @name_token = parser_at(tokens, start + 1)
-        out parser_ok("enum-value", parser_loc(parser_group2("enum-value", name_token.value), token, locations), start + 2)
-    }
-    (token.kind == "LBRACKET") { out parser_group(tokens, start, path, locations) }
-    (token.kind == "IDENT") { out parser_path(tokens, start, path, locations) }
-    (token.kind == "LPAREN") {
-        @inside = parser_expression(tokens, start + 1, path, locations)
-        (parser_has_diagnostics(inside.diagnostics) == yes) { out inside }
-        @close = parser_expect(tokens, inside.next, "RPAREN", "expected RPAREN", path)
-        (parser_has_diagnostics(close.diagnostics) == yes) { out close }
-        out SalticRead { node = inside.node next = close.next diagnostics = [] }
-    }
-    out parser_fail(tokens, start, "expected expression", path)
-}
-
-skill parser_args(tokens, start, path, locations) {
-    @args = []
-    @next = start + 1
-    @done = no
-    @diagnostics = []
-    (parser_is(tokens, next, "RPAREN") == yes) { next = next + 1 done = yes }
-    @count = core.group.count(tokens)
-    drum (count) {
-        (done == no) {
-            @arg = parser_expression(tokens, next, path, locations)
-            (parser_has_diagnostics(arg.diagnostics) == yes) { diagnostics = arg.diagnostics done = yes }
-            (parser_has_diagnostics(arg.diagnostics) == no) {
-                args = core.group.add(args, arg.node.datum)
-                next = arg.next
-                @comma = parser_is(tokens, next, "COMMA")
-                (comma == yes) { next = next + 1 }
-                (comma == no) {
-                    @close = parser_expect(tokens, next, "RPAREN", "expected RPAREN", path)
-                    (parser_has_diagnostics(close.diagnostics) == yes) { diagnostics = close.diagnostics }
-                    (parser_has_diagnostics(close.diagnostics) == no) { next = close.next }
-                    done = yes
-                }
-            }
-        }
-    }
-    out SalticRead { node = parser_node("args", args) next = next diagnostics = diagnostics }
-}
-
-skill parser_fields(tokens, start, path, locations) {
-    @open = parser_expect(tokens, start, "LBRACE", "expected LBRACE", path)
-    (parser_has_diagnostics(open.diagnostics) == yes) { out open }
-    @fields = []
-    @next = parser_skip_lines(tokens, open.next)
-    @done = no
-    @diagnostics = []
-    @count = core.group.count(tokens)
-    drum (count) {
-        (done == no) {
-            (parser_is(tokens, next, "RBRACE") == yes) { next = next + 1 done = yes }
-            (done == no) {
-              (parser_is(tokens, next, "EOF") == yes) { @failure = parser_fail(tokens, next, "expected }", path) diagnostics = failure.diagnostics done = yes }
-            }
-            (done == no) {
-                (parser_is(tokens, next, "IDENT") == no) { @failure = parser_fail(tokens, next, "expected field name", path) diagnostics = failure.diagnostics done = yes }
-                (done == no) {
-                    @name_token = parser_at(tokens, next)
-                    @name = name_token.value
-                    @eq = parser_expect(tokens, next + 1, "ASSIGN", "expected = after field name", path)
-                    (parser_has_diagnostics(eq.diagnostics) == yes) { diagnostics = eq.diagnostics done = yes }
-                    (done == no) {
-                        @value = parser_expression(tokens, eq.next, path, locations)
-                        (parser_has_diagnostics(value.diagnostics) == yes) { diagnostics = value.diagnostics done = yes }
-                        (done == no) {
-                            fields = core.group.add(fields, parser_group3("field", name, value.node.datum))
-                            next = value.next
-                            (parser_is(tokens, next, "COMMA") == yes) { next = next + 1 }
-                            next = parser_skip_lines(tokens, next)
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out SalticRead { node = parser_node("fields", fields) next = next diagnostics = diagnostics }
-}
-
-skill parser_postfix(tokens, start, path, locations) {
-    @base = parser_primary(tokens, start, path, locations)
-    (parser_has_diagnostics(base.diagnostics) == yes) { out base }
-    @node = base.node
-    @next = base.next
-    @active = yes
-    @diagnostics = []
-    @count = core.group.count(tokens)
-    drum (count) {
-        (active == yes) {
-            (parser_is(tokens, next, "LPAREN") == yes) {
-                @call_token = parser_at(tokens, next)
-                @args = parser_args(tokens, next, path, locations)
-                (parser_has_diagnostics(args.diagnostics) == yes) { diagnostics = args.diagnostics active = no }
-                (parser_has_diagnostics(args.diagnostics) == no) {
-                    @call = parser_group2("call", node.datum)
-                    call = parser_append_tail(call, args.node.datum, 0)
-                    node = parser_node("call", parser_loc(call, call_token, locations))
-                    next = args.next
-                }
-            }
-            (parser_is(tokens, next, "LPAREN") == no) {
-                @box_candidate = no
-                (node.tag == "path") {
-                    @plain_path = node.datum
-                    (locations == yes) { plain_path = core.group.item(node.datum, 3) }
-                    (core.group.count(plain_path) == 2) {
-                        (parser_is(tokens, next, "LBRACE") == yes) { box_candidate = yes }
-                    }
-                }
-                (box_candidate == yes) {
-                    @box_token = parser_at(tokens, next)
-                    @fields = parser_fields(tokens, next, path, locations)
-                    (parser_has_diagnostics(fields.diagnostics) == yes) { diagnostics = fields.diagnostics active = no }
-                    (parser_has_diagnostics(fields.diagnostics) == no) {
-                        @plain_name = node.datum
-                        (locations == yes) { plain_name = core.group.item(node.datum, 3) }
-                        @box = parser_group2("box-new", core.group.item(plain_name, 1))
-                        box = parser_append_tail(box, fields.node.datum, 0)
-                        node = parser_node("box-new", parser_loc(box, box_token, locations))
-                        next = fields.next
-                    }
-                }
-                (box_candidate == no) { active = no }
-            }
-        }
-    }
-    out SalticRead { node = node next = next diagnostics = diagnostics }
-}
-
-skill parser_precedence(kind) {
-    (kind == "EQ") { out 1 }
-    (kind == "GT") { out 1 }
-    (kind == "LT") { out 1 }
-    (kind == "PLUS") { out 2 }
-    (kind == "MINUS") { out 2 }
-    (kind == "STAR") { out 3 }
-    (kind == "SLASH") { out 3 }
-    out 0
-}
-
-skill parser_binary(tokens, start, minimum, path, locations) {
-    @first = parser_postfix(tokens, start, path, locations)
-    (parser_has_diagnostics(first.diagnostics) == yes) { out first }
-    @left = first.node
-    @next = first.next
-    @active = yes
-    @diagnostics = []
-    @count = core.group.count(tokens)
-    drum (count) {
-        (active == yes) {
-            @operator = parser_at(tokens, next)
-            @level = parser_precedence(operator.kind)
-            (level < minimum) { active = no }
-            (level == 0) { active = no }
-            (active == yes) {
-                @right = parser_binary(tokens, next + 1, level + 1, path, locations)
-                (parser_has_diagnostics(right.diagnostics) == yes) { diagnostics = right.diagnostics active = no }
-                (parser_has_diagnostics(right.diagnostics) == no) {
-                    left = parser_node("binary", parser_loc(parser_group4("binary", operator.value, left.datum, right.node.datum), operator, locations))
-                    next = right.next
-                }
-            }
-        }
-    }
-    out SalticRead { node = left next = next diagnostics = diagnostics }
-}
-
-skill parser_expression(tokens, start, path, locations) {
-    @value = parser_binary(tokens, start, 0, path, locations)
-    (parser_has_diagnostics(value.diagnostics) == yes) { out value }
-    (parser_is(tokens, value.next, "RESCUE") == yes) {
-        @rescue_token = parser_at(tokens, value.next)
-        @pipe = parser_expect(tokens, value.next + 1, "PIPE", "expected PIPE", path)
-        (parser_has_diagnostics(pipe.diagnostics) == yes) { out pipe }
-        (parser_is(tokens, pipe.next, "IDENT") == no) { out parser_fail(tokens, pipe.next, "expected rescue error name", path) }
-        @error_token = parser_at(tokens, pipe.next)
-        @error_name = error_token.value
-        @pipe2 = parser_expect(tokens, pipe.next + 1, "PIPE", "expected PIPE", path)
-        (parser_has_diagnostics(pipe2.diagnostics) == yes) { out pipe2 }
-        @body = parser_block(tokens, pipe2.next, path, locations)
-        (parser_has_diagnostics(body.diagnostics) == yes) { out body }
-        out parser_ok("rescue", parser_loc(parser_group4("rescue", value.node.datum, error_name, body.node.datum), rescue_token, locations), body.next)
-    }
-    out value
-}
-
-skill parser_group(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @items = parser_group1("group")
-    @next = parser_skip_lines(tokens, start + 1)
-    @done = no
-    @diagnostics = []
-    @count = core.group.count(tokens)
-    drum (count) {
-        (done == no) {
-            (parser_is(tokens, next, "RBRACKET") == yes) { next = next + 1 done = yes }
-            (done == no) {
-              (parser_is(tokens, next, "EOF") == yes) { @failure = parser_fail(tokens, next, "expected ]", path) diagnostics = failure.diagnostics done = yes }
-            }
-            (done == no) {
-                @item = parser_expression(tokens, next, path, locations)
-                (parser_has_diagnostics(item.diagnostics) == yes) { diagnostics = item.diagnostics done = yes }
-                (done == no) {
-                    items = core.group.add(items, item.node.datum)
-                    next = item.next
-                    (parser_is(tokens, next, "COMMA") == yes) { next = next + 1 }
-                    next = parser_skip_lines(tokens, next)
-                }
-            }
-        }
-    }
-    out SalticRead { node = parser_node("group", parser_loc(items, token, locations)) next = next diagnostics = diagnostics }
-}
-
-skill parser_block(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @open = parser_expect(tokens, start, "LBRACE", "expected LBRACE", path)
-    (parser_has_diagnostics(open.diagnostics) == yes) { out open }
-    @items = parser_group1("block")
-    @next = parser_skip_lines(tokens, open.next)
-    @done = no
-    @diagnostics = []
-    @count = core.group.count(tokens)
-    drum (count) {
-        (done == no) {
-            (parser_is(tokens, next, "RBRACE") == yes) { next = next + 1 done = yes }
-            (done == no) {
-              (parser_is(tokens, next, "EOF") == yes) { @failure = parser_fail(tokens, next, "expected }", path) diagnostics = failure.diagnostics done = yes }
-            }
-            (done == no) {
-                @statement = parser_statement(tokens, next, path, locations)
-                (parser_has_diagnostics(statement.diagnostics) == yes) { diagnostics = statement.diagnostics done = yes }
-                (done == no) {
-                    items = core.group.add(items, statement.node.datum)
-                    next = parser_skip_lines(tokens, statement.next)
-                }
-            }
-        }
-    }
-    out SalticRead { node = parser_node("block", parser_loc(items, token, locations)) next = next diagnostics = diagnostics }
-}
-
-skill parser_var(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    (parser_is(tokens, start + 1, "IDENT") == no) { out parser_fail(tokens, start + 1, "expected variable name", path) }
-    @name_token = parser_at(tokens, start + 1)
-    @name = name_token.value
-    @eq = parser_expect(tokens, start + 2, "ASSIGN", "expected = after variable name", path)
-    (parser_has_diagnostics(eq.diagnostics) == yes) { out eq }
-    @value = parser_expression(tokens, eq.next, path, locations)
-    (parser_has_diagnostics(value.diagnostics) == yes) { out value }
-    out parser_ok("var", parser_loc(parser_group3("var", name, value.node.datum), token, locations), value.next)
-}
-
-skill parser_assign(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @value = parser_expression(tokens, start + 2, path, locations)
-    (parser_has_diagnostics(value.diagnostics) == yes) { out value }
-    out parser_ok("assign", parser_loc(parser_group3("assign", token.value, value.node.datum), token, locations), value.next)
-}
-
-skill parser_out(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @value = parser_expression(tokens, start + 1, path, locations)
-    (parser_has_diagnostics(value.diagnostics) == yes) { out value }
-    out parser_ok("out", parser_loc(parser_group2("out", value.node.datum), token, locations), value.next)
-}
-
-skill parser_drum(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @open = parser_expect(tokens, start + 1, "LPAREN", "expected ( after drum", path)
-    (parser_has_diagnostics(open.diagnostics) == yes) { out open }
-    @count = parser_expression(tokens, open.next, path, locations)
-    (parser_has_diagnostics(count.diagnostics) == yes) { out count }
-    @close = parser_expect(tokens, count.next, "RPAREN", "expected RPAREN", path)
-    (parser_has_diagnostics(close.diagnostics) == yes) { out close }
-    @body = parser_block(tokens, close.next, path, locations)
-    (parser_has_diagnostics(body.diagnostics) == yes) { out body }
-    out parser_ok("drum", parser_loc(parser_group3("drum", count.node.datum, body.node.datum), token, locations), body.next)
-}
-
-skill parser_paren_statement(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @value = parser_expression(tokens, start + 1, path, locations)
-    (parser_has_diagnostics(value.diagnostics) == yes) { out value }
-    @close = parser_expect(tokens, value.next, "RPAREN", "expected RPAREN", path)
-    (parser_has_diagnostics(close.diagnostics) == yes) { out close }
-    @open = parser_expect(tokens, close.next, "LBRACE", "expected LBRACE", path)
-    (parser_has_diagnostics(open.diagnostics) == yes) { out open }
-    @next = parser_skip_lines(tokens, open.next)
-    (parser_is(tokens, next, "DOT") == yes) {
-        @cases = parser_group2("switch", value.node.datum)
-        @done = no
-        @diagnostics = []
-        @count = core.group.count(tokens)
-        drum (count) {
-            (done == no) {
-                (parser_is(tokens, next, "RBRACE") == yes) { next = next + 1 done = yes }
-                (done == no) {
-                    @case_token = parser_at(tokens, next)
-                    @dot = parser_expect(tokens, next, "DOT", "expected DOT", path)
-                    (parser_has_diagnostics(dot.diagnostics) == yes) { diagnostics = dot.diagnostics done = yes }
-                    (done == no) {
-                        (parser_is(tokens, dot.next, "IDENT") == no) { @failure = parser_fail(tokens, dot.next, "expected switch case tag", path) diagnostics = failure.diagnostics done = yes }
-                    }
-                    (done == no) {
-                        @tag_token = parser_at(tokens, dot.next)
-                        @tag = tag_token.value
-                        @arrow = parser_expect(tokens, dot.next + 1, "ARROW", "expected ARROW", path)
-                        (parser_has_diagnostics(arrow.diagnostics) == yes) { diagnostics = arrow.diagnostics done = yes }
-                        (done == no) {
-                            @body = parser_expression(tokens, arrow.next, path, locations)
-                            (parser_has_diagnostics(body.diagnostics) == yes) { diagnostics = body.diagnostics done = yes }
-                            (done == no) {
-                                cases = core.group.add(cases, parser_loc(parser_group3("case", tag, body.node.datum), case_token, locations))
-                                next = body.next
-                                (parser_is(tokens, next, "COMMA") == yes) { next = next + 1 }
-                                next = parser_skip_lines(tokens, next)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out SalticRead { node = parser_node("switch", parser_loc(cases, token, locations)) next = next diagnostics = diagnostics }
-    }
-    @items = parser_group1("block")
-    @if_done = no
-    @if_diagnostics = []
-    @if_count = core.group.count(tokens)
-    drum (if_count) {
-        (if_done == no) {
-            (parser_is(tokens, next, "RBRACE") == yes) { next = next + 1 if_done = yes }
-            (if_done == no) {
-              (parser_is(tokens, next, "EOF") == yes) { @failure = parser_fail(tokens, next, "expected }", path) if_diagnostics = failure.diagnostics if_done = yes }
-            }
-            (if_done == no) {
-                @statement = parser_statement(tokens, next, path, locations)
-                (parser_has_diagnostics(statement.diagnostics) == yes) { if_diagnostics = statement.diagnostics if_done = yes }
-                (if_done == no) { items = core.group.add(items, statement.node.datum) next = parser_skip_lines(tokens, statement.next) }
-            }
-        }
-    }
-    @located_body = parser_loc(items, token, locations)
-    out SalticRead { node = parser_node("if", parser_loc(parser_group3("if", value.node.datum, located_body), token, locations)) next = next diagnostics = if_diagnostics }
-}
-
-skill parser_statement(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    (token.kind == "AT") { out parser_var(tokens, start, path, locations) }
-    (token.kind == "OUT") { out parser_out(tokens, start, path, locations) }
-    (token.kind == "DRUM") { out parser_drum(tokens, start, path, locations) }
-    (token.kind == "LPAREN") { out parser_paren_statement(tokens, start, path, locations) }
-    (token.kind == "IDENT") {
-        (parser_is(tokens, start + 1, "ASSIGN") == yes) { out parser_assign(tokens, start, path, locations) }
-    }
-    @expression = parser_expression(tokens, start, path, locations)
-    (parser_has_diagnostics(expression.diagnostics) == yes) { out expression }
-    out parser_ok("expr", parser_group2("expr", expression.node.datum), expression.next)
-}
-
-skill parser_use(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @module = parser_path(tokens, start + 1, path, no)
-    (parser_has_diagnostics(module.diagnostics) == yes) { out module }
-    @parts = module.node.datum
-    @datum = parser_group1("use")
-    datum = parser_append_tail(datum, parts, 1)
-    out parser_ok("use", parser_loc(datum, token, locations), module.next)
-}
-
-skill parser_entry(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @open = parser_expect(tokens, start + 1, "LPAREN", "expected ( after program", path)
-    (parser_has_diagnostics(open.diagnostics) == yes) { out open }
-    @params = parser_params(tokens, open.next, path)
-    (parser_has_diagnostics(params.diagnostics) == yes) { out params }
-    @close = parser_expect(tokens, params.next, "RPAREN", "expected RPAREN", path)
-    (parser_has_diagnostics(close.diagnostics) == yes) { out close }
-    @body = parser_block(tokens, close.next, path, locations)
-    (parser_has_diagnostics(body.diagnostics) == yes) { out body }
-    out parser_ok("entry", parser_loc(parser_group3("entry", params.node.datum, body.node.datum), token, locations), body.next)
-}
-
-skill parser_skill(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    (parser_is(tokens, start + 1, "IDENT") == no) { out parser_fail(tokens, start + 1, "expected skill name", path) }
-    @name_token = parser_at(tokens, start + 1)
-    @name = name_token.value
-    @open = parser_expect(tokens, start + 2, "LPAREN", "expected LPAREN", path)
-    (parser_has_diagnostics(open.diagnostics) == yes) { out open }
-    @params = parser_params(tokens, open.next, path)
-    (parser_has_diagnostics(params.diagnostics) == yes) { out params }
-    @close = parser_expect(tokens, params.next, "RPAREN", "expected RPAREN", path)
-    (parser_has_diagnostics(close.diagnostics) == yes) { out close }
-    @body = parser_block(tokens, close.next, path, locations)
-    (parser_has_diagnostics(body.diagnostics) == yes) { out body }
-    out parser_ok("skill", parser_loc(parser_group4("skill", name, params.node.datum, body.node.datum), token, locations), body.next)
-}
-
-skill parser_constant(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @value = parser_expression(tokens, start + 2, path, locations)
-    (parser_has_diagnostics(value.diagnostics) == yes) { out value }
-    out parser_ok("const", parser_loc(parser_group3("const", token.value, value.node.datum), token, locations), value.next)
-}
-
-skill parser_box(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @fields = parser_fields(tokens, start + 3, path, locations)
-    (parser_has_diagnostics(fields.diagnostics) == yes) { out fields }
-    @datum = parser_group2("box", token.value)
-    datum = parser_append_tail(datum, fields.node.datum, 0)
-    out parser_ok("box", parser_loc(datum, token, locations), fields.next)
-}
-
-skill parser_enum(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    @open = parser_expect(tokens, start + 3, "LBRACE", "expected LBRACE", path)
-    (parser_has_diagnostics(open.diagnostics) == yes) { out open }
-    @datum = parser_group2("enum", token.value)
-    @next = parser_skip_lines(tokens, open.next)
-    @done = no
-    @diagnostics = []
-    @count = core.group.count(tokens)
-    drum (count) {
-        (done == no) {
-            (parser_is(tokens, next, "RBRACE") == yes) { next = next + 1 done = yes }
-            (done == no) {
-                (parser_is(tokens, next, "IDENT") == no) { @failure = parser_fail(tokens, next, "expected enum variant", path) diagnostics = failure.diagnostics done = yes }
-                (done == no) {
-                    @variant_token = parser_at(tokens, next)
-                    datum = core.group.add(datum, variant_token.value)
-                    next = next + 1
-                    (parser_is(tokens, next, "COMMA") == yes) { next = next + 1 }
-                    next = parser_skip_lines(tokens, next)
-                }
-            }
-        }
-    }
-    out SalticRead { node = parser_node("enum", parser_loc(datum, token, locations)) next = next diagnostics = diagnostics }
-}
-
-skill parser_top(tokens, start, path, locations) {
-    @token = parser_at(tokens, start)
-    (token.kind == "USE") { out parser_use(tokens, start, path, locations) }
-    (token.kind == "PROGRAM") { out parser_entry(tokens, start, path, locations) }
-    (token.kind == "SKILL") { out parser_skill(tokens, start, path, locations) }
-    (token.kind == "IDENT") {
-        (parser_is(tokens, start + 1, "ASSIGN") == yes) {
-            (parser_is(tokens, start + 2, "BOX") == yes) { out parser_box(tokens, start, path, locations) }
-            (parser_is(tokens, start + 2, "ENUM") == yes) { out parser_enum(tokens, start, path, locations) }
-            out parser_constant(tokens, start, path, locations)
-        }
-    }
-    out parser_fail(tokens, start, "expected top-level declaration", path)
-}
-
 skill parser_parse_tokens_mode(tokens, path, locations) {
-    @ast = parser_group1("program")
-    @next = parser_skip_lines(tokens, 0)
-    @diagnostics = []
-    @done = no
-    @count = core.group.count(tokens)
-    drum (count) {
-        (done == no) {
-            (parser_is(tokens, next, "EOF") == yes) { done = yes }
-            (done == no) {
-                @item = parser_top(tokens, next, path, locations)
-                (parser_has_diagnostics(item.diagnostics) == yes) { diagnostics = item.diagnostics done = yes }
-                (done == no) { ast = core.group.add(ast, item.node.datum) next = parser_skip_lines(tokens, item.next) }
-            }
-        }
-    }
-    out SalticParse { ast = ast tokens = tokens diagnostics = diagnostics }
+    @parser = SalticParser()
+    parser.tokens = tokens
+    parser.path = path
+    parser.locations = locations
+    out parser.parse_tokens()
 }
 
 skill parser_parse_tokens(tokens, path) {

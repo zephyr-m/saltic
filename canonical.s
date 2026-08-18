@@ -37,6 +37,31 @@ Signal = Box {
     cost = 0
 }
 
+Cursor = Box {
+    items = []
+    index = 0
+
+    skill at(offset) {
+        out core.group.at(items, index + offset)
+    }
+
+    skill has() {
+        out index < core.group.count(items)
+    }
+
+    skill peek() {
+        @item = at(0)
+        out item
+    }
+
+    skill next() {
+        @cursor = Cursor()
+        cursor.items = items
+        cursor.index = index + 1
+        out cursor
+    }
+}
+
 skill move(point, step) {
     out Point {
         x = point.x + step
@@ -139,6 +164,16 @@ program(input_path, output_path) {
     @numbers = measure(8, 2) rescue |err| {
         core.io.show("measure failed: ", err)
         []
+    }
+
+    @cursor = Cursor()
+    cursor.items = numbers
+
+    drum (core.group.count(numbers)) {
+        (cursor.has() == yes) {
+            core.io.show("cursor: ", cursor.peek())
+            cursor = cursor.next()
+        }
     }
 
     (Tracing == yes) {

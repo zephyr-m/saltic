@@ -38,6 +38,7 @@ class Compiler {
     this.errors = new Map()
     this.fields = new Map()
     this.skills = new Map()
+    this.subjectSkills = new Map()
     this.entry = null
     this.function = null
     this.collectTopLevel()
@@ -49,8 +50,11 @@ class Compiler {
     for (const item of this.ast.slice(1)) {
       if (item[0] === 'const') this.constants.set(item[1], item[2])
       if (item[0] === 'box') {
-        this.boxes.set(item[1], item.slice(2))
-        for (const field of item.slice(2)) {
+        const fields = item.slice(2).filter(member => member[0] === 'field')
+        const skills = item.slice(2).filter(member => member[0] === 'subject-skill')
+        this.boxes.set(item[1], fields)
+        this.subjectSkills.set(item[1], new Map(skills.map(skill => [skill[1], skill])))
+        for (const field of fields) {
           if (!this.fields.has(field[1])) this.fields.set(field[1], fieldId++)
         }
       }
@@ -72,6 +76,9 @@ class Compiler {
     this.emit('.option norvc', '.option norelax', '.section .text', '.global _start', '')
     this.compileStart()
     for (const skill of this.skills.values()) this.compileFunction(skill[1], skill[2], skill[3])
+    for (const [box, skills] of this.subjectSkills) {
+      for (const skill of skills.values()) this.compileFunction(`${box}.${skill[1]}`, ['$self', ...skill[2]], skill[3], box)
+    }
     this.compileFunction('program', this.entry[1], this.entry[2])
     this.emit(runtimeAssembly())
     this.emit('.section .rodata', '.balign 8')
@@ -95,7 +102,7 @@ class Compiler {
     this.emit('  call saltic_program', '  andi t0, a0, 7', `  addi t1, zero, ${TAG.error}`, '  sub a0, t0, t1', '  sltu a0, zero, a0', '  xori a0, a0, 1', '  addi a7, zero, 93', '  ecall', '')
   }
 
-  compileFunction(name, params, body) {
+  compileFunction(name, params, body, subject = null) {
     const locals = collectLocals(params, body)
     const frame = align16((locals.size + 2) * 4)
     const slots = new Map()
@@ -105,7 +112,8 @@ class Compiler {
       slot -= 4
     }
     const end = this.label(`${name}_return`)
-    this.function = { name, slots, end, drums: new Map() }
+    this.function = { name, slots, end, drums: new Map(), subject, types: new Map(params.map(param => [param, 'unknown'])) }
+    if (subject) this.function.types.set('$self', ['box', subject])
     this.emit(`saltic_${safe(name)}:`, `  addi sp, sp, -${frame}`, `  sw ra, ${frame - 4}(sp)`, `  sw s0, ${frame - 8}(sp)`, `  addi s0, sp, ${frame}`)
     params.forEach((param, index) => this.emit(`  sw a${index}, ${slots.get(param)}(s0)`))
     this.compileBlock(body)
@@ -127,6 +135,19 @@ class Compiler {
     if (tag === 'var' || tag === 'assign') {
       this.compileExpression(node[2])
       this.emit(`  sw a0, ${this.slot(node[1])}(s0)`)
+      const type = this.inferType(node[2])
+      if (type !== 'unknown' || !this.function.types.has(node[1])) this.function.types.set(node[1], type)
+      return
+    }
+    if (tag === 'field-assign') {
+      const parts = node[1].slice(1)
+      this.compilePath(parts.slice(0, -1))
+      this.push('a0')
+      this.compileExpression(node[2])
+      this.emit('  addi a2, a0, 0')
+      this.pop('a0')
+      this.loadImmediate('a1', this.field(parts.at(-1)))
+      this.emit('  call rt_box_set')
       return
     }
     if (tag === 'out') {
@@ -204,6 +225,13 @@ class Compiler {
     const name = parts[0]
     if (this.function?.slots.has(name)) this.emit(`  lw a0, ${this.slot(name)}(s0)`)
     else if (this.constants.has(name)) this.compileExpression(this.constants.get(name))
+    else if (this.function?.subject && this.boxes.get(this.function.subject).some(field => field[1] === name)) {
+      this.emit(`  lw a0, ${this.slot('$self')}(s0)`)
+      this.push('a0')
+      this.loadImmediate('a1', this.field(name))
+      this.pop('a0')
+      this.emit('  call rt_box_get')
+    }
     else throw new Error(`compile: unknown value ${name}`)
     for (const field of parts.slice(1)) {
       this.push('a0')
@@ -227,6 +255,24 @@ class Compiler {
     if (callee[0] !== 'path') throw new Error('compile: callable expression must be a path')
     const name = callee.slice(1).join('.')
     if (name === 'core.io.show') return this.compileShow(args)
+    if (callee.length === 2 && this.function?.subject && this.subjectSkills.get(this.function.subject)?.has(callee[1])) {
+      this.compileArguments([['path', '$self'], ...args])
+      this.emit(`  call saltic_${safe(`${this.function.subject}.${callee[1]}`)}`)
+      return
+    }
+    if (callee.length === 2 && this.boxes.has(callee[1])) {
+      if (args.length) throw new Error(`compile: ${callee[1]}() expects no arguments`)
+      return this.compileBox(callee[1], [])
+    }
+    if (callee.length === 3) {
+      const receiver = ['path', callee[1]]
+      const type = this.inferType(receiver)
+      if (Array.isArray(type) && type[0] === 'box' && this.subjectSkills.get(type[1])?.has(callee[2])) {
+        this.compileArguments([receiver, ...args])
+        this.emit(`  call saltic_${safe(`${type[1]}.${callee[2]}`)}`)
+        return
+      }
+    }
     const intrinsics = {
       'core.group.count': 'rt_group_count',
       'core.group.at': 'rt_group_at',
@@ -252,6 +298,26 @@ class Compiler {
     if (!target) throw new Error(`compile: unsupported call ${name}`)
     this.compileArguments(args)
     this.emit(`  call ${target}`)
+  }
+
+  inferType(node) {
+    if (!Array.isArray(node)) return 'unknown'
+    if (node[0] === 'box-new') return ['box', node[1]]
+    if (node[0] === 'path') {
+      if (node.length === 2) return this.function?.types.get(node[1]) ?? 'unknown'
+      const base = this.inferType(['path', node[1]])
+      if (Array.isArray(base) && base[0] === 'box') {
+        const field = this.boxes.get(base[1])?.find(item => item[1] === node[2])
+        if (field?.[2]?.[0] === 'box-new') return ['box', field[2][1]]
+      }
+      return 'unknown'
+    }
+    if (node[0] === 'call' && node[1]?.[0] === 'path') {
+      const callee = node[1]
+      if (callee.length === 2 && this.boxes.has(callee[1])) return ['box', callee[1]]
+    }
+    if (node[0] === 'rescue') return this.inferType(node[1])
+    return 'unknown'
   }
 
   compileArguments(args) {
@@ -494,6 +560,22 @@ rt_box_get:
   j .L_box_get_loop
 .L_box_get_found:
   lw a0, 4(a0)
+  jalr zero, 0(ra)
+
+rt_box_set:
+  andi a0, a0, -8
+  lw t0, 0(a0)
+  addi a0, a0, 4
+.L_box_set_loop:
+  beq t0, zero, rt_missing_field
+  lw t1, 0(a0)
+  beq t1, a1, .L_box_set_found
+  addi a0, a0, 8
+  addi t0, t0, -1
+  j .L_box_set_loop
+.L_box_set_found:
+  sw a2, 4(a0)
+  addi a0, zero, ${NONE}
   jalr zero, 0(ra)
 
 rt_group_count:
