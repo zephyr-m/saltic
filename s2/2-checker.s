@@ -203,7 +203,8 @@ skill checker_collect(ast) {
                 (checker_has(result.globals, name) == yes) {
                     result.diagnostics = checker_add(result.diagnostics, CheckDiagnostic { code = "duplicate_definition" message = core.str.add("duplicate top-level name '", core.str.add(name, "'")) })
                 }
-                @type = checker_type(checker_part(item, 2))
+                @type = "unknown"
+                (kind == "const") { type = checker_type(checker_part(item, 2)) }
                 (kind == "enum") { type = "enum-type" }
                 (kind == "box") { type = "box-type" }
                 (kind == "skill") { type = "function" }

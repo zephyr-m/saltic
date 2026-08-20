@@ -22,9 +22,13 @@ CompilerNames = Box {
     next_drum = 1
 }
 
+CompilerOutput = Box {
+    chunks = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+}
+
 CompilerState = Box {
     ast = []
-    lines = []
+    lines = CompilerOutput {}
     data = []
     strings = []
     serial = 0
@@ -115,8 +119,46 @@ skill compiler_type_set(types, name, type) {
     out result
 }
 
+skill compiler_output_add(output, text) {
+    @carry = text
+    @chunks = []
+    @index = 0
+    @count = core.group.count(output.chunks)
+    @active = yes
+    drum (count) {
+        @chunk = core.group.item(output.chunks, index)
+        @handling = active
+        (handling == no) { chunks = core.group.add(chunks, chunk) }
+        (handling == yes) {
+            (core.str.len(chunk) == 0) {
+                chunks = core.group.add(chunks, carry)
+                active = no
+            }
+            (core.str.len(chunk) > 0) {
+                chunks = core.group.add(chunks, "")
+                carry = core.str.add(chunk, carry)
+            }
+        }
+        index = index + 1
+    }
+    (active == yes) { chunks = core.group.add(chunks, carry) }
+    out CompilerOutput { chunks = chunks }
+}
+
+skill compiler_output_text(output) {
+    @result = ""
+    @count = core.group.count(output.chunks)
+    @index = count - 1
+    drum (count) {
+        @chunk = core.group.item(output.chunks, index)
+        (core.str.len(chunk) > 0) { result = core.str.add(result, chunk) }
+        index = index - 1
+    }
+    out result
+}
+
 skill compiler_emit(compiler, line) {
-    compiler.lines = core.group.add(compiler.lines, line)
+    compiler.lines = compiler_output_add(compiler.lines, core.str.add(line, "\n"))
     out compiler
 }
 
@@ -327,18 +369,8 @@ skill compiler_field(compiler, name) {
     out field.value
 }
 
-skill compiler_render_lines(lines) {
-    @result = ""
-    @index = 0
-    @count = core.group.count(lines)
-    drum (count) {
-        (index < count) {
-            result = core.str.add(result, core.group.item(lines, index))
-            result = core.str.add(result, "\n")
-            index = index + 1
-        }
-    }
-    out result
+skill compiler_render_lines(output) {
+    out compiler_output_text(output)
 }
 
 skill compiler_collect_box(compiler, item) {
@@ -713,22 +745,23 @@ skill compiler_string_label(compiler, text) {
     @known = compiler_string_find(compiler, text)
     (core.str.len(known.name) > 0) { out known.name }
     @label = compiler_label(compiler, "string")
-    @values = ""
+    @values = CompilerOutput()
     @index = 0
     @length = core.str.len(text)
     drum (length) {
         (index < length) {
-            (index > 0) { values = core.str.add(values, ", ") }
-            values = core.str.add(values, core.num.text(compiler_ascii_code(core.str.at(text, index))))
+            (index > 0) { values = compiler_output_add(values, ", ") }
+            values = compiler_output_add(values, core.num.text(compiler_ascii_code(core.str.at(text, index))))
             index = index + 1
         }
     }
-    (length > 0) { values = core.str.add(values, ", ") }
-    values = core.str.add(values, "0")
+    (length > 0) { values = compiler_output_add(values, ", ") }
+    values = compiler_output_add(values, "0")
+    @values_text = compiler_output_text(values)
     @datum = core.str.add(label, ":\n  .word ")
     datum = core.str.add(datum, core.num.text(length))
     datum = core.str.add(datum, "\n  .byte ")
-    datum = core.str.add(datum, values)
+    datum = core.str.add(datum, values_text)
     datum = core.str.add(datum, "\n  .balign 8")
     compiler.data = core.group.add(compiler.data, datum)
     compiler.strings = core.group.add(compiler.strings, CompilerSymbol { name = label kind = "string" text = text })

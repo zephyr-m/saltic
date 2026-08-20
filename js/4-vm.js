@@ -141,6 +141,7 @@ class Host {
         machine.exitCode = args[0] & 0xff
         machine.halted = true
         machine.haltReason = 'exit'
+        machine.haltPc = machine.pc
         return 0
       default:
         throw new Trap('unsupported ecall', machine.pc, `number ${number}`)
@@ -230,6 +231,7 @@ class Machine {
     this.pc = 0
     this.halted = false
     this.haltReason = null
+    this.haltPc = null
     this.exitCode = 0
     this.steps = 0
     this.lastHostError = null
@@ -405,6 +407,7 @@ class Machine {
         else if (instruction === 0x00100073) { // EBREAK
           this.halted = true
           this.haltReason = 'break'
+          this.haltPc = currentPc
         } else illegal()
         break
       default:
@@ -418,8 +421,25 @@ class Machine {
 
   run(options = {}) {
     const limit = options.steps ?? DEFAULT_STEP_LIMIT
+    const progressEvery = options.progressEvery
+    const onProgress = options.onProgress
     try {
-      while (!this.halted && this.steps < limit) this.step()
+      if (typeof onProgress === 'function' && Number.isFinite(progressEvery) && progressEvery > 0) {
+        let nextProgress = (Math.floor(this.steps / progressEvery) + 1) * progressEvery
+        let reportedSteps = -1
+        while (!this.halted && this.steps < limit) {
+          const boundary = Math.min(nextProgress, limit)
+          while (!this.halted && this.steps < boundary) this.step()
+          if (this.halted || this.steps >= nextProgress || this.steps === limit) {
+            onProgress(this, limit)
+            reportedSteps = this.steps
+          }
+          while (nextProgress <= this.steps) nextProgress += progressEvery
+        }
+        if (this.halted && reportedSteps !== this.steps) onProgress(this, limit)
+      } else {
+        while (!this.halted && this.steps < limit) this.step()
+      }
       if (!this.halted) throw new Trap('step limit reached', this.pc, `${limit} instructions`)
       return this.result()
     } finally {
@@ -507,6 +527,57 @@ function hex(value) {
   return (value >>> 0).toString(16).padStart(8, '0')
 }
 
+function duration(seconds) {
+  const whole = Math.floor(seconds)
+  const hours = Math.floor(whole / 3600)
+  const minutes = Math.floor(whole % 3600 / 60)
+  const rest = whole % 60
+  const clock = `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
+  return hours > 0 ? `${String(hours).padStart(2, '0')}:${clock}` : clock
+}
+
+function mib(bytes) {
+  return Math.round(bytes / (1024 * 1024))
+}
+
+function progressReporter(options) {
+  const started = process.hrtime.bigint()
+  let previous = started
+  let previousSteps = 0
+  return (machine, limit) => {
+    const now = process.hrtime.bigint()
+    const elapsed = Number(now - started) / 1e9
+    const interval = Number(now - previous) / 1e9
+    const speed = interval > 0 ? (machine.steps - previousSteps) / interval : 0
+    const percent = limit > 0 ? machine.steps / limit * 100 : 100
+    const heapCursor = machine.reg(9)
+    const heapEnd = machine.reg(18)
+    const heapRemaining = heapEnd >= heapCursor ? heapEnd - heapCursor : 0
+    const heapUsed = options.heapSize > 0
+      ? Math.max(0, Math.min(options.heapSize, options.heapSize - heapRemaining))
+      : 0
+    const heap = options.heapSize > 0
+      ? ` | heap: ${mib(heapUsed)} / ${mib(options.heapSize)} МБ`
+      : ''
+    const completion = machine.halted
+      ? ` | завершение: ${machine.haltReason}, код ${machine.exitCode} | RA: 0x${hex(machine.reg(1))}`
+      : ''
+    const pc = machine.halted && machine.haltPc !== null ? machine.haltPc : machine.pc
+    const label = options.progressLabel || 'VM'
+    console.error(
+      `${label}: ${(machine.steps / 1e9).toFixed(2)} / ${(limit / 1e9).toFixed(2)} млрд (${percent.toFixed(1)}%)`
+      + ` | скорость: ${(speed / 1e6).toFixed(1)} млн/с`
+      + ` | время: ${duration(elapsed)}`
+      + ` | PC: 0x${hex(pc)}`
+      + heap
+      + ` | RSS Node: ${mib(process.memoryUsage().rss)} МБ`
+      + completion,
+    )
+    previous = now
+    previousSteps = machine.steps
+  }
+}
+
 function parseCli(args) {
   const options = { args: [] }
   let file = null
@@ -518,12 +589,16 @@ function parseCli(args) {
     }
     if (arg === '--memory') options.memorySize = Number(args[++index])
     else if (arg === '--steps') options.steps = Number(args[++index])
+    else if (arg === '--progress') options.progress = true
+    else if (arg === '--progress-steps') options.progressSteps = Number(args[++index])
+    else if (arg === '--progress-label') options.progressLabel = args[++index]
+    else if (arg === '--heap-size') options.heapSize = Number(args[++index])
     else if (arg === '--root') options.root = args[++index]
     else if (arg === '--address') options.address = Number(args[++index])
     else if (!file) file = arg
     else options.args.push(arg)
   }
-  if (!file) throw new Error('usage: node js/4-vm.js <program.elf|program.bin> [--root folder] [--steps count] [-- args...]')
+  if (!file) throw new Error('usage: node js/4-vm.js <program.elf|program.bin> [--root folder] [--steps count] [--progress] [-- args...]')
   return { file, options }
 }
 
@@ -534,7 +609,11 @@ function runFile(file, options = {}) {
     args: options.args,
     programName: file,
   })
-  return machine.run({ steps: options.steps })
+  return machine.run({
+    steps: options.steps,
+    progressEvery: options.progress ? (options.progressSteps || 100_000_000) : 0,
+    onProgress: options.progress ? progressReporter(options) : null,
+  })
 }
 
 module.exports = {

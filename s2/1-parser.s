@@ -40,8 +40,33 @@ SalticToken = Box {
     col = 1
 }
 
+SalticTokenBuffer = Box {
+    chunks = []
+    tail = []
+    length = 0
+}
+
+skill parser_token_buffer_add(buffer, item) {
+    @next_chunks = buffer.chunks
+    @next_tail = core.group.add(buffer.tail, item)
+    (core.group.count(next_tail) == 256) {
+        next_chunks = core.group.add(next_chunks, next_tail)
+        next_tail = []
+    }
+    out SalticTokenBuffer { chunks = next_chunks tail = next_tail length = buffer.length + 1 }
+}
+
+skill parser_token_buffer_at(buffer, index) {
+    @chunk_index = index / 256
+    @item_index = index - chunk_index * 256
+    (chunk_index < core.group.count(buffer.chunks)) {
+        out core.group.item(core.group.item(buffer.chunks, chunk_index), item_index)
+    }
+    out core.group.item(buffer.tail, item_index)
+}
+
 SalticScan = Box {
-    tokens = []
+    tokens = SalticTokenBuffer {}
     diagnostics = []
 }
 
@@ -83,16 +108,19 @@ SalticLexer = Box {
         @index = start
         @next_col = col
         @length = core.str.len(source)
-        @reading = yes
-        drum (length) {
-            (reading == yes) {
-                (index < length) {
-                    @part = core.str.at(source, index)
-                    (ident_part(part) == yes) { index = index + 1 next_col = next_col + 1 }
-                    (ident_part(part) == no) { reading = no }
+        drum (length - start) {
+            @part = core.str.at(source, index)
+            (ident_part(part) == no) {
+                @value = core.str.slice(source, start, index)
+                out SalticLexeme {
+                    token = token(word_kind(value), value, line, col)
+                    next = index
+                    line = line
+                    col = next_col
                 }
-                (index == length) { reading = no }
             }
+            index = index + 1
+            next_col = next_col + 1
         }
         @value = core.str.slice(source, start, index)
         out SalticLexeme {
@@ -108,24 +136,29 @@ SalticLexer = Box {
         @next_col = col
         @length = core.str.len(source)
         @dot = no
-        @reading = yes
-        drum (length) {
-            (reading == yes) {
-                (index < length) {
-                    @digit = core.str.at(source, index)
-                    @take = parser_is_digit(digit)
-                    (digit == ".") {
-                        (dot == no) {
-                            (index + 1 < length) {
-                                (parser_is_digit(core.str.at(source, index + 1)) == yes) { take = yes dot = yes }
-                            }
+        drum (length - start) {
+            @digit = core.str.at(source, index)
+            @take = parser_is_digit(digit)
+            (digit == ".") {
+                (dot == no) {
+                    (index + 1 < length) {
+                        (parser_is_digit(core.str.at(source, index + 1)) == yes) {
+                            take = yes
+                            dot = yes
                         }
                     }
-                    (take == yes) { index = index + 1 next_col = next_col + 1 }
-                    (take == no) { reading = no }
                 }
-                (index == length) { reading = no }
             }
+            (take == no) {
+                out SalticLexeme {
+                    token = token(TokenKind.NUMBER, core.str.slice(source, start, index), line, col)
+                    next = index
+                    line = line
+                    col = next_col
+                }
+            }
+            index = index + 1
+            next_col = next_col + 1
         }
         out SalticLexeme {
             token = token(TokenKind.NUMBER, core.str.slice(source, start, index), line, col)
@@ -141,53 +174,71 @@ SalticLexer = Box {
         @next_col = col + 1
         @length = core.str.len(source)
         @value = ""
-        @closed = no
         @diagnostics = []
-        drum (length) {
-            (closed == no) {
-                (index < length) {
-                    @ch = core.str.at(source, index)
-                    (ch == Quote) { closed = yes index = index + 1 next_col = next_col + 1 }
-                    (ch == Escape) {
-                        (closed == no) {
-                            (index + 1 < length) {
-                                @escape = core.str.at(source, index + 1)
-                                @decoded = escape
-                                (escape == EscapeNewline) { decoded = Newline }
-                                (escape == EscapeTab) { decoded = Tab }
-                                (escape == Quote) { decoded = Quote }
-                                (escape == Escape) { decoded = Escape }
-                                value = core.str.add(value, decoded)
-                                index = index + 2
-                                next_col = next_col + 2
-                            }
-                            (index + 1 == length) {
-                                diagnostics = core.group.add(diagnostics, parser_diagnostic(path, next_line, next_col, "unterminated escape"))
-                                closed = yes
-                            }
-                        }
-                    }
-                    (closed == no) {
-                        (ch == Newline) { value = core.str.add(value, ch) index = index + 1 next_line = next_line + 1 next_col = 1 }
-                        @ordinary = yes
-                        (ch == Newline) { ordinary = no }
-                        (ch == Quote) { ordinary = no }
-                        (ch == Escape) { ordinary = no }
-                        (ordinary == yes) { value = core.str.add(value, ch) index = index + 1 next_col = next_col + 1 }
-                    }
+        drum (length - start) {
+            (index == length) {
+                diagnostics = core.group.add(diagnostics, parser_diagnostic(path, line, col, "unterminated string"))
+                out SalticLexeme {
+                    token = none
+                    next = index
+                    line = next_line
+                    col = next_col
+                    diagnostics = diagnostics
                 }
-                (closed == no) {
-                    (index == length) {
-                        diagnostics = core.group.add(diagnostics, parser_diagnostic(path, line, col, "unterminated string"))
-                        closed = yes
+            }
+            @ch = core.str.at(source, index)
+            (ch == Quote) {
+                out SalticLexeme {
+                    token = token(TokenKind.STRING, value, line, col)
+                    next = index + 1
+                    line = next_line
+                    col = next_col + 1
+                    diagnostics = diagnostics
+                }
+            }
+            @escaped = no
+            (ch == Escape) {
+                (index + 1 < length) {
+                    @escape = core.str.at(source, index + 1)
+                    @decoded = escape
+                    (escape == EscapeNewline) { decoded = Newline }
+                    (escape == EscapeTab) { decoded = Tab }
+                    (escape == Quote) { decoded = Quote }
+                    (escape == Escape) { decoded = Escape }
+                    value = core.str.add(value, decoded)
+                    index = index + 2
+                    next_col = next_col + 2
+                    escaped = yes
+                }
+                (escaped == no) {
+                    diagnostics = core.group.add(diagnostics, parser_diagnostic(path, next_line, next_col, "unterminated escape"))
+                    out SalticLexeme {
+                        token = none
+                        next = index
+                        line = next_line
+                        col = next_col
+                        diagnostics = diagnostics
                     }
                 }
             }
+            (escaped == no) {
+                (ch == Newline) {
+                    value = core.str.add(value, ch)
+                    index = index + 1
+                    next_line = next_line + 1
+                    next_col = 1
+                }
+                (ch == Newline) { escaped = yes }
+            }
+            (escaped == no) {
+                value = core.str.add(value, ch)
+                index = index + 1
+                next_col = next_col + 1
+            }
         }
-        @result_token = none
-        (parser_has_diagnostics(diagnostics) == no) { result_token = token(TokenKind.STRING, value, line, col) }
+        diagnostics = core.group.add(diagnostics, parser_diagnostic(path, line, col, "unterminated string"))
         out SalticLexeme {
-            token = result_token
+            token = none
             next = index
             line = next_line
             col = next_col
@@ -216,7 +267,7 @@ SalticLexer = Box {
     }
 
     skill scan() {
-        @tokens = []
+        @tokens = SalticTokenBuffer()
         @diagnostics = []
         @index = 0
         @line = 1
@@ -231,7 +282,7 @@ SalticLexer = Box {
                     (ch == " ") { index = index + 1 col = col + 1 handled = yes }
                     (ch == Tab) { index = index + 1 col = col + 1 handled = yes }
                     (ch == Newline) {
-                        tokens = core.group.add(tokens, token(TokenKind.NEWLINE, Newline, line, col))
+                        tokens = parser_token_buffer_add(tokens, token(TokenKind.NEWLINE, Newline, line, col))
                         index = index + 1
                         line = line + 1
                         col = 1
@@ -240,7 +291,7 @@ SalticLexer = Box {
                     (handled == no) {
                         (ident_start(ch) == yes) {
                             @lexeme = word(index, line, col)
-                            tokens = core.group.add(tokens, lexeme.token)
+                            tokens = parser_token_buffer_add(tokens, lexeme.token)
                             index = lexeme.next
                             line = lexeme.line
                             col = lexeme.col
@@ -250,7 +301,7 @@ SalticLexer = Box {
                     (handled == no) {
                         (parser_is_digit(ch) == yes) {
                             @lexeme = number(index, line, col)
-                            tokens = core.group.add(tokens, lexeme.token)
+                            tokens = parser_token_buffer_add(tokens, lexeme.token)
                             index = lexeme.next
                             line = lexeme.line
                             col = lexeme.col
@@ -264,7 +315,7 @@ SalticLexer = Box {
                             line = lexeme.line
                             col = lexeme.col
                             diagnostics = lexeme.diagnostics
-                            (parser_has_diagnostics(diagnostics) == no) { tokens = core.group.add(tokens, lexeme.token) }
+                            (parser_has_diagnostics(diagnostics) == no) { tokens = parser_token_buffer_add(tokens, lexeme.token) }
                             (parser_has_diagnostics(diagnostics) == yes) { active = no }
                             handled = yes
                         }
@@ -272,8 +323,8 @@ SalticLexer = Box {
                     (handled == no) {
                         @pair = ""
                         (index + 1 < length) { pair = core.str.slice(source, index, index + 2) }
-                        (pair == "==") { tokens = core.group.add(tokens, token(TokenKind.EQ, pair, line, col)) index = index + 2 col = col + 2 handled = yes }
-                        (pair == "=>") { tokens = core.group.add(tokens, token(TokenKind.ARROW, pair, line, col)) index = index + 2 col = col + 2 handled = yes }
+                        (pair == "==") { tokens = parser_token_buffer_add(tokens, token(TokenKind.EQ, pair, line, col)) index = index + 2 col = col + 2 handled = yes }
+                        (pair == "=>") { tokens = parser_token_buffer_add(tokens, token(TokenKind.ARROW, pair, line, col)) index = index + 2 col = col + 2 handled = yes }
                     }
                     (handled == no) {
                         @sign = sign_kind(ch)
@@ -285,7 +336,7 @@ SalticLexer = Box {
                             valid_sign = no
                         }
                         (valid_sign == yes) {
-                            tokens = core.group.add(tokens, token(sign, ch, line, col))
+                            tokens = parser_token_buffer_add(tokens, token(sign, ch, line, col))
                             index = index + 1
                             col = col + 1
                             handled = yes
@@ -295,17 +346,17 @@ SalticLexer = Box {
                 (index == length) { active = no }
             }
         }
-        tokens = core.group.add(tokens, token(TokenKind.EOF, "", line, col))
+        tokens = parser_token_buffer_add(tokens, token(TokenKind.EOF, "", line, col))
         out SalticScan { tokens = tokens diagnostics = diagnostics }
     }
 }
 
 SalticCursor = Box {
-    tokens = []
+    tokens = SalticTokenBuffer {}
     index = 0
 
     skill at(offset) {
-        out core.group.item(tokens, index + offset)
+        out parser_token_buffer_at(tokens, index + offset)
     }
 
     skill peek() {
@@ -339,12 +390,12 @@ SalticCursor = Box {
 }
 
 SalticParser = Box {
-    tokens = []
+    tokens = SalticTokenBuffer {}
     path = ""
     locations = no
 
     skill at(index) {
-        out core.group.item(tokens, index)
+        out parser_token_buffer_at(tokens, index)
     }
 
     skill is(index, kind) {
@@ -354,11 +405,11 @@ SalticParser = Box {
 
     skill skip_lines(index) {
         @next = index
-        @count = core.group.count(tokens)
+        @count = tokens.length
         drum (count) {
-            (next < count) {
-                (is(next, TokenKind.NEWLINE) == yes) { next = next + 1 }
-            }
+            (next == count) { out next }
+            (is(next, TokenKind.NEWLINE) == no) { out next }
+            next = next + 1
         }
         out next
     }
@@ -423,7 +474,7 @@ SalticParser = Box {
         @next = skip_lines(start)
         @done = no
         @diagnostics = []
-        @count = core.group.count(tokens)
+        @count = tokens.length
         drum (count) {
             (done == no) {
                 (is(next, end_kind) == yes) {
@@ -465,6 +516,7 @@ SalticParser = Box {
                     }
                 }
             }
+            (done == yes) { out SalticRead { node = parser_node("sequence", items) next = next diagnostics = diagnostics } }
         }
         out SalticRead { node = parser_node("sequence", items) next = next diagnostics = diagnostics }
     }
@@ -585,7 +637,7 @@ SalticParser = Box {
         @next = skip_lines(0)
         @diagnostics = []
         @done = no
-        @count = core.group.count(tokens)
+        @count = tokens.length
         drum (count) {
             (done == no) {
                 (is(next, TokenKind.EOF) == yes) { done = yes }
@@ -595,6 +647,7 @@ SalticParser = Box {
                     (done == no) { ast = core.group.add(ast, item.node.datum) next = skip_lines(item.next) }
                 }
             }
+            (done == yes) { out SalticParse { ast = ast tokens = tokens diagnostics = diagnostics } }
         }
         out SalticParse { ast = ast tokens = tokens diagnostics = diagnostics }
     }
@@ -607,7 +660,7 @@ SalticParser = Box {
         @token = cursor.peek()
         @parts = parser_group2("path", token.value)
         cursor = cursor.next()
-        @count = core.group.count(tokens)
+        @count = tokens.length
         @active = yes
         drum (count) {
             (active == yes) {
@@ -625,6 +678,7 @@ SalticParser = Box {
                 }
                 (cursor.index + 1 == count) { active = no }
             }
+            (active == no) { out parser_ok("path", parser_loc(parts, token, with_locations), cursor.index) }
         }
         out parser_ok("path", parser_loc(parts, token, with_locations), cursor.index)
     }
@@ -677,7 +731,7 @@ SalticParser = Box {
         @next = base.next
         @active = yes
         @diagnostics = []
-        @count = core.group.count(tokens)
+        @count = tokens.length
         drum (count) {
             (active == yes) {
                 (is(next, TokenKind.LPAREN) == yes) {
@@ -716,6 +770,7 @@ SalticParser = Box {
                     (box_candidate == no) { active = no }
                 }
             }
+            (active == no) { out SalticRead { node = node next = next diagnostics = diagnostics } }
         }
         out SalticRead { node = node next = next diagnostics = diagnostics }
     }
@@ -738,7 +793,7 @@ SalticParser = Box {
         @next = first.next
         @active = yes
         @diagnostics = []
-        @count = core.group.count(tokens)
+        @count = tokens.length
         drum (count) {
             (active == yes) {
                 @operator = at(next)
@@ -754,6 +809,7 @@ SalticParser = Box {
                     }
                 }
             }
+            (active == no) { out SalticRead { node = left next = next diagnostics = diagnostics } }
         }
         out SalticRead { node = left next = next diagnostics = diagnostics }
     }
@@ -859,7 +915,7 @@ SalticParser = Box {
             @cases = parser_group2("switch", value.node.datum)
             @done = no
             @diagnostics = []
-            @count = core.group.count(tokens)
+            @count = tokens.length
             drum (count) {
                 (done == no) {
                     (is(next, TokenKind.RBRACE) == yes) { next = next + 1 done = yes }
@@ -888,6 +944,7 @@ SalticParser = Box {
                         }
                     }
                 }
+                (done == yes) { out SalticRead { node = parser_node("switch", parser_loc(cases, token, locations)) next = next diagnostics = diagnostics } }
             }
             out SalticRead { node = parser_node("switch", parser_loc(cases, token, locations)) next = next diagnostics = diagnostics }
         }
@@ -936,7 +993,7 @@ SalticRead = Box {
 
 SalticParse = Box {
     ast = []
-    tokens = []
+    tokens = SalticTokenBuffer {}
     diagnostics = []
 }
 
