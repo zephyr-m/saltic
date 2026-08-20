@@ -152,7 +152,11 @@ class Parser {
     while(true){a.push(this.expression());if(!this.is('COMMA'))break;this.take()}this.expect('RPAREN');return a
   }
   primary(){
-    if(this.is('NUMBER'))return ['number',Number(this.take().value)]
+    if(this.is('NUMBER')){
+      const text=this.take().value
+      if(!text.includes('.')&&Number(text)>268435455)return ['wide-number',text]
+      return ['number',Number(text)]
+    }
     if(this.is('STRING'))return ['string',this.take().value]
     if(this.is('YES')){this.take();return ['answer','yes']}
     if(this.is('NO')){this.take();return ['answer','no']}

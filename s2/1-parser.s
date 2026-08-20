@@ -690,7 +690,10 @@ SalticParser = Box {
 
     skill primary(start) {
         @token = at(start)
-        (token.kind == TokenKind.NUMBER) { out parser_ok("number", parser_loc(parser_group2("number", parser_number_value(token.value)), token, locations), start + 1) }
+        (token.kind == TokenKind.NUMBER) {
+            (parser_number_is_wide(token.value) == yes) { out parser_ok("wide-number", parser_loc(parser_group2("wide-number", token.value), token, locations), start + 1) }
+            out parser_ok("number", parser_loc(parser_group2("number", parser_number_value(token.value)), token, locations), start + 1)
+        }
         (token.kind == TokenKind.STRING) { out parser_ok("string", parser_loc(parser_group2("string", token.value), token, locations), start + 1) }
         (token.kind == TokenKind.YES) { out parser_ok("answer", parser_loc(parser_group2("answer", "yes"), token, locations), start + 1) }
         (token.kind == TokenKind.NO) { out parser_ok("answer", parser_loc(parser_group2("answer", "no"), token, locations), start + 1) }
@@ -1068,6 +1071,23 @@ skill parser_number_value(text) {
         }
     }
     out whole + fraction / scale
+}
+
+skill parser_number_is_wide(text) {
+    (core.str.contains(text, ".") == yes) { out no }
+    @length = core.str.len(text)
+    (length > 9) { out yes }
+    (length < 9) { out no }
+    @limit = "268435455"
+    @index = 0
+    drum (9) {
+        @actual = parser_digit_value(core.str.at(text, index))
+        @maximum = parser_digit_value(core.str.at(limit, index))
+        (actual > maximum) { out yes }
+        (actual < maximum) { out no }
+        index = index + 1
+    }
+    out no
 }
 
 skill parser_lex(source, path) {

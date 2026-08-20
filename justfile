@@ -31,6 +31,9 @@ compiler-parity:
 vm-parity:
     bash tests/5-vm-parity.sh
 
+fixed-types:
+    bash tests/7-fixed-types.sh
+
 selfhost-parity:
     bash tests/6-selfhost-parity.sh
 
@@ -40,5 +43,7 @@ test:
     bash tests/3-checker-parity.sh
     bash tests/4-compiler-parity.sh
     bash tests/5-vm-parity.sh
+    bash tests/6-selfhost-parity.sh
+    bash tests/7-fixed-types.sh
 
 verify: test

@@ -154,9 +154,101 @@ skill checker_type_text(type) {
     out type
 }
 
+skill checker_is_fixed_type(type) {
+    (type == "u8") { out yes }
+    (type == "u16") { out yes }
+    (type == "u32") { out yes }
+    (type == "i32") { out yes }
+    (type == "bits32") { out yes }
+    (type == "address") { out yes }
+    (type == "usize") { out yes }
+    out no
+}
+
+skill checker_integer_text(node) {
+    @plain = checker_plain(node)
+    @tag = core.group.item(plain, 0)
+    (tag == "number") { out core.num.text(core.group.item(plain, 1)) }
+    (tag == "wide-number") { out core.group.item(plain, 1) }
+    (tag == "binary") {
+        (core.group.item(plain, 1) == "-") {
+            @left = checker_plain(core.group.item(plain, 2))
+            (core.group.item(left, 0) == "number") {
+                (core.group.item(left, 1) == 0) { out core.str.add("-", checker_integer_text(core.group.item(plain, 3))) }
+            }
+        }
+    }
+    out ""
+}
+
+skill checker_unsigned_greater(value, maximum) {
+    @value_length = core.str.len(value)
+    @maximum_length = core.str.len(maximum)
+    (value_length > maximum_length) { out yes }
+    (value_length < maximum_length) { out no }
+    @index = 0
+    drum (value_length) {
+        @actual = checker_digit(core.str.at(value, index))
+        @limit = checker_digit(core.str.at(maximum, index))
+        (actual > limit) { out yes }
+        (actual < limit) { out no }
+        index = index + 1
+    }
+    out no
+}
+
+skill checker_digit(ch) {
+    (ch == "0") { out 0 }
+    (ch == "1") { out 1 }
+    (ch == "2") { out 2 }
+    (ch == "3") { out 3 }
+    (ch == "4") { out 4 }
+    (ch == "5") { out 5 }
+    (ch == "6") { out 6 }
+    (ch == "7") { out 7 }
+    (ch == "8") { out 8 }
+    out 9
+}
+
+skill checker_path_text(path) {
+    @plain = checker_plain(path)
+    @text = core.group.item(plain, 1)
+    @index = 2
+    @count = core.group.count(plain)
+    drum (count) {
+        (index < count) { text = core.str.add(text, core.str.add(".", core.group.item(plain, index))) }
+        index = index + 1
+    }
+    out text
+}
+
+skill checker_fixed_range(type, text) {
+    @negative = core.str.starts_with(text, "-")
+    @magnitude = text
+    (negative == yes) { magnitude = core.str.slice(text, 1, core.str.len(text)) }
+    (type == "u8") { (negative == yes) { out no } out checker_unsigned_greater(magnitude, "255") == no }
+    (type == "u16") { (negative == yes) { out no } out checker_unsigned_greater(magnitude, "65535") == no }
+    (type == "u32") { (negative == yes) { out no } out checker_unsigned_greater(magnitude, "4294967295") == no }
+    (type == "bits32") { (negative == yes) { out no } out checker_unsigned_greater(magnitude, "4294967295") == no }
+    (type == "usize") { (negative == yes) { out no } out checker_unsigned_greater(magnitude, "4294967295") == no }
+    (type == "i32") {
+        (negative == yes) { out checker_unsigned_greater(magnitude, "2147483648") == no }
+        out checker_unsigned_greater(magnitude, "2147483647") == no
+    }
+    out yes
+}
+
+skill checker_fixed_range_text(type) {
+    (type == "u8") { out "0..255" }
+    (type == "u16") { out "0..65535" }
+    (type == "i32") { out "-2147483648..2147483647" }
+    out "0..4294967295"
+}
+
 skill checker_type(node) {
     @tag = checker_tag(node)
     (tag == "number") { out "number" }
+    (tag == "wide-number") { out "number" }
     (tag == "string") { out "string" }
     (tag == "answer") { out "answer" }
     (tag == "none") { out "none" }
@@ -322,6 +414,14 @@ skill checker_call_type(node, scope, globals) {
         drum (part_count) {
             (part_index < part_count) { full = core.str.add(full, core.str.add(".", core.group.item(callee, part_index))) part_index = part_index + 1 }
         }
+        (checker_is_fixed_type(full) == yes) { out full }
+        (full == "core.u8.from") { out "u8" }
+        (full == "core.u16.from") { out "u16" }
+        (full == "core.u32.from") { out "u32" }
+        (full == "core.i32.from") { out "i32" }
+        (full == "core.usize.from") { out "usize" }
+        (core.str.starts_with(full, "core.bits32.") == yes) { out "bits32" }
+        (full == "core.address.add") { out "address" }
         (full == "core.group.count") { out "number" }
         (full == "core.group.at") { out checker_group_item_type(checker_value_type(core.group.item(plain, 2), scope, globals)) }
         (full == "core.group.item") { out checker_group_item_type(checker_value_type(core.group.item(plain, 2), scope, globals)) }
@@ -379,6 +479,7 @@ skill checker_value_type(node, scope, globals) {
     @plain = checker_plain(node)
     @tag = core.group.item(plain, 0)
     (tag == "number") { out "number" }
+    (tag == "wide-number") { out "number" }
     (tag == "string") { out "string" }
     (tag == "answer") { out "answer" }
     (tag == "none") { out "none" }
@@ -401,6 +502,8 @@ skill checker_value_type(node, scope, globals) {
         (operator == "==") { out "answer" }
         (operator == ">") { out "answer" }
         (operator == "<") { out "answer" }
+        @left_type = checker_value_type(core.group.item(plain, 2), scope, globals)
+        (checker_is_fixed_type(left_type) == yes) { out left_type }
         out "number"
     }
     (tag == "rescue") {
@@ -506,6 +609,27 @@ skill checker_expression(node, scope, globals, diagnostics) {
                 (left_type == "number") {
                     (right_type == "number") { both_numbers = yes }
                 }
+                @fixed = no
+                (checker_is_fixed_type(left_type) == yes) { fixed = yes }
+                (checker_is_fixed_type(right_type) == yes) { fixed = yes }
+                (fixed == yes) {
+                    both_numbers = yes
+                    @message = ""
+                    (left_type == "address") { message = "для арифметики адресов используй core.address.add(address, usize)" }
+                    (right_type == "address") { message = "для арифметики адресов используй core.address.add(address, usize)" }
+                    (left_type == "bits32") { message = core.str.add("операция '", core.str.add(operator, "' недоступна для bits32: используй операции core.bits32")) }
+                    (right_type == "bits32") { message = core.str.add("операция '", core.str.add(operator, "' недоступна для bits32: используй операции core.bits32")) }
+                    (core.str.len(message) == 0) {
+                        (left_type == right_type) { message = "" }
+                        (left_type == "number") { message = core.str.add("операция '", core.str.add(operator, core.str.add("' не может смешивать ", core.str.add(right_type, " и number")))) }
+                        (right_type == "number") { message = core.str.add("операция '", core.str.add(operator, core.str.add("' не может смешивать ", core.str.add(left_type, " и number")))) }
+                        (core.str.len(message) == 0) {
+                            (left_type == right_type) { message = "" }
+                            ((left_type == right_type) == no) { message = core.str.add("операция '", core.str.add(operator, core.str.add("' требует одинаковые фиксированные целые типы: получены ", core.str.add(left_type, core.str.add(" и ", right_type))))) }
+                        }
+                    }
+                    (core.str.len(message) > 0) { diagnostics = checker_add(diagnostics, checker_diagnostic(node, "operator_type_mismatch", message)) }
+                }
                 (both_numbers == no) {
                     @message = core.str.add("operator '", operator)
                     message = core.str.add(message, "' expects numbers, got ")
@@ -524,6 +648,7 @@ skill checker_expression(node, scope, globals, diagnostics) {
         (core.group.item(callee, 0) == "path") {
             @callee_count = core.group.count(callee)
             (callee_count == 2) {
+                (checker_is_fixed_type(core.group.item(callee, 1)) == yes) { skip_callee = yes }
                 (core.str.len(scope.subject) > 0) {
                     (checker_box_has_skill(globals, scope.subject, core.group.item(callee, 1)) == yes) { skip_callee = yes }
                 }
@@ -542,6 +667,51 @@ skill checker_expression(node, scope, globals, diagnostics) {
         drum (count) {
             (index < count) { diagnostics = checker_expression(core.group.item(plain, index), scope, globals, diagnostics) }
             index = index + 1
+        }
+        @full = checker_path_text(callee)
+        (checker_is_fixed_type(full) == yes) {
+            @text = checker_integer_text(core.group.item(plain, 2))
+            (core.str.len(text) > 0) {
+                (checker_fixed_range(full, text) == no) {
+                    @message = core.str.add("значение ", text)
+                    message = core.str.add(message, core.str.add(" не помещается в ", full))
+                    message = core.str.add(message, core.str.add(": допустимо ", checker_fixed_range_text(full)))
+                    diagnostics = checker_add(diagnostics, checker_diagnostic(node, "fixed_integer_out_of_range", message))
+                }
+            }
+        }
+        @expected = ""
+        (full == "core.mem.store8") { expected = "u8" }
+        (full == "core.mem.store16") { expected = "u16" }
+        (full == "core.mem.store32") { expected = "u32" }
+        (core.str.len(expected) > 0) {
+            (checker_value_type(core.group.item(plain, 2), scope, globals) == "address") {
+                @actual = checker_value_type(core.group.item(plain, 4), scope, globals)
+                (actual == expected) { expected = "" }
+                (core.str.len(expected) > 0) {
+                    @message = core.str.add(full, core.str.add(" ожидает значение ", expected))
+                    message = core.str.add(message, core.str.add(", получено ", actual))
+                    diagnostics = checker_add(diagnostics, checker_diagnostic(node, "type_mismatch", message))
+                }
+            }
+        }
+        (core.str.starts_with(full, "core.bits32.") == yes) {
+            @argument_index = 3
+            @expected_type = "bits32"
+            (full == "core.bits32.not") { argument_index = 0 }
+            (full == "core.bits32.shift_left") { expected_type = "u8" }
+            (full == "core.bits32.shift_right") { expected_type = "u8" }
+            (argument_index > 0) {
+                @actual = checker_value_type(core.group.item(plain, argument_index), scope, globals)
+                (actual == expected_type) { expected_type = "" }
+                (core.str.len(expected_type) > 0) {
+                    @message = core.str.add(full, " ожидает ")
+                    (expected_type == "u8") { message = core.str.add(message, "сдвиг ") }
+                    message = core.str.add(message, expected_type)
+                    message = core.str.add(message, core.str.add(", получено ", actual))
+                    diagnostics = checker_add(diagnostics, checker_diagnostic(node, "type_mismatch", message))
+                }
+            }
         }
         out diagnostics
     }
@@ -642,11 +812,23 @@ skill checker_statement(node, scope, globals, diagnostics) {
             @value_type = checker_value_type(value, scope, globals)
             (checker_compatible(old.type, value_type) == yes) { scope.names = checker_update(scope.names, name, checker_merge(old.type, value_type)) }
             (checker_compatible(old.type, value_type) == no) {
-                @message = core.str.add("cannot assign ", checker_type_text(value_type))
-                message = core.str.add(message, " to variable '")
-                message = core.str.add(message, name)
-                message = core.str.add(message, "' of type ")
-                message = core.str.add(message, checker_type_text(old.type))
+                @message = ""
+                @fixed = checker_is_fixed_type(old.type)
+                (checker_is_fixed_type(value_type) == yes) { fixed = yes }
+                (fixed == yes) {
+                    message = core.str.add("нельзя присвоить ", checker_type_text(value_type))
+                    message = core.str.add(message, " переменной '")
+                    message = core.str.add(message, name)
+                    message = core.str.add(message, "' типа ")
+                    message = core.str.add(message, checker_type_text(old.type))
+                }
+                (fixed == no) {
+                    message = core.str.add("cannot assign ", checker_type_text(value_type))
+                    message = core.str.add(message, " to variable '")
+                    message = core.str.add(message, name)
+                    message = core.str.add(message, "' of type ")
+                    message = core.str.add(message, checker_type_text(old.type))
+                }
                 diagnostics = checker_add(diagnostics, checker_diagnostic(node, "type_mismatch", message))
             }
         }

@@ -23,6 +23,18 @@ const TAG = {
 const NO = TAG.answer
 const YES = (1 << 3) | TAG.answer
 const NONE = TAG.none
+const FIXED_KIND = { u8: 1, u16: 2, u32: 3, i32: 4, bits32: 5, address: 6, usize: 7 }
+const FIXED_TYPES = new Set(Object.keys(FIXED_KIND))
+
+function constantInteger(node) {
+  if (node?.[0] === 'number') return node[1]
+  if (node?.[0] === 'wide-number') return Number(node[1])
+  if (node?.[0] === 'binary' && node[1] === '-') {
+    const left = constantInteger(node[2]), right = constantInteger(node[3])
+    if (left !== null && right !== null) return left - right
+  }
+  return null
+}
 
 class Compiler {
   constructor(ast) {
@@ -218,6 +230,7 @@ class Compiler {
 
   compilePath(parts) {
     if (parts[0] === 'error' && parts.length === 2) {
+      if (parts[1] === 'FixedIntegerOverflow') return this.loadImmediate('a0', (6 << 3) | TAG.error)
       if (!this.errors.has(parts[1])) this.errors.set(parts[1], this.errors.size + 1)
       return this.loadImmediate('a0', (this.errors.get(parts[1]) << 3) | TAG.error)
     }
@@ -247,7 +260,9 @@ class Compiler {
     this.compileExpression(right)
     this.emit('  addi a1, a0, 0')
     this.pop('a0')
-    const calls = { '+': 'rt_add', '-': 'rt_sub', '*': 'rt_mul', '/': 'rt_div', '==': 'rt_equal', '>': 'rt_greater', '<': 'rt_less' }
+    const type = this.inferType(left)
+    const fixedCalls = { '+': 'rt_fixed_add', '-': 'rt_fixed_sub', '*': 'rt_fixed_mul', '/': 'rt_fixed_div', '==': 'rt_fixed_equal', '>': 'rt_fixed_greater', '<': 'rt_fixed_less' }
+    const calls = FIXED_TYPES.has(type) ? fixedCalls : { '+': 'rt_add', '-': 'rt_sub', '*': 'rt_mul', '/': 'rt_div', '==': 'rt_equal', '>': 'rt_greater', '<': 'rt_less' }
     this.emit(`  call ${calls[operator]}`)
   }
 
@@ -255,6 +270,39 @@ class Compiler {
     if (callee[0] !== 'path') throw new Error('compile: callable expression must be a path')
     const name = callee.slice(1).join('.')
     if (name === 'core.io.show') return this.compileShow(args)
+    if (FIXED_TYPES.has(name)) {
+      if (args.length !== 1) throw new Error(`compile: ${name} expects one argument`)
+      const value = constantInteger(args[0])
+      if (value !== null) this.emit(`  li a0, ${value}`)
+      else {
+        this.compileExpression(args[0])
+        if (FIXED_TYPES.has(this.inferType(args[0]))) this.emit('  andi a0, a0, -8', '  lw a0, 0(a0)')
+        else this.emit('  srai a0, a0, 3')
+      }
+      this.loadImmediate('a1', FIXED_KIND[name])
+      this.emit('  call rt_fixed_new')
+      return
+    }
+    const conversion = /^core\.(u8|u16|u32|i32|usize)\.from$/.exec(name)
+    if (conversion) {
+      this.compileArguments(args)
+      this.loadImmediate('a1', FIXED_KIND[conversion[1]])
+      this.emit('  call rt_fixed_convert')
+      return
+    }
+    const fixedIntrinsic = {
+      'core.bits32.and': 'rt_fixed_and', 'core.bits32.or': 'rt_fixed_or',
+      'core.bits32.xor': 'rt_fixed_xor', 'core.bits32.not': 'rt_fixed_not',
+      'core.bits32.shift_left': 'rt_fixed_shift_left', 'core.bits32.shift_right': 'rt_fixed_shift_right',
+      'core.address.add': 'rt_fixed_add',
+    }[name]
+    if (fixedIntrinsic) { this.compileArguments(args); this.emit(`  call ${fixedIntrinsic}`); return }
+    const typedMemory = /^core\.mem\.(load|store)(8|16|32)$/.exec(name)
+    if (typedMemory && this.inferType(args[0]) === 'address') {
+      this.compileArguments(args)
+      this.emit(`  call rt_fixed_mem_${typedMemory[1]}${typedMemory[2]}`)
+      return
+    }
     if (callee.length === 2 && this.function?.subject && this.subjectSkills.get(this.function.subject)?.has(callee[1])) {
       this.compileArguments([['path', '$self'], ...args])
       this.emit(`  call saltic_${safe(`${this.function.subject}.${callee[1]}`)}`)
@@ -324,7 +372,20 @@ class Compiler {
     }
     if (node[0] === 'call' && node[1]?.[0] === 'path') {
       const callee = node[1]
+      const name = callee.slice(1).join('.')
+      if (FIXED_TYPES.has(name)) return name
+      const conversion = /^core\.(u8|u16|u32|i32|usize)\.from$/.exec(name)
+      if (conversion) return conversion[1]
+      if (name.startsWith('core.bits32.')) return 'bits32'
+      if (name === 'core.address.add') return 'address'
+      if (name === 'core.mem.load8' && this.inferType(node[2]) === 'address') return 'u8'
+      if (name === 'core.mem.load16' && this.inferType(node[2]) === 'address') return 'u16'
+      if (name === 'core.mem.load32' && this.inferType(node[2]) === 'address') return 'u32'
       if (callee.length === 2 && this.boxes.has(callee[1])) return ['box', callee[1]]
+    }
+    if (node[0] === 'binary') {
+      if (['==','>','<'].includes(node[1])) return 'answer'
+      return this.inferType(node[2])
     }
     if (node[0] === 'rescue') return this.inferType(node[1])
     return 'unknown'
@@ -343,7 +404,7 @@ class Compiler {
   compileShow(args) {
     for (const argument of args) {
       this.compileExpression(argument)
-      this.emit('  call rt_show')
+      this.emit(`  call ${FIXED_TYPES.has(this.inferType(argument)) ? 'rt_fixed_show' : 'rt_show'}`)
     }
     this.emit('  call rt_newline')
     this.loadImmediate('a0', NONE)
@@ -455,6 +516,403 @@ rt_alloc:
   bgtu t0, s2, rt_out_of_memory
   addi a0, s1, 0
   addi s1, t0, 0
+  jalr zero, 0(ra)
+
+rt_fixed_new:
+  addi sp, sp, -16
+  sw ra, 12(sp)
+  sw a0, 8(sp)
+  sw a1, 4(sp)
+  addi t0, zero, 1
+  beq a1, t0, .L_fixed_check_u8
+  addi t0, zero, 2
+  beq a1, t0, .L_fixed_check_u16
+  j .L_fixed_allocate
+.L_fixed_check_u8:
+  srli t0, a0, 8
+  bne t0, zero, rt_fixed_overflow_restore
+  j .L_fixed_allocate
+.L_fixed_check_u16:
+  srli t0, a0, 16
+  bne t0, zero, rt_fixed_overflow_restore
+.L_fixed_allocate:
+  addi a0, zero, 8
+  call rt_alloc
+  lw t0, 8(sp)
+  sw t0, 0(a0)
+  lw t0, 4(sp)
+  sw t0, 4(a0)
+  ori a0, a0, ${TAG.box}
+  lw ra, 12(sp)
+  addi sp, sp, 16
+  jalr zero, 0(ra)
+rt_fixed_overflow_restore:
+  li a0, ${(6 << 3) | TAG.error}
+  lw ra, 12(sp)
+  addi sp, sp, 16
+  jalr zero, 0(ra)
+
+rt_fixed_add:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw t2, 0(t0)
+  lw t3, 0(t1)
+  lw a1, 4(t0)
+  add a0, t2, t3
+  addi t4, zero, 4
+  beq a1, t4, .L_fixed_add_signed
+  bltu a0, t2, rt_fixed_overflow
+  j rt_fixed_new
+.L_fixed_add_signed:
+  xor t4, a0, t2
+  xor t5, a0, t3
+  and t4, t4, t5
+  blt t4, zero, rt_fixed_overflow
+  j rt_fixed_new
+
+rt_fixed_sub:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw t2, 0(t0)
+  lw t3, 0(t1)
+  lw a1, 4(t0)
+  sub a0, t2, t3
+  addi t4, zero, 4
+  beq a1, t4, .L_fixed_sub_signed
+  bltu t2, t3, rt_fixed_overflow
+  j rt_fixed_new
+.L_fixed_sub_signed:
+  xor t4, t2, t3
+  xor t5, a0, t2
+  and t4, t4, t5
+  blt t4, zero, rt_fixed_overflow
+  j rt_fixed_new
+
+rt_fixed_mul:
+  addi sp, sp, -16
+  sw ra, 12(sp)
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw t2, 0(t0)
+  lw t3, 0(t1)
+  lw t0, 4(t0)
+  sw t0, 8(sp)
+  addi a6, zero, 0
+  addi a2, zero, 4
+  bne t0, a2, .L_fixed_mul_unsigned
+  bge t2, zero, .L_fixed_mul_left_ready
+  sub t2, zero, t2
+  xori a6, a6, 1
+.L_fixed_mul_left_ready:
+  bge t3, zero, .L_fixed_mul_unsigned
+  sub t3, zero, t3
+  xori a6, a6, 1
+.L_fixed_mul_unsigned:
+  addi t4, zero, 0
+  addi t5, zero, 0
+  addi a4, zero, 0
+  addi t6, zero, 32
+.L_fixed_mul_loop:
+  andi a2, t3, 1
+  beq a2, zero, .L_fixed_mul_shift
+  add a2, t4, t2
+  sltu a3, a2, t4
+  add t5, t5, a4
+  add t5, t5, a3
+  add t4, a2, zero
+.L_fixed_mul_shift:
+  srli t3, t3, 1
+  srli a2, t2, 31
+  slli t2, t2, 1
+  slli a4, a4, 1
+  or a4, a4, a2
+  addi t6, t6, -1
+  bne t6, zero, .L_fixed_mul_loop
+  bne t5, zero, .L_fixed_mul_overflow
+  lw a1, 8(sp)
+  addi a2, zero, 4
+  bne a1, a2, .L_fixed_mul_ready
+  beq a6, zero, .L_fixed_mul_positive
+  li a2, 2147483648
+  bltu a2, t4, .L_fixed_mul_overflow
+  sub t4, zero, t4
+  j .L_fixed_mul_ready
+.L_fixed_mul_positive:
+  li a2, 2147483647
+  bltu a2, t4, .L_fixed_mul_overflow
+.L_fixed_mul_ready:
+  add a0, t4, zero
+  call rt_fixed_new
+  lw ra, 12(sp)
+  addi sp, sp, 16
+  jalr zero, 0(ra)
+.L_fixed_mul_overflow:
+  li a0, ${(6 << 3) | TAG.error}
+  lw ra, 12(sp)
+  addi sp, sp, 16
+  jalr zero, 0(ra)
+
+rt_fixed_div:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw t2, 0(t0)
+  lw t3, 0(t1)
+  beq t3, zero, rt_division_by_zero
+  lw a1, 4(t0)
+  addi a4, zero, 0
+  addi a2, zero, 4
+  bne a1, a2, .L_fixed_div_unsigned
+  bge t2, zero, .L_fixed_div_left_ready
+  sub t2, zero, t2
+  xori a4, a4, 1
+.L_fixed_div_left_ready:
+  bge t3, zero, .L_fixed_div_unsigned
+  sub t3, zero, t3
+  xori a4, a4, 1
+.L_fixed_div_unsigned:
+  addi t4, zero, 0
+  addi t5, zero, 0
+  addi t6, zero, 32
+.L_fixed_div_loop:
+  srli a2, t2, 31
+  slli t2, t2, 1
+  slli t5, t5, 1
+  or t5, t5, a2
+  slli t4, t4, 1
+  bltu t5, t3, .L_fixed_div_next
+  sub t5, t5, t3
+  ori t4, t4, 1
+.L_fixed_div_next:
+  addi t6, t6, -1
+  bne t6, zero, .L_fixed_div_loop
+  beq a4, zero, .L_fixed_div_positive
+  sub t4, zero, t4
+  j .L_fixed_div_ready
+.L_fixed_div_positive:
+  addi a2, zero, 4
+  bne a1, a2, .L_fixed_div_ready
+  blt t4, zero, rt_fixed_overflow
+.L_fixed_div_ready:
+  add a0, t4, zero
+  j rt_fixed_new
+
+rt_fixed_equal:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw t0, 0(t0)
+  lw t1, 0(t1)
+  beq t0, t1, .L_equal_yes
+  j .L_equal_no
+rt_fixed_less:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw t2, 4(t0)
+  lw t0, 0(t0)
+  lw t1, 0(t1)
+  addi t3, zero, 4
+  beq t2, t3, .L_fixed_less_signed
+  bltu t0, t1, .L_less_yes
+  j .L_equal_no
+.L_fixed_less_signed:
+  blt t0, t1, .L_less_yes
+  j .L_equal_no
+rt_fixed_greater:
+  add a2, a0, zero
+  add a0, a1, zero
+  add a1, a2, zero
+  j rt_fixed_less
+
+rt_fixed_overflow:
+  li a0, ${(6 << 3) | TAG.error}
+  jalr zero, 0(ra)
+
+rt_fixed_and:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw a0, 0(t0)
+  lw t1, 0(t1)
+  and a0, a0, t1
+  addi a1, zero, 5
+  j rt_fixed_new
+rt_fixed_or:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw a0, 0(t0)
+  lw t1, 0(t1)
+  or a0, a0, t1
+  addi a1, zero, 5
+  j rt_fixed_new
+rt_fixed_xor:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw a0, 0(t0)
+  lw t1, 0(t1)
+  xor a0, a0, t1
+  addi a1, zero, 5
+  j rt_fixed_new
+rt_fixed_not:
+  andi t0, a0, -8
+  lw a0, 0(t0)
+  xori a0, a0, -1
+  addi a1, zero, 5
+  j rt_fixed_new
+rt_fixed_shift_left:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw a0, 0(t0)
+  lw t1, 0(t1)
+  sll a0, a0, t1
+  addi a1, zero, 5
+  j rt_fixed_new
+rt_fixed_shift_right:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw a0, 0(t0)
+  lw t1, 0(t1)
+  srl a0, a0, t1
+  addi a1, zero, 5
+  j rt_fixed_new
+
+rt_fixed_convert:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw a0, 0(t0)
+  addi t0, zero, 4
+  bne t1, t0, .L_fixed_convert_to_signed
+  blt a0, zero, rt_fixed_overflow
+.L_fixed_convert_to_signed:
+  bne a1, t0, .L_fixed_convert_ready
+  blt a0, zero, rt_fixed_overflow
+.L_fixed_convert_ready:
+  j rt_fixed_new
+
+rt_fixed_mem_load8:
+  addi a2, zero, 1
+  j rt_fixed_mem_load
+rt_fixed_mem_load16:
+  addi a2, zero, 2
+  j rt_fixed_mem_load
+rt_fixed_mem_load32:
+  addi a2, zero, 3
+rt_fixed_mem_load:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  lw t0, 0(t0)
+  lw t1, 0(t1)
+  add t0, t0, t1
+  add a1, a2, zero
+  addi t1, zero, 1
+  beq a2, t1, .L_fixed_mem_load8
+  addi t1, zero, 2
+  beq a2, t1, .L_fixed_mem_load16
+  lw a0, 0(t0)
+  j rt_fixed_new
+.L_fixed_mem_load8:
+  lbu a0, 0(t0)
+  j rt_fixed_new
+.L_fixed_mem_load16:
+  lhu a0, 0(t0)
+  j rt_fixed_new
+rt_fixed_mem_store8:
+  addi t3, zero, 1
+  j rt_fixed_mem_store
+rt_fixed_mem_store16:
+  addi t3, zero, 2
+  j rt_fixed_mem_store
+rt_fixed_mem_store32:
+  addi t3, zero, 3
+rt_fixed_mem_store:
+  andi t0, a0, -8
+  andi t1, a1, -8
+  andi t2, a2, -8
+  lw t0, 0(t0)
+  lw t1, 0(t1)
+  lw t2, 0(t2)
+  add t0, t0, t1
+  addi t1, zero, 1
+  beq t3, t1, .L_fixed_mem_store8
+  addi t1, zero, 2
+  beq t3, t1, .L_fixed_mem_store16
+  sw t2, 0(t0)
+  j .L_fixed_mem_store_done
+.L_fixed_mem_store8:
+  sb t2, 0(t0)
+  j .L_fixed_mem_store_done
+.L_fixed_mem_store16:
+  sh t2, 0(t0)
+.L_fixed_mem_store_done:
+  addi a0, zero, ${NONE}
+  jalr zero, 0(ra)
+
+rt_fixed_show:
+  addi sp, sp, -64
+  sw ra, 60(sp)
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t0, 0(t0)
+  addi t2, zero, 0
+  addi t3, zero, 4
+  bne t1, t3, .L_fixed_text_digits
+  bge t0, zero, .L_fixed_text_digits
+  addi t2, zero, 1
+  sub t0, zero, t0
+.L_fixed_text_digits:
+  addi t3, zero, 0
+.L_fixed_text_digit:
+  addi t4, zero, 0
+  addi t5, zero, 0
+  addi t6, zero, 32
+  add a3, t0, zero
+.L_fixed_text_div10:
+  srli a4, a3, 31
+  slli a3, a3, 1
+  slli t5, t5, 1
+  or t5, t5, a4
+  slli t4, t4, 1
+  addi a4, zero, 10
+  bltu t5, a4, .L_fixed_text_div10_next
+  addi t5, t5, -10
+  ori t4, t4, 1
+.L_fixed_text_div10_next:
+  addi t6, t6, -1
+  bne t6, zero, .L_fixed_text_div10
+  addi t5, t5, 48
+  add a4, sp, t3
+  sb t5, 0(a4)
+  addi t3, t3, 1
+  add t0, t4, zero
+  bne t0, zero, .L_fixed_text_digit
+  add t4, t3, t2
+  sw t3, 56(sp)
+  sw t2, 52(sp)
+  sw t4, 48(sp)
+  addi a0, t4, 5
+  call rt_alloc
+  lw t3, 56(sp)
+  lw t2, 52(sp)
+  lw t4, 48(sp)
+  sw t4, 0(a0)
+  addi t5, zero, 0
+  beq t2, zero, .L_fixed_text_copy
+  addi t6, zero, 45
+  sb t6, 4(a0)
+  addi t5, zero, 1
+.L_fixed_text_copy:
+  beq t3, zero, .L_fixed_text_done
+  addi t3, t3, -1
+  add t6, sp, t3
+  lbu t6, 0(t6)
+  add a3, a0, t5
+  sb t6, 4(a3)
+  addi t5, t5, 1
+  j .L_fixed_text_copy
+.L_fixed_text_done:
+  add a3, a0, t4
+  sb zero, 4(a3)
+  ori a0, a0, ${TAG.string}
+  call rt_show
+  lw ra, 60(sp)
+  addi sp, sp, 64
   jalr zero, 0(ra)
 
 rt_add:
@@ -1012,6 +1470,10 @@ rt_show:
   beq t0, t1, .L_show_string
   addi t1, zero, ${TAG.number}
   beq t0, t1, .L_show_number
+  addi t1, zero, ${TAG.answer}
+  beq t0, t1, .L_show_answer
+  addi t1, zero, ${TAG.error}
+  beq t0, t1, .L_show_error
   la a0, rt_unknown_text
   ori a0, a0, ${TAG.string}
   j .L_show_string
@@ -1023,6 +1485,26 @@ rt_show:
   lw ra, 12(sp)
   addi sp, sp, 16
   jalr zero, 0(ra)
+.L_show_answer:
+  beq a0, zero, .L_show_no
+  la a0, rt_yes_text
+  ori a0, a0, ${TAG.string}
+  j .L_show_string
+.L_show_no:
+  la a0, rt_no_text
+  ori a0, a0, ${TAG.string}
+  j .L_show_string
+.L_show_error:
+  srli t0, a0, 3
+  addi t1, zero, 6
+  bne t0, t1, .L_show_error_unknown
+  la a0, rt_fixed_overflow_text
+  ori a0, a0, ${TAG.string}
+  j .L_show_string
+.L_show_error_unknown:
+  la a0, rt_unknown_text
+  ori a0, a0, ${TAG.string}
+  j .L_show_string
 .L_show_string:
   andi t0, a0, -8
   lw a2, 0(t0)
@@ -1275,6 +1757,21 @@ rt_file_error:
 rt_unknown_text:
   .word 7
   .ascii "<value>"
+  .byte 0
+  .balign 8
+rt_fixed_overflow_text:
+  .word 89
+  .ascii "значение вышло за границы фиксированного целого"
+  .byte 0
+  .balign 8
+rt_yes_text:
+  .word 3
+  .ascii "yes"
+  .byte 0
+  .balign 8
+rt_no_text:
+  .word 2
+  .ascii "no"
   .byte 0
   .balign 8
 rt_newline_text:
