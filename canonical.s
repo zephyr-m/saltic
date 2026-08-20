@@ -90,6 +90,23 @@ skill measure(left, right) {
     out error.BadMeasure
 }
 
+skill memory_probe() {
+    @address = [0, 4096]
+    core.mem.store8(address, 0, core.str.byte("Z", 0))
+    core.mem.store16(address, 2, 12345)
+    core.mem.store32(address, 4, 123456)
+    core.mem.store_address32(address, 8, [0, 4096])
+    core.cpu.fence()
+
+    (core.mem.load8(address, 0) == 90) {
+        (core.mem.load16(address, 2) == 12345) {
+            out core.mem.load32(address, 4)
+        }
+    }
+
+    out error.MemoryProbeFailed
+}
+
 skill react(agent, signal) {
     @energy = spend(agent.energy, signal.cost)
     @state = State.ACTIVE
@@ -183,6 +200,8 @@ program(input_path, output_path) {
     (Silent == no) {
         core.io.show("run: visible")
     }
+
+    core.io.show("memory: ", memory_probe())
 
     agent = run(agent, signals)
     report(agent, input_path, output_path)

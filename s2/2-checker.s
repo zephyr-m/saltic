@@ -327,10 +327,20 @@ skill checker_call_type(node, scope, globals) {
         (full == "core.group.item") { out checker_group_item_type(checker_value_type(core.group.item(plain, 2), scope, globals)) }
         (full == "core.group.add") { out checker_group_type(checker_merge(checker_group_item_type(checker_value_type(core.group.item(plain, 2), scope, globals)), checker_value_type(core.group.item(plain, 3), scope, globals))) }
         (full == "core.group.append") { out checker_group_type(checker_merge(checker_group_item_type(checker_value_type(core.group.item(plain, 2), scope, globals)), checker_value_type(core.group.item(plain, 3), scope, globals))) }
+        (full == "core.mem.load8") { out "number" }
+        (full == "core.mem.load16") { out "number" }
+        (full == "core.mem.load32") { out "number" }
+        (full == "core.mem.store8") { out "none" }
+        (full == "core.mem.store16") { out "none" }
+        (full == "core.mem.store32") { out "none" }
+        (full == "core.mem.store_address32") { out "none" }
+        (full == "core.cpu.wait") { out "none" }
+        (full == "core.cpu.fence") { out "none" }
         (full == "core.file.read") { out "string" }
         (full == "core.str.line_count") { out "number" }
         (full == "core.str.len") { out "number" }
         (full == "core.str.at") { out "string" }
+        (full == "core.str.byte") { out "number" }
         (full == "core.str.slice") { out "string" }
         (full == "core.str.join") { out "string" }
         (full == "core.str.add") { out "string" }

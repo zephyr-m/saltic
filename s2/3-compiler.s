@@ -473,8 +473,7 @@ skill compiler_start(compiler) {
     compiler = compiler_emit(compiler, "  sub a0, t0, t1")
     compiler = compiler_emit(compiler, "  sltu a0, zero, a0")
     compiler = compiler_emit(compiler, "  xori a0, a0, 1")
-    compiler = compiler_emit(compiler, "  addi a7, zero, 93")
-    compiler = compiler_emit(compiler, "  ecall")
+    compiler = compiler_emit(compiler, "  call rt_platform_exit")
     compiler = compiler_emit_blank(compiler)
     out compiler
 }
@@ -695,6 +694,15 @@ skill compiler_intrinsic(name) {
     (name == "core.group.item") { out "rt_group_at" }
     (name == "core.group.add") { out "rt_group_add" }
     (name == "core.group.append") { out "rt_group_add" }
+    (name == "core.mem.load8") { out "rt_mem_load8" }
+    (name == "core.mem.load16") { out "rt_mem_load16" }
+    (name == "core.mem.load32") { out "rt_mem_load32" }
+    (name == "core.mem.store8") { out "rt_mem_store8" }
+    (name == "core.mem.store16") { out "rt_mem_store16" }
+    (name == "core.mem.store32") { out "rt_mem_store32" }
+    (name == "core.mem.store_address32") { out "rt_mem_store_address32" }
+    (name == "core.cpu.wait") { out "rt_cpu_wait" }
+    (name == "core.cpu.fence") { out "rt_cpu_fence" }
     (name == "core.file.read") { out "rt_file_read" }
     (name == "core.file.write") { out "rt_file_write" }
     (name == "core.str.line_count") { out "rt_line_count" }
@@ -702,6 +710,7 @@ skill compiler_intrinsic(name) {
     (name == "core.str.join") { out "rt_string_add" }
     (name == "core.str.len") { out "rt_string_len" }
     (name == "core.str.at") { out "rt_string_at" }
+    (name == "core.str.byte") { out "rt_string_byte" }
     (name == "core.str.slice") { out "rt_string_slice" }
     (name == "core.str.contains") { out "rt_string_contains" }
     (name == "core.str.starts_with") { out "rt_string_starts_with" }
@@ -1443,6 +1452,16 @@ rt_string_at:
   addi sp, sp, 16
   jalr zero, 0(ra)
 
+rt_string_byte:
+  andi t0, a0, -8
+  srai a1, a1, 3
+  lw t1, 0(t0)
+  bgeu a1, t1, rt_string_bounds
+  add t0, t0, a1
+  lbu a0, 4(t0)
+  slli a0, a0, 3
+  jalr zero, 0(ra)
+
 rt_string_slice:
   addi sp, sp, -32
   sw ra, 28(sp)
@@ -1713,16 +1732,42 @@ rt_show:
   lw a2, 0(t0)
   addi a1, t0, 4
   addi a0, zero, 1
-  addi a7, zero, 64
-  ecall
+  addi sp, sp, -16
+  sw ra, 12(sp)
+  call rt_platform_write
+  lw ra, 12(sp)
+  addi sp, sp, 16
   addi a0, zero, 2
   jalr zero, 0(ra)
 rt_newline:
   addi a0, zero, 1
   la a1, rt_newline_text
   addi a2, zero, 1
+  addi sp, sp, -16
+  sw ra, 12(sp)
+  call rt_platform_write
+  lw ra, 12(sp)
+  addi sp, sp, 16
+  jalr zero, 0(ra)
+
+.weak rt_platform_write
+rt_platform_write:
   addi a7, zero, 64
   ecall
+  jalr zero, 0(ra)
+
+.weak rt_platform_exit
+rt_platform_exit:
+  addi a7, zero, 93
+  ecall
+
+rt_cpu_wait:
+  wfi
+  addi a0, zero, 2
+  jalr zero, 0(ra)
+rt_cpu_fence:
+  fence rw, rw
+  addi a0, zero, 2
   jalr zero, 0(ra)
 
 rt_file_read:
@@ -1787,14 +1832,130 @@ rt_file_write:
   addi sp, sp, 32
   jalr zero, 0(ra)
 
+rt_mem_load8:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  lbu a0, 0(t0)
+  slli a0, a0, 3
+  jalr zero, 0(ra)
+rt_mem_load16:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  lhu a0, 0(t0)
+  slli a0, a0, 3
+  jalr zero, 0(ra)
+rt_mem_load32:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  lw a0, 0(t0)
+  slli a0, a0, 3
+  jalr zero, 0(ra)
+rt_mem_store8:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  srai a2, a2, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  sb a2, 0(t0)
+  addi a0, zero, 2
+  jalr zero, 0(ra)
+rt_mem_store16:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  srai a2, a2, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  sh a2, 0(t0)
+  addi a0, zero, 2
+  jalr zero, 0(ra)
+rt_mem_store32:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  srai a2, a2, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  sw a2, 0(t0)
+  addi a0, zero, 2
+  jalr zero, 0(ra)
+rt_mem_store_address32:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  or t0, t1, t2
+  srai a1, a1, 3
+  add t0, t0, a1
+  andi t3, a2, -8
+  lw t1, 4(t3)
+  lw t2, 8(t3)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  or t3, t1, t2
+  sw t3, 0(t0)
+  addi a0, zero, 2
+  jalr zero, 0(ra)
+
 rt_missing_args:
   addi a0, zero, 64
-  addi a7, zero, 93
-  ecall
+  j rt_platform_exit
 rt_out_of_memory:
   addi a0, zero, 65
-  addi a7, zero, 93
-  ecall
+  j rt_platform_exit
 rt_missing_field:
   li a0, 15
   jalr zero, 0(ra)

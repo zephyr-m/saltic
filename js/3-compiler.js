@@ -99,7 +99,7 @@ class Compiler {
       this.emit(`  lw a${index}, ${(params.length - index - 1) * 4}(sp)`)
     }
     if (params.length) this.emit(`  addi sp, sp, ${params.length * 4}`)
-    this.emit('  call saltic_program', '  andi t0, a0, 7', `  addi t1, zero, ${TAG.error}`, '  sub a0, t0, t1', '  sltu a0, zero, a0', '  xori a0, a0, 1', '  addi a7, zero, 93', '  ecall', '')
+    this.emit('  call saltic_program', '  andi t0, a0, 7', `  addi t1, zero, ${TAG.error}`, '  sub a0, t0, t1', '  sltu a0, zero, a0', '  xori a0, a0, 1', '  call rt_platform_exit', '')
   }
 
   compileFunction(name, params, body, subject = null) {
@@ -279,6 +279,15 @@ class Compiler {
       'core.group.item': 'rt_group_at',
       'core.group.add': 'rt_group_add',
       'core.group.append': 'rt_group_add',
+      'core.mem.load8': 'rt_mem_load8',
+      'core.mem.load16': 'rt_mem_load16',
+      'core.mem.load32': 'rt_mem_load32',
+      'core.mem.store8': 'rt_mem_store8',
+      'core.mem.store16': 'rt_mem_store16',
+      'core.mem.store32': 'rt_mem_store32',
+      'core.mem.store_address32': 'rt_mem_store_address32',
+      'core.cpu.wait': 'rt_cpu_wait',
+      'core.cpu.fence': 'rt_cpu_fence',
       'core.file.read': 'rt_file_read',
       'core.file.write': 'rt_file_write',
       'core.str.line_count': 'rt_line_count',
@@ -286,6 +295,7 @@ class Compiler {
       'core.str.join': 'rt_string_add',
       'core.str.len': 'rt_string_len',
       'core.str.at': 'rt_string_at',
+      'core.str.byte': 'rt_string_byte',
       'core.str.slice': 'rt_string_slice',
       'core.str.contains': 'rt_string_contains',
       'core.str.starts_with': 'rt_string_starts_with',
@@ -738,6 +748,16 @@ rt_string_at:
   addi sp, sp, 16
   jalr zero, 0(ra)
 
+rt_string_byte:
+  andi t0, a0, -8
+  srai a1, a1, 3
+  lw t1, 0(t0)
+  bgeu a1, t1, rt_string_bounds
+  add t0, t0, a1
+  lbu a0, 4(t0)
+  slli a0, a0, 3
+  jalr zero, 0(ra)
+
 rt_string_slice:
   addi sp, sp, -32
   sw ra, 28(sp)
@@ -1008,16 +1028,42 @@ rt_show:
   lw a2, 0(t0)
   addi a1, t0, 4
   addi a0, zero, 1
-  addi a7, zero, 64
-  ecall
+  addi sp, sp, -16
+  sw ra, 12(sp)
+  call rt_platform_write
+  lw ra, 12(sp)
+  addi sp, sp, 16
   addi a0, zero, ${NONE}
   jalr zero, 0(ra)
 rt_newline:
   addi a0, zero, 1
   la a1, rt_newline_text
   addi a2, zero, 1
+  addi sp, sp, -16
+  sw ra, 12(sp)
+  call rt_platform_write
+  lw ra, 12(sp)
+  addi sp, sp, 16
+  jalr zero, 0(ra)
+
+.weak rt_platform_write
+rt_platform_write:
   addi a7, zero, 64
   ecall
+  jalr zero, 0(ra)
+
+.weak rt_platform_exit
+rt_platform_exit:
+  addi a7, zero, 93
+  ecall
+
+rt_cpu_wait:
+  wfi
+  addi a0, zero, ${NONE}
+  jalr zero, 0(ra)
+rt_cpu_fence:
+  fence rw, rw
+  addi a0, zero, ${NONE}
   jalr zero, 0(ra)
 
 rt_file_read:
@@ -1082,14 +1128,130 @@ rt_file_write:
   addi sp, sp, 32
   jalr zero, 0(ra)
 
+rt_mem_load8:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  lbu a0, 0(t0)
+  slli a0, a0, 3
+  jalr zero, 0(ra)
+rt_mem_load16:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  lhu a0, 0(t0)
+  slli a0, a0, 3
+  jalr zero, 0(ra)
+rt_mem_load32:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  lw a0, 0(t0)
+  slli a0, a0, 3
+  jalr zero, 0(ra)
+rt_mem_store8:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  srai a2, a2, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  sb a2, 0(t0)
+  addi a0, zero, 2
+  jalr zero, 0(ra)
+rt_mem_store16:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  srai a2, a2, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  sh a2, 0(t0)
+  addi a0, zero, 2
+  jalr zero, 0(ra)
+rt_mem_store32:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  srai a1, a1, 3
+  srai a2, a2, 3
+  or t0, t1, t2
+  add t0, t0, a1
+  sw a2, 0(t0)
+  addi a0, zero, 2
+  jalr zero, 0(ra)
+rt_mem_store_address32:
+  andi t0, a0, -8
+  lw t1, 4(t0)
+  lw t2, 8(t0)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  or t0, t1, t2
+  srai a1, a1, 3
+  add t0, t0, a1
+  andi t3, a2, -8
+  lw t1, 4(t3)
+  lw t2, 8(t3)
+  srai t1, t1, 3
+  srai t2, t2, 3
+  slli t1, t1, 16
+  slli t2, t2, 16
+  srli t2, t2, 16
+  or t3, t1, t2
+  sw t3, 0(t0)
+  addi a0, zero, 2
+  jalr zero, 0(ra)
+
 rt_missing_args:
   addi a0, zero, 64
-  addi a7, zero, 93
-  ecall
+  j rt_platform_exit
 rt_out_of_memory:
   addi a0, zero, 65
-  addi a7, zero, 93
-  ecall
+  j rt_platform_exit
 rt_missing_field:
   li a0, ${(1 << 3) | TAG.error}
   jalr zero, 0(ra)
