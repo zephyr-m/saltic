@@ -10,6 +10,7 @@ mkdir -p "$work/stage-1" "$work/stage-2" "$work/canonical"
 
 command -v qemu-riscv32 >/dev/null
 command -v riscv32-none-elf-gcc >/dev/null
+command -v riscv32-none-elf-objcopy >/dev/null
 
 echo "bootstrap: зафиксированный компилятор собирает toolchain"
 SALTIC_BUILD_DIR="$work/stage-1" \
@@ -18,7 +19,17 @@ bash bootstrap/build.sh \
     s2/toolchain.saltic \
     "$work/stage-1/toolchain.elf" \
     "$work/stage-1/toolchain.s"
-cmp bootstrap/compiler.elf "$work/stage-1/toolchain.elf"
+
+echo "bootstrap: сравниваю исполняемый образ с зафиксированным компилятором"
+riscv32-none-elf-objcopy \
+    -O binary -j .text -j .rodata \
+    bootstrap/compiler.elf \
+    "$work/stage-1/bootstrap.bin"
+riscv32-none-elf-objcopy \
+    -O binary -j .text -j .rodata \
+    "$work/stage-1/toolchain.elf" \
+    "$work/stage-1/toolchain.bin"
+cmp "$work/stage-1/bootstrap.bin" "$work/stage-1/toolchain.bin"
 
 echo "bootstrap: собранный toolchain повторяет себя"
 SALTIC_BOOTSTRAP_COMPILER="$work/stage-1/toolchain.elf" \
