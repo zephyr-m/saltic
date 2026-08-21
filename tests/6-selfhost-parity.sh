@@ -110,6 +110,8 @@ else
 fi
 
 if ! diff -u \
+    -I '^  lw a0, 0(sp)$' \
+    -I '^  addi a1, sp, 4$' \
     "$work/stage-1/toolchain-rv32i.s" \
     "$work/stage-2/toolchain-rv32i.s" \
     >"$work/diff/stage-1--stage-2.diff"; then

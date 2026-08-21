@@ -16,6 +16,12 @@ platform_start:
   csrw mtvec, t0
   la a1, platform_argv
   addi a0, zero, 1
+  addi sp, sp, -16
+  sw a0, 0(sp)
+  la t0, platform_name
+  sw t0, 4(sp)
+  sw zero, 8(sp)
+  sw zero, 12(sp)
   j _start
 
 .section .text

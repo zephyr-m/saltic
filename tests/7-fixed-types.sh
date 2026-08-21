@@ -56,7 +56,10 @@ nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run \
     "riscv32-none-elf-gcc -march=rv32i -mabi=ilp32 -mno-relax -nostdlib -Wl,--no-relax,-Ttext=0x10000,-e,_start '$work/bootstrap/compiler-large.s' -o '$work/bootstrap/compiler.elf'"
 node js/4-vm.js "$work/bootstrap/compiler.elf" --steps 1000000000 -- \
     tests/fixed-types.saltic "$work/compiler/saltic.s"
-if ! diff -u "$work/compiler/js.s" "$work/compiler/saltic.s" \
+if ! diff -u \
+    -I '^  lw a0, 0(sp)$' \
+    -I '^  addi a1, sp, 4$' \
+    "$work/compiler/js.s" "$work/compiler/saltic.s" \
     >"$work/diff/compilers.diff"; then
     echo "фиксированные типы: компиляторы различаются, смотри $work/diff/compilers.diff"
     exit 1

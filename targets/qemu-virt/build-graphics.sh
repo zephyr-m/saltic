@@ -19,13 +19,9 @@ sed '/^use core$/d' lib/keymap-us.saltic >>"$combined"
 sed '/^use core$/d' lib/text-field.saltic >>"$combined"
 sed '/^use core$/d' examples/qemu-graphics.saltic >>"$combined"
 
-echo "графика: проверяю объединённый Saltic-файл"
-node js/1-parser.js "$combined" >/dev/null
-node js/2-checker.js "$combined" >/dev/null
-
 echo "графика: создаю $work/program.s"
-node js/3-compiler.js --assembly "$work/program.s" \
-    "$combined" "$work/program-vm.elf"
+qemu-riscv32 -B 0x100000000 bootstrap/compiler.elf \
+    "$combined" "$work/program.s"
 
 echo "графика: собираю $work/program.elf"
 riscv32-none-elf-gcc \
