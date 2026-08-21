@@ -1,0 +1,488 @@
+use core
+
+VM_PAGE_SIZE = 256
+VM_WORD_BASE = 256
+VM_HEX = "0123456789abcdef"
+VM_PRINTABLE = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+VmWord = Box {
+    b0 = 0
+    b1 = 0
+    b2 = 0
+    b3 = 0
+}
+
+VmByte = Box {
+    value = 0
+}
+
+VmPage = Box {
+    index = 0
+    present = no
+    cells = []
+}
+
+VmMemory = Box {
+    size = 0
+    pages = []
+}
+
+VmFile = Box {
+    path = ""
+    data = []
+}
+
+VmName = Box {
+    text = ""
+    data = []
+    present = no
+}
+
+VmHandle = Box {
+    guest_fd = 0
+    file_index = 0
+    position = 0
+    readable = no
+    writable = no
+    append = no
+    open = no
+}
+
+VmOptions = Box {
+    load_address = 4096
+    memory_size = 262144
+    step_limit = 100000
+    program_name = "program"
+    arguments = []
+    files = []
+}
+
+VmResult = Box {
+    exit_code = 0
+    reason = ""
+    pc = "00000000"
+    steps = 0
+    registers = []
+    stdout = []
+    stderr = []
+    files = []
+    trap = ""
+}
+
+VmMachine = Box {
+    memory = VmMemory {}
+    registers = []
+    pc = 0
+    halted = no
+    halt_reason = ""
+    exit_code = 0
+    steps = 0
+    trap = ""
+    stdout = []
+    stderr = []
+    files = []
+    names = []
+    handles = []
+    next_fd = 3
+}
+
+VmInstruction = Box {
+    word = VmWord {}
+    opcode = 0
+    rd = 0
+    funct3 = 0
+    rs1 = 0
+    rs2 = 0
+    funct7 = 0
+}
+
+VmControl = Box {
+    next_pc = 0
+    handled = no
+}
+
+skill vm_mod(value, divisor) {
+    out value - value / divisor * divisor
+}
+
+skill vm_word_bytes(b0, b1, b2, b3) {
+    out VmWord { b0 = b0 b1 = b1 b2 = b2 b3 = b3 }
+}
+
+skill vm_word_zero() {
+    out VmWord {}
+}
+
+skill vm_word_copy(word) {
+    out vm_word_bytes(word.b0, word.b1, word.b2, word.b3)
+}
+
+skill vm_byte_and(left, right) {
+    @a = left
+    @b = right
+    @weight = 1
+    @result = 0
+    drum (8) {
+        @a_bit = vm_mod(a, 2)
+        @b_bit = vm_mod(b, 2)
+        (a_bit == 1) {
+            (b_bit == 1) { result = result + weight }
+        }
+        a = a / 2
+        b = b / 2
+        weight = weight * 2
+    }
+    out result
+}
+
+skill vm_byte_or(left, right) {
+    @a = left
+    @b = right
+    @weight = 1
+    @result = 0
+    drum (8) {
+        @bits = vm_mod(a, 2) + vm_mod(b, 2)
+        (bits > 0) { result = result + weight }
+        a = a / 2
+        b = b / 2
+        weight = weight * 2
+    }
+    out result
+}
+
+skill vm_byte_xor(left, right) {
+    @a = left
+    @b = right
+    @weight = 1
+    @result = 0
+    drum (8) {
+        @bits = vm_mod(a, 2) + vm_mod(b, 2)
+        (bits == 1) { result = result + weight }
+        a = a / 2
+        b = b / 2
+        weight = weight * 2
+    }
+    out result
+}
+
+skill vm_word_not(word) {
+    out vm_word_bytes(255 - word.b0, 255 - word.b1, 255 - word.b2, 255 - word.b3)
+}
+
+skill vm_word_add(left, right) {
+    @v0 = left.b0 + right.b0
+    @c0 = v0 / 256
+    @v1 = left.b1 + right.b1 + c0
+    @c1 = v1 / 256
+    @v2 = left.b2 + right.b2 + c1
+    @c2 = v2 / 256
+    @v3 = left.b3 + right.b3 + c2
+    out vm_word_bytes(vm_mod(v0, 256), vm_mod(v1, 256), vm_mod(v2, 256), vm_mod(v3, 256))
+}
+
+skill vm_word_negate(word) {
+    out vm_word_add(vm_word_not(word), vm_word_bytes(1, 0, 0, 0))
+}
+
+skill vm_word_number(value) {
+    @negative = no
+    @current = value
+    (current < 0) { negative = yes current = 0 - current }
+    @b0 = vm_mod(current, 256)
+    current = current / 256
+    @b1 = vm_mod(current, 256)
+    current = current / 256
+    @b2 = vm_mod(current, 256)
+    current = current / 256
+    @b3 = vm_mod(current, 256)
+    @word = vm_word_bytes(b0, b1, b2, b3)
+    (negative == yes) { out vm_word_negate(word) }
+    out word
+}
+
+skill vm_word_sub(left, right) {
+    out vm_word_add(left, vm_word_negate(right))
+}
+
+skill vm_word_and(left, right) {
+    out vm_word_bytes(vm_byte_and(left.b0, right.b0), vm_byte_and(left.b1, right.b1), vm_byte_and(left.b2, right.b2), vm_byte_and(left.b3, right.b3))
+}
+
+skill vm_word_or(left, right) {
+    out vm_word_bytes(vm_byte_or(left.b0, right.b0), vm_byte_or(left.b1, right.b1), vm_byte_or(left.b2, right.b2), vm_byte_or(left.b3, right.b3))
+}
+
+skill vm_word_xor(left, right) {
+    out vm_word_bytes(vm_byte_xor(left.b0, right.b0), vm_byte_xor(left.b1, right.b1), vm_byte_xor(left.b2, right.b2), vm_byte_xor(left.b3, right.b3))
+}
+
+skill vm_word_shift_left_one(word) {
+    @c0 = word.b0 / 128
+    @c1 = word.b1 / 128
+    @c2 = word.b2 / 128
+    out vm_word_bytes(vm_mod(word.b0 * 2, 256), vm_mod(word.b1 * 2 + c0, 256), vm_mod(word.b2 * 2 + c1, 256), vm_mod(word.b3 * 2 + c2, 256))
+}
+
+skill vm_word_shift_right_one(word) {
+    out vm_word_bytes(word.b0 / 2 + vm_mod(word.b1, 2) * 128, word.b1 / 2 + vm_mod(word.b2, 2) * 128, word.b2 / 2 + vm_mod(word.b3, 2) * 128, word.b3 / 2)
+}
+
+skill vm_word_shift_right_arithmetic_one(word) {
+    @high = word.b3 / 2
+    (word.b3 > 127) { high = high + 128 }
+    out vm_word_bytes(word.b0 / 2 + vm_mod(word.b1, 2) * 128, word.b1 / 2 + vm_mod(word.b2, 2) * 128, word.b2 / 2 + vm_mod(word.b3, 2) * 128, high)
+}
+
+skill vm_word_shift_left(word, amount) {
+    @result = vm_word_copy(word)
+    drum (amount) { result = vm_word_shift_left_one(result) }
+    out result
+}
+
+skill vm_word_shift_right(word, amount) {
+    @result = vm_word_copy(word)
+    drum (amount) { result = vm_word_shift_right_one(result) }
+    out result
+}
+
+skill vm_word_shift_right_arithmetic(word, amount) {
+    @result = vm_word_copy(word)
+    drum (amount) { result = vm_word_shift_right_arithmetic_one(result) }
+    out result
+}
+
+skill vm_word_multiply(left, right) {
+    @result = vm_word_zero()
+    @addend = vm_word_copy(left)
+    @multiplier = vm_word_copy(right)
+    drum (32) {
+        (vm_mod(multiplier.b0, 2) == 1) { result = vm_word_add(result, addend) }
+        addend = vm_word_shift_left_one(addend)
+        multiplier = vm_word_shift_right_one(multiplier)
+    }
+    out result
+}
+
+skill vm_word_equal(left, right) {
+    (left.b0 == right.b0) {
+        (left.b1 == right.b1) {
+            (left.b2 == right.b2) {
+                (left.b3 == right.b3) { out yes }
+            }
+        }
+    }
+    out no
+}
+
+skill vm_word_unsigned_less(left, right) {
+    (left.b3 < right.b3) { out yes }
+    (left.b3 > right.b3) { out no }
+    (left.b2 < right.b2) { out yes }
+    (left.b2 > right.b2) { out no }
+    (left.b1 < right.b1) { out yes }
+    (left.b1 > right.b1) { out no }
+    out left.b0 < right.b0
+}
+
+skill vm_word_signed_less(left, right) {
+    @left_negative = left.b3 > 127
+    @right_negative = right.b3 > 127
+    (left_negative == yes) {
+        (right_negative == no) { out yes }
+    }
+    (left_negative == no) {
+        (right_negative == yes) { out no }
+    }
+    out vm_word_unsigned_less(left, right)
+}
+
+skill vm_word_address(word) {
+    (word.b3 > 15) { out 0 - 1 }
+    out word.b0 + word.b1 * 256 + word.b2 * 65536 + word.b3 * 16777216
+}
+
+skill vm_word_signed_number(word) {
+    (word.b3 < 128) { out vm_word_address(word) }
+    @magnitude = vm_word_address(vm_word_negate(word))
+    out 0 - magnitude
+}
+
+skill vm_word_hex(word) {
+    @text = core.str.at(VM_HEX, word.b3 / 16)
+    text = core.str.add(text, core.str.at(VM_HEX, vm_mod(word.b3, 16)))
+    text = core.str.add(text, core.str.at(VM_HEX, word.b2 / 16))
+    text = core.str.add(text, core.str.at(VM_HEX, vm_mod(word.b2, 16)))
+    text = core.str.add(text, core.str.at(VM_HEX, word.b1 / 16))
+    text = core.str.add(text, core.str.at(VM_HEX, vm_mod(word.b1, 16)))
+    text = core.str.add(text, core.str.at(VM_HEX, word.b0 / 16))
+    out core.str.add(text, core.str.at(VM_HEX, vm_mod(word.b0, 16)))
+}
+
+skill vm_number_hex(value) {
+    out vm_word_hex(vm_word_number(value))
+}
+
+skill vm_memory_page(memory, page_index, create) {
+    @index = 0
+    @count = core.group.count(memory.pages)
+    drum (count) {
+        @page = core.group.at(memory.pages, index)
+        (page.index == page_index) { out page }
+        index = index + 1
+    }
+    (create == yes) {
+        @cells = []
+        @cell_index = 0
+        drum (VM_PAGE_SIZE) {
+            cells = core.group.add(cells, VmByte {})
+            cell_index = cell_index + 1
+        }
+        @page = VmPage { index = page_index present = yes cells = cells }
+        memory.pages = core.group.add(memory.pages, page)
+        out page
+    }
+    out VmPage {}
+}
+
+skill vm_memory_raw_load8(memory, address) {
+    @page = vm_memory_page(memory, address / VM_PAGE_SIZE, no)
+    (page.present == no) { out 0 }
+    @cell = core.group.at(page.cells, vm_mod(address, VM_PAGE_SIZE))
+    out cell.value
+}
+
+skill vm_memory_raw_store8(memory, address, value) {
+    @page = vm_memory_page(memory, address / VM_PAGE_SIZE, yes)
+    @cell = core.group.at(page.cells, vm_mod(address, VM_PAGE_SIZE))
+    cell.value = vm_mod(value, 256)
+    out none
+}
+
+skill vm_trap(machine, reason, detail) {
+    @message = core.str.add(reason, " at 0x")
+    message = core.str.add(message, vm_number_hex(machine.pc))
+    (core.str.len(detail) > 0) {
+        message = core.str.add(message, ": ")
+        message = core.str.add(message, detail)
+    }
+    machine.trap = message
+    machine.halted = yes
+    out none
+}
+
+skill vm_memory_check(machine, address, size, alignment, access) {
+    @valid = yes
+    (address < 0) { valid = no }
+    (address > machine.memory.size - size) { valid = no }
+    (valid == no) {
+        @detail = core.str.add("memory access 0x", vm_number_hex(address))
+        detail = core.str.add(detail, "..0x")
+        detail = core.str.add(detail, vm_number_hex(address + size - 1))
+        detail = core.str.add(detail, " is outside RAM")
+        vm_trap(machine, core.str.add(access, " access fault"), detail)
+        out no
+    }
+    (vm_mod(address, alignment) > 0) {
+        @detail = core.str.add("misaligned ", core.num.text(alignment))
+        detail = core.str.add(detail, "-byte access at 0x")
+        detail = core.str.add(detail, vm_number_hex(address))
+        vm_trap(machine, core.str.add(access, " access fault"), detail)
+        out no
+    }
+    out yes
+}
+
+skill vm_memory_load_word(memory, address) {
+    out vm_word_bytes(vm_memory_raw_load8(memory, address), vm_memory_raw_load8(memory, address + 1), vm_memory_raw_load8(memory, address + 2), vm_memory_raw_load8(memory, address + 3))
+}
+
+skill vm_memory_store_word(memory, address, word, size) {
+    vm_memory_raw_store8(memory, address, word.b0)
+    (size > 1) { vm_memory_raw_store8(memory, address + 1, word.b1) }
+    (size > 2) {
+        vm_memory_raw_store8(memory, address + 2, word.b2)
+        vm_memory_raw_store8(memory, address + 3, word.b3)
+    }
+    out none
+}
+
+skill vm_register(machine, index) {
+    (index == 0) { out vm_word_zero() }
+    out core.group.at(machine.registers, index)
+}
+
+skill vm_set_register(machine, index, word) {
+    (index > 0) {
+        @target = core.group.at(machine.registers, index)
+        target.b0 = word.b0
+        target.b1 = word.b1
+        target.b2 = word.b2
+        target.b3 = word.b3
+    }
+    out none
+}
+
+skill vm_ascii_code(ch) {
+    (ch == "\n") { out 10 }
+    (ch == "\t") { out 9 }
+    @index = 0
+    @length = core.str.len(VM_PRINTABLE)
+    drum (length) {
+        (core.str.at(VM_PRINTABLE, index) == ch) { out index + 32 }
+        index = index + 1
+    }
+    out 0
+}
+
+skill vm_text_bytes(text) {
+    @bytes = []
+    @index = 0
+    @length = core.str.len(text)
+    drum (length) {
+        bytes = core.group.add(bytes, vm_ascii_code(core.str.at(text, index)))
+        index = index + 1
+    }
+    out bytes
+}
+
+skill vm_name_add(machine, text) {
+    @index = 0
+    @count = core.group.count(machine.names)
+    drum (count) {
+        @name = core.group.at(machine.names, index)
+        (name.text == text) { out name.data }
+        index = index + 1
+    }
+    @data = vm_text_bytes(text)
+    machine.names = core.group.add(machine.names, VmName { text = text data = data present = yes })
+    out data
+}
+
+skill vm_new_machine(options) {
+    @registers = []
+    @index = 0
+    drum (32) {
+        registers = core.group.add(registers, vm_word_zero())
+        index = index + 1
+    }
+    @machine = VmMachine {
+        memory = VmMemory { size = options.memory_size pages = [] }
+        registers = registers
+        files = options.files
+    }
+    vm_name_add(machine, options.program_name)
+    index = 0
+    @argument_count = core.group.count(options.arguments)
+    drum (argument_count) {
+        vm_name_add(machine, core.group.at(options.arguments, index))
+        index = index + 1
+    }
+    index = 0
+    @file_count = core.group.count(options.files)
+    drum (file_count) {
+        @file = core.group.at(options.files, index)
+        vm_name_add(machine, file.path)
+        index = index + 1
+    }
+    out machine
+}

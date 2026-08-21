@@ -23,8 +23,9 @@ function byteChunks(file) {
 
 function build(output, elf, flat, input) {
   const fixtures = `VM_TEST_ELF = ${byteChunks(elf)}\nVM_TEST_FLAT = ${byteChunks(flat)}\nVM_TEST_INPUT = ${byteGroup(input)}\n`
-  const entry = String.raw`use core
+const entry = String.raw`use core
 use s2.vm
+use s2.vm.state
 
 skill vm_test_numbers(values) {
     @text = ""
@@ -90,13 +91,13 @@ program(image_format, scenario, snapshot_path) {
     (scenario == "normal") { arguments = ["normal", "input.txt", "output.txt"] }
     @limit = 100000
     (scenario == "timeout") { limit = 32 }
-    @options = vm.VmOptions {
+    @options = state.VmOptions {
         load_address = 4096
         memory_size = 262144
         step_limit = limit
         program_name = "vm-canonical"
         arguments = arguments
-        files = [vm.VmFile { path = "input.txt" data = VM_TEST_INPUT }]
+        files = [state.VmFile { path = "input.txt" data = VM_TEST_INPUT }]
     }
     @result = vm.vm_run(image, options)
     core.file.write(snapshot_path, vm_test_snapshot(result))

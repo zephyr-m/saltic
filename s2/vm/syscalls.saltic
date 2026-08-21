@@ -1,0 +1,248 @@
+use core
+use s2.vm.state
+
+skill vm_word_small(word) {
+    (word.b3 > 15) { out 0 - 1 }
+    out state.vm_word_address(word)
+}
+
+skill vm_flag(value, flag) {
+    out state.vm_mod(value / flag, 2) == 1
+}
+
+skill vm_memory_matches(machine, address, data) {
+    @count = core.group.count(data)
+    (address < 0) { out no }
+    (address > machine.memory.size - count - 1) { out no }
+    @same = yes
+    @index = 0
+    drum (count) {
+        @memory_byte = state.vm_memory_raw_load8(machine.memory, address + index)
+        @data_byte = core.group.at(data, index)
+        (memory_byte < data_byte) { same = no }
+        (memory_byte > data_byte) { same = no }
+        index = index + 1
+    }
+    (state.vm_memory_raw_load8(machine.memory, address + count) > 0) { same = no }
+    out same
+}
+
+skill vm_memory_name(machine, address) {
+    @index = 0
+    @count = core.group.count(machine.names)
+    drum (count) {
+        @name = core.group.at(machine.names, index)
+        (vm_memory_matches(machine, address, name.data) == yes) { out name }
+        index = index + 1
+    }
+    out state.VmName {}
+}
+
+skill vm_file_index(machine, path) {
+    @found = 0 - 1
+    @index = 0
+    @count = core.group.count(machine.files)
+    drum (count) {
+        @file = core.group.at(machine.files, index)
+        (file.path == path) { found = index }
+        index = index + 1
+    }
+    out found
+}
+
+skill vm_handle(machine, guest_fd) {
+    @index = 0
+    @count = core.group.count(machine.handles)
+    drum (count) {
+        @handle = core.group.at(machine.handles, index)
+        (handle.guest_fd == guest_fd) {
+            (handle.open == yes) { out handle }
+        }
+        index = index + 1
+    }
+    out state.VmHandle {}
+}
+
+skill vm_file_set(file, position, value) {
+    @count = core.group.count(file.data)
+    (position < count) {
+        @next = []
+        @index = 0
+        drum (count) {
+            @item = core.group.at(file.data, index)
+            (index == position) { item = value }
+            next = core.group.add(next, item)
+            index = index + 1
+        }
+        file.data = next
+        out none
+    }
+    @cursor = count
+    drum (position - count) {
+        file.data = core.group.add(file.data, 0)
+        cursor = cursor + 1
+    }
+    file.data = core.group.add(file.data, value)
+    out none
+}
+
+skill vm_syscall_open(machine) {
+    @address = vm_word_small(state.vm_register(machine, 11))
+    @flags = vm_word_small(state.vm_register(machine, 12))
+    @name = vm_memory_name(machine, address)
+    (name.present == no) { out state.vm_word_number(0 - 1) }
+
+    @access = state.vm_mod(flags, 4)
+    @readable = access == 0
+    @writable = access > 0
+    @create = vm_flag(flags, 64)
+    @exclusive = vm_flag(flags, 128)
+    @truncate = vm_flag(flags, 512)
+    @append = vm_flag(flags, 1024)
+    @file_index = vm_file_index(machine, name.text)
+    @existed = file_index > 0 - 1
+
+    (file_index < 0) {
+        (create == no) { out state.vm_word_number(0 - 1) }
+        machine.files = core.group.add(machine.files, state.VmFile { path = name.text data = [] })
+        file_index = core.group.count(machine.files) - 1
+    }
+    (existed == yes) {
+        (create == yes) {
+            (exclusive == yes) { out state.vm_word_number(0 - 1) }
+        }
+    }
+
+    @file = core.group.at(machine.files, file_index)
+    (truncate == yes) { file.data = [] }
+    @position = 0
+    (append == yes) { position = core.group.count(file.data) }
+    @fd = machine.next_fd
+    machine.next_fd = machine.next_fd + 1
+    machine.handles = core.group.add(machine.handles, state.VmHandle {
+        guest_fd = fd
+        file_index = file_index
+        position = position
+        readable = readable
+        writable = writable
+        append = append
+        open = yes
+    })
+    out state.vm_word_number(fd)
+}
+
+skill vm_syscall_close(machine) {
+    @fd = vm_word_small(state.vm_register(machine, 10))
+    @handle = vm_handle(machine, fd)
+    (handle.open == no) { out state.vm_word_number(0 - 1) }
+    handle.open = no
+    out state.vm_word_zero()
+}
+
+skill vm_syscall_seek(machine) {
+    @fd = vm_word_small(state.vm_register(machine, 10))
+    @offset = state.vm_word_signed_number(state.vm_register(machine, 11))
+    @whence = vm_word_small(state.vm_register(machine, 12))
+    @handle = vm_handle(machine, fd)
+    (handle.open == no) { out state.vm_word_number(0 - 1) }
+    @position = handle.position
+    (whence == 0) { position = offset }
+    (whence == 1) { position = position + offset }
+    (whence == 2) {
+        @file = core.group.at(machine.files, handle.file_index)
+        position = core.group.count(file.data) + offset
+    }
+    (whence < 0) { out state.vm_word_number(0 - 1) }
+    (whence > 2) { out state.vm_word_number(0 - 1) }
+    (position < 0) { out state.vm_word_number(0 - 1) }
+    handle.position = position
+    out state.vm_word_number(position)
+}
+
+skill vm_syscall_read(machine) {
+    @fd = vm_word_small(state.vm_register(machine, 10))
+    @address = vm_word_small(state.vm_register(machine, 11))
+    @requested = vm_word_small(state.vm_register(machine, 12))
+    @handle = vm_handle(machine, fd)
+    (handle.open == no) { out state.vm_word_number(0 - 1) }
+    (handle.readable == no) { out state.vm_word_number(0 - 1) }
+    (address < 0) { out state.vm_word_number(0 - 1) }
+    (address > machine.memory.size - requested) { out state.vm_word_number(0 - 1) }
+    @file = core.group.at(machine.files, handle.file_index)
+    @available = core.group.count(file.data) - handle.position
+    @count = requested
+    (count > available) { count = available }
+    @index = 0
+    drum (count) {
+        state.vm_memory_raw_store8(machine.memory, address + index, core.group.at(file.data, handle.position + index))
+        index = index + 1
+    }
+    handle.position = handle.position + count
+    out state.vm_word_number(count)
+}
+
+skill vm_syscall_write_file(machine, handle, address, count) {
+    @file = core.group.at(machine.files, handle.file_index)
+    @index = 0
+    drum (count) {
+        vm_file_set(file, handle.position + index, state.vm_memory_raw_load8(machine.memory, address + index))
+        index = index + 1
+    }
+    handle.position = handle.position + count
+    out state.vm_word_number(count)
+}
+
+skill vm_syscall_write(machine) {
+    @fd = vm_word_small(state.vm_register(machine, 10))
+    @address = vm_word_small(state.vm_register(machine, 11))
+    @count = vm_word_small(state.vm_register(machine, 12))
+    (address < 0) { out state.vm_word_number(0 - 1) }
+    (address > machine.memory.size - count) { out state.vm_word_number(0 - 1) }
+    (fd == 1) {
+        @index = 0
+        drum (count) {
+            machine.stdout = core.group.add(machine.stdout, state.vm_memory_raw_load8(machine.memory, address + index))
+            index = index + 1
+        }
+        out state.vm_word_number(count)
+    }
+    (fd == 2) {
+        @index = 0
+        drum (count) {
+            machine.stderr = core.group.add(machine.stderr, state.vm_memory_raw_load8(machine.memory, address + index))
+            index = index + 1
+        }
+        out state.vm_word_number(count)
+    }
+    @handle = vm_handle(machine, fd)
+    (handle.open == no) { out state.vm_word_number(0 - 1) }
+    (handle.writable == no) { out state.vm_word_number(0 - 1) }
+    out vm_syscall_write_file(machine, handle, address, count)
+}
+
+skill vm_ecall(machine) {
+    @number = vm_word_small(state.vm_register(machine, 17))
+    (number == 56) { state.vm_set_register(machine, 10, vm_syscall_open(machine)) out none }
+    (number == 57) { state.vm_set_register(machine, 10, vm_syscall_close(machine)) out none }
+    (number == 62) { state.vm_set_register(machine, 10, vm_syscall_seek(machine)) out none }
+    (number == 63) { state.vm_set_register(machine, 10, vm_syscall_read(machine)) out none }
+    (number == 64) { state.vm_set_register(machine, 10, vm_syscall_write(machine)) out none }
+    (number == 93) {
+        @code = state.vm_register(machine, 10)
+        machine.exit_code = code.b0
+        machine.halted = yes
+        machine.halt_reason = "exit"
+        state.vm_set_register(machine, 10, state.vm_word_zero())
+        out none
+    }
+    (number == 94) {
+        @code = state.vm_register(machine, 10)
+        machine.exit_code = code.b0
+        machine.halted = yes
+        machine.halt_reason = "exit"
+        state.vm_set_register(machine, 10, state.vm_word_zero())
+        out none
+    }
+    state.vm_trap(machine, "unsupported ecall", core.str.add("number ", core.num.text(number)))
+    out none
+}

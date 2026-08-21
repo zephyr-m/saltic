@@ -52,6 +52,22 @@ selfhost-parity:
 bootstrap-parity:
     nix-shell -p qemu pkgsCross.riscv32-embedded.buildPackages.gcc --run 'bash tests/9-bootstrap.sh'
 
+bootstrap-refresh source="s2/toolchain.saltic":
+    nix-shell -p qemu pkgsCross.riscv32-embedded.buildPackages.gcc --run 'bash bootstrap/refresh.sh {{source}}'
+
+toolchain-step:
+    node js/2-checker.js s2/parser.saltic >/dev/null
+    bash tests/2-selfhost-parser.sh
+    bash tests/3-checker-parity.sh
+    just bootstrap-refresh
+    bash tests/4-compiler-parity.sh
+    bash tests/8-modules.sh
+    just bootstrap-parity
+
+vm-step:
+    node js/2-checker.js s2/vm.saltic >/dev/null
+    bash tests/5-vm-parity.sh
+
 test:
     bash tests/1-canonical.sh
     bash tests/2-selfhost-parser.sh

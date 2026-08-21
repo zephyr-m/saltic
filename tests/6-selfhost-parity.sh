@@ -5,9 +5,9 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 work=".cache/build/selfhost-parity"
-heap_bytes="${SALTIC_SELFHOST_HEAP_BYTES:-536870912}"
-memory_bytes="${SALTIC_SELFHOST_MEMORY_BYTES:-671088640}"
-step_limit="${SALTIC_SELFHOST_STEP_LIMIT:-4000000000}"
+heap_bytes="${SALTIC_SELFHOST_HEAP_BYTES:-805306368}"
+memory_bytes="${SALTIC_SELFHOST_MEMORY_BYTES:-939524096}"
+step_limit="${SALTIC_SELFHOST_STEP_LIMIT:-6000000000}"
 progress_steps="${SALTIC_SELFHOST_PROGRESS_STEPS:-100000000}"
 
 mkdir -p "$work/source" "$work/stage-1" "$work/stage-2" "$work/stage-3" "$work/diff"

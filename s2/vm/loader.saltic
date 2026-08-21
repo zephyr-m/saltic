@@ -1,0 +1,178 @@
+use core
+use s2.vm.state
+
+skill vm_image_u16(image, offset) {
+    out vm_image_byte(image, offset) + vm_image_byte(image, offset + 1) * 256
+}
+
+skill vm_image_u32(image, offset) {
+    @word = state.vm_word_bytes(vm_image_byte(image, offset), vm_image_byte(image, offset + 1), vm_image_byte(image, offset + 2), vm_image_byte(image, offset + 3))
+    out state.vm_word_address(word)
+}
+
+skill vm_image_length(image) {
+    @length = 0
+    @index = 0
+    @count = core.group.count(image)
+    drum (count) {
+        @chunk = core.group.at(image, index)
+        length = length + core.group.count(chunk)
+        index = index + 1
+    }
+    out length
+}
+
+skill vm_image_byte(image, offset) {
+    @chunk = core.group.at(image, offset / state.VM_PAGE_SIZE)
+    out core.group.at(chunk, state.vm_mod(offset, state.VM_PAGE_SIZE))
+}
+
+skill vm_load_error(machine, message) {
+    machine.trap = message
+    machine.halted = yes
+    out none
+}
+
+skill vm_copy_image(machine, image, offset, address, size) {
+    @index = 0
+    drum (size) {
+        state.vm_memory_raw_store8(machine.memory, address + index, vm_image_byte(image, offset + index))
+        index = index + 1
+    }
+    out none
+}
+
+skill vm_fill_memory(machine, address, size) {
+    @index = 0
+    drum (size) {
+        state.vm_memory_raw_store8(machine.memory, address + index, 0)
+        index = index + 1
+    }
+    out none
+}
+
+skill vm_load_flat(machine, image, address) {
+    @size = vm_image_length(image)
+    (address < 0) { vm_load_error(machine, "flat image address is outside RAM") out none }
+    (address > machine.memory.size - size) { vm_load_error(machine, "flat image is outside RAM") out none }
+    vm_copy_image(machine, image, 0, address, size)
+    machine.pc = address
+    out none
+}
+
+skill vm_load_elf(machine, image) {
+    @length = vm_image_length(image)
+    (length < 52) { vm_load_error(machine, "ELF header is truncated") out none }
+    (vm_image_byte(image, 4) == 1) {
+        (vm_image_byte(image, 5) == 1) {
+            (vm_image_u16(image, 18) == 243) {
+                @entry = vm_image_u32(image, 24)
+                @table = vm_image_u32(image, 28)
+                @entry_size = vm_image_u16(image, 42)
+                @count = vm_image_u16(image, 44)
+                @segments = 0
+                @index = 0
+                drum (count) {
+                    (core.str.len(machine.trap) == 0) {
+                        @header = table + index * entry_size
+                        (header > length - 32) {
+                            vm_load_error(machine, "ELF program header is truncated")
+                        }
+                        (header < length - 31) {
+                            (vm_image_u32(image, header) == 1) {
+                                @offset = vm_image_u32(image, header + 4)
+                                @address = vm_image_u32(image, header + 8)
+                                @file_size = vm_image_u32(image, header + 16)
+                                @memory_size = vm_image_u32(image, header + 20)
+                                @valid = yes
+                                (file_size > memory_size) { valid = no }
+                                (offset > length - file_size) { valid = no }
+                                (address < 0) { valid = no }
+                                (address > machine.memory.size - memory_size) { valid = no }
+                                (valid == no) { vm_load_error(machine, "invalid ELF load segment") }
+                                (valid == yes) {
+                                    vm_copy_image(machine, image, offset, address, file_size)
+                                    (memory_size > file_size) { vm_fill_memory(machine, address + file_size, memory_size - file_size) }
+                                    segments = segments + 1
+                                }
+                            }
+                        }
+                    }
+                    index = index + 1
+                }
+                (core.str.len(machine.trap) == 0) {
+                    (segments == 0) { vm_load_error(machine, "ELF contains no loadable segments") }
+                    (segments > 0) { machine.pc = entry }
+                }
+                out none
+            }
+            vm_load_error(machine, "ELF machine is not RISC-V")
+            out none
+        }
+        vm_load_error(machine, "only little-endian ELF is supported")
+        out none
+    }
+    vm_load_error(machine, "only ELF32 is supported")
+    out none
+}
+
+skill vm_load(machine, image, address) {
+    @elf = no
+    (vm_image_length(image) > 3) {
+        (vm_image_byte(image, 0) == 127) {
+            (vm_image_byte(image, 1) == 69) {
+                (vm_image_byte(image, 2) == 76) {
+                    (vm_image_byte(image, 3) == 70) { elf = yes }
+                }
+            }
+        }
+    }
+    (elf == yes) { vm_load_elf(machine, image) out none }
+    vm_load_flat(machine, image, address)
+    out none
+}
+
+skill vm_prepare_stack(machine, options) {
+    @values = core.group.add([], options.program_name)
+    @index = 0
+    @argument_count = core.group.count(options.arguments)
+    drum (argument_count) {
+        values = core.group.add(values, core.group.at(options.arguments, index))
+        index = index + 1
+    }
+
+    @count = core.group.count(values)
+    @cursor = machine.memory.size - 16
+    cursor = cursor - state.vm_mod(cursor, 16)
+    @addresses = []
+    index = count
+    drum (count) {
+        index = index - 1
+        @data = state.vm_name_add(machine, core.group.at(values, index))
+        cursor = cursor - core.group.count(data) - 1
+        @byte_index = 0
+        @byte_count = core.group.count(data)
+        drum (byte_count) {
+            state.vm_memory_raw_store8(machine.memory, cursor + byte_index, core.group.at(data, byte_index))
+            byte_index = byte_index + 1
+        }
+        state.vm_memory_raw_store8(machine.memory, cursor + byte_count, 0)
+        addresses = core.group.add(addresses, cursor)
+    }
+
+    @stack = cursor - (count + 2) * 4
+    stack = stack - state.vm_mod(stack, 16)
+    @argv = stack + 4
+    state.vm_memory_store_word(machine.memory, stack, state.vm_word_number(count), 4)
+    index = 0
+    drum (count) {
+        @reverse_index = count - index - 1
+        state.vm_memory_store_word(machine.memory, argv + reverse_index * 4, state.vm_word_number(core.group.at(addresses, index)), 4)
+        index = index + 1
+    }
+    state.vm_memory_store_word(machine.memory, argv + count * 4, state.vm_word_zero(), 4)
+    state.vm_set_register(machine, 2, state.vm_word_number(stack))
+    state.vm_set_register(machine, 10, state.vm_word_number(count))
+    state.vm_set_register(machine, 11, state.vm_word_number(argv))
+    out none
+}

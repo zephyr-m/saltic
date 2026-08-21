@@ -1,0 +1,187 @@
+use core
+use s2.parser.syntax
+
+SalticLoader = Box {
+    root = ""
+    locations = no
+    included = []
+    stack = []
+}
+
+SalticLoad = Box {
+    ast = []
+    included = []
+    diagnostics = []
+}
+
+skill parser_group_contains(group, value) {
+    @found = no
+    @index = 0
+    @count = core.group.count(group)
+    drum (count) {
+        (index < count) {
+            (core.group.item(group, index) == value) { found = yes }
+            index = index + 1
+        }
+    }
+    out found
+}
+
+skill parser_strip_loc(datum) {
+    (core.group.count(datum) == 4) {
+        (core.group.item(datum, 0) == "loc") { out core.group.item(datum, 3) }
+    }
+    out datum
+}
+
+skill parser_dirname(path) {
+    @last = 0
+    @index = 0
+    @length = core.str.len(path)
+    drum (length) {
+        (index < length) {
+            (core.str.at(path, index) == "/") { last = index }
+            index = index + 1
+        }
+    }
+    (last == 0) {
+        (core.str.starts_with(path, "/") == yes) { out "/" }
+        out "."
+    }
+    out core.str.slice(path, 0, last)
+}
+
+skill parser_join_path(base, relative) {
+    (core.str.ends_with(base, "/") == yes) { out core.str.add(base, relative) }
+    out core.str.add(core.str.add(base, "/"), relative)
+}
+
+skill parser_module_relative(parts) {
+    @relative = ""
+    @index = 0
+    @count = core.group.count(parts)
+    drum (count) {
+        (index < count) {
+            (index > 0) { relative = core.str.add(relative, "/") }
+            relative = core.str.add(relative, core.group.item(parts, index))
+            index = index + 1
+        }
+    }
+    out core.str.add(relative, ".saltic")
+}
+
+skill parser_module_text(parts) {
+    @text = ""
+    @index = 0
+    @count = core.group.count(parts)
+    drum (count) {
+        (index < count) {
+            (index > 0) { text = core.str.add(text, ".") }
+            text = core.str.add(text, core.group.item(parts, index))
+            index = index + 1
+        }
+    }
+    out text
+}
+
+skill parser_resolve_module(source_path, parts, root) {
+    @base = parser_dirname(source_path)
+    @first = core.group.item(parts, 0)
+    (first == "s") { base = root }
+    (first == "s2") { base = root }
+    out parser_join_path(base, parser_module_relative(parts))
+}
+
+skill parser_load_error(path, message, included) {
+    out SalticLoad { ast = syntax.parser_group1("program") included = included diagnostics = syntax.parser_group1(core.str.add(core.str.add("modules: ", message), path)) }
+}
+
+skill parser_expand_file(path, root, locations, expand_core, included, stack, module_name) {
+    (parser_group_contains(stack, path) == yes) { out parser_load_error(path, "cyclic import involving ", included) }
+    (parser_group_contains(included, path) == yes) { out SalticLoad { ast = syntax.parser_group1("program") included = included diagnostics = [] } }
+    @next_included = core.group.add(included, path)
+    @source = core.file.read(path) rescue |error| {
+        out parser_load_error(path, "module not found at ", next_included)
+    }
+    @parsed = syntax.parser_parse_string(source, path)
+    (locations == yes) { parsed = syntax.parser_parse_string_loc(source, path) }
+    (syntax.parser_has_diagnostics(parsed.diagnostics) == yes) { out SalticLoad { ast = syntax.parser_group1("program") included = next_included diagnostics = parsed.diagnostics } }
+    @output = syntax.parser_group1("program")
+    @next_stack = core.group.add(stack, path)
+    @index = 1
+    @count = core.group.count(parsed.ast)
+    @diagnostics = []
+    @active = yes
+    drum (count) {
+        (active == yes) {
+            (index < count) {
+                @item = core.group.item(parsed.ast, index)
+                @plain = parser_strip_loc(item)
+                @include_item = yes
+                (core.group.item(plain, 0) == "entry") {
+                    (core.group.count(stack) > 0) { include_item = no }
+                }
+                (include_item == yes) {
+                    @output_item = item
+                    (core.str.len(module_name) > 0) { output_item = syntax.parser_group3("module", module_name, item) }
+                    output = core.group.add(output, output_item)
+                }
+                (core.group.item(plain, 0) == "use") {
+                    @parts = []
+                    @part_index = 1
+                    @part_count = core.group.count(plain)
+                    drum (part_count) {
+                        (part_index < part_count) { parts = core.group.add(parts, core.group.item(plain, part_index)) part_index = part_index + 1 }
+                    }
+                    @is_core = no
+                    (core.group.count(parts) == 1) {
+                        (core.group.item(parts, 0) == "core") { is_core = yes }
+                    }
+                    (is_core == yes) {
+                        (expand_core == yes) {
+                            @core_files = ["file.saltic", "json.saltic", "str.saltic", "num.saltic", "group.saltic"]
+                            @core_index = 0
+                            @core_count = core.group.count(core_files)
+                            drum (core_count) {
+                                (active == yes) {
+                                    (core_index < core_count) {
+                                        @core_path = parser_join_path(parser_join_path(root, "core"), core.group.item(core_files, core_index))
+                                        @core_module = core.str.add("core.", core.str.slice(core.group.item(core_files, core_index), 0, core.str.len(core.group.item(core_files, core_index)) - 7))
+                                        @loaded = parser_expand_file(core_path, root, locations, expand_core, next_included, next_stack, core_module)
+                                        next_included = loaded.included
+                                        (syntax.parser_has_diagnostics(loaded.diagnostics) == yes) { diagnostics = loaded.diagnostics active = no }
+                                        (active == yes) { output = syntax.parser_append_tail(output, loaded.ast, 1) }
+                                        core_index = core_index + 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    (is_core == no) {
+                        @module_path = parser_resolve_module(path, parts, root)
+                        @loaded = parser_expand_file(module_path, root, locations, expand_core, next_included, next_stack, parser_module_text(parts))
+                        next_included = loaded.included
+                        (syntax.parser_has_diagnostics(loaded.diagnostics) == yes) { diagnostics = loaded.diagnostics active = no }
+                        (active == yes) { output = syntax.parser_append_tail(output, loaded.ast, 1) }
+                    }
+                }
+                index = index + 1
+            }
+            (index == count) { active = no }
+        }
+    }
+    out SalticLoad { ast = output included = next_included diagnostics = diagnostics }
+}
+
+skill parser_load_file(path, root) {
+    out parser_expand_file(path, root, no, yes, [], [], "")
+}
+
+skill parser_load_file_loc(path, root) {
+    out parser_expand_file(path, root, yes, yes, [], [], "")
+}
+
+skill parser_load_modules(path, root) {
+    out parser_expand_file(path, root, no, no, [], [], "")
+}
+
