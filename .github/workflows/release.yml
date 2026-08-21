@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Run the complete test suite
+        run: nix-shell -p just --run 'just test'
+
+  publish:
+    name: Publish
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare release metadata
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(tr -d '\r\n' < VERSION)"
+          tag="${GITHUB_REF_NAME}"
+
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION ${version} is not semantic X.Y.Z" >&2
+            exit 1
+          fi
+
+          if [[ "${tag}" != "v${version}" ]]; then
+            echo "tag ${tag} does not match VERSION ${version}" >&2
+            exit 1
+          fi
+
+          if ! git cat-file -e "${tag}^{tag}" 2>/dev/null; then
+            echo "tag ${tag} must be annotated" >&2
+            exit 1
+          fi
+
+          notes="${RUNNER_TEMP}/release-notes.md"
+          awk -v version="${version}" '
+            index($0, "## " version " — ") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > "${notes}"
+
+          if [[ ! -s "${notes}" ]]; then
+            echo "CHANGELOG has no notes for ${version}" >&2
+            exit 1
+          fi
+
+          title="$(git for-each-ref "refs/tags/${tag}" --format='%(contents:subject)')"
+          if [[ -z "${title}" ]]; then
+            title="Saltic ${version}"
+          fi
+
+          echo "title=${title}" >> "${GITHUB_OUTPUT}"
+          echo "notes=${notes}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          --verify-tag
+          --title "${{ steps.release.outputs.title }}"
+          --notes-file "${{ steps.release.outputs.notes }}"

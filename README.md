@@ -9,6 +9,17 @@ Saltic — самохостящийся системный язык: его ак
 История релизов находится в [CHANGELOG.md](CHANGELOG.md), каноничный номер
 версии — в [VERSION](VERSION).
 
+## Релиз
+
+1. Поднять номер в `VERSION`, `README.md` и `CHANGELOG.md`.
+2. Закоммитить готовый релиз.
+3. Создать аннотированный тег с заголовком релиза:
+   `git tag -a vX.Y.Z -m "Saltic X.Y.Z — название"`.
+4. Отправить коммит и тег: `git push origin main --follow-tags`.
+
+GitHub Actions сверит тег с `VERSION`, прогонит полный `just test`, возьмёт
+описание из соответствующего раздела `CHANGELOG.md` и опубликует GitHub Release.
+
 ```s
 use core
 
