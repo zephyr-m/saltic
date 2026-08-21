@@ -1,0 +1,249 @@
+use core
+use canonical.support
+use s2.std.str
+
+AppName = "Saltic"
+MaxEnergy = 100
+DefaultStep = 2
+Tracing = yes
+Silent = no
+
+State = enum {
+    READY,
+    ACTIVE,
+    EMPTY,
+}
+
+Kind = enum {
+    AGENT,
+    SIGNAL,
+}
+
+Point = Box {
+    x = 0
+    y = 0
+}
+
+Agent = Box {
+    name = "agent"
+    kind = Kind.AGENT
+    state = State.READY
+    energy = MaxEnergy
+    point = Point {}
+}
+
+Signal = Box {
+    name = "signal"
+    kind = Kind.SIGNAL
+    step = DefaultStep
+    cost = 0
+}
+
+Cursor = Box {
+    items = []
+    index = 0
+
+    skill at(offset) {
+        out core.group.at(items, index + offset)
+    }
+
+    skill has() {
+        out index < core.group.count(items)
+    }
+
+    skill peek() {
+        @item = at(0)
+        out item
+    }
+
+    skill next() {
+        @cursor = Cursor()
+        cursor.items = items
+        cursor.index = index + 1
+        out cursor
+    }
+}
+
+skill move(point, step) {
+    out Point {
+        x = point.x + step
+        y = point.y + 1
+    }
+}
+
+skill spend(energy, cost) {
+    (cost > energy) {
+        out error.NotEnoughEnergy
+    }
+
+    out energy - cost
+}
+
+skill measure(left, right) {
+    @sum = left + right
+    @difference = left - right
+    @product = left * right
+    @quotient = product / right
+
+    (quotient == left) {
+        out [sum, difference, product, quotient]
+    }
+
+    out error.BadMeasure
+}
+
+skill memory_probe() {
+    @address = [0, 4096]
+    core.mem.store8(address, 0, core.str.byte("Z", 0))
+    core.mem.store16(address, 2, 12345)
+    core.mem.store32(address, 4, 123456)
+    core.mem.store_address32(address, 8, [0, 4096])
+    core.cpu.fence()
+
+    (core.mem.load8(address, 0) == 90) {
+        (core.mem.load16(address, 2) == 12345) {
+            out core.mem.load32(address, 4)
+        }
+    }
+
+    out error.MemoryProbeFailed
+}
+
+skill fixed_probe() {
+    @byte = u8(250) + u8(5)
+    @word = u16(60000) + u16(5535)
+    @wide = u32(4000000000) / u32(2)
+    @signed = i32(0 - 42)
+    @converted = core.u16.from(u8(250))
+    @mask = core.bits32.shift_left(bits32(1), u8(8))
+    @memory = address(u32(8192))
+    @next = core.address.add(memory, usize(1))
+
+    core.mem.store8(memory, usize(0), u8(171))
+    core.mem.store8(next, usize(0), u8(172))
+
+    core.io.show("fixed: ", byte, " ", word, " ", wide, " ", signed)
+    core.io.show("conversion: ", converted)
+    core.io.show("bits: ", mask)
+    core.io.show("typed memory: ", core.mem.load8(memory, usize(0)), " ", core.mem.load8(next, usize(0)))
+
+    out none
+}
+
+skill module_probe() {
+    @short_badge = support.Badge { prefix = "short:" }
+    @full_badge = canonical.support.Badge { prefix = "full:" }
+
+    core.io.show("module name: ", support.Name)
+    core.io.show("module enum: ", support.active() == support.Mode.ENABLED)
+    core.io.show("module skill: ", support.badge("skill"))
+    core.io.show("module short Box: ", short_badge.text("box"))
+    core.io.show("module full Box: ", full_badge.text("box"))
+    core.io.show("std string: ", str.contains("Saltic", "alt"))
+
+    out none
+}
+
+skill react(agent, signal) {
+    @energy = spend(agent.energy, signal.cost)
+    @state = State.ACTIVE
+
+    (energy < 1) {
+        state = State.EMPTY
+    }
+
+    out Agent {
+        name = agent.name
+        kind = agent.kind
+        state = state
+        energy = energy
+        point = move(agent.point, signal.step)
+    }
+}
+
+skill show_state(state) {
+    (state) {
+        .READY => core.io.show("state: ready"),
+        .ACTIVE => core.io.show("state: active"),
+        .EMPTY => core.io.show("state: empty"),
+    }
+
+    out none
+}
+
+skill run(agent, signals) {
+    @current = agent
+    @index = 0
+
+    drum (core.group.count(signals)) {
+        @signal = core.group.at(signals, index)
+        current = react(current, signal) rescue |err| {
+            core.io.show("rescue: ", err)
+            current
+        }
+        show_state(current.state)
+        index = index + 1
+    }
+
+    out current
+}
+
+skill report(agent, input_path, output_path) {
+    @text = core.file.read(input_path)
+    @lines = core.str.line_count(text)
+    @summary = core.str.add(agent.name, ":")
+    summary = core.str.add(summary, core.num.text(agent.energy))
+
+    core.io.show(AppName)
+    core.io.show("input lines: ", lines)
+    core.io.show("agent: ", summary)
+    core.file.write(output_path, summary)
+
+    out none
+}
+
+program(input_path, output_path) {
+    @agent = Agent {
+        name = "pip"
+        energy = 23
+        point = Point { x = 2 y = 3 }
+    }
+
+    @signals = [
+        Signal { name = "scan" step = 1 cost = 5 },
+        Signal { name = "move" step = 2 cost = 7 },
+        Signal { name = "build" step = 3 cost = 11 },
+    ]
+
+    @numbers = measure(8, 2) rescue |err| {
+        core.io.show("measure failed: ", err)
+        []
+    }
+
+    @cursor = Cursor()
+    cursor.items = numbers
+
+    drum (core.group.count(numbers)) {
+        (cursor.has() == yes) {
+            core.io.show("cursor: ", cursor.peek())
+            cursor = cursor.next()
+        }
+    }
+
+    (Tracing == yes) {
+        core.io.show("measure count: ", core.group.count(numbers))
+    }
+
+    (Silent == no) {
+        core.io.show("run: visible")
+    }
+
+    core.io.show("memory: ", memory_probe())
+    fixed_probe()
+    module_probe()
+
+    agent = run(agent, signals)
+    report(agent, input_path, output_path)
+
+    out none
+}
