@@ -1,10 +1,5 @@
 use core
 
-SalticNode = Box {
-    datum = []
-    tag = ""
-}
-
 CheckName = Box {
     name = ""
     kind = ""
@@ -27,13 +22,25 @@ CheckResult = Box {
 CheckScope = Box {
     names = []
     subject = ""
+    module = ""
 }
 
 skill checker_plain(node) {
-    (core.group.count(node) == 4) {
-        (core.group.item(node, 0) == "loc") { out core.group.item(node, 3) }
+    @plain = node
+    (core.group.count(plain) == 3) {
+        (core.group.item(plain, 0) == "module") { plain = core.group.item(plain, 2) }
     }
-    out node
+    (core.group.count(plain) == 4) {
+        (core.group.item(plain, 0) == "loc") { out core.group.item(plain, 3) }
+    }
+    out plain
+}
+
+skill checker_module(node) {
+    (core.group.count(node) == 3) {
+        (core.group.item(node, 0) == "module") { out core.group.item(node, 1) }
+    }
+    out ""
 }
 
 skill checker_tag(node) {
@@ -47,8 +54,12 @@ skill checker_part(node, index) {
 }
 
 skill checker_location(node) {
-    (core.group.count(node) == 4) {
-        (core.group.item(node, 0) == "loc") { out [core.group.item(node, 1), core.group.item(node, 2)] }
+    @plain = node
+    (core.group.count(plain) == 3) {
+        (core.group.item(plain, 0) == "module") { plain = core.group.item(plain, 2) }
+    }
+    (core.group.count(plain) == 4) {
+        (core.group.item(plain, 0) == "loc") { out [core.group.item(plain, 1), core.group.item(plain, 2)] }
     }
     out [0, 0]
 }
@@ -222,6 +233,109 @@ skill checker_path_text(path) {
     out text
 }
 
+skill checker_qualified(module, name) {
+    (core.str.len(module) == 0) { out name }
+    out core.str.add(module, core.str.add(".", name))
+}
+
+skill checker_alias_key(module, alias) {
+    out core.str.add(module, core.str.add("|", alias))
+}
+
+skill checker_name_head(name) {
+    @index = 0
+    @count = core.str.len(name)
+    drum (count) {
+        (index < count) {
+            (core.str.at(name, index) == ".") { out core.str.slice(name, 0, index) }
+            index = index + 1
+        }
+    }
+    out name
+}
+
+skill checker_name_tail(name) {
+    @index = 0
+    @count = core.str.len(name)
+    drum (count) {
+        (index < count) {
+            (core.str.at(name, index) == ".") { out core.str.slice(name, index, count) }
+            index = index + 1
+        }
+    }
+    out ""
+}
+
+skill checker_name_module(name) {
+    @last = 0
+    @index = 0
+    @count = core.str.len(name)
+    drum (count) {
+        (index < count) {
+            (core.str.at(name, index) == ".") { last = index }
+            index = index + 1
+        }
+    }
+    (last == 0) { out "" }
+    out core.str.slice(name, 0, last)
+}
+
+skill checker_resolve_name(name, module, globals) {
+    (checker_has(globals, name) == yes) { out name }
+    @local = checker_qualified(module, name)
+    (checker_has(globals, local) == yes) { out local }
+    @head = checker_name_head(name)
+    @import = checker_find(globals, checker_alias_key(module, head))
+    (import.kind == "import") {
+        @candidate = core.str.add(import.type, checker_name_tail(name))
+        (checker_has(globals, candidate) == yes) { out candidate }
+    }
+    out ""
+}
+
+skill checker_type_in_module(node, module, globals) {
+    @type = checker_type(node)
+    (core.str.starts_with(type, "box:") == yes) {
+        @name = checker_tail(type, 4)
+        @resolved = checker_resolve_name(name, module, globals)
+        (core.str.len(resolved) > 0) { out core.str.add("box:", resolved) }
+    }
+    out type
+}
+
+skill checker_resolve_path(node, scope, globals) {
+    @plain = checker_plain(node)
+    @count = core.group.count(plain)
+    @head = core.group.item(plain, 1)
+    @direct = checker_path_text(plain)
+    (checker_has(globals, direct) == yes) { out direct }
+    (count == 2) {
+        @local = checker_qualified(scope.module, head)
+        (checker_has(globals, local) == yes) { out local }
+    }
+    @import = checker_find(globals, checker_alias_key(scope.module, head))
+    (import.kind == "import") {
+        @candidate = import.type
+        @index = 2
+        drum (count) {
+            (index < count) { candidate = core.str.add(candidate, core.str.add(".", core.group.item(plain, index))) index = index + 1 }
+        }
+        (checker_has(globals, candidate) == yes) { out candidate }
+    }
+    out ""
+}
+
+skill checker_path_prefix(node) {
+    @plain = checker_plain(node)
+    @count = core.group.count(plain)
+    @text = core.group.item(plain, 1)
+    @index = 2
+    drum (count - 1) {
+        (index < count - 1) { text = core.str.add(text, core.str.add(".", core.group.item(plain, index))) index = index + 1 }
+    }
+    out text
+}
+
 skill checker_fixed_range(type, text) {
     @negative = core.str.starts_with(text, "-")
     @magnitude = text
@@ -276,27 +390,37 @@ skill checker_collect(ast) {
         (index < count) {
             @item = core.group.item(ast, index)
             @tag = checker_tag(item)
+            @module = checker_module(item)
             @name = ""
             @kind = ""
             (tag == "use") {
                 (checker_part(item, 1) == "core") {
                     (checker_has(result.globals, "__core__") == no) { result.globals = checker_put(result.globals, "__core__", "import", "module-path") }
                 }
+                @target = checker_path_text(item)
+                @plain_use = checker_plain(item)
+                @alias = core.group.item(plain_use, core.group.count(plain_use) - 1)
+                @alias_key = checker_alias_key(module, alias)
+                @old_alias = checker_find(result.globals, alias_key)
+                (core.str.len(old_alias.name) > 0) {
+                    ((old_alias.type == target) == no) { result.diagnostics = checker_add(result.diagnostics, CheckDiagnostic { code = "duplicate_definition" message = core.str.add("duplicate module alias '", core.str.add(alias, "'")) }) }
+                }
+                (core.str.len(old_alias.name) == 0) { result.globals = checker_put(result.globals, alias_key, "import", target) }
             }
             (tag == "entry") {
                 (program_seen == yes) { result.diagnostics = checker_add(result.diagnostics, CheckDiagnostic { code = "duplicate_definition" message = "duplicate program entry" }) }
                 program_seen = yes
             }
-            (tag == "const") { name = checker_part(item, 1) kind = "const" }
-            (tag == "enum") { name = checker_part(item, 1) kind = "enum" }
-            (tag == "box") { name = checker_part(item, 1) kind = "box" }
-            (tag == "skill") { name = checker_part(item, 1) kind = "skill" }
+            (tag == "const") { name = checker_qualified(module, checker_part(item, 1)) kind = "const" }
+            (tag == "enum") { name = checker_qualified(module, checker_part(item, 1)) kind = "enum" }
+            (tag == "box") { name = checker_qualified(module, checker_part(item, 1)) kind = "box" }
+            (tag == "skill") { name = checker_qualified(module, checker_part(item, 1)) kind = "skill" }
             (core.str.len(name) > 0) {
                 (checker_has(result.globals, name) == yes) {
                     result.diagnostics = checker_add(result.diagnostics, CheckDiagnostic { code = "duplicate_definition" message = core.str.add("duplicate top-level name '", core.str.add(name, "'")) })
                 }
                 @type = "unknown"
-                (kind == "const") { type = checker_type(checker_part(item, 2)) }
+                (kind == "const") { type = checker_type_in_module(checker_part(item, 2), module, result.globals) }
                 (kind == "enum") { type = "enum-type" }
                 (kind == "box") { type = "box-type" }
                 (kind == "skill") { type = "function" }
@@ -317,7 +441,7 @@ skill checker_box_field(globals, box_name, field_name) {
         (index < count) {
             @member = checker_part(box.node, index)
             (checker_tag(member) == "field") {
-                (checker_part(member, 1) == field_name) { result = CheckName { name = field_name kind = "field" type = checker_type(checker_part(member, 2)) node = member } }
+                (checker_part(member, 1) == field_name) { result = CheckName { name = field_name kind = "field" type = checker_type_in_module(checker_part(member, 2), checker_name_module(box_name), globals) node = member } }
             }
             index = index + 1
         }
@@ -360,6 +484,16 @@ skill checker_path_type(node, scope, globals) {
     @parts = checker_plain(node)
     @count = core.group.count(parts)
     @name = core.group.item(parts, 1)
+    @resolved = checker_resolve_path(node, scope, globals)
+    (core.str.len(resolved) > 0) {
+        @resolved_name = checker_find(globals, resolved)
+        out resolved_name.type
+    }
+    (count > 2) {
+        @resolved_enum = checker_resolve_name(checker_path_prefix(node), scope.module, globals)
+        @enum_symbol = checker_find(globals, resolved_enum)
+        (enum_symbol.kind == "enum") { out core.str.add("enum:", resolved_enum) }
+    }
     (count == 2) {
         @local = checker_find(scope.names, name)
         (core.str.len(local.name) > 0) { out local.type }
@@ -485,7 +619,10 @@ skill checker_value_type(node, scope, globals) {
     (tag == "none") { out "none" }
     (tag == "enum-value") { out "enum-value" }
     (tag == "path") { out checker_path_type(node, scope, globals) }
-    (tag == "box-new") { out core.str.add("box:", core.group.item(plain, 1)) }
+    (tag == "box-new") {
+        @box_name = checker_resolve_name(core.group.item(plain, 1), scope.module, globals)
+        out core.str.add("box:", box_name)
+    }
     (tag == "call") { out checker_call_type(node, scope, globals) }
     (tag == "group") {
         @type = "unknown"
@@ -508,7 +645,7 @@ skill checker_value_type(node, scope, globals) {
     }
     (tag == "rescue") {
         @left = checker_value_type(core.group.item(plain, 1), scope, globals)
-        @child = CheckScope { names = scope.names subject = scope.subject }
+        @child = CheckScope { names = scope.names subject = scope.subject module = scope.module }
         child.names = checker_put(child.names, core.group.item(plain, 2), "variable", "error")
         out checker_merge(left, checker_block_value_type(core.group.item(plain, 3), child, globals))
     }
@@ -519,6 +656,8 @@ skill checker_path(node, scope, globals, diagnostics) {
     @parts = checker_plain(node)
     @name = core.group.item(parts, 1)
     @count = core.group.count(parts)
+    @resolved = checker_resolve_path(node, scope, globals)
+    (core.str.len(resolved) > 0) { out diagnostics }
     (count == 2) {
         @known = checker_has(scope.names, name)
         (known == no) { known = checker_has(globals, name) }
@@ -726,7 +865,8 @@ skill checker_expression(node, scope, globals, diagnostics) {
     }
     (tag == "box-new") {
         @name = core.group.item(plain, 1)
-        @model = checker_find(globals, name)
+        @resolved_box = checker_resolve_name(name, scope.module, globals)
+        @model = checker_find(globals, resolved_box)
         (model.kind == "box") {
             @seen = []
             @index = 2
@@ -745,7 +885,7 @@ skill checker_expression(node, scope, globals, diagnostics) {
                         diagnostics = checker_add(diagnostics, checker_diagnostic(node, "duplicate_definition", message))
                     }
                     seen = checker_put(seen, field_name, "field", "unknown")
-                    @field = checker_box_field(globals, name, field_name)
+                    @field = checker_box_field(globals, resolved_box, field_name)
                     (core.str.len(field.name) == 0) {
                         @message = core.str.add("Box '", name)
                         message = core.str.add(message, "' has no field '")
@@ -778,7 +918,7 @@ skill checker_expression(node, scope, globals, diagnostics) {
     }
     (tag == "rescue") {
         diagnostics = checker_expression(core.group.item(plain, 1), scope, globals, diagnostics)
-        @child = CheckScope { names = scope.names subject = scope.subject }
+        @child = CheckScope { names = scope.names subject = scope.subject module = scope.module }
         child.names = checker_put(child.names, core.group.item(plain, 2), "variable", "error")
         out checker_block(core.group.item(plain, 3), child, globals, diagnostics)
     }
@@ -891,11 +1031,11 @@ skill checker_statement(node, scope, globals, diagnostics) {
     (tag == "expr") { out checker_expression(core.group.item(plain, 1), scope, globals, diagnostics) }
     (tag == "if") {
         diagnostics = checker_expression(core.group.item(plain, 1), scope, globals, diagnostics)
-        out checker_block(core.group.item(plain, 2), CheckScope { names = scope.names subject = scope.subject }, globals, diagnostics)
+        out checker_block(core.group.item(plain, 2), CheckScope { names = scope.names subject = scope.subject module = scope.module }, globals, diagnostics)
     }
     (tag == "drum") {
         diagnostics = checker_expression(core.group.item(plain, 1), scope, globals, diagnostics)
-        out checker_block(core.group.item(plain, 2), CheckScope { names = scope.names subject = scope.subject }, globals, diagnostics)
+        out checker_block(core.group.item(plain, 2), CheckScope { names = scope.names subject = scope.subject module = scope.module }, globals, diagnostics)
     }
     (tag == "switch") {
         diagnostics = checker_expression(core.group.item(plain, 1), scope, globals, diagnostics)
@@ -921,8 +1061,8 @@ skill checker_block(block, scope, globals, diagnostics) {
     out diagnostics
 }
 
-skill checker_params(params, globals, subject, body, diagnostics) {
-    @scope = CheckScope { subject = subject }
+skill checker_params(params, globals, subject, module, body, diagnostics) {
+    @scope = CheckScope { subject = subject module = module }
     (core.str.len(subject) > 0) {
         @model = checker_find(globals, subject)
         @member_index = 2
@@ -930,7 +1070,7 @@ skill checker_params(params, globals, subject, body, diagnostics) {
         drum (member_count) {
             (member_index < member_count) {
                 @member = checker_part(model.node, member_index)
-                (checker_tag(member) == "field") { scope.names = checker_put(scope.names, checker_part(member, 1), "field", checker_type(checker_part(member, 2))) }
+                (checker_tag(member) == "field") { scope.names = checker_put(scope.names, checker_part(member, 1), "field", checker_type_in_module(checker_part(member, 2), module, globals)) }
                 member_index = member_index + 1
             }
         }
@@ -954,9 +1094,10 @@ skill checker_check(ast) {
         (index < count) {
             @item = core.group.item(ast, index)
             @tag = checker_tag(item)
-            (tag == "const") { result.diagnostics = checker_expression(checker_part(item, 2), CheckScope {}, result.globals, result.diagnostics) }
-            (tag == "skill") { result.diagnostics = checker_params(checker_part(item, 2), result.globals, "", checker_part(item, 3), result.diagnostics) }
-            (tag == "entry") { result.diagnostics = checker_params(checker_part(item, 1), result.globals, "", checker_part(item, 2), result.diagnostics) }
+            @module = checker_module(item)
+            (tag == "const") { result.diagnostics = checker_expression(checker_part(item, 2), CheckScope { module = module }, result.globals, result.diagnostics) }
+            (tag == "skill") { result.diagnostics = checker_params(checker_part(item, 2), result.globals, "", module, checker_part(item, 3), result.diagnostics) }
+            (tag == "entry") { result.diagnostics = checker_params(checker_part(item, 1), result.globals, "", module, checker_part(item, 2), result.diagnostics) }
             (tag == "box") {
                 @seen_fields = []
                 @seen_skills = []
@@ -976,7 +1117,7 @@ skill checker_check(ast) {
                                 result.diagnostics = checker_add(result.diagnostics, CheckDiagnostic { code = "duplicate_definition" message = message })
                             }
                             seen_fields = checker_put(seen_fields, field_name, "field", "unknown")
-                            result.diagnostics = checker_expression(checker_part(member, 2), CheckScope {}, result.globals, result.diagnostics)
+                            result.diagnostics = checker_expression(checker_part(member, 2), CheckScope { module = module }, result.globals, result.diagnostics)
                         }
                         (member_tag == "subject-skill") {
                             @skill_name = checker_part(member, 1)
@@ -988,7 +1129,7 @@ skill checker_check(ast) {
                                 result.diagnostics = checker_add(result.diagnostics, CheckDiagnostic { code = "duplicate_definition" message = message })
                             }
                             seen_skills = checker_put(seen_skills, skill_name, "skill", "function")
-                            result.diagnostics = checker_params(checker_part(member, 2), result.globals, checker_part(item, 1), checker_part(member, 3), result.diagnostics)
+                            result.diagnostics = checker_params(checker_part(member, 2), result.globals, checker_qualified(module, checker_part(item, 1)), module, checker_part(member, 3), result.diagnostics)
                         }
                         member_index = member_index + 1
                     }

@@ -8,11 +8,6 @@ const MEMORY_SIZE = 256 * 1024
 const NORMAL_STEP_LIMIT = 100_000
 const SHORT_STEP_LIMIT = 32
 
-function withoutProgram(source) {
-  const at = source.lastIndexOf('\nprogram(')
-  return at < 0 ? source : `${source.slice(0, at)}\n`
-}
-
 function byteGroup(file) {
   return `[${Array.from(fs.readFileSync(file)).join(', ')}]`
 }
@@ -27,10 +22,10 @@ function byteChunks(file) {
 }
 
 function build(output, elf, flat, input) {
-  const root = path.resolve(__dirname, '..')
-  const vmSource = withoutProgram(fs.readFileSync(path.join(root, 's2/4-vm.saltic'), 'utf8'))
-  const fixtures = `\nVM_TEST_ELF = ${byteChunks(elf)}\nVM_TEST_FLAT = ${byteChunks(flat)}\nVM_TEST_INPUT = ${byteGroup(input)}\n`
-  const entry = String.raw`
+  const fixtures = `VM_TEST_ELF = ${byteChunks(elf)}\nVM_TEST_FLAT = ${byteChunks(flat)}\nVM_TEST_INPUT = ${byteGroup(input)}\n`
+  const entry = String.raw`use core
+use s2.vm
+
 skill vm_test_numbers(values) {
     @text = ""
     @index = 0
@@ -95,20 +90,20 @@ program(image_format, scenario, snapshot_path) {
     (scenario == "normal") { arguments = ["normal", "input.txt", "output.txt"] }
     @limit = 100000
     (scenario == "timeout") { limit = 32 }
-    @options = VmOptions {
+    @options = vm.VmOptions {
         load_address = 4096
         memory_size = 262144
         step_limit = limit
         program_name = "vm-canonical"
         arguments = arguments
-        files = [VmFile { path = "input.txt" data = VM_TEST_INPUT }]
+        files = [vm.VmFile { path = "input.txt" data = VM_TEST_INPUT }]
     }
-    @result = vm_run(image, options)
+    @result = vm.vm_run(image, options)
     core.file.write(snapshot_path, vm_test_snapshot(result))
     out none
 }
 `
-  fs.writeFileSync(output, `${vmSource.trimEnd()}\n${fixtures}${entry}`)
+  fs.writeFileSync(output, `${fixtures}\n${entry}`)
 }
 
 function hex(value) {

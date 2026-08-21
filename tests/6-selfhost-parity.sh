@@ -77,7 +77,7 @@ report_compiler_failure() {
     fi
 }
 
-echo "самохостинг: создаю единый исходник toolchain"
+echo "самохостинг: создаю корневой исходник toolchain"
 node tests/compiler-parity.js build "$work/source/toolchain.saltic"
 node js/1-parser.js "$work/source/toolchain.saltic" >"$work/source/ast.json"
 node js/2-checker.js "$work/source/toolchain.saltic" >"$work/source/checker.json"

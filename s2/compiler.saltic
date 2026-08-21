@@ -13,6 +13,7 @@ CompilerFunction = Box {
     slots = []
     end = ""
     subject = ""
+    module = ""
     types = []
     next_drum = 1
 }
@@ -39,6 +40,7 @@ CompilerState = Box {
     errors = []
     fields = []
     skills = []
+    aliases = []
     entry = []
     current_function = CompilerFunction {}
     next_enum_id = 1
@@ -60,10 +62,21 @@ COMPILER_NONE = COMPILER_TAG_NONE
 COMPILER_PRINTABLE = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 
 skill compiler_plain(node) {
-    (core.group.count(node) == 4) {
-        (core.group.item(node, 0) == "loc") { out core.group.item(node, 3) }
+    @plain = node
+    (core.group.count(plain) == 3) {
+        (core.group.item(plain, 0) == "module") { plain = core.group.item(plain, 2) }
     }
-    out node
+    (core.group.count(plain) == 4) {
+        (core.group.item(plain, 0) == "loc") { out core.group.item(plain, 3) }
+    }
+    out plain
+}
+
+skill compiler_module(node) {
+    (core.group.count(node) == 3) {
+        (core.group.item(node, 0) == "module") { out core.group.item(node, 1) }
+    }
+    out ""
 }
 
 skill compiler_tag(node) {
@@ -95,6 +108,10 @@ skill compiler_symbol_has(symbols, name) {
 
 skill compiler_symbol_add(symbols, name, kind, node, value) {
     out core.group.add(symbols, CompilerSymbol { name = name kind = kind node = node value = value })
+}
+
+skill compiler_symbol_add_text(symbols, name, kind, node, text) {
+    out core.group.add(symbols, CompilerSymbol { name = name kind = kind node = node text = text })
 }
 
 skill compiler_type_find(types, name) {
@@ -373,9 +390,9 @@ skill compiler_render_lines(output) {
     out compiler_output_text(output)
 }
 
-skill compiler_collect_box(compiler, item) {
-    @name = compiler_part(item, 1)
-    compiler.boxes = compiler_symbol_add(compiler.boxes, name, "box", item, 0)
+skill compiler_collect_box(compiler, item, module) {
+    @name = compiler_qualified(module, compiler_part(item, 1))
+    compiler.boxes = compiler_symbol_add_text(compiler.boxes, name, "box", item, module)
     @index = 2
     @count = core.group.count(compiler_plain(item))
     drum (count) {
@@ -394,9 +411,9 @@ skill compiler_collect_box(compiler, item) {
     out compiler
 }
 
-skill compiler_collect_enum(compiler, item) {
-    @name = compiler_part(item, 1)
-    compiler.enums = compiler_symbol_add(compiler.enums, name, "enum", item, 0)
+skill compiler_collect_enum(compiler, item, module) {
+    @name = compiler_qualified(module, compiler_part(item, 1))
+    compiler.enums = compiler_symbol_add_text(compiler.enums, name, "enum", item, module)
     @index = 2
     @count = core.group.count(compiler_plain(item))
     drum (count) {
@@ -421,10 +438,17 @@ skill compiler_collect_top_level(compiler) {
         (index < count) {
             @item = core.group.item(compiler.ast, index)
             @tag = compiler_tag(item)
-            (tag == "const") { compiler.constants = compiler_symbol_add(compiler.constants, compiler_part(item, 1), "const", compiler_part(item, 2), 0) }
-            (tag == "box") { compiler = compiler_collect_box(compiler, item) }
-            (tag == "enum") { compiler = compiler_collect_enum(compiler, item) }
-            (tag == "skill") { compiler.skills = compiler_symbol_add(compiler.skills, compiler_part(item, 1), "skill", item, 0) }
+            @module = compiler_module(item)
+            (tag == "use") {
+                @plain_use = compiler_plain(item)
+                @alias = core.group.item(plain_use, core.group.count(plain_use) - 1)
+                @target = compiler_path_text(item)
+                compiler.aliases = compiler_symbol_add_text(compiler.aliases, compiler_alias_key(module, alias), "import", item, target)
+            }
+            (tag == "const") { compiler.constants = compiler_symbol_add_text(compiler.constants, compiler_qualified(module, compiler_part(item, 1)), "const", compiler_part(item, 2), module) }
+            (tag == "box") { compiler = compiler_collect_box(compiler, item, module) }
+            (tag == "enum") { compiler = compiler_collect_enum(compiler, item, module) }
+            (tag == "skill") { compiler.skills = compiler_symbol_add_text(compiler.skills, compiler_qualified(module, compiler_part(item, 1)), "skill", item, module) }
             (tag == "entry") { compiler.entry = item }
             index = index + 1
         }
@@ -510,13 +534,22 @@ skill compiler_compile_path(compiler, node) {
     @parts = compiler_plain(node)
     @count = core.group.count(parts)
     @name = core.group.item(parts, 1)
+    @path_name = compiler_path_text(parts)
+    @constant_name = ""
+    @constant = CompilerSymbol {}
     (name == "error") {
         (count == 3) { out compiler_load_immediate(compiler, "a0", compiler_error_value(compiler, core.group.item(parts, 2))) }
     }
-    (count == 3) {
-        (compiler_symbol_has(compiler.enums, name) == yes) {
-            @full_name = core.str.add(name, ".")
-            full_name = core.str.add(full_name, core.group.item(parts, 2))
+    (count > 2) {
+        @enum_text = core.group.item(parts, 1)
+        @enum_index = 2
+        drum (count - 1) {
+            (enum_index < count - 1) { enum_text = core.str.add(enum_text, core.str.add(".", core.group.item(parts, enum_index))) enum_index = enum_index + 1 }
+        }
+        @enum_name = compiler_resolve_symbol(compiler.enums, compiler.aliases, enum_text, compiler.current_function.module)
+        (core.str.len(enum_name) > 0) {
+            @full_name = core.str.add(enum_name, ".")
+            full_name = core.str.add(full_name, core.group.item(parts, count - 1))
             @variant = compiler_symbol_find(compiler.variants, full_name)
             out compiler_load_immediate(compiler, "a0", variant.value)
         }
@@ -526,8 +559,14 @@ skill compiler_compile_path(compiler, node) {
         compiler = compiler_emit(compiler, core.str.add("  lw a0, ", core.str.add(core.num.text(slot), "(s0)")))
     }
     (compiler_symbol_has(compiler.current_function.slots, name) == no) {
-        @constant = compiler_symbol_find(compiler.constants, name)
-        (core.str.len(constant.name) > 0) { compiler = compiler_expression(compiler, constant.node) }
+        constant_name = compiler_resolve_symbol(compiler.constants, compiler.aliases, path_name, compiler.current_function.module)
+        constant = compiler_symbol_find(compiler.constants, constant_name)
+        (core.str.len(constant.name) > 0) {
+            @caller_module = compiler.current_function.module
+            compiler.current_function.module = constant.text
+            compiler = compiler_expression(compiler, constant.node)
+            compiler.current_function.module = caller_module
+        }
         (core.str.len(constant.name) == 0) {
             @subject_field = compiler_box_field_symbol(compiler, compiler.current_function.subject, name)
             (core.str.len(subject_field.name) > 0) {
@@ -541,6 +580,7 @@ skill compiler_compile_path(compiler, node) {
         }
     }
     @index = 2
+    (core.str.len(constant.name) > 0) { index = count }
     drum (count) {
         (index < count) {
             compiler = compiler_push(compiler, "a0")
@@ -634,7 +674,10 @@ skill compiler_box_has_skill(compiler, box_name, skill_name) {
 skill compiler_infer_type(compiler, node) {
     @plain = compiler_plain(node)
     @tag = core.group.item(plain, 0)
-    (tag == "box-new") { out core.str.add("box:", core.group.item(plain, 1)) }
+    (tag == "box-new") {
+        @box_name = compiler_resolve_symbol(compiler.boxes, compiler.aliases, core.group.item(plain, 1), compiler.current_function.module)
+        out core.str.add("box:", box_name)
+    }
     (tag == "path") {
         @name = core.group.item(plain, 1)
         @type_item = compiler_type_find(compiler.current_function.types, name)
@@ -666,10 +709,8 @@ skill compiler_infer_type(compiler, node) {
                 (full == "core.mem.load16") { out "u16" }
                 (full == "core.mem.load32") { out "u32" }
             }
-            (core.group.count(callee) == 2) {
-                @name = core.group.item(callee, 1)
-                (compiler_symbol_has(compiler.boxes, name) == yes) { out core.str.add("box:", name) }
-            }
+            @box_name = compiler_resolve_symbol(compiler.boxes, compiler.aliases, full, compiler.current_function.module)
+            (core.str.len(box_name) > 0) { out core.str.add("box:", box_name) }
         }
         out "unknown"
     }
@@ -697,6 +738,56 @@ skill compiler_path_text(path) {
         }
     }
     out result
+}
+
+skill compiler_qualified(module, name) {
+    (core.str.len(module) == 0) { out name }
+    out core.str.add(module, core.str.add(".", name))
+}
+
+skill compiler_alias_key(module, alias) {
+    out core.str.add(module, core.str.add("|", alias))
+}
+
+skill compiler_name_head(name) {
+    @index = 0
+    @count = core.str.len(name)
+    drum (count) {
+        (index < count) {
+            (core.str.at(name, index) == ".") { out core.str.slice(name, 0, index) }
+            index = index + 1
+        }
+    }
+    out name
+}
+
+skill compiler_name_tail(name) {
+    @index = 0
+    @count = core.str.len(name)
+    drum (count) {
+        (index < count) {
+            (core.str.at(name, index) == ".") { out core.str.slice(name, index, count) }
+            index = index + 1
+        }
+    }
+    out ""
+}
+
+skill compiler_resolve_symbol(symbols, aliases, name, module) {
+    (compiler_symbol_has(symbols, name) == yes) { out name }
+    @local = compiler_qualified(module, name)
+    (compiler_symbol_has(symbols, local) == yes) { out local }
+    @head = compiler_name_head(name)
+    @import = compiler_symbol_find(aliases, compiler_alias_key(module, head))
+    (import.kind == "import") {
+        @candidate = core.str.add(import.text, compiler_name_tail(name))
+        (compiler_symbol_has(symbols, candidate) == yes) { out candidate }
+    }
+    out ""
+}
+
+skill compiler_resolve_skill(compiler, path) {
+    out compiler_resolve_symbol(compiler.skills, compiler.aliases, compiler_path_text(path), compiler.current_function.module)
 }
 
 skill compiler_call_arguments(node) {
@@ -892,8 +983,12 @@ skill compiler_compile_box(compiler, name, overrides) {
         (index < count) {
             @field = core.group.item(fields, index)
             @value = compiler_box_override(overrides, compiler_part(field, 1))
-            (core.group.count(value) == 0) { value = compiler_part(field, 2) }
+            @default_value = no
+            (core.group.count(value) == 0) { value = compiler_part(field, 2) default_value = yes }
+            @caller_module = compiler.current_function.module
+            (default_value == yes) { compiler.current_function.module = model.text }
             compiler = compiler_expression(compiler, value)
+            compiler.current_function.module = caller_module
             compiler = compiler_push(compiler, "a0")
             index = index + 1
         }
@@ -995,6 +1090,8 @@ skill compiler_compile_call(compiler, node) {
         compiler = compiler_compile_arguments(compiler, args)
         out compiler_emit(compiler, core.str.add("  call ", memory_target))
     }
+    @resolved_box = compiler_resolve_symbol(compiler.boxes, compiler.aliases, name, compiler.current_function.module)
+    (core.str.len(resolved_box) > 0) { out compiler_compile_box(compiler, resolved_box, []) }
     (core.group.count(callee) == 2) {
         @short_name = core.group.item(callee, 1)
         (core.str.len(compiler.current_function.subject) > 0) {
@@ -1006,7 +1103,6 @@ skill compiler_compile_call(compiler, node) {
                 out compiler_emit(compiler, core.str.add("  call saltic_", compiler_safe(target)))
             }
         }
-        (compiler_symbol_has(compiler.boxes, short_name) == yes) { out compiler_compile_box(compiler, short_name, []) }
     }
     (core.group.count(callee) == 3) {
         @receiver = ["path", core.group.item(callee, 1)]
@@ -1025,7 +1121,8 @@ skill compiler_compile_call(compiler, node) {
     }
     @target = compiler_intrinsic(name)
     (core.str.len(target) == 0) {
-        (compiler_symbol_has(compiler.skills, name) == yes) { target = core.str.add("saltic_", compiler_safe(name)) }
+        @resolved_skill = compiler_resolve_skill(compiler, callee)
+        (core.str.len(resolved_skill) > 0) { target = core.str.add("saltic_", compiler_safe(resolved_skill)) }
     }
     compiler = compiler_compile_arguments(compiler, args)
     out compiler_emit(compiler, core.str.add("  call ", target))
@@ -1049,7 +1146,10 @@ skill compiler_expression(compiler, node) {
     (tag == "binary") { out compiler_compile_binary(compiler, core.group.item(plain, 1), core.group.item(plain, 2), core.group.item(plain, 3)) }
     (tag == "call") { out compiler_compile_call(compiler, node) }
     (tag == "group") { out compiler_compile_group(compiler, compiler_group_slice(plain, 1, core.group.count(plain))) }
-    (tag == "box-new") { out compiler_compile_box(compiler, core.group.item(plain, 1), compiler_group_slice(plain, 2, core.group.count(plain))) }
+    (tag == "box-new") {
+        @box_name = compiler_resolve_symbol(compiler.boxes, compiler.aliases, core.group.item(plain, 1), compiler.current_function.module)
+        out compiler_compile_box(compiler, box_name, compiler_group_slice(plain, 2, core.group.count(plain)))
+    }
     (tag == "rescue") { out compiler_compile_rescue(compiler, node) }
     (tag == "enum-value") {
         @variant = compiler_symbol_find(compiler.variants, core.group.item(plain, 1))
@@ -1179,7 +1279,7 @@ skill compiler_compile_statement(compiler, node, keep) {
     out compiler
 }
 
-skill compiler_compile_function(compiler, name, params, body, subject) {
+skill compiler_compile_function(compiler, name, params, body, subject, module) {
     @locals = compiler_collect_locals(params, body)
     @local_count = core.group.count(locals.names)
     @frame = compiler_align16((local_count + 2) * 4)
@@ -1195,7 +1295,7 @@ skill compiler_compile_function(compiler, name, params, body, subject) {
         }
     }
     (core.str.len(subject) > 0) { types = compiler_type_set(types, "$self", core.str.add("box:", subject)) }
-    compiler.current_function = CompilerFunction { name = name slots = slots end = end subject = subject types = types }
+    compiler.current_function = CompilerFunction { name = name slots = slots end = end subject = subject module = module types = types }
     compiler = compiler_emit(compiler, core.str.add("saltic_", core.str.add(compiler_safe(name), ":")))
     compiler = compiler_emit(compiler, core.str.add("  addi sp, sp, -", core.num.text(frame)))
     compiler = compiler_emit(compiler, core.str.add("  sw ra, ", core.str.add(core.num.text(frame - 4), "(sp)")))
@@ -1232,7 +1332,7 @@ skill compiler_compile_functions(compiler) {
         (index < count) {
             @symbol = core.group.item(compiler.skills, index)
             @skill_node = symbol.node
-            compiler = compiler_compile_function(compiler, symbol.name, compiler_part(skill_node, 2), compiler_part(skill_node, 3), "")
+            compiler = compiler_compile_function(compiler, symbol.name, compiler_part(skill_node, 2), compiler_part(skill_node, 3), "", symbol.text)
             index = index + 1
         }
     }
@@ -1250,7 +1350,7 @@ skill compiler_compile_functions(compiler) {
                         @name = core.str.add(box.name, ".")
                         name = core.str.add(name, compiler_part(member, 1))
                         @params = compiler_group_prepend("$self", compiler_part(member, 2))
-                        compiler = compiler_compile_function(compiler, name, params, compiler_part(member, 3), box.name)
+                        compiler = compiler_compile_function(compiler, name, params, compiler_part(member, 3), box.name, compiler_module(box.node))
                     }
                     member_index = member_index + 1
                 }
@@ -1258,7 +1358,7 @@ skill compiler_compile_functions(compiler) {
             box_index = box_index + 1
         }
     }
-    compiler = compiler_compile_function(compiler, "program", compiler_part(compiler.entry, 1), compiler_part(compiler.entry, 2), "")
+    compiler = compiler_compile_function(compiler, "program", compiler_part(compiler.entry, 1), compiler_part(compiler.entry, 2), "", "")
     out compiler
 }
 

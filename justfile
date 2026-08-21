@@ -22,7 +22,7 @@ qemu-graphics:
     nix-shell -p qemu pkgsCross.riscv32-embedded.buildPackages.gcc --run 'bash targets/qemu-virt/build-graphics.sh && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
 
 selfhost source="canonical.saltic" output="/tmp/saltic-self-parser.elf":
-    nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run 'node js/3-compiler.js s2/1-parser.saltic {{output}}'
+    nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run 'node js/3-compiler.js s2/parser.saltic {{output}}'
     node js/4-vm.js {{output}} --steps 1000000000 -- {{source}}
 
 compiler-parity:
@@ -33,6 +33,9 @@ vm-parity:
 
 fixed-types:
     bash tests/7-fixed-types.sh
+
+modules:
+    bash tests/8-modules.sh
 
 selfhost-parity:
     bash tests/6-selfhost-parity.sh
@@ -45,5 +48,6 @@ test:
     bash tests/5-vm-parity.sh
     bash tests/6-selfhost-parity.sh
     bash tests/7-fixed-types.sh
+    bash tests/8-modules.sh
 
 verify: test

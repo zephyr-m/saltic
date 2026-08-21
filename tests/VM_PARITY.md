@@ -1,7 +1,7 @@
 # Сравнение виртуальных машин
 
 Команда `bash tests/5-vm-parity.sh` сравнивает host-VM из `js/4-vm.js`
-и VM на Saltic из `s2/4-vm.saltic`.
+и VM на Saltic из `s2/vm.saltic`.
 
 Зафиксированный интерфейс self-hosted слоя:
 

@@ -2,6 +2,7 @@
 const fs = require('node:fs')
 const pathTools = require('node:path')
 const locations = new WeakMap()
+const modules = new WeakMap()
 
 function locate(node, token) {
   if (Array.isArray(node) && !locations.has(node)) locations.set(node, [token.line, token.col])
@@ -138,7 +139,7 @@ class Parser {
     let value=this.primary()
     while(true){
       if(this.is('LPAREN')){const start=this.peek();value=locate(['call',value,...this.args()],start);continue}
-      if(value[0]==='path'&&value.length===2&&this.is('LBRACE')){const start=this.peek();value=locate(['box-new',value[1],...this.fields()],start);continue}
+      if(value[0]==='path'&&this.is('LBRACE')){const start=this.peek();value=locate(['box-new',value.slice(1).join('.'),...this.fields()],start);continue}
       return value
     }
   }
@@ -192,8 +193,14 @@ Parser.prototype.statement = function (...args) {
 function astWithLocations(value) {
   if (!Array.isArray(value)) return value
   const node = value.map(astWithLocations)
+  if (modules.has(value)) modules.set(node, modules.get(value))
   const point = locations.get(value)
   return point ? ['loc', point[0], point[1], node] : node
+}
+
+function moduleOf(node) {
+  const plain = stripLocation(node)
+  return modules.get(plain) ?? null
 }
 
 function stripLocation(value) {
@@ -212,8 +219,9 @@ function modulePath(sourcePath, parts, root) {
 function loadFile(path, options={}) {
   const root = options.root ?? pathTools.resolve(__dirname, '..')
   const withLocations = options.locations ?? false
+  const expandCore = options.expandCore ?? true
   const included = new Set()
-  function expand(file, stack=[]) {
+  function expand(file, stack=[], module=[]) {
     const normalized = pathTools.resolve(file)
     if (stack.includes(normalized)) throw Error(`modules: cyclic import involving ${normalized}`)
     if (included.has(normalized)) return []
@@ -223,13 +231,16 @@ function loadFile(path, options={}) {
     const program = stripLocation(datum)
     const output=[]
     for (const item of program.slice(1)) {
-      output.push(item)
       const plain=stripLocation(item)
+      if (plain[0] === 'entry' && stack.length) continue
+      modules.set(stripLocation(item), module)
+      output.push(item)
       if (plain[0] !== 'use') continue
       if (plain.length === 2 && plain[1] === 'core') {
-        for (const name of coreFiles) output.push(...expand(pathTools.join(root,'core',name),[normalized,...stack]))
+        if (expandCore) for (const name of coreFiles) output.push(...expand(pathTools.join(root,'core',name),[normalized,...stack],['core',name.slice(0,-7)]))
       } else {
-        output.push(...expand(modulePath(normalized,plain.slice(1),root),[normalized,...stack]))
+        const imported = plain.slice(1)
+        output.push(...expand(modulePath(normalized,imported,root),[normalized,...stack],imported))
       }
     }
     return output
@@ -239,7 +250,7 @@ function loadFile(path, options={}) {
 
 function parseString(source,path='<string>'){return new Parser(lex(source,path),path).parse()}
 function parseFile(path){return parseString(fs.readFileSync(path,'utf8'),path)}
-module.exports={lex,parseString,parseFile,astWithLocations,loadFile}
+module.exports={lex,parseString,parseFile,astWithLocations,moduleOf,loadFile}
 
 if(require.main===module){
   if(process.argv.length!==3){console.error('usage: node js/1-parser.js <file.saltic>');process.exit(2)}

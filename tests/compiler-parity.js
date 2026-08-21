@@ -2,34 +2,9 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-function withoutProgram(source, required = true) {
-  const at = source.lastIndexOf('\nprogram(')
-  if (at < 0) {
-    if (required) throw new Error('точка входа program не найдена')
-    return source
-  }
-  return `${source.slice(0, at)}\n`
-}
-
 function build(output) {
   const root = path.resolve(__dirname, '..')
-  const parserSource = withoutProgram(fs.readFileSync(path.join(root, 's2/1-parser.saltic'), 'utf8'))
-  let checkerSource = withoutProgram(fs.readFileSync(path.join(root, 's2/2-checker.saltic'), 'utf8'))
-  const compilerSource = withoutProgram(fs.readFileSync(path.join(root, 's2/3-compiler.saltic'), 'utf8'), false)
-  checkerSource = checkerSource.replace(/use core\n\nSalticNode = Box \{\n    datum = \[\]\n    tag = ""\n\}\n\n/, '')
-  const entry = `
-program(source_path, assembly_path) {
-    @source = core.file.read(source_path)
-    @parsed = parser_parse_string(source, source_path)
-    (core.group.count(parsed.diagnostics) > 0) { out error.ParseFailed }
-    @checked = checker_check(parsed.ast)
-    (core.group.count(checked.diagnostics) > 0) { out error.CheckFailed }
-    @assembly = compiler_compile(parsed.ast)
-    core.file.write(assembly_path, assembly)
-    out none
-}
-`
-  fs.writeFileSync(output, parserSource + checkerSource + compilerSource + entry)
+  fs.copyFileSync(path.join(root, 's2/toolchain.saltic'), output)
 }
 
 function expandHeap(input, output) {

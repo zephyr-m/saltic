@@ -44,12 +44,15 @@ class Compiler {
     this.serial = 0
     this.strings = new Map()
     this.constants = new Map()
+    this.constantModules = new Map()
     this.boxes = new Map()
+    this.boxModules = new Map()
     this.enums = new Map()
     this.variants = new Map()
     this.errors = new Map()
     this.fields = new Map()
     this.skills = new Map()
+    this.aliases = new Map()
     this.subjectSkills = new Map()
     this.entry = null
     this.function = null
@@ -60,36 +63,67 @@ class Compiler {
     let enumId = 1
     let fieldId = 1
     for (const item of this.ast.slice(1)) {
-      if (item[0] === 'const') this.constants.set(item[1], item[2])
+      const module = parser.moduleOf(item) ?? []
+      const topName = name => [...module, name].join('.')
+      if (item[0] === 'use') {
+        const imported = item.slice(1)
+        const aliases = this.aliases.get(module.join('.')) ?? new Map()
+        aliases.set(imported.at(-1), imported.join('.'))
+        this.aliases.set(module.join('.'), aliases)
+      }
+      if (item[0] === 'const') { this.constants.set(topName(item[1]), item[2]); this.constantModules.set(topName(item[1]), module) }
       if (item[0] === 'box') {
+        const name = topName(item[1])
+        this.boxModules.set(name, module)
         const fields = item.slice(2).filter(member => member[0] === 'field')
         const skills = item.slice(2).filter(member => member[0] === 'subject-skill')
-        this.boxes.set(item[1], fields)
-        this.subjectSkills.set(item[1], new Map(skills.map(skill => [skill[1], skill])))
+        this.boxes.set(name, fields)
+        this.subjectSkills.set(name, new Map(skills.map(skill => [skill[1], skill])))
         for (const field of fields) {
           if (!this.fields.has(field[1])) this.fields.set(field[1], fieldId++)
         }
       }
       if (item[0] === 'enum') {
-        this.enums.set(item[1], item.slice(2))
+        const name = topName(item[1])
+        this.enums.set(name, item.slice(2))
         for (const variant of item.slice(2)) {
           const value = (enumId++ << 3) | TAG.enum
-          this.variants.set(`${item[1]}.${variant}`, value)
+          this.variants.set(`${name}.${variant}`, value)
           if (!this.variants.has(variant)) this.variants.set(variant, value)
         }
       }
-      if (item[0] === 'skill') this.skills.set(item[1], item)
-      if (item[0] === 'entry') this.entry = item
+      if (item[0] === 'skill') {
+        this.skills.set(topName(item[1]), item)
+      }
+      if (item[0] === 'entry' && (parser.moduleOf(item)?.length ?? 0) === 0) this.entry = item
     }
     if (!this.entry) throw new Error('compile: program() is missing')
+  }
+
+  resolve(symbols, name, module = this.function?.module ?? []) {
+    if (symbols.has(name)) return name
+    const local = [...module, name].join('.')
+    if (symbols.has(local)) return local
+    const parts = name.split('.')
+    const alias = this.aliases.get(module.join('.'))?.get(parts[0])
+    const imported = alias ? [alias, ...parts.slice(1)].join('.') : null
+    return imported && symbols.has(imported) ? imported : null
+  }
+
+  resolvePrefix(symbols, parts, module = this.function?.module ?? []) {
+    for (let count = parts.length; count > 0; count--) {
+      const name = this.resolve(symbols, parts.slice(0, count).join('.'), module)
+      if (name) return { name, count }
+    }
+    return null
   }
 
   compile() {
     this.emit('.option norvc', '.option norelax', '.section .text', '.global _start', '')
     this.compileStart()
-    for (const skill of this.skills.values()) this.compileFunction(skill[1], skill[2], skill[3])
+    for (const [name, skill] of this.skills) this.compileFunction(name, skill[2], skill[3], null, parser.moduleOf(skill) ?? [])
     for (const [box, skills] of this.subjectSkills) {
-      for (const skill of skills.values()) this.compileFunction(`${box}.${skill[1]}`, ['$self', ...skill[2]], skill[3], box)
+      for (const skill of skills.values()) this.compileFunction(`${box}.${skill[1]}`, ['$self', ...skill[2]], skill[3], box, this.boxModules.get(box) ?? [])
     }
     this.compileFunction('program', this.entry[1], this.entry[2])
     this.emit(runtimeAssembly())
@@ -114,7 +148,7 @@ class Compiler {
     this.emit('  call saltic_program', '  andi t0, a0, 7', `  addi t1, zero, ${TAG.error}`, '  sub a0, t0, t1', '  sltu a0, zero, a0', '  xori a0, a0, 1', '  call rt_platform_exit', '')
   }
 
-  compileFunction(name, params, body, subject = null) {
+  compileFunction(name, params, body, subject = null, module = []) {
     const locals = collectLocals(params, body)
     const frame = align16((locals.size + 2) * 4)
     const slots = new Map()
@@ -124,7 +158,7 @@ class Compiler {
       slot -= 4
     }
     const end = this.label(`${name}_return`)
-    this.function = { name, slots, end, drums: new Map(), subject, types: new Map(params.map(param => [param, 'unknown'])) }
+    this.function = { name, slots, end, drums: new Map(), subject, module, types: new Map(params.map(param => [param, 'unknown'])) }
     if (subject) this.function.types.set('$self', ['box', subject])
     this.emit(`saltic_${safe(name)}:`, `  addi sp, sp, -${frame}`, `  sw ra, ${frame - 4}(sp)`, `  sw s0, ${frame - 8}(sp)`, `  addi s0, sp, ${frame}`)
     params.forEach((param, index) => this.emit(`  sw a${index}, ${slots.get(param)}(s0)`))
@@ -218,7 +252,7 @@ class Compiler {
     if (tag === 'binary') return this.compileBinary(node[1], node[2], node[3])
     if (tag === 'call') return this.compileCall(node[1], node.slice(2))
     if (tag === 'group') return this.compileGroup(node.slice(1))
-    if (tag === 'box-new') return this.compileBox(node[1], node.slice(2))
+    if (tag === 'box-new') return this.compileBox(this.resolve(this.boxes, node[1]) ?? node[1], node.slice(2))
     if (tag === 'rescue') return this.compileRescue(node)
     if (tag === 'enum-value') {
       const value = this.variants.get(node[1])
@@ -234,10 +268,19 @@ class Compiler {
       if (!this.errors.has(parts[1])) this.errors.set(parts[1], this.errors.size + 1)
       return this.loadImmediate('a0', (this.errors.get(parts[1]) << 3) | TAG.error)
     }
-    if (parts.length === 2 && this.enums.has(parts[0])) return this.loadImmediate('a0', this.variants.get(parts.join('.')))
+    const enumName = parts.length > 1 ? this.resolve(this.enums, parts.slice(0, -1).join('.')) : null
+    if (enumName) return this.loadImmediate('a0', this.variants.get(`${enumName}.${parts.at(-1)}`))
     const name = parts[0]
+    let consumed = 1
     if (this.function?.slots.has(name)) this.emit(`  lw a0, ${this.slot(name)}(s0)`)
-    else if (this.constants.has(name)) this.compileExpression(this.constants.get(name))
+    else if (this.resolvePrefix(this.constants, parts)) {
+      const constant = this.resolvePrefix(this.constants, parts)
+      consumed = constant.count
+      const previous = this.function.module
+      this.function.module = this.constantModules.get(constant.name) ?? previous
+      this.compileExpression(this.constants.get(constant.name))
+      this.function.module = previous
+    }
     else if (this.function?.subject && this.boxes.get(this.function.subject).some(field => field[1] === name)) {
       this.emit(`  lw a0, ${this.slot('$self')}(s0)`)
       this.push('a0')
@@ -246,7 +289,7 @@ class Compiler {
       this.emit('  call rt_box_get')
     }
     else throw new Error(`compile: unknown value ${name}`)
-    for (const field of parts.slice(1)) {
+    for (const field of parts.slice(consumed)) {
       this.push('a0')
       this.loadImmediate('a1', this.field(field))
       this.pop('a0')
@@ -308,9 +351,10 @@ class Compiler {
       this.emit(`  call saltic_${safe(`${this.function.subject}.${callee[1]}`)}`)
       return
     }
-    if (callee.length === 2 && this.boxes.has(callee[1])) {
-      if (args.length) throw new Error(`compile: ${callee[1]}() expects no arguments`)
-      return this.compileBox(callee[1], [])
+    const box = this.resolve(this.boxes, name)
+    if (box) {
+      if (args.length) throw new Error(`compile: ${name}() expects no arguments`)
+      return this.compileBox(box, [])
     }
     if (callee.length === 3) {
       const receiver = ['path', callee[1]]
@@ -352,7 +396,8 @@ class Compiler {
       'core.str.upper': 'rt_string_upper',
       'core.num.text': 'rt_number_text',
     }
-    const target = intrinsics[name] || (this.skills.has(name) ? `saltic_${safe(name)}` : null)
+    const skill = this.resolve(this.skills, name)
+    const target = intrinsics[name] || (skill ? `saltic_${safe(skill)}` : null)
     if (!target) throw new Error(`compile: unsupported call ${name}`)
     this.compileArguments(args)
     this.emit(`  call ${target}`)
@@ -360,7 +405,7 @@ class Compiler {
 
   inferType(node) {
     if (!Array.isArray(node)) return 'unknown'
-    if (node[0] === 'box-new') return ['box', node[1]]
+    if (node[0] === 'box-new') return ['box', this.resolve(this.boxes, node[1]) ?? node[1]]
     if (node[0] === 'path') {
       if (node.length === 2) return this.function?.types.get(node[1]) ?? 'unknown'
       const base = this.inferType(['path', node[1]])
@@ -381,7 +426,8 @@ class Compiler {
       if (name === 'core.mem.load8' && this.inferType(node[2]) === 'address') return 'u8'
       if (name === 'core.mem.load16' && this.inferType(node[2]) === 'address') return 'u16'
       if (name === 'core.mem.load32' && this.inferType(node[2]) === 'address') return 'u32'
-      if (callee.length === 2 && this.boxes.has(callee[1])) return ['box', callee[1]]
+      const box = this.resolve(this.boxes, name)
+      if (box) return ['box', box]
     }
     if (node[0] === 'binary') {
       if (['==','>','<'].includes(node[1])) return 'answer'
@@ -425,10 +471,13 @@ class Compiler {
   compileBox(name, overrides) {
     const model = this.boxes.get(name)
     if (!model) throw new Error(`compile: unknown Box ${name}`)
-    const values = new Map(model.map(field => [field[1], field[2]]))
-    for (const field of overrides) values.set(field[1], field[2])
+    const values = new Map(overrides.map(field => [field[1], field[2]]))
     for (const field of model) {
-      this.compileExpression(values.get(field[1]))
+      const override = values.get(field[1])
+      const previous = this.function.module
+      if (!override) this.function.module = this.boxModules.get(name) ?? previous
+      this.compileExpression(override ?? field[2])
+      this.function.module = previous
       this.push('a0')
     }
     this.loadImmediate('a0', align8(4 + model.length * 8))
@@ -1780,7 +1829,7 @@ rt_newline_text:
 }
 
 function compileFile(source, output, options = {}) {
-  const ast = parser.parseFile(source)
+  const ast = parser.loadFile(source, { expandCore: false })
   const diagnostics = checker.checkDatum(parser.astWithLocations(ast))
   if (diagnostics.length) throw new Error(diagnostics.map(checker.diagnosticText).join('\n'))
   const assembly = new Compiler(ast).compile()

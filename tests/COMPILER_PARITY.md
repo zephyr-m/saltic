@@ -1,7 +1,7 @@
 # Сравнение компиляторов
 
 Команда `bash tests/4-compiler-parity.sh` сравнивает host-компилятор
-`js/3-compiler.js` и компилятор на Saltic из `s2/3-compiler.saltic`.
+`js/3-compiler.js` и компилятор на Saltic из `s2/compiler.saltic`.
 
 Зафиксированный интерфейс self-hosted слоя:
 

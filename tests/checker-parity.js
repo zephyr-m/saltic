@@ -1,25 +1,17 @@
 #!/usr/bin/env node
 const fs = require('node:fs')
-const path = require('node:path')
 const parser = require('../js/1-parser')
 const checker = require('../js/2-checker')
 
-function withoutProgram(source) {
-  const at = source.lastIndexOf('\nprogram(')
-  if (at < 0) throw new Error('точка входа program не найдена')
-  return `${source.slice(0, at)}\n`
-}
-
 function build(output) {
-  const root = path.resolve(__dirname, '..')
-  const parserSource = withoutProgram(fs.readFileSync(path.join(root, 's2/1-parser.saltic'), 'utf8'))
-  let checkerSource = withoutProgram(fs.readFileSync(path.join(root, 's2/2-checker.saltic'), 'utf8'))
-  checkerSource = checkerSource.replace(/use core\n\nSalticNode = Box \{\n    datum = \[\]\n    tag = ""\n\}\n\n/, '')
-  const entry = `
+  const entry = `use core
+use s2.parser
+use s2.checker
+
 program(path) {
-    @loaded = parser_load_file_loc(path, ".")
+    @loaded = parser.parser_load_file_loc(path, ".")
     (core.group.count(loaded.diagnostics) > 0) { out error.ParseFailed }
-    @result = checker_check(loaded.ast)
+    @result = checker.checker_check(loaded.ast)
     @index = 0
     @count = core.group.count(result.diagnostics)
     drum (count) {
@@ -30,7 +22,7 @@ program(path) {
     out none
 }
 `
-  fs.writeFileSync(output, parserSource + checkerSource + entry)
+  fs.writeFileSync(output, entry)
 }
 
 function expected(file) {
