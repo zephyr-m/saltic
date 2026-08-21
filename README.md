@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="masscot.jpg" alt="Saltic — маскот Candy Engine" width="720">
+</p>
+
 # Saltic
 
 **Текущая версия: 1.1.1**
