@@ -12,8 +12,8 @@ function withoutProgram(source) {
 
 function build(output) {
   const root = path.resolve(__dirname, '..')
-  const parserSource = withoutProgram(fs.readFileSync(path.join(root, 's2/1-parser.s'), 'utf8'))
-  let checkerSource = withoutProgram(fs.readFileSync(path.join(root, 's2/2-checker.s'), 'utf8'))
+  const parserSource = withoutProgram(fs.readFileSync(path.join(root, 's2/1-parser.saltic'), 'utf8'))
+  let checkerSource = withoutProgram(fs.readFileSync(path.join(root, 's2/2-checker.saltic'), 'utf8'))
   checkerSource = checkerSource.replace(/use core\n\nSalticNode = Box \{\n    datum = \[\]\n    tag = ""\n\}\n\n/, '')
   const entry = `
 program(path) {

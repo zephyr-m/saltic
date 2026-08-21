@@ -2,7 +2,7 @@
 
 This extension adds early editor support for S:
 
-- `.s` language registration;
+- `.saltic` language registration;
 - TextMate syntax highlighting;
 - bracket auto-closing;
 - language and file icons.
@@ -15,7 +15,7 @@ Open this directory in VS Code:
 code editors/vscode-s
 ```
 
-Then press `F5` and open `examples/basic.s` from the Extension Development Host window.
+Then press `F5` and open `examples/qemu-hello.saltic` from the Extension Development Host window.
 
 ## Current Scope
 

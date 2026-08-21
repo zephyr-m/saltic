@@ -7,8 +7,8 @@ work=".cache/build/vm-parity"
 mkdir -p "$work/bootstrap" "$work/guest" "$work/expected" "$work/actual" "$work/diff"
 
 echo "сравнение VM: проверяю интерфейс"
-if ! grep -q '^skill vm_run(image, options)' s2/4-vm.s; then
-    echo "сравнение VM: в s2/4-vm.s ещё нет skill vm_run(image, options)"
+if ! grep -q '^skill vm_run(image, options)' s2/4-vm.saltic; then
+    echo "сравнение VM: в s2/4-vm.saltic ещё нет skill vm_run(image, options)"
     exit 1
 fi
 
@@ -17,15 +17,15 @@ nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run \
     "riscv32-none-elf-gcc -march=rv32i -mabi=ilp32 -mno-relax -nostdlib -Wl,--no-relax,-Ttext=0x10000,-e,_start tests/fixtures/vm-canonical.S -o '$work/guest/vm-canonical.elf'"
 nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run \
     "riscv32-none-elf-objcopy -O binary '$work/guest/vm-canonical.elf' '$work/guest/vm-canonical.bin'"
-echo "сравнение VM: создаю $work/bootstrap/vm.s"
-node tests/vm-parity.js build "$work/bootstrap/vm.s" \
+echo "сравнение VM: создаю $work/bootstrap/vm.saltic"
+node tests/vm-parity.js build "$work/bootstrap/vm.saltic" \
     "$work/guest/vm-canonical.elf" "$work/guest/vm-canonical.bin" tests/fixtures/input.txt
-node js/1-parser.js "$work/bootstrap/vm.s" >"$work/bootstrap/ast.json"
-node js/2-checker.js "$work/bootstrap/vm.s" >"$work/bootstrap/checker.json"
+node js/1-parser.js "$work/bootstrap/vm.saltic" >"$work/bootstrap/ast.json"
+node js/2-checker.js "$work/bootstrap/vm.saltic" >"$work/bootstrap/checker.json"
 
 echo "сравнение VM: собираю Saltic-VM"
 nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run \
-    "node js/3-compiler.js --assembly '$work/bootstrap/vm-rv32i.s' '$work/bootstrap/vm.s' '$work/bootstrap/vm.elf'"
+    "node js/3-compiler.js --assembly '$work/bootstrap/vm-rv32i.s' '$work/bootstrap/vm.saltic' '$work/bootstrap/vm.elf'"
 
 scenarios=(
     "elf-normal|нормальное исполнение ELF|elf|normal"

@@ -28,7 +28,7 @@ function byteChunks(file) {
 
 function build(output, elf, flat, input) {
   const root = path.resolve(__dirname, '..')
-  const vmSource = withoutProgram(fs.readFileSync(path.join(root, 's2/4-vm.s'), 'utf8'))
+  const vmSource = withoutProgram(fs.readFileSync(path.join(root, 's2/4-vm.saltic'), 'utf8'))
   const fixtures = `\nVM_TEST_ELF = ${byteChunks(elf)}\nVM_TEST_FLAT = ${byteChunks(flat)}\nVM_TEST_INPUT = ${byteGroup(input)}\n`
   const entry = String.raw`
 skill vm_test_numbers(values) {

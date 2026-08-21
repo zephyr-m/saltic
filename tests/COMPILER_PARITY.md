@@ -1,7 +1,7 @@
 # Сравнение компиляторов
 
 Команда `bash tests/4-compiler-parity.sh` сравнивает host-компилятор
-`js/3-compiler.js` и компилятор на Saltic из `s2/3-compiler.s`.
+`js/3-compiler.js` и компилятор на Saltic из `s2/3-compiler.saltic`.
 
 Зафиксированный интерфейс self-hosted слоя:
 
@@ -12,11 +12,11 @@ skill compiler_compile(ast) {
 ```
 
 Тест требует точного совпадения RV32I assembly, затем собирает оба ELF и
-сравнивает их поведение на `canonical.s`.
+сравнивает их поведение на `canonical.saltic`.
 
 Все промежуточные результаты сохраняются в `.cache/build/compiler-parity/`:
 
-- `bootstrap/compiler.s` — parser, checker и compiler с общей точкой входа;
+- `bootstrap/compiler.saltic` — parser, checker и compiler с общей точкой входа;
 - `bootstrap/compiler-rv32i.s` — исходный assembly bootstrap-компилятора;
 - `bootstrap/compiler-large-heap.s` — его версия с 48-МБ рабочим heap;
 - `bootstrap/compiler.elf` — исполняемый self-hosted компилятор;

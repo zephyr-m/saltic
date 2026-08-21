@@ -40,7 +40,7 @@ run_compiler() {
     fi
 
     node js/4-vm.js "$compiler" --memory "$memory_bytes" --steps "$step_limit" \
-        "${progress[@]}" -- "$work/source/toolchain.s" "$assembly" \
+        "${progress[@]}" -- "$work/source/toolchain.saltic" "$assembly" \
         >"$stdout" 2> >(tee "$stderr" >&2)
 }
 
@@ -78,13 +78,13 @@ report_compiler_failure() {
 }
 
 echo "самохостинг: создаю единый исходник toolchain"
-node tests/compiler-parity.js build "$work/source/toolchain.s"
-node js/1-parser.js "$work/source/toolchain.s" >"$work/source/ast.json"
-node js/2-checker.js "$work/source/toolchain.s" >"$work/source/checker.json"
+node tests/compiler-parity.js build "$work/source/toolchain.saltic"
+node js/1-parser.js "$work/source/toolchain.saltic" >"$work/source/ast.json"
+node js/2-checker.js "$work/source/toolchain.saltic" >"$work/source/checker.json"
 
 echo "самохостинг: этап 1 — начальная сборка через JS-компилятор"
 nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run \
-    "node js/3-compiler.js --assembly '$work/stage-1/toolchain-rv32i.s' '$work/source/toolchain.s' '$work/stage-1/toolchain-small.elf'"
+    "node js/3-compiler.js --assembly '$work/stage-1/toolchain-rv32i.s' '$work/source/toolchain.saltic' '$work/stage-1/toolchain-small.elf'"
 assemble_stage \
     "$work/stage-1/toolchain-rv32i.s" \
     "$work/stage-1/toolchain-large-heap.s" \

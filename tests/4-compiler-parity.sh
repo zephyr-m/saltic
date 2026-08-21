@@ -7,19 +7,19 @@ work=".cache/build/compiler-parity"
 mkdir -p "$work/bootstrap" "$work/expected" "$work/actual" "$work/diff" "$work/run-host" "$work/run-saltic"
 
 echo "сравнение компиляторов: проверяю интерфейс"
-if ! grep -q '^skill compiler_compile(ast)' s2/3-compiler.s; then
-    echo "сравнение компиляторов: в s2/3-compiler.s ещё нет skill compiler_compile(ast)"
+if ! grep -q '^skill compiler_compile(ast)' s2/3-compiler.saltic; then
+    echo "сравнение компиляторов: в s2/3-compiler.saltic ещё нет skill compiler_compile(ast)"
     exit 1
 fi
 
-echo "сравнение компиляторов: создаю $work/bootstrap/compiler.s"
-node tests/compiler-parity.js build "$work/bootstrap/compiler.s"
-node js/1-parser.js "$work/bootstrap/compiler.s" >/dev/null
-node js/2-checker.js "$work/bootstrap/compiler.s" >/dev/null
+echo "сравнение компиляторов: создаю $work/bootstrap/compiler.saltic"
+node tests/compiler-parity.js build "$work/bootstrap/compiler.saltic"
+node js/1-parser.js "$work/bootstrap/compiler.saltic" >/dev/null
+node js/2-checker.js "$work/bootstrap/compiler.saltic" >/dev/null
 
 echo "сравнение компиляторов: собираю self-hosted compiler"
 nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run \
-    "node js/3-compiler.js --assembly '$work/bootstrap/compiler-rv32i.s' '$work/bootstrap/compiler.s' '$work/bootstrap/compiler-small.elf'"
+    "node js/3-compiler.js --assembly '$work/bootstrap/compiler-rv32i.s' '$work/bootstrap/compiler.saltic' '$work/bootstrap/compiler-small.elf'"
 node tests/compiler-parity.js expand-heap \
     "$work/bootstrap/compiler-rv32i.s" "$work/bootstrap/compiler-large-heap.s"
 nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run \
@@ -27,11 +27,11 @@ nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run \
 
 echo "сравнение компиляторов: получаю эталонный assembly"
 nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc --run \
-    "node js/3-compiler.js --assembly '$work/expected/canonical.s' canonical.s '$work/expected/canonical.elf'"
+    "node js/3-compiler.js --assembly '$work/expected/canonical.s' canonical.saltic '$work/expected/canonical.elf'"
 
 echo "сравнение компиляторов: запускаю Saltic-компилятор"
 node js/4-vm.js "$work/bootstrap/compiler.elf" --steps 1000000000 -- \
-    canonical.s "$work/actual/canonical.s"
+    canonical.saltic "$work/actual/canonical.s"
 
 if ! diff -u "$work/expected/canonical.s" "$work/actual/canonical.s" >"$work/diff/assembly.diff"; then
     echo "сравнение компиляторов: assembly различается, смотри $work/diff/assembly.diff"

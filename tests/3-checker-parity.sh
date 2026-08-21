@@ -6,17 +6,17 @@ cd "$root"
 work=".cache/build/checker-parity"
 mkdir -p "$work/ast" "$work/expected" "$work/actual" "$work/diff"
 
-echo "сравнение чекеров: создаю $work/checker.s"
-node tests/checker-parity.js build "$work/checker.s"
-node js/1-parser.js "$work/checker.s" >/dev/null
-node js/2-checker.js "$work/checker.s" >/dev/null
+echo "сравнение чекеров: создаю $work/checker.saltic"
+node tests/checker-parity.js build "$work/checker.saltic"
+node js/1-parser.js "$work/checker.saltic" >/dev/null
+node js/2-checker.js "$work/checker.saltic" >/dev/null
 echo "сравнение чекеров: компилирую $work/checker.elf"
 nix-shell -p pkgsCross.riscv32-embedded.buildPackages.gcc \
-    --run "node js/3-compiler.js '$work/checker.s' '$work/checker.elf'"
+    --run "node js/3-compiler.js '$work/checker.saltic' '$work/checker.elf'"
 
 for name in canonical canonical-errors; do
-    source="$name.s"
-    (test "$name" = "canonical-errors") && source="tests/canonical-errors.s"
+    source="$name.saltic"
+    (test "$name" = "canonical-errors") && source="tests/canonical-errors.saltic"
     expected="$work/expected/$name.txt"
     actual="$work/actual/$name.txt"
     difference="$work/diff/$name.diff"

@@ -1804,7 +1804,7 @@ if (require.main === module) {
   let assembly = null
   if (args[0] === '--assembly') assembly = args.shift() && args.shift()
   if (args.length !== 2) {
-    console.error('usage: node js/3-compiler.js [--assembly output.s] <input.s> <output.elf>')
+    console.error('usage: node js/3-compiler.js [--assembly output.s] <input.saltic> <output.elf>')
     process.exit(2)
   }
   try {

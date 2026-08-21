@@ -200,10 +200,10 @@ function stripLocation(value) {
   return Array.isArray(value) && value[0] === 'loc' ? value[3] : value
 }
 
-const coreFiles = ['file.s','json.s','str.s','num.s','group.s']
+const coreFiles = ['file.saltic','json.saltic','str.saltic','num.saltic','group.saltic']
 
 function modulePath(sourcePath, parts, root) {
-  const relative = pathTools.join(...parts.slice(0,-1), `${parts.at(-1)}.s`)
+  const relative = pathTools.join(...parts.slice(0,-1), `${parts.at(-1)}.saltic`)
   const result = pathTools.resolve(['s','s2'].includes(parts[0]) ? root : pathTools.dirname(sourcePath), relative)
   if (!fs.existsSync(result)) throw Error(`modules: module '${parts.join('.')}' not found at ${result}`)
   return result
@@ -242,6 +242,6 @@ function parseFile(path){return parseString(fs.readFileSync(path,'utf8'),path)}
 module.exports={lex,parseString,parseFile,astWithLocations,loadFile}
 
 if(require.main===module){
-  if(process.argv.length!==3){console.error('usage: node js/1-parser.js <file.s>');process.exit(2)}
+  if(process.argv.length!==3){console.error('usage: node js/1-parser.js <file.saltic>');process.exit(2)}
   try{console.log(JSON.stringify(parseFile(process.argv[2]),null,2))}catch(error){console.error(error.message);process.exit(1)}
 }
