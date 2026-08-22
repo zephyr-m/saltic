@@ -44,6 +44,8 @@ done
 
 mkdir -p "$dist"
 tar -czf "$archive" \
+    --exclude='os/bootstrap/heap-audit.gdb' \
+    --exclude='os/bootstrap/heap-audit.sh' \
     --transform "s,^,saltic-$version/," \
     "${files[@]}"
 

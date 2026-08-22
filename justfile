@@ -72,9 +72,6 @@ bootstrap-parity:
 bootstrap-refresh source="soul/seed/toolchain.saltic":
     bash os/bootstrap/refresh.sh "$1"
 
-heap-audit source="soul/seed/toolchain.saltic":
-    bash os/bootstrap/heap-audit.sh "$1"
-
 toolchain-step:
     just checker
     just bootstrap-refresh
