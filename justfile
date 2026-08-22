@@ -46,6 +46,9 @@ fixed-types:
 modules:
     bash tests/8-modules.sh
 
+json-rpc:
+    bash tests/10-json-rpc.sh
+
 selfhost-parity:
     bash tests/6-selfhost-parity.sh
 
@@ -77,6 +80,7 @@ test:
     bash tests/6-selfhost-parity.sh
     bash tests/7-fixed-types.sh
     bash tests/8-modules.sh
+    bash tests/10-json-rpc.sh
     nix-shell -p qemu pkgsCross.riscv32-embedded.buildPackages.gcc --run 'bash tests/9-bootstrap.sh'
 
 verify: test

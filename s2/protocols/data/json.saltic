@@ -1,1 +1,667 @@
+use core
 
+JsonKind = enum {
+    NULL,
+    ANSWER,
+    NUMBER,
+    STRING,
+    ARRAY,
+    OBJECT,
+}
+
+HEX = "0123456789abcdef"
+ASCII = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+Text = Box {
+    units = []
+}
+
+Value = Box {
+    kind = JsonKind.NULL
+    answer = no
+    number = ""
+    string = Text {}
+    items = []
+    members = []
+}
+
+Member = Box {
+    name = Text {}
+    value = Value {}
+}
+
+Parse = Box {
+    ok = no
+    value = Value {}
+    index = 0
+    message = ""
+}
+
+TextRead = Box {
+    ok = no
+    text = Text {}
+    index = 0
+    message = ""
+}
+
+CodepointRead = Box {
+    ok = no
+    value = 0
+    index = 0
+    message = ""
+}
+
+Lookup = Box {
+    found = no
+    value = Value {}
+}
+
+skill null_value() {
+    out Value {}
+}
+
+skill answer_value(answer) {
+    out Value { kind = JsonKind.ANSWER answer = answer }
+}
+
+skill number_value(number) {
+    out Value { kind = JsonKind.NUMBER number = number }
+}
+
+skill number(number) {
+    out number_value(core.num.text(number))
+}
+
+skill string_text(text) {
+    out Value { kind = JsonKind.STRING string = text }
+}
+
+skill array(items) {
+    out Value { kind = JsonKind.ARRAY items = items }
+}
+
+skill field_text(name, value) {
+    out Member { name = name value = value }
+}
+
+skill object(members) {
+    out Value { kind = JsonKind.OBJECT members = members }
+}
+
+skill is_kind(value, kind) {
+    out value.kind == kind
+}
+
+skill text_add(text, unit) {
+    out Text { units = core.group.add(text.units, unit) }
+}
+
+skill text_count(text) {
+    out core.group.count(text.units)
+}
+
+skill text_at(text, index) {
+    out core.group.item(text.units, index)
+}
+
+skill continuation(byte) {
+    (byte > 127) {
+        (byte < 192) { out yes }
+    }
+    out no
+}
+
+skill codepoint_failure(index, message) {
+    out CodepointRead { index = index message = message }
+}
+
+skill read_utf8(source, index) {
+    @length = core.str.len(source)
+    (index > length - 1) { out codepoint_failure(index, "unexpected end of UTF-8 text") }
+
+    @first = core.str.byte(source, index)
+    (first < 128) { out CodepointRead { ok = yes value = first index = index + 1 } }
+
+    (first > 193) {
+        (first < 224) {
+            (index + 1 > length - 1) { out codepoint_failure(index, "incomplete two-byte UTF-8 sequence") }
+            @second = core.str.byte(source, index + 1)
+            (continuation(second) == no) { out codepoint_failure(index, "invalid UTF-8 continuation byte") }
+            @value = (first - 192) * 64 + second - 128
+            out CodepointRead { ok = yes value = value index = index + 2 }
+        }
+    }
+
+    (first > 223) {
+        (first < 240) {
+            (index + 2 > length - 1) { out codepoint_failure(index, "incomplete three-byte UTF-8 sequence") }
+            @second = core.str.byte(source, index + 1)
+            @third = core.str.byte(source, index + 2)
+            (continuation(second) == no) { out codepoint_failure(index, "invalid UTF-8 continuation byte") }
+            (continuation(third) == no) { out codepoint_failure(index, "invalid UTF-8 continuation byte") }
+            @value = (first - 224) * 4096 + (second - 128) * 64 + third - 128
+            (value < 2048) { out codepoint_failure(index, "overlong UTF-8 sequence") }
+            (value > 55295) {
+                (value < 57344) { out codepoint_failure(index, "UTF-8 sequence encodes a surrogate") }
+            }
+            out CodepointRead { ok = yes value = value index = index + 3 }
+        }
+    }
+
+    (first > 239) {
+        (first < 245) {
+            (index + 3 > length - 1) { out codepoint_failure(index, "incomplete four-byte UTF-8 sequence") }
+            @second = core.str.byte(source, index + 1)
+            @third = core.str.byte(source, index + 2)
+            @fourth = core.str.byte(source, index + 3)
+            (continuation(second) == no) { out codepoint_failure(index, "invalid UTF-8 continuation byte") }
+            (continuation(third) == no) { out codepoint_failure(index, "invalid UTF-8 continuation byte") }
+            (continuation(fourth) == no) { out codepoint_failure(index, "invalid UTF-8 continuation byte") }
+            @value = (first - 240) * 262144 + (second - 128) * 4096 + (third - 128) * 64 + fourth - 128
+            (value < 65536) { out codepoint_failure(index, "overlong UTF-8 sequence") }
+            (value > 1114111) { out codepoint_failure(index, "UTF-8 code point is out of range") }
+            out CodepointRead { ok = yes value = value index = index + 4 }
+        }
+    }
+
+    out codepoint_failure(index, "invalid UTF-8 leading byte")
+}
+
+skill text_read_failure(index, message) {
+    out TextRead { index = index message = message }
+}
+
+skill read_text(source) {
+    @text = Text {}
+    @index = 0
+    @length = core.str.len(source)
+    @active = yes
+    drum (length + 1) {
+        (active == yes) {
+            (index < length) {
+                @unit = read_utf8(source, index)
+                (unit.ok == no) { out text_read_failure(unit.index, unit.message) }
+                text = text_add(text, unit.value)
+                index = unit.index
+            }
+            (index == length) { active = no }
+        }
+    }
+    out TextRead { ok = yes text = text index = index }
+}
+
+skill string(value) {
+    @read = read_text(value)
+    out string_text(read.text)
+}
+
+skill field(name, value) {
+    @read = read_text(name)
+    out field_text(read.text, value)
+}
+
+skill text_equal(left, right) {
+    @count = text_count(left)
+    (count == text_count(right)) {
+        @equal = yes
+        @index = 0
+        drum (count) {
+            (index < count) {
+                @same = text_at(left, index) == text_at(right, index)
+                (same == yes) { index = index + 1 }
+                (same == no) { equal = no index = count }
+            }
+        }
+        out equal
+    }
+    out no
+}
+
+skill text_equal_string(left, right) {
+    @read = read_text(right)
+    (read.ok == no) { out no }
+    out text_equal(left, read.text)
+}
+
+skill string_equal(value, text) {
+    (value.kind == JsonKind.STRING) { out text_equal_string(value.string, text) }
+    out no
+}
+
+skill get_text(value, name) {
+    (value.kind == JsonKind.OBJECT) {
+        @index = 0
+        @count = core.group.count(value.members)
+        drum (count) {
+            (index < count) {
+                @member = core.group.item(value.members, index)
+                (text_equal(member.name, name) == yes) { out Lookup { found = yes value = member.value } }
+                index = index + 1
+            }
+        }
+    }
+    out Lookup {}
+}
+
+skill get(value, name) {
+    @read = read_text(name)
+    (read.ok == no) { out Lookup {} }
+    out get_text(value, read.text)
+}
+
+skill has(value, name) {
+    @lookup = get(value, name)
+    out lookup.found
+}
+
+skill hex_value(ch) {
+    @lower = core.str.lower(ch)
+    @index = 0
+    drum (16) {
+        (index < 16) {
+            (core.str.at(HEX, index) == lower) { out index }
+            index = index + 1
+        }
+    }
+    out 0 - 1
+}
+
+skill hex_digit(value) {
+    out core.str.at(HEX, value)
+}
+
+skill hex4(value) {
+    @a = value / 4096
+    @rest = value - a * 4096
+    @b = rest / 256
+    rest = rest - b * 256
+    @c = rest / 16
+    @d = rest - c * 16
+    @text = hex_digit(a)
+    text = core.str.add(text, hex_digit(b))
+    text = core.str.add(text, hex_digit(c))
+    out core.str.add(text, hex_digit(d))
+}
+
+skill encode_unit(unit) {
+    (unit == 34) { out "\\\"" }
+    (unit == 92) { out "\\\\" }
+    (unit == 8) { out "\\b" }
+    (unit == 12) { out "\\f" }
+    (unit == 10) { out "\\n" }
+    (unit == 13) { out "\\r" }
+    (unit == 9) { out "\\t" }
+    (unit > 31) {
+        (unit < 127) { out core.str.at(ASCII, unit - 32) }
+    }
+    (unit < 65536) { out core.str.add("\\u", hex4(unit)) }
+
+    @rest = unit - 65536
+    @high = 55296 + rest / 1024
+    @low = 56320 + rest - rest / 1024 * 1024
+    @encoded = core.str.add("\\u", hex4(high))
+    out core.str.add(encoded, core.str.add("\\u", hex4(low)))
+}
+
+skill encode_text(text) {
+    @encoded = "\""
+    @index = 0
+    @count = text_count(text)
+    drum (count) {
+        (index < count) {
+            encoded = core.str.add(encoded, encode_unit(text_at(text, index)))
+            index = index + 1
+        }
+    }
+    out core.str.add(encoded, "\"")
+}
+
+skill encode_array(items) {
+    @encoded = "["
+    @index = 0
+    @count = core.group.count(items)
+    drum (count) {
+        (index < count) {
+            (index > 0) { encoded = core.str.add(encoded, ",") }
+            encoded = core.str.add(encoded, encode(core.group.item(items, index)))
+            index = index + 1
+        }
+    }
+    out core.str.add(encoded, "]")
+}
+
+skill encode_object(members) {
+    @encoded = "{"
+    @index = 0
+    @count = core.group.count(members)
+    drum (count) {
+        (index < count) {
+            @member = core.group.item(members, index)
+            (index > 0) { encoded = core.str.add(encoded, ",") }
+            encoded = core.str.add(encoded, encode_text(member.name))
+            encoded = core.str.add(encoded, ":")
+            encoded = core.str.add(encoded, encode(member.value))
+            index = index + 1
+        }
+    }
+    out core.str.add(encoded, "}")
+}
+
+skill encode(value) {
+    (value.kind == JsonKind.NULL) { out "null" }
+    (value.kind == JsonKind.ANSWER) {
+        (value.answer == yes) { out "true" }
+        out "false"
+    }
+    (value.kind == JsonKind.NUMBER) { out value.number }
+    (value.kind == JsonKind.STRING) { out encode_text(value.string) }
+    (value.kind == JsonKind.ARRAY) { out encode_array(value.items) }
+    (value.kind == JsonKind.OBJECT) { out encode_object(value.members) }
+    out "null"
+}
+
+skill parse_failure(index, message) {
+    out Parse { index = index message = message }
+}
+
+skill skip_space(source, start) {
+    @index = start
+    @length = core.str.len(source)
+    @active = yes
+    drum (length + 1) {
+        (active == yes) {
+            (index < length) {
+                @ch = core.str.at(source, index)
+                @space = no
+                (ch == " ") { space = yes }
+                (ch == "\n") { space = yes }
+                (ch == "\r") { space = yes }
+                (ch == "\t") { space = yes }
+                (space == yes) { index = index + 1 }
+                (space == no) { active = no }
+            }
+            (index == length) { active = no }
+        }
+    }
+    out index
+}
+
+skill starts_at(source, needle, index) {
+    @end = index + core.str.len(needle)
+    (end > core.str.len(source)) { out no }
+    out core.str.slice(source, index, end) == needle
+}
+
+skill read_hex4(source, index) {
+    (index + 4 > core.str.len(source)) { out CodepointRead { index = index message = "incomplete Unicode escape" } }
+    @value = 0
+    @cursor = index
+    drum (4) {
+        @digit = hex_value(core.str.at(source, cursor))
+        (digit < 0) { out CodepointRead { index = cursor message = "invalid hexadecimal digit in Unicode escape" } }
+        value = value * 16 + digit
+        cursor = cursor + 1
+    }
+    out CodepointRead { ok = yes value = value index = cursor }
+}
+
+skill parse_text_at(source, start) {
+    @length = core.str.len(source)
+    (start > length - 1) { out text_read_failure(start, "expected JSON string") }
+    (core.str.at(source, start) == "\"") {
+        @text = Text {}
+        @index = start + 1
+        @active = yes
+        drum (length + 1) {
+            (active == yes) {
+                (index == length) { out text_read_failure(index, "unterminated JSON string") }
+                @byte = core.str.byte(source, index)
+                (byte == 34) { out TextRead { ok = yes text = text index = index + 1 } }
+                (byte < 32) { out text_read_failure(index, "unescaped control character in JSON string") }
+                (byte == 92) {
+                    (index + 1 == length) { out text_read_failure(index, "unterminated JSON escape") }
+                    @escape = core.str.at(source, index + 1)
+                    @handled = yes
+                    (escape == "\"") { text = text_add(text, 34) index = index + 2 }
+                    (escape == "\\") { text = text_add(text, 92) index = index + 2 }
+                    (escape == "/") { text = text_add(text, 47) index = index + 2 }
+                    (escape == "b") { text = text_add(text, 8) index = index + 2 }
+                    (escape == "f") { text = text_add(text, 12) index = index + 2 }
+                    (escape == "n") { text = text_add(text, 10) index = index + 2 }
+                    (escape == "r") { text = text_add(text, 13) index = index + 2 }
+                    (escape == "t") { text = text_add(text, 9) index = index + 2 }
+                    (escape == "u") {
+                        @unit = read_hex4(source, index + 2)
+                        (unit.ok == no) { out text_read_failure(unit.index, unit.message) }
+                        @value = unit.value
+                        @next = unit.index
+                        (value > 55295) {
+                            (value < 56320) {
+                                (starts_at(source, "\\u", next) == no) { out text_read_failure(next, "high surrogate is not followed by a low surrogate") }
+                                @low = read_hex4(source, next + 2)
+                                (low.ok == no) { out text_read_failure(low.index, low.message) }
+                                (low.value < 56320) { out text_read_failure(next, "high surrogate is not followed by a low surrogate") }
+                                (low.value > 57343) { out text_read_failure(next, "high surrogate is not followed by a low surrogate") }
+                                value = 65536 + (value - 55296) * 1024 + low.value - 56320
+                                next = low.index
+                            }
+                        }
+                        (value > 56319) {
+                            (value < 57344) { out text_read_failure(index, "isolated low surrogate in JSON string") }
+                        }
+                        text = text_add(text, value)
+                        index = next
+                    }
+                    (escape == "\"") { handled = no }
+                    (escape == "\\") { handled = no }
+                    (escape == "/") { handled = no }
+                    (escape == "b") { handled = no }
+                    (escape == "f") { handled = no }
+                    (escape == "n") { handled = no }
+                    (escape == "r") { handled = no }
+                    (escape == "t") { handled = no }
+                    (escape == "u") { handled = no }
+                    (handled == yes) { out text_read_failure(index, "unknown JSON escape") }
+                }
+                (byte == 92) { byte = 0 }
+                (byte > 0) {
+                    @unit = read_utf8(source, index)
+                    (unit.ok == no) { out text_read_failure(unit.index, unit.message) }
+                    text = text_add(text, unit.value)
+                    index = unit.index
+                }
+            }
+        }
+    }
+    out text_read_failure(start, "expected JSON string")
+}
+
+skill is_digit(ch) {
+    out core.str.contains("0123456789", ch)
+}
+
+skill is_nonzero_digit(ch) {
+    out core.str.contains("123456789", ch)
+}
+
+skill parse_number_at(source, start) {
+    @length = core.str.len(source)
+    @index = start
+    (index < length) {
+        (core.str.at(source, index) == "-") { index = index + 1 }
+    }
+    (index == length) { out parse_failure(index, "incomplete JSON number") }
+
+    @first = core.str.at(source, index)
+    (first == "0") {
+        index = index + 1
+        (index < length) {
+            (is_digit(core.str.at(source, index)) == yes) { out parse_failure(index, "leading zero in JSON number") }
+        }
+    }
+    (first == "0") { first = "" }
+    (core.str.len(first) > 0) {
+        (is_nonzero_digit(first) == no) { out parse_failure(index, "expected JSON number") }
+        index = index + 1
+        @active = yes
+        drum (length + 1) {
+            (active == yes) {
+                (index < length) {
+                    @digit = is_digit(core.str.at(source, index))
+                    (digit == yes) { index = index + 1 }
+                    (digit == no) { active = no }
+                }
+                (index == length) { active = no }
+            }
+        }
+    }
+
+    (index < length) {
+        (core.str.at(source, index) == ".") {
+            index = index + 1
+            (index == length) { out parse_failure(index, "fraction has no digits") }
+            (is_digit(core.str.at(source, index)) == no) { out parse_failure(index, "fraction has no digits") }
+            @active = yes
+            drum (length + 1) {
+                (active == yes) {
+                    (index < length) {
+                        @digit = is_digit(core.str.at(source, index))
+                        (digit == yes) { index = index + 1 }
+                        (digit == no) { active = no }
+                    }
+                    (index == length) { active = no }
+                }
+            }
+        }
+    }
+
+    (index < length) {
+        @exponent = core.str.at(source, index)
+        (exponent == "e") { index = index + 1 }
+        (exponent == "E") { index = index + 1 }
+        (exponent == "e") { exponent = "" }
+        (exponent == "E") { exponent = "" }
+        (core.str.len(exponent) == 0) {
+            (index == length) { out parse_failure(index, "exponent has no digits") }
+            @sign = core.str.at(source, index)
+            (sign == "+") { index = index + 1 }
+            (sign == "-") { index = index + 1 }
+            (index == length) { out parse_failure(index, "exponent has no digits") }
+            (is_digit(core.str.at(source, index)) == no) { out parse_failure(index, "exponent has no digits") }
+            @active = yes
+            drum (length + 1) {
+                (active == yes) {
+                    (index < length) {
+                        @digit = is_digit(core.str.at(source, index))
+                        (digit == yes) { index = index + 1 }
+                        (digit == no) { active = no }
+                    }
+                    (index == length) { active = no }
+                }
+            }
+        }
+    }
+
+    out Parse { ok = yes value = number_value(core.str.slice(source, start, index)) index = index }
+}
+
+skill number_text_valid(text) {
+    @parsed = parse_number_at(text, 0)
+    (parsed.ok == yes) { out parsed.index == core.str.len(text) }
+    out no
+}
+
+skill integer_text_valid(text) {
+    (number_text_valid(text) == no) { out no }
+    (core.str.contains(text, ".") == yes) { out no }
+    (core.str.contains(core.str.lower(text), "e") == yes) { out no }
+    out yes
+}
+
+skill parse_array_at(source, start) {
+    @items = []
+    @index = skip_space(source, start + 1)
+    @length = core.str.len(source)
+    (index == length) { out parse_failure(index, "unterminated JSON array") }
+    (core.str.at(source, index) == "]") { out Parse { ok = yes value = array(items) index = index + 1 } }
+
+    @active = yes
+    drum (length + 1) {
+        (active == yes) {
+            @item = parse_value_at(source, index)
+            (item.ok == no) { out item }
+            items = core.group.add(items, item.value)
+            index = skip_space(source, item.index)
+            (index == length) { out parse_failure(index, "unterminated JSON array") }
+            @ch = core.str.at(source, index)
+            (ch == "]") { out Parse { ok = yes value = array(items) index = index + 1 } }
+            (ch == ",") { index = skip_space(source, index + 1) }
+            (ch == ",") { ch = "" }
+            (core.str.len(ch) > 0) { out parse_failure(index, "expected comma or closing bracket") }
+            (index == length) { out parse_failure(index, "unterminated JSON array") }
+        }
+    }
+    out parse_failure(index, "unterminated JSON array")
+}
+
+skill parse_object_at(source, start) {
+    @members = []
+    @index = skip_space(source, start + 1)
+    @length = core.str.len(source)
+    (index == length) { out parse_failure(index, "unterminated JSON object") }
+    (core.str.at(source, index) == "}") { out Parse { ok = yes value = object(members) index = index + 1 } }
+
+    @active = yes
+    drum (length + 1) {
+        (active == yes) {
+            @name = parse_text_at(source, index)
+            (name.ok == no) { out parse_failure(name.index, name.message) }
+            index = skip_space(source, name.index)
+            (index == length) { out parse_failure(index, "unterminated JSON object") }
+            @separator = core.str.at(source, index)
+            (separator == ":") { index = skip_space(source, index + 1) separator = "" }
+            (core.str.len(separator) > 0) { out parse_failure(index, "expected colon after object member name") }
+            @item = parse_value_at(source, index)
+            (item.ok == no) { out item }
+            members = core.group.add(members, field_text(name.text, item.value))
+            index = skip_space(source, item.index)
+            (index == length) { out parse_failure(index, "unterminated JSON object") }
+            @ch = core.str.at(source, index)
+            (ch == "}") { out Parse { ok = yes value = object(members) index = index + 1 } }
+            (ch == ",") { index = skip_space(source, index + 1) }
+            (ch == ",") { ch = "" }
+            (core.str.len(ch) > 0) { out parse_failure(index, "expected comma or closing brace") }
+            (index == length) { out parse_failure(index, "unterminated JSON object") }
+        }
+    }
+    out parse_failure(index, "unterminated JSON object")
+}
+
+skill parse_value_at(source, start) {
+    @index = skip_space(source, start)
+    @length = core.str.len(source)
+    (index == length) { out parse_failure(index, "expected JSON value") }
+    @ch = core.str.at(source, index)
+
+    (ch == "\"") {
+        @text = parse_text_at(source, index)
+        (text.ok == yes) { out Parse { ok = yes value = string_text(text.text) index = text.index } }
+        out parse_failure(text.index, text.message)
+    }
+    (ch == "[") { out parse_array_at(source, index) }
+    (ch == "{") { out parse_object_at(source, index) }
+    (starts_at(source, "true", index) == yes) { out Parse { ok = yes value = answer_value(yes) index = index + 4 } }
+    (starts_at(source, "false", index) == yes) { out Parse { ok = yes value = answer_value(no) index = index + 5 } }
+    (starts_at(source, "null", index) == yes) { out Parse { ok = yes value = null_value() index = index + 4 } }
+    (ch == "-") { out parse_number_at(source, index) }
+    (is_digit(ch) == yes) { out parse_number_at(source, index) }
+    out parse_failure(index, "unexpected character while reading JSON value")
+}
+
+skill parse(source) {
+    @parsed = parse_value_at(source, 0)
+    (parsed.ok == no) { out parsed }
+    @index = skip_space(source, parsed.index)
+    (index == core.str.len(source)) { out Parse { ok = yes value = parsed.value index = index } }
+    out parse_failure(index, "unexpected data after JSON value")
+}

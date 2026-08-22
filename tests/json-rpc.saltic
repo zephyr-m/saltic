@@ -1,0 +1,175 @@
+use core
+use s2.protocols.data.json
+use s2.protocols.data.json_rpc
+
+skill probe(name, result) {
+    core.io.show(name, ": ", result)
+    out none
+}
+
+skill json_values() {
+    @document = "{\"name\":\"Saltic\",\"enabled\":true,\"count\":-12.5e+2,\"nothing\":null,\"items\":[1,\"two\",false],\"unicode\":\"\\u0421\\ud83d\\udc1c\"}"
+    @parsed = json.parse(document)
+    probe("json parse", parsed.ok)
+    probe("json root object", parsed.value.kind == json.JsonKind.OBJECT)
+
+    @name = json.get(parsed.value, "name")
+    @enabled = json.get(parsed.value, "enabled")
+    @count = json.get(parsed.value, "count")
+    @nothing = json.get(parsed.value, "nothing")
+    @items = json.get(parsed.value, "items")
+    @unicode = json.get(parsed.value, "unicode")
+
+    probe("json string", json.string_equal(name.value, "Saltic"))
+    probe("json answer", enabled.value.answer)
+    probe("json number", count.value.number == "-12.5e+2")
+    probe("json null", nothing.value.kind == json.JsonKind.NULL)
+    probe("json array", items.value.kind == json.JsonKind.ARRAY)
+    probe("json array count", core.group.count(items.value.items) == 3)
+    probe("json unicode", json.string_equal(unicode.value, "С🐜"))
+    probe("json roundtrip", json.encode(parsed.value) == document)
+
+    @made = json.object([
+        json.field("quote", json.string("a\"b\n")),
+        json.field("wide", json.string("С🐜")),
+    ])
+    @made_expected = "{\"quote\":\"a\\\"b\\n\",\"wide\":\"\\u0421\\ud83d\\udc1c\"}"
+    probe("json construct", json.encode(made) == made_expected)
+    out none
+}
+
+skill json_numbers() {
+    @zero = json.parse("0")
+    @negative = json.parse("-42")
+    @fraction = json.parse("12.5")
+    @exponent = json.parse("-12.5e+2")
+    @leading_zero = json.parse("01")
+    @empty_fraction = json.parse("1.")
+    @empty_exponent = json.parse("1e")
+    probe("number zero", zero.ok)
+    probe("number negative", negative.ok)
+    probe("number fraction", fraction.ok)
+    probe("number exponent", exponent.ok)
+    probe("number leading zero", leading_zero.ok == no)
+    probe("number empty fraction", empty_fraction.ok == no)
+    probe("number empty exponent", empty_exponent.ok == no)
+    probe("integer grammar", json.integer_text_valid("-32600"))
+    probe("fraction not integer", json.integer_text_valid("1.5") == no)
+    out none
+}
+
+skill json_errors() {
+    @missing_colon = json.parse("{\"a\" 1}")
+    @trailing_comma = json.parse("[1,]")
+    @unknown_escape = json.parse("\"\\x\"")
+    @high_surrogate = json.parse("\"\\ud800\"")
+    @low_surrogate = json.parse("\"\\udc00\"")
+    @trailing_data = json.parse("true false")
+    probe("json missing colon", missing_colon.ok == no)
+    probe("json trailing comma", trailing_comma.ok == no)
+    probe("json unknown escape", unknown_escape.ok == no)
+    probe("json high surrogate", high_surrogate.ok == no)
+    probe("json low surrogate", low_surrogate.ok == no)
+    probe("json trailing data", trailing_data.ok == no)
+    out none
+}
+
+skill rpc_request() {
+    @source = "{\"jsonrpc\":\"2.0\",\"method\":\"subtract\",\"params\":[42,23],\"id\":1}"
+    @packet = json_rpc.decode(source)
+    @message = core.group.item(packet.messages, 0)
+
+    probe("rpc request packet", packet.ok)
+    probe("rpc request single", packet.batch == no)
+    probe("rpc request kind", message.kind == json_rpc.MessageKind.REQUEST)
+    probe("rpc request method", json_rpc.method_is(message, "subtract"))
+    probe("rpc request params", message.params.kind == json.JsonKind.ARRAY)
+    probe("rpc request id", message.id.number == "1")
+    probe("rpc request roundtrip", json_rpc.encode_packet(packet) == source)
+
+    @notification = json_rpc.notification_with_params("update", json.object([json.field("value", json.number(7))]))
+    @notification_expected = "{\"jsonrpc\":\"2.0\",\"method\":\"update\",\"params\":{\"value\":7}}"
+    probe("rpc notification", json_rpc.encode(notification) == notification_expected)
+
+    @escaped = json_rpc.decode("{\"jsonrpc\":\"2.0\",\"method\":\"\\u043c\\u0435\\u0442\\u043e\\u0434\"}")
+    @escaped_message = core.group.item(escaped.messages, 0)
+    probe("rpc unicode method", json_rpc.method_is(escaped_message, "метод"))
+    out none
+}
+
+skill rpc_responses() {
+    @success = json_rpc.success(json.number(1), json.string("done"))
+    @success_expected = "{\"jsonrpc\":\"2.0\",\"result\":\"done\",\"id\":1}"
+    probe("rpc success", json_rpc.encode(success) == success_expected)
+
+    @failure = json_rpc.failure(json.number(1), 0 - 32601, "Method not found")
+    @failure_expected = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":1}"
+    probe("rpc failure", json_rpc.encode(failure) == failure_expected)
+
+    @source = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Invalid params\",\"data\":{\"field\":\"x\"}},\"id\":\"call-1\"}"
+    @packet = json_rpc.decode(source)
+    @message = core.group.item(packet.messages, 0)
+    probe("rpc decoded failure", message.kind == json_rpc.MessageKind.FAILURE)
+    probe("rpc failure code", message.error_code == "-32602")
+    probe("rpc failure message", json.text_equal_string(message.error_message, "Invalid params"))
+    probe("rpc failure data", message.has_error_data)
+    probe("rpc failure roundtrip", json_rpc.encode_packet(packet) == source)
+    out none
+}
+
+skill rpc_batch() {
+    @source = "[{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":[1,2],\"id\":\"a\"},{\"jsonrpc\":\"2.0\",\"method\":\"tick\"},{\"jsonrpc\":\"2.0\",\"result\":3,\"id\":\"a\"}]"
+    @packet = json_rpc.decode(source)
+    probe("rpc batch packet", packet.ok)
+    probe("rpc batch marker", packet.batch)
+    probe("rpc batch count", core.group.count(packet.messages) == 3)
+    @request = core.group.item(packet.messages, 0)
+    @notification = core.group.item(packet.messages, 1)
+    @response = core.group.item(packet.messages, 2)
+    probe("rpc batch request", request.kind == json_rpc.MessageKind.REQUEST)
+    probe("rpc batch notification", notification.kind == json_rpc.MessageKind.NOTIFICATION)
+    probe("rpc batch response", response.kind == json_rpc.MessageKind.SUCCESS)
+    probe("rpc batch roundtrip", json_rpc.encode_packet(packet) == source)
+    out none
+}
+
+skill rpc_errors() {
+    @parse_packet = json_rpc.decode("{]")
+    @parse_error = core.group.item(parse_packet.messages, 0)
+    probe("rpc parse status", parse_packet.ok == no)
+    probe("rpc parse kind", parse_error.kind == json_rpc.MessageKind.INVALID)
+    probe("rpc parse code", parse_error.error_code == json_rpc.PARSE_ERROR)
+    @parse_expected = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,\"message\":\"Parse error\"},\"id\":null}"
+    probe("rpc parse response", json_rpc.encode_packet(parse_packet) == parse_expected)
+
+    @invalid_packet = json_rpc.decode("{\"jsonrpc\":\"1.0\",\"method\":\"old\",\"id\":1}")
+    @invalid = core.group.item(invalid_packet.messages, 0)
+    probe("rpc invalid status", invalid_packet.ok)
+    probe("rpc invalid kind", invalid.kind == json_rpc.MessageKind.INVALID)
+    probe("rpc invalid code", invalid.error_code == json_rpc.INVALID_REQUEST)
+
+    @empty = json_rpc.decode("[]")
+    @empty_message = core.group.item(empty.messages, 0)
+    probe("rpc empty batch shape", empty.batch == no)
+    probe("rpc empty batch invalid", empty_message.kind == json_rpc.MessageKind.INVALID)
+
+    @bad_params = json_rpc.decode("{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"params\":1,\"id\":1}")
+    @bad_params_message = core.group.item(bad_params.messages, 0)
+    probe("rpc invalid params", bad_params_message.kind == json_rpc.MessageKind.INVALID)
+
+    @bad_response = json_rpc.decode("{\"jsonrpc\":\"2.0\",\"result\":1,\"error\":{\"code\":-1,\"message\":\"x\"},\"id\":1}")
+    @bad_response_message = core.group.item(bad_response.messages, 0)
+    probe("rpc exclusive result", bad_response_message.kind == json_rpc.MessageKind.INVALID)
+    out none
+}
+
+program() {
+    json_values()
+    json_numbers()
+    json_errors()
+    rpc_request()
+    rpc_responses()
+    rpc_batch()
+    rpc_errors()
+    out none
+}

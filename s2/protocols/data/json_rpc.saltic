@@ -1,1 +1,336 @@
+use core
+use s2.protocols.data.json
 
+MessageKind = enum {
+    INVALID,
+    REQUEST,
+    NOTIFICATION,
+    SUCCESS,
+    FAILURE,
+}
+
+PARSE_ERROR = "-32700"
+INVALID_REQUEST = "-32600"
+METHOD_NOT_FOUND = "-32601"
+INVALID_PARAMS = "-32602"
+INTERNAL_ERROR = "-32603"
+
+Message = Box {
+    kind = MessageKind.INVALID
+    method = json.Text {}
+    params = json.Value {}
+    has_params = no
+    id = json.Value {}
+    has_id = no
+    result = json.Value {}
+    error_code = INVALID_REQUEST
+    error_message = json.Text {}
+    error_data = json.Value {}
+    has_error_data = no
+    diagnostic = ""
+}
+
+Packet = Box {
+    ok = no
+    batch = no
+    messages = []
+    diagnostic = ""
+}
+
+skill rpc_text(value) {
+    @read = json.read_text(value)
+    out read.text
+}
+
+skill invalid(code, message, diagnostic) {
+    out Message {
+        kind = MessageKind.INVALID
+        id = json.null_value()
+        has_id = yes
+        error_code = code
+        error_message = rpc_text(message)
+        diagnostic = diagnostic
+    }
+}
+
+skill parse_error(diagnostic) {
+    out invalid(PARSE_ERROR, "Parse error", diagnostic)
+}
+
+skill invalid_request(diagnostic) {
+    out invalid(INVALID_REQUEST, "Invalid Request", diagnostic)
+}
+
+skill request(method, id) {
+    out Message {
+        kind = MessageKind.REQUEST
+        method = rpc_text(method)
+        id = id
+        has_id = yes
+    }
+}
+
+skill request_with_params(method, params, id) {
+    out Message {
+        kind = MessageKind.REQUEST
+        method = rpc_text(method)
+        params = params
+        has_params = yes
+        id = id
+        has_id = yes
+    }
+}
+
+skill notification(method) {
+    out Message {
+        kind = MessageKind.NOTIFICATION
+        method = rpc_text(method)
+    }
+}
+
+skill notification_with_params(method, params) {
+    out Message {
+        kind = MessageKind.NOTIFICATION
+        method = rpc_text(method)
+        params = params
+        has_params = yes
+    }
+}
+
+skill success(id, result) {
+    out Message {
+        kind = MessageKind.SUCCESS
+        id = id
+        has_id = yes
+        result = result
+    }
+}
+
+skill failure_text(id, code, message) {
+    out Message {
+        kind = MessageKind.FAILURE
+        id = id
+        has_id = yes
+        error_code = code
+        error_message = rpc_text(message)
+    }
+}
+
+skill failure(id, code, message) {
+    out failure_text(id, core.num.text(code), message)
+}
+
+skill failure_with_data(id, code, message, data) {
+    out Message {
+        kind = MessageKind.FAILURE
+        id = id
+        has_id = yes
+        error_code = core.num.text(code)
+        error_message = rpc_text(message)
+        error_data = data
+        has_error_data = yes
+    }
+}
+
+skill method_is(message, method) {
+    (message.kind == MessageKind.REQUEST) { out json.text_equal_string(message.method, method) }
+    (message.kind == MessageKind.NOTIFICATION) { out json.text_equal_string(message.method, method) }
+    out no
+}
+
+skill valid_id(value) {
+    (value.kind == json.JsonKind.NULL) { out yes }
+    (value.kind == json.JsonKind.STRING) { out yes }
+    (value.kind == json.JsonKind.NUMBER) { out yes }
+    out no
+}
+
+skill valid_params(value) {
+    (value.kind == json.JsonKind.ARRAY) { out yes }
+    (value.kind == json.JsonKind.OBJECT) { out yes }
+    out no
+}
+
+skill decode_request(value, method) {
+    (method.value.kind == json.JsonKind.STRING) {
+        @params = json.get(value, "params")
+        (params.found == yes) {
+            (valid_params(params.value) == no) { out invalid_request("request params must be an array or object") }
+        }
+
+        @id = json.get(value, "id")
+        (id.found == yes) {
+            (valid_id(id.value) == no) { out invalid_request("request id must be a string, number, or null") }
+            out Message {
+                kind = MessageKind.REQUEST
+                method = method.value.string
+                params = params.value
+                has_params = params.found
+                id = id.value
+                has_id = yes
+            }
+        }
+
+        out Message {
+            kind = MessageKind.NOTIFICATION
+            method = method.value.string
+            params = params.value
+            has_params = params.found
+        }
+    }
+    out invalid_request("request method must be a string")
+}
+
+skill decode_error_object(value, id, error) {
+    (error.value.kind == json.JsonKind.OBJECT) {
+        @code = json.get(error.value, "code")
+        (code.found == no) { out invalid_request("error response has no code") }
+        (code.value.kind == json.JsonKind.NUMBER) {
+            (json.integer_text_valid(code.value.number) == no) { out invalid_request("error code must be an integer") }
+            @message = json.get(error.value, "message")
+            (message.found == no) { out invalid_request("error response has no message") }
+            (message.value.kind == json.JsonKind.STRING) {
+                @data = json.get(error.value, "data")
+                out Message {
+                    kind = MessageKind.FAILURE
+                    id = id.value
+                    has_id = yes
+                    error_code = code.value.number
+                    error_message = message.value.string
+                    error_data = data.value
+                    has_error_data = data.found
+                }
+            }
+            out invalid_request("error message must be a string")
+        }
+        out invalid_request("error code must be a number")
+    }
+    out invalid_request("response error must be an object")
+}
+
+skill decode_response(value) {
+    @id = json.get(value, "id")
+    (id.found == no) { out invalid_request("response has no id") }
+    (valid_id(id.value) == no) { out invalid_request("response id must be a string, number, or null") }
+
+    @result = json.get(value, "result")
+    @error = json.get(value, "error")
+    @choices = 0
+    (result.found == yes) { choices = choices + 1 }
+    (error.found == yes) { choices = choices + 1 }
+    ((choices == 1) == no) { out invalid_request("response must contain exactly one of result or error") }
+
+    (result.found == yes) {
+        out Message {
+            kind = MessageKind.SUCCESS
+            id = id.value
+            has_id = yes
+            result = result.value
+        }
+    }
+    out decode_error_object(value, id, error)
+}
+
+skill decode_message(value) {
+    (value.kind == json.JsonKind.OBJECT) {
+        @version = json.get(value, "jsonrpc")
+        (version.found == no) { out invalid_request("message has no jsonrpc member") }
+        (json.string_equal(version.value, "2.0") == no) { out invalid_request("jsonrpc must be the string 2.0") }
+
+        @method = json.get(value, "method")
+        (method.found == yes) { out decode_request(value, method) }
+        out decode_response(value)
+    }
+    out invalid_request("JSON-RPC message must be an object")
+}
+
+skill decode(source) {
+    @parsed = json.parse(source)
+    (parsed.ok == no) {
+        out Packet {
+            messages = [parse_error(parsed.message)]
+            diagnostic = parsed.message
+        }
+    }
+
+    (parsed.value.kind == json.JsonKind.ARRAY) {
+        @messages = []
+        @count = core.group.count(parsed.value.items)
+        (count == 0) {
+            out Packet {
+                ok = yes
+                messages = [invalid_request("batch must not be empty")]
+            }
+        }
+        @index = 0
+        drum (count) {
+            (index < count) {
+                messages = core.group.add(messages, decode_message(core.group.item(parsed.value.items, index)))
+                index = index + 1
+            }
+        }
+        out Packet { ok = yes batch = yes messages = messages }
+    }
+
+    out Packet { ok = yes messages = [decode_message(parsed.value)] }
+}
+
+skill request_value(message) {
+    @members = [
+        json.field("jsonrpc", json.string("2.0")),
+        json.field_text(rpc_text("method"), json.string_text(message.method)),
+    ]
+    (message.has_params == yes) { members = core.group.add(members, json.field("params", message.params)) }
+    (message.has_id == yes) { members = core.group.add(members, json.field("id", message.id)) }
+    out json.object(members)
+}
+
+skill success_value(message) {
+    out json.object([
+        json.field("jsonrpc", json.string("2.0")),
+        json.field("result", message.result),
+        json.field("id", message.id),
+    ])
+}
+
+skill failure_value(message) {
+    @error_members = [
+        json.field("code", json.number_value(message.error_code)),
+        json.field_text(rpc_text("message"), json.string_text(message.error_message)),
+    ]
+    (message.has_error_data == yes) { error_members = core.group.add(error_members, json.field("data", message.error_data)) }
+    out json.object([
+        json.field("jsonrpc", json.string("2.0")),
+        json.field("error", json.object(error_members)),
+        json.field("id", message.id),
+    ])
+}
+
+skill message_value(message) {
+    (message.kind == MessageKind.REQUEST) { out request_value(message) }
+    (message.kind == MessageKind.NOTIFICATION) { out request_value(message) }
+    (message.kind == MessageKind.SUCCESS) { out success_value(message) }
+    (message.kind == MessageKind.FAILURE) { out failure_value(message) }
+    out failure_value(message)
+}
+
+skill encode(message) {
+    out json.encode(message_value(message))
+}
+
+skill encode_packet(packet) {
+    (packet.batch == yes) {
+        @items = []
+        @index = 0
+        @count = core.group.count(packet.messages)
+        drum (count) {
+            (index < count) {
+                items = core.group.add(items, message_value(core.group.item(packet.messages, index)))
+                index = index + 1
+            }
+        }
+        out json.encode(json.array(items))
+    }
+    (core.group.count(packet.messages) > 0) { out encode(core.group.item(packet.messages, 0)) }
+    out encode(invalid_request("packet contains no messages"))
+}
