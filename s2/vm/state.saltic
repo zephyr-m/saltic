@@ -351,14 +351,47 @@ skill memory_raw_load8(memory, address) {
 }
 
 skill memory_raw_store8(memory, address, value) {
-    @page = memory_page(memory, address / PAGE_SIZE, yes)
+    @page = memory_page(memory, address / PAGE_SIZE, no)
+    (page.present == no) {
+        (mod(value, 256) == 0) { out none }
+        page = memory_page(memory, address / PAGE_SIZE, yes)
+    }
     @cell = core.group.at(page.cells, mod(address, PAGE_SIZE))
     cell.value = mod(value, 256)
     out none
 }
 
+skill memory_fill_zero(memory, address, size) {
+    @end = address + size
+    @page_index = 0
+    @page_count = core.group.count(memory.pages)
+    drum (page_count) {
+        @page = core.group.at(memory.pages, page_index)
+        @page_address = page.index * PAGE_SIZE
+        @overlaps = yes
+        (page_address > end - 1) { overlaps = no }
+        (page_address + PAGE_SIZE < address + 1) { overlaps = no }
+        (overlaps == yes) {
+            @cell_index = 0
+            drum (PAGE_SIZE) {
+                @cell_address = page_address + cell_index
+                @inside = yes
+                (cell_address < address) { inside = no }
+                (cell_address > end - 1) { inside = no }
+                (inside == yes) {
+                    @cell = core.group.at(page.cells, cell_index)
+                    cell.value = 0
+                }
+                cell_index = cell_index + 1
+            }
+        }
+        page_index = page_index + 1
+    }
+    out none
+}
+
 skill trap(machine, reason, detail) {
-    @message = core.str.add(reason, " at 0x")
+    @message = core.str.add(reason, " по адресу 0x")
     message = core.str.add(message, number_hex(machine.pc))
     (core.str.len(detail) > 0) {
         message = core.str.add(message, ": ")
@@ -374,18 +407,18 @@ skill memory_check(machine, address, size, alignment, access) {
     (address < 0) { valid = no }
     (address > machine.memory.size - size) { valid = no }
     (valid == no) {
-        @detail = core.str.add("memory access 0x", number_hex(address))
+        @detail = core.str.add("обращение к памяти 0x", number_hex(address))
         detail = core.str.add(detail, "..0x")
         detail = core.str.add(detail, number_hex(address + size - 1))
-        detail = core.str.add(detail, " is outside RAM")
-        trap(machine, core.str.add(access, " access fault"), detail)
+        detail = core.str.add(detail, " выходит за пределы ОЗУ")
+        trap(machine, core.str.add("ошибка доступа: ", access), detail)
         out no
     }
     (mod(address, alignment) > 0) {
-        @detail = core.str.add("misaligned ", core.num.text(alignment))
-        detail = core.str.add(detail, "-byte access at 0x")
+        @detail = core.str.add("невыровненный доступ размером ", core.num.text(alignment))
+        detail = core.str.add(detail, " байт по адресу 0x")
         detail = core.str.add(detail, number_hex(address))
-        trap(machine, core.str.add(access, " access fault"), detail)
+        trap(machine, core.str.add("ошибка доступа: ", access), detail)
         out no
     }
     out yes

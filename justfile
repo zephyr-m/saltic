@@ -49,6 +49,14 @@ modules:
 json-rpc:
     bash tests/10-json-rpc.sh
 
+trace file="canonical.saltic":
+    mkdir -p .cache/build/tracer
+    nix-shell -p qemu pkgsCross.riscv32-embedded.buildPackages.gcc --run 'SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh {{file}} .cache/build/tracer/target.elf .cache/build/tracer/target.s && SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh s2/craft/tracer.saltic .cache/build/tracer/tracer.elf .cache/build/tracer/tracer.s && qemu-riscv32 -B 0x100000000 .cache/build/tracer/tracer.elf .cache/build/tracer/target.elf'
+
+trace-elf file:
+    mkdir -p .cache/build/tracer
+    nix-shell -p qemu pkgsCross.riscv32-embedded.buildPackages.gcc --run 'SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh s2/craft/tracer.saltic .cache/build/tracer/tracer.elf .cache/build/tracer/tracer.s && qemu-riscv32 -B 0x100000000 .cache/build/tracer/tracer.elf {{file}}'
+
 selfhost-parity:
     bash tests/6-selfhost-parity.sh
 
@@ -81,6 +89,7 @@ test:
     bash tests/7-fixed-types.sh
     bash tests/8-modules.sh
     bash tests/10-json-rpc.sh
+    bash tests/11-tracer.sh
     nix-shell -p qemu pkgsCross.riscv32-embedded.buildPackages.gcc --run 'bash tests/9-bootstrap.sh'
 
 verify: test

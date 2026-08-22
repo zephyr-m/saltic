@@ -41,16 +41,16 @@ function lex(source, path='<string>') {
         const x=source[i]
         if(x==='"'){i++;col++;closed=true;break}
         if(x==='\\'){
-          if(i+1>=source.length)fail('unterminated escape')
+          if(i+1>=source.length)fail('незавершённая escape-последовательность')
           const e=source[i+1];value+=({n:'\n',t:'\t','"':'"','\\':'\\'})[e]??e;i+=2;col+=2;continue
         }
         value+=x;i++;if(x==='\n'){line++;col=1}else col++
       }
-      if(!closed)fail('unterminated string',l,c);add('STRING',value,l,c);continue
+      if(!closed)fail('незавершённая строка',l,c);add('STRING',value,l,c);continue
     }
     const pair=source.slice(i,i+2)
     if(pair==='=='||pair==='=>'){add(pair==='=='?'EQ':'ARROW',pair);i+=2;col+=2;continue}
-    if(!signs[ch])fail(`unexpected character ${JSON.stringify(ch)}`)
+    if(!signs[ch])fail(`неожиданный символ ${JSON.stringify(ch)}`)
     add(signs[ch],ch);i++;col++
   }
   add('EOF',null);return list
@@ -61,9 +61,9 @@ class Parser {
   peek(n=0){return this.tokens[this.at+n]}
   is(kind,n=0){return this.peek(n).kind===kind}
   take(){return this.tokens[this.at++]}
-  error(message,t=this.peek()){throw Error(`parse: ${t.line}:${t.col}: ${message}, got ${t.kind}`)}
-  expect(kind,message=`expected ${kind}`){if(!this.is(kind))this.error(message);return this.take()}
-  ident(message='expected identifier'){return this.expect('IDENT',message).value}
+  error(message,t=this.peek()){throw Error(`разбор: ${t.line}:${t.col}: ${message}, получен ${t.kind}`)}
+  expect(kind,message=`ожидался ${kind}`){if(!this.is(kind))this.error(message);return this.take()}
+  ident(message='ожидался идентификатор'){return this.expect('IDENT',message).value}
   lines(){while(this.is('NEWLINE'))this.take()}
   parse(){const items=[];this.lines();while(!this.is('EOF')){items.push(this.top());this.lines()}return ['program',...items]}
   top(){
@@ -73,33 +73,33 @@ class Parser {
     if(this.is('IDENT')&&this.is('ASSIGN',1)&&this.is('BOX',2))return this.box()
     if(this.is('IDENT')&&this.is('ASSIGN',1)&&this.is('ENUM',2))return this.enum()
     if(this.is('IDENT'))return this.constant()
-    this.error('expected top-level declaration')
+    this.error('ожидалось объявление верхнего уровня')
   }
   use(){this.take();return ['use',...this.pathExpr().slice(1)]}
-  entry(){this.take();this.expect('LPAREN','expected ( after program');const p=this.params();this.expect('RPAREN');return ['entry',p,this.block()]}
-  skill(){this.take();const n=this.ident('expected skill name');this.expect('LPAREN');const p=this.params();this.expect('RPAREN');return ['skill',n,p,this.block()]}
-  params(){const p=[];if(this.is('RPAREN'))return p;while(true){p.push(this.ident('expected parameter name'));if(!this.is('COMMA'))return p;this.take()}}
+  entry(){this.take();this.expect('LPAREN','ожидалась ( после program');const p=this.params();this.expect('RPAREN');return ['entry',p,this.block()]}
+  skill(){this.take();const n=this.ident('ожидалось имя skill');this.expect('LPAREN');const p=this.params();this.expect('RPAREN');return ['skill',n,p,this.block()]}
+  params(){const p=[];if(this.is('RPAREN'))return p;while(true){p.push(this.ident('ожидалось имя параметра'));if(!this.is('COMMA'))return p;this.take()}}
   constant(){const n=this.ident();this.expect('ASSIGN');return ['const',n,this.expression()]}
   box(){const n=this.ident();this.expect('ASSIGN');this.expect('BOX');return ['box',n,...this.boxMembers()]}
   boxMembers(){
     this.expect('LBRACE');const a=[];this.lines()
     while(!this.is('RBRACE')){
-      if(this.is('EOF'))this.error('expected }')
+      if(this.is('EOF'))this.error('ожидалась }')
       if(this.is('SKILL'))a.push(this.subjectSkill())
-      else {const n=this.ident('expected field or skill');this.expect('ASSIGN','expected = after field name');a.push(['field',n,this.expression()])}
+      else {const n=this.ident('ожидалось поле или skill');this.expect('ASSIGN','ожидался = после имени поля');a.push(['field',n,this.expression()])}
       if(this.is('COMMA'))this.take();this.lines()
     }
     this.take();return a
   }
-  subjectSkill(){this.take();const n=this.ident('expected skill name');this.expect('LPAREN');const p=this.params();this.expect('RPAREN');return ['subject-skill',n,p,this.block()]}
+  subjectSkill(){this.take();const n=this.ident('ожидалось имя skill');this.expect('LPAREN');const p=this.params();this.expect('RPAREN');return ['subject-skill',n,p,this.block()]}
   enum(){
     const n=this.ident();this.expect('ASSIGN');this.expect('ENUM');this.expect('LBRACE');const v=[];this.lines()
-    while(!this.is('RBRACE')){v.push(this.ident('expected enum variant'));if(this.is('COMMA'))this.take();this.lines()}
+    while(!this.is('RBRACE')){v.push(this.ident('ожидался вариант enum'));if(this.is('COMMA'))this.take();this.lines()}
     this.take();return ['enum',n,...v]
   }
   block(){
     this.expect('LBRACE');const a=[];this.lines()
-    while(!this.is('RBRACE')){if(this.is('EOF'))this.error('expected }');a.push(this.statement());this.lines()}
+    while(!this.is('RBRACE')){if(this.is('EOF'))this.error('ожидалась }');a.push(this.statement());this.lines()}
     this.take();return ['block',...a]
   }
   statement(){
@@ -115,20 +115,20 @@ class Parser {
     return ['expr',this.expression()]
   }
   assignmentAhead(){let n=1;while(this.is('DOT',n)&&this.is('IDENT',n+1))n+=2;return this.is('ASSIGN',n)}
-  variable(){this.take();const n=this.ident('expected variable name');this.expect('ASSIGN','expected = after variable name');return ['var',n,this.expression()]}
-  drum(){this.take();this.expect('LPAREN','expected ( after drum');const n=this.expression();this.expect('RPAREN');return ['drum',n,this.block()]}
+  variable(){this.take();const n=this.ident('ожидалось имя переменной');this.expect('ASSIGN','ожидался = после имени переменной');return ['var',n,this.expression()]}
+  drum(){this.take();this.expect('LPAREN','ожидалась ( после drum');const n=this.expression();this.expect('RPAREN');return ['drum',n,this.block()]}
   parenBlock(){
     const start=this.take();const value=this.expression();this.expect('RPAREN');this.expect('LBRACE');this.lines()
     if(this.is('DOT'))return this.switch(value)
     const a=[];while(!this.is('RBRACE')){a.push(this.statement());this.lines()}this.take();return ['if',value,locate(['block',...a],start)]
   }
   switch(value){
-    const a=[];while(!this.is('RBRACE')){const start=this.peek();this.expect('DOT');const tag=this.ident('expected switch case tag');this.expect('ARROW');a.push(locate(['case',tag,this.expression()],start));if(this.is('COMMA'))this.take();this.lines()}
+    const a=[];while(!this.is('RBRACE')){const start=this.peek();this.expect('DOT');const tag=this.ident('ожидалась метка ветки выбора');this.expect('ARROW');a.push(locate(['case',tag,this.expression()],start));if(this.is('COMMA'))this.take();this.lines()}
     this.take();return ['switch',value,...a]
   }
   expression(){
     let value=this.binary(0)
-    if(this.is('RESCUE')){const start=this.take();this.expect('PIPE');const err=this.ident('expected rescue error name');this.expect('PIPE');value=locate(['rescue',value,err,this.block()],start)}
+    if(this.is('RESCUE')){const start=this.take();this.expect('PIPE');const err=this.ident('ожидалось имя ошибки rescue');this.expect('PIPE');value=locate(['rescue',value,err,this.block()],start)}
     return value
   }
   binary(min){
@@ -145,7 +145,7 @@ class Parser {
   }
   fields(){
     this.expect('LBRACE');const a=[];this.lines()
-    while(!this.is('RBRACE')){if(this.is('EOF'))this.error('expected }');const n=this.ident('expected field name');this.expect('ASSIGN','expected = after field name');a.push(['field',n,this.expression()]);if(this.is('COMMA'))this.take();this.lines()}
+    while(!this.is('RBRACE')){if(this.is('EOF'))this.error('ожидалась }');const n=this.ident('ожидалось имя поля');this.expect('ASSIGN','ожидался = после имени поля');a.push(['field',n,this.expression()]);if(this.is('COMMA'))this.take();this.lines()}
     this.take();return a
   }
   args(){
@@ -162,14 +162,14 @@ class Parser {
     if(this.is('YES')){this.take();return ['answer','yes']}
     if(this.is('NO')){this.take();return ['answer','no']}
     if(this.is('NONE')){this.take();return ['none']}
-    if(this.is('DOT')){this.take();return ['enum-value',this.ident('expected enum value')]}
+    if(this.is('DOT')){this.take();return ['enum-value',this.ident('ожидалось значение enum')]}
     if(this.is('LBRACKET'))return this.group()
     if(this.is('IDENT'))return this.pathExpr()
     if(this.is('LPAREN')){this.take();const v=this.expression();this.expect('RPAREN');return v}
-    this.error('expected expression')
+    this.error('ожидалось выражение')
   }
   group(){
-    this.take();const a=[];this.lines();while(!this.is('RBRACKET')){if(this.is('EOF'))this.error('expected ]');a.push(this.expression());if(this.is('COMMA'))this.take();this.lines()}this.take();return ['group',...a]
+    this.take();const a=[];this.lines();while(!this.is('RBRACKET')){if(this.is('EOF'))this.error('ожидалась ]');a.push(this.expression());if(this.is('COMMA'))this.take();this.lines()}this.take();return ['group',...a]
   }
   pathExpr(){const a=[this.ident()];while(this.is('DOT')&&this.is('IDENT',1)){this.take();a.push(this.ident())}return ['path',...a]}
 }
@@ -212,7 +212,7 @@ const coreFiles = ['file.saltic','json.saltic','str.saltic','num.saltic','group.
 function modulePath(sourcePath, parts, root) {
   const relative = pathTools.join(...parts.slice(0,-1), `${parts.at(-1)}.saltic`)
   const result = pathTools.resolve(['s','s2'].includes(parts[0]) ? root : pathTools.dirname(sourcePath), relative)
-  if (!fs.existsSync(result)) throw Error(`modules: module '${parts.join('.')}' not found at ${result}`)
+  if (!fs.existsSync(result)) throw Error(`модули: модуль '${parts.join('.')}' не найден: ${result}`)
   return result
 }
 
@@ -223,7 +223,7 @@ function loadFile(path, options={}) {
   const included = new Set()
   function expand(file, stack=[], module=[]) {
     const normalized = pathTools.resolve(file)
-    if (stack.includes(normalized)) throw Error(`modules: cyclic import involving ${normalized}`)
+    if (stack.includes(normalized)) throw Error(`модули: циклический импорт: ${normalized}`)
     if (included.has(normalized)) return []
     included.add(normalized)
     const ast = parseFile(normalized)
@@ -253,6 +253,6 @@ function parseFile(path){return parseString(fs.readFileSync(path,'utf8'),path)}
 module.exports={lex,parseString,parseFile,astWithLocations,moduleOf,loadFile}
 
 if(require.main===module){
-  if(process.argv.length!==3){console.error('usage: node js/1-parser.js <file.saltic>');process.exit(2)}
+  if(process.argv.length!==3){console.error('использование: node js/1-parser.js <файл.saltic>');process.exit(2)}
   try{console.log(JSON.stringify(parseFile(process.argv[2]),null,2))}catch(error){console.error(error.message);process.exit(1)}
 }

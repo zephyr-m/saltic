@@ -1,0 +1,221 @@
+use core
+use s2.protocols.data.json
+use s2.protocols.data.json.text
+use s2.protocols.data.json.value
+use s2.protocols.data.json.number
+
+skill failure(index, message) {
+    out json.Parse { index = index message = message }
+}
+
+skill skip_space(source, start) {
+    @index = start
+    @length = core.str.len(source)
+    @active = yes
+    drum (length + 1) {
+        (active == yes) {
+            (index < length) {
+                @ch = core.str.at(source, index)
+                @space = no
+                (ch == " ") { space = yes }
+                (ch == "\n") { space = yes }
+                (ch == "\r") { space = yes }
+                (ch == "\t") { space = yes }
+                (space == yes) { index = index + 1 }
+                (space == no) { active = no }
+            }
+            (index == length) { active = no }
+        }
+    }
+    out index
+}
+
+skill starts_at(source, needle, index) {
+    @end = index + core.str.len(needle)
+    (end > core.str.len(source)) { out no }
+    out core.str.slice(source, index, end) == needle
+}
+
+skill hex_value(ch) {
+    @lower = core.str.lower(ch)
+    @index = 0
+    drum (16) {
+        (index < 16) {
+            (core.str.at(json.HEX, index) == lower) { out index }
+            index = index + 1
+        }
+    }
+    out 0 - 1
+}
+
+skill read_hex4(source, index) {
+    (index + 4 > core.str.len(source)) { out json.CodepointRead { index = index message = "неполная escape-последовательность Unicode" } }
+    @unit = 0
+    @cursor = index
+    drum (4) {
+        @digit = hex_value(core.str.at(source, cursor))
+        (digit < 0) { out json.CodepointRead { index = cursor message = "некорректная шестнадцатеричная цифра в escape-последовательности Unicode" } }
+        unit = unit * 16 + digit
+        cursor = cursor + 1
+    }
+    out json.CodepointRead { ok = yes value = unit index = cursor }
+}
+
+skill parse_text_at(source, start) {
+    @length = core.str.len(source)
+    (start > length - 1) { out text.read_failure(start, "ожидалась строка JSON") }
+    (core.str.at(source, start) == "\"") {
+        @subject = json.Text {}
+        @index = start + 1
+        @active = yes
+        drum (length + 1) {
+            (active == yes) {
+                (index == length) { out text.read_failure(index, "незавершённая строка JSON") }
+                @byte = core.str.byte(source, index)
+                (byte == 34) { out json.TextRead { ok = yes text = subject index = index + 1 } }
+                (byte < 32) { out text.read_failure(index, "неэкранированный управляющий символ в строке JSON") }
+                (byte == 92) {
+                    (index + 1 == length) { out text.read_failure(index, "незавершённая escape-последовательность JSON") }
+                    @escape = core.str.at(source, index + 1)
+                    @handled = yes
+                    (escape == "\"") { subject = text.add(subject, 34) index = index + 2 }
+                    (escape == "\\") { subject = text.add(subject, 92) index = index + 2 }
+                    (escape == "/") { subject = text.add(subject, 47) index = index + 2 }
+                    (escape == "b") { subject = text.add(subject, 8) index = index + 2 }
+                    (escape == "f") { subject = text.add(subject, 12) index = index + 2 }
+                    (escape == "n") { subject = text.add(subject, 10) index = index + 2 }
+                    (escape == "r") { subject = text.add(subject, 13) index = index + 2 }
+                    (escape == "t") { subject = text.add(subject, 9) index = index + 2 }
+                    (escape == "u") {
+                        @read = read_hex4(source, index + 2)
+                        (read.ok == no) { out text.read_failure(read.index, read.message) }
+                        @codepoint = read.value
+                        @next = read.index
+                        (codepoint > 55295) {
+                            (codepoint < 56320) {
+                                (starts_at(source, "\\u", next) == no) { out text.read_failure(next, "после старшего суррогата отсутствует младший") }
+                                @low = read_hex4(source, next + 2)
+                                (low.ok == no) { out text.read_failure(low.index, low.message) }
+                                (low.value < 56320) { out text.read_failure(next, "после старшего суррогата отсутствует младший") }
+                                (low.value > 57343) { out text.read_failure(next, "после старшего суррогата отсутствует младший") }
+                                codepoint = 65536 + (codepoint - 55296) * 1024 + low.value - 56320
+                                next = low.index
+                            }
+                        }
+                        (codepoint > 56319) {
+                            (codepoint < 57344) { out text.read_failure(index, "одиночный младший суррогат в строке JSON") }
+                        }
+                        subject = text.add(subject, codepoint)
+                        index = next
+                    }
+                    (escape == "\"") { handled = no }
+                    (escape == "\\") { handled = no }
+                    (escape == "/") { handled = no }
+                    (escape == "b") { handled = no }
+                    (escape == "f") { handled = no }
+                    (escape == "n") { handled = no }
+                    (escape == "r") { handled = no }
+                    (escape == "t") { handled = no }
+                    (escape == "u") { handled = no }
+                    (handled == yes) { out text.read_failure(index, "неизвестная escape-последовательность JSON") }
+                }
+                (byte == 92) { byte = 0 }
+                (byte > 0) {
+                    @read = text.read_utf8(source, index)
+                    (read.ok == no) { out text.read_failure(read.index, read.message) }
+                    subject = text.add(subject, read.value)
+                    index = read.index
+                }
+            }
+        }
+    }
+    out text.read_failure(start, "ожидалась строка JSON")
+}
+
+skill parse_array_at(source, start) {
+    @items = []
+    @index = skip_space(source, start + 1)
+    @length = core.str.len(source)
+    (index == length) { out failure(index, "незавершённый массив JSON") }
+    (core.str.at(source, index) == "]") { out json.Parse { ok = yes value = value.array(items) index = index + 1 } }
+
+    @active = yes
+    drum (length + 1) {
+        (active == yes) {
+            @item = parse_value_at(source, index)
+            (item.ok == no) { out item }
+            items = core.group.add(items, item.value)
+            index = skip_space(source, item.index)
+            (index == length) { out failure(index, "незавершённый массив JSON") }
+            @ch = core.str.at(source, index)
+            (ch == "]") { out json.Parse { ok = yes value = value.array(items) index = index + 1 } }
+            (ch == ",") { index = skip_space(source, index + 1) }
+            (ch == ",") { ch = "" }
+            (core.str.len(ch) > 0) { out failure(index, "ожидалась запятая или закрывающая скобка") }
+            (index == length) { out failure(index, "незавершённый массив JSON") }
+        }
+    }
+    out failure(index, "незавершённый массив JSON")
+}
+
+skill parse_object_at(source, start) {
+    @members = []
+    @index = skip_space(source, start + 1)
+    @length = core.str.len(source)
+    (index == length) { out failure(index, "незавершённый объект JSON") }
+    (core.str.at(source, index) == "}") { out json.Parse { ok = yes value = value.object(members) index = index + 1 } }
+
+    @active = yes
+    drum (length + 1) {
+        (active == yes) {
+            @name = parse_text_at(source, index)
+            (name.ok == no) { out failure(name.index, name.message) }
+            index = skip_space(source, name.index)
+            (index == length) { out failure(index, "незавершённый объект JSON") }
+            @separator = core.str.at(source, index)
+            (separator == ":") { index = skip_space(source, index + 1) separator = "" }
+            (core.str.len(separator) > 0) { out failure(index, "после имени поля объекта ожидалось двоеточие") }
+            @item = parse_value_at(source, index)
+            (item.ok == no) { out item }
+            members = core.group.add(members, value.field_text(name.text, item.value))
+            index = skip_space(source, item.index)
+            (index == length) { out failure(index, "незавершённый объект JSON") }
+            @ch = core.str.at(source, index)
+            (ch == "}") { out json.Parse { ok = yes value = value.object(members) index = index + 1 } }
+            (ch == ",") { index = skip_space(source, index + 1) }
+            (ch == ",") { ch = "" }
+            (core.str.len(ch) > 0) { out failure(index, "ожидалась запятая или закрывающая фигурная скобка") }
+            (index == length) { out failure(index, "незавершённый объект JSON") }
+        }
+    }
+    out failure(index, "незавершённый объект JSON")
+}
+
+skill parse_value_at(source, start) {
+    @index = skip_space(source, start)
+    @length = core.str.len(source)
+    (index == length) { out failure(index, "ожидалось значение JSON") }
+    @ch = core.str.at(source, index)
+
+    (ch == "\"") {
+        @read = parse_text_at(source, index)
+        (read.ok == yes) { out json.Parse { ok = yes value = value.string_text(read.text) index = read.index } }
+        out failure(read.index, read.message)
+    }
+    (ch == "[") { out parse_array_at(source, index) }
+    (ch == "{") { out parse_object_at(source, index) }
+    (starts_at(source, "true", index) == yes) { out json.Parse { ok = yes value = value.answer_value(yes) index = index + 4 } }
+    (starts_at(source, "false", index) == yes) { out json.Parse { ok = yes value = value.answer_value(no) index = index + 5 } }
+    (starts_at(source, "null", index) == yes) { out json.Parse { ok = yes value = value.null_value() index = index + 4 } }
+    (ch == "-") { out number.parse_at(source, index) }
+    (number.is_digit(ch) == yes) { out number.parse_at(source, index) }
+    out failure(index, "неожиданный символ при чтении значения JSON")
+}
+
+skill parse(source) {
+    @parsed = parse_value_at(source, 0)
+    (parsed.ok == no) { out parsed }
+    @index = skip_space(source, parsed.index)
+    (index == core.str.len(source)) { out json.Parse { ok = yes value = parsed.value index = index } }
+    out failure(index, "неожиданные данные после значения JSON")
+}

@@ -97,7 +97,7 @@ class Compiler {
       }
       if (item[0] === 'entry' && (parser.moduleOf(item)?.length ?? 0) === 0) this.entry = item
     }
-    if (!this.entry) throw new Error('compile: program() is missing')
+    if (!this.entry) throw new Error('компиляция: отсутствует program()')
   }
 
   resolve(symbols, name, module = this.function?.module ?? []) {
@@ -220,7 +220,7 @@ class Compiler {
       for (const item of node.slice(2)) {
         const next = this.label('case_next')
         const value = this.variants.get(item[1])
-        if (value === undefined) throw new Error(`compile: unknown enum variant .${item[1]}`)
+        if (value === undefined) throw new Error(`компиляция: неизвестный вариант enum .${item[1]}`)
         this.loadImmediate('t0', value)
         this.emit(`  bne t2, t0, ${next}`)
         this.compileExpression(item[2])
@@ -239,7 +239,7 @@ class Compiler {
       this.emit(`  j ${start}`, `${end}:`)
       return
     }
-    throw new Error(`compile: unsupported statement ${tag}`)
+    throw new Error(`компиляция: неподдерживаемая инструкция ${tag}`)
   }
 
   compileExpression(node) {
@@ -256,10 +256,10 @@ class Compiler {
     if (tag === 'rescue') return this.compileRescue(node)
     if (tag === 'enum-value') {
       const value = this.variants.get(node[1])
-      if (value === undefined) throw new Error(`compile: unknown enum variant .${node[1]}`)
+      if (value === undefined) throw new Error(`компиляция: неизвестный вариант enum .${node[1]}`)
       return this.loadImmediate('a0', value)
     }
-    throw new Error(`compile: unsupported expression ${tag}`)
+    throw new Error(`компиляция: неподдерживаемое выражение ${tag}`)
   }
 
   compilePath(parts) {
@@ -288,7 +288,7 @@ class Compiler {
       this.pop('a0')
       this.emit('  call rt_box_get')
     }
-    else throw new Error(`compile: unknown value ${name}`)
+    else throw new Error(`компиляция: неизвестное значение ${name}`)
     for (const field of parts.slice(consumed)) {
       this.push('a0')
       this.loadImmediate('a1', this.field(field))
@@ -310,11 +310,11 @@ class Compiler {
   }
 
   compileCall(callee, args) {
-    if (callee[0] !== 'path') throw new Error('compile: callable expression must be a path')
+    if (callee[0] !== 'path') throw new Error('компиляция: вызываемое выражение должно быть путём')
     const name = callee.slice(1).join('.')
     if (name === 'core.io.show') return this.compileShow(args)
     if (FIXED_TYPES.has(name)) {
-      if (args.length !== 1) throw new Error(`compile: ${name} expects one argument`)
+      if (args.length !== 1) throw new Error(`компиляция: ${name} ожидает один аргумент`)
       const value = constantInteger(args[0])
       if (value !== null) this.emit(`  li a0, ${value}`)
       else {
@@ -353,7 +353,7 @@ class Compiler {
     }
     const box = this.resolve(this.boxes, name)
     if (box) {
-      if (args.length) throw new Error(`compile: ${name}() expects no arguments`)
+      if (args.length) throw new Error(`компиляция: ${name}() не ожидает аргументов`)
       return this.compileBox(box, [])
     }
     if (callee.length === 3) {
@@ -398,7 +398,7 @@ class Compiler {
     }
     const skill = this.resolve(this.skills, name)
     const target = intrinsics[name] || (skill ? `saltic_${safe(skill)}` : null)
-    if (!target) throw new Error(`compile: unsupported call ${name}`)
+    if (!target) throw new Error(`компиляция: неподдерживаемый вызов ${name}`)
     this.compileArguments(args)
     this.emit(`  call ${target}`)
   }
@@ -438,7 +438,7 @@ class Compiler {
   }
 
   compileArguments(args) {
-    if (args.length > 8) throw new Error('compile: at most 8 arguments are supported')
+    if (args.length > 8) throw new Error('компиляция: поддерживается не более 8 аргументов')
     for (const argument of args) {
       this.compileExpression(argument)
       this.push('a0')
@@ -470,7 +470,7 @@ class Compiler {
 
   compileBox(name, overrides) {
     const model = this.boxes.get(name)
-    if (!model) throw new Error(`compile: unknown Box ${name}`)
+    if (!model) throw new Error(`компиляция: неизвестный Box ${name}`)
     const values = new Map(overrides.map(field => [field[1], field[2]]))
     for (const field of model) {
       const override = values.get(field[1])
@@ -510,13 +510,13 @@ class Compiler {
 
   field(name) {
     const value = this.fields.get(name)
-    if (value === undefined) throw new Error(`compile: unknown field ${name}`)
+    if (value === undefined) throw new Error(`компиляция: неизвестное поле ${name}`)
     return value
   }
 
   slot(name) {
     const value = this.function.slots.get(name)
-    if (value === undefined) throw new Error(`compile: unknown local ${name}`)
+    if (value === undefined) throw new Error(`компиляция: неизвестная локальная переменная ${name}`)
     return value
   }
 
@@ -548,7 +548,7 @@ function collectLocals(params, body) {
 }
 
 function encodeNumber(value) {
-  if (!Number.isInteger(value) || value < -268435456 || value > 268435455) throw new Error(`compile: number ${value} is outside tagged RV32I range`)
+  if (!Number.isInteger(value) || value < -268435456 || value > 268435455) throw new Error(`компиляция: число ${value} выходит за тегированный диапазон RV32I`)
   return (value << 3) | TAG.number
 }
 
@@ -1535,7 +1535,8 @@ rt_show:
   addi sp, sp, 16
   jalr zero, 0(ra)
 .L_show_answer:
-  beq a0, zero, .L_show_no
+  addi t0, zero, 1
+  beq a0, t0, .L_show_no
   la a0, rt_yes_text
   ori a0, a0, ${TAG.string}
   j .L_show_string
@@ -1841,8 +1842,8 @@ function compileFile(source, output, options = {}) {
   const args = ['-march=rv32i', '-mabi=ilp32', '-mno-relax', '-nostdlib', '-Wl,--no-relax,-Ttext=0x10000,-e,_start', input, '-o', output]
   const result = child.spawnSync(command, args, { encoding: 'utf8' })
   fs.rmSync(folder, { recursive: true, force: true })
-  if (result.error) throw new Error(`compile: cannot run ${command}: ${result.error.message}`)
-  if (result.status !== 0) throw new Error(result.stderr.trim() || `${command} failed with status ${result.status}`)
+  if (result.error) throw new Error(`компиляция: не удалось запустить ${command}: ${result.error.message}`)
+  if (result.status !== 0) throw new Error(result.stderr.trim() || `${command} завершился с состоянием ${result.status}`)
   return { output, assembly }
 }
 
@@ -1853,7 +1854,7 @@ if (require.main === module) {
   let assembly = null
   if (args[0] === '--assembly') assembly = args.shift() && args.shift()
   if (args.length !== 2) {
-    console.error('usage: node js/3-compiler.js [--assembly output.s] <input.saltic> <output.elf>')
+    console.error('использование: node js/3-compiler.js [--assembly выход.s] <вход.saltic> <выход.elf>')
     process.exit(2)
   }
   try {

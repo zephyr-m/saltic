@@ -1,0 +1,124 @@
+use core
+use s2.vm.state
+use s2.vm.loader
+use s2.vm.cpu
+use s2.craft.tracer.model
+use s2.craft.tracer.elf
+use s2.craft.tracer.instruction
+use s2.craft.tracer.filter
+use s2.craft.tracer.value
+use s2.craft.tracer.render
+
+skill frame_set(frames, index, frame) {
+    (index < core.group.count(frames)) {
+        @target = core.group.at(frames, index)
+        target.name = frame.name
+        target.visible = frame.visible
+        out frames
+    }
+    out core.group.add(frames, frame)
+}
+
+skill result(machine, ok, completed, limited, events, diagnostic) {
+    out model.Result {
+        ok = ok
+        completed = completed
+        limited = limited
+        events = events
+        steps = machine.steps
+        exit_code = machine.exit_code
+        reason = machine.halt_reason
+        diagnostic = diagnostic
+    }
+}
+
+skill stopped(machine, events) {
+    (core.str.len(machine.trap) > 0) {
+        out result(machine, no, no, no, events, machine.trap)
+    }
+    out result(machine, yes, yes, no, events, "")
+}
+
+skill event_limit(machine, events, limit) {
+    @message = core.str.add("достигнут лимит событий: ", core.num.text(limit))
+    out result(machine, no, no, yes, events, message)
+}
+
+skill step_limit(machine, events, limit) {
+    @message = core.str.add("исчерпан лимит инструкций: ", core.num.text(limit))
+    out result(machine, no, no, yes, events, message)
+}
+
+skill run(source, table, options) {
+    @vm_options = state.Options {
+        memory_size = options.memory_size
+        step_limit = options.step_limit
+        program_name = options.program_name
+        arguments = options.arguments
+        files = options.files
+    }
+    @machine = state.new_machine(vm_options)
+    loader.load(machine, source.chunks, vm_options.load_address)
+    (core.str.len(machine.trap) > 0) { out stopped(machine, 0) }
+    loader.prepare_stack(machine, vm_options)
+
+    @frames = []
+    @frame_count = 0
+    @visible_depth = 0
+    @events = 0
+    @iteration = 0
+    drum (options.step_limit) {
+        (machine.halted == yes) { out stopped(machine, events) }
+
+        @decoded = cpu.decode(state.memory_load_word(machine.memory, machine.pc))
+        (instruction.is_call(decoded) == yes) {
+            @target_address = instruction.call_target(machine, decoded)
+            @symbol = elf.find(table, target_address)
+            @visible = filter.include(symbol, options)
+            (visible == yes) {
+                (events == options.event_limit) { out event_limit(machine, events, options.event_limit) }
+                @values = []
+                (options.show_registers == yes) { values = value.registers(machine) }
+                render.event(model.Event {
+                    kind = model.EventKind.CALL
+                    sequence = events + 1
+                    depth = visible_depth
+                    name = filter.display_name(symbol)
+                    pc = state.number_hex(machine.pc)
+                    values = values
+                })
+                events = events + 1
+                visible_depth = visible_depth + 1
+            }
+            frames = frame_set(frames, frame_count, model.Frame {
+                name = filter.display_name(symbol)
+                visible = visible
+            })
+            frame_count = frame_count + 1
+        }
+
+        (instruction.is_return(decoded) == yes) {
+            (frame_count > 0) {
+                @frame = core.group.at(frames, frame_count - 1)
+                frame_count = frame_count - 1
+                (frame.visible == yes) {
+                    (events == options.event_limit) { out event_limit(machine, events, options.event_limit) }
+                    visible_depth = visible_depth - 1
+                    render.event(model.Event {
+                        kind = model.EventKind.RETURN
+                        sequence = events + 1
+                        depth = visible_depth
+                        name = frame.name
+                        pc = state.number_hex(machine.pc)
+                        result = value.render(machine, state.register(machine, 10))
+                    })
+                    events = events + 1
+                }
+            }
+        }
+
+        cpu.step(machine)
+        iteration = iteration + 1
+    }
+    out step_limit(machine, events, options.step_limit)
+}

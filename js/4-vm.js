@@ -21,7 +21,7 @@ const DEFAULT_STEP_LIMIT = 100_000_000
 
 class Trap extends Error {
   constructor(reason, pc, detail = '') {
-    super(`${reason} at 0x${hex(pc)}${detail ? `: ${detail}` : ''}`)
+    super(`${reason} по адресу 0x${hex(pc)}${detail ? `: ${detail}` : ''}`)
     this.name = 'Trap'
     this.reason = reason
     this.pc = pc >>> 0
@@ -36,7 +36,7 @@ class Memory {
   check(address, size = 1) {
     address >>>= 0
     if (address > this.bytes.length - size) {
-      throw new RangeError(`memory access 0x${hex(address)}..0x${hex(address + size - 1)} is outside RAM`)
+      throw new RangeError(`обращение к памяти 0x${hex(address)}..0x${hex(address + size - 1)} выходит за пределы ОЗУ`)
     }
     return address
   }
@@ -88,7 +88,7 @@ class Memory {
 
   checkAligned(address, alignment) {
     address = this.check(address, alignment)
-    if (address % alignment !== 0) throw new RangeError(`misaligned ${alignment}-byte access at 0x${hex(address)}`)
+    if (address % alignment !== 0) throw new RangeError(`невыровненный доступ размером ${alignment} байт по адресу 0x${hex(address)}`)
     return address
   }
 
@@ -96,7 +96,7 @@ class Memory {
     const start = this.check(address)
     let end = start
     while (end < this.bytes.length && end - start < limit && this.bytes[end] !== 0) end++
-    if (end === this.bytes.length || end - start === limit) throw new RangeError('unterminated guest string')
+    if (end === this.bytes.length || end - start === limit) throw new RangeError('незавершённая строка гостевой программы')
     return Buffer.from(this.bytes.subarray(start, end)).toString('utf8')
   }
 }
@@ -144,7 +144,7 @@ class Host {
         machine.haltPc = machine.pc
         return 0
       default:
-        throw new Trap('unsupported ecall', machine.pc, `number ${number}`)
+        throw new Trap('неподдерживаемый ecall', machine.pc, `номер ${number}`)
     }
   }
 
@@ -152,7 +152,7 @@ class Host {
     const name = machine.memory.readString(address)
     const target = path.resolve(this.root, name)
     if (target !== this.root && !target.startsWith(`${this.root}${path.sep}`)) {
-      throw new Error(`path escapes VM root: ${name}`)
+      throw new Error(`путь выходит за корень VM: ${name}`)
     }
     return target
   }
@@ -180,12 +180,12 @@ class Host {
 
   seek(guestFd, offset, whence) {
     const file = this.file(guestFd)
-    if (file.position === null) throw new Error('file is not seekable')
+    if (file.position === null) throw new Error('файл не поддерживает позиционирование')
     if (whence === 0) file.position = offset
     else if (whence === 1) file.position += offset
     else if (whence === 2) file.position = fs.fstatSync(file.fd).size + offset
-    else throw new Error(`invalid whence ${whence}`)
-    if (file.position < 0) throw new Error('negative file position')
+    else throw new Error(`некорректная точка отсчёта ${whence}`)
+    if (file.position < 0) throw new Error('отрицательная позиция в файле')
     return file.position
   }
 
@@ -209,7 +209,7 @@ class Host {
 
   file(guestFd) {
     const file = this.files.get(guestFd)
-    if (!file) throw new Error(`bad file descriptor ${guestFd}`)
+    if (!file) throw new Error(`некорректный файловый дескриптор ${guestFd}`)
     return file
   }
 
@@ -281,13 +281,13 @@ class Machine {
 
   step() {
     if (this.halted) return
-    if (this.pc & 3) throw new Trap('instruction address misaligned', this.pc)
+    if (this.pc & 3) throw new Trap('невыровненный адрес инструкции', this.pc)
 
     let instruction
     try {
       instruction = this.memory.load32(this.pc)
     } catch (error) {
-      throw new Trap('instruction access fault', this.pc, error.message)
+      throw new Trap('ошибка доступа: инструкция', this.pc, error.message)
     }
 
     const currentPc = this.pc
@@ -299,7 +299,7 @@ class Machine {
     const funct7 = instruction >>> 25
     let nextPc = (currentPc + 4) >>> 0
 
-    const illegal = detail => { throw new Trap('illegal instruction', currentPc, detail || `0x${hex(instruction)}`) }
+    const illegal = detail => { throw new Trap('недопустимая инструкция', currentPc, detail || `0x${hex(instruction)}`) }
     const address = immediate => (this.reg(rs1) + immediate) >>> 0
     const load = (size, signed) => {
       try {
@@ -308,7 +308,7 @@ class Machine {
             : this.memory.load32(address(immI(instruction)))
         return signed ? signExtend(value, size * 8) : value >>> 0
       } catch (error) {
-        throw new Trap('load access fault', currentPc, error.message)
+        throw new Trap('ошибка доступа: чтение', currentPc, error.message)
       }
     }
     const store = (size, value) => {
@@ -318,7 +318,7 @@ class Machine {
         else if (size === 2) this.memory.store16(target, value)
         else this.memory.store32(target, value)
       } catch (error) {
-        throw new Trap('store access fault', currentPc, error.message)
+        throw new Trap('ошибка доступа: запись', currentPc, error.message)
       }
     }
 
@@ -440,7 +440,7 @@ class Machine {
       } else {
         while (!this.halted && this.steps < limit) this.step()
       }
-      if (!this.halted) throw new Trap('step limit reached', this.pc, `${limit} instructions`)
+      if (!this.halted) throw new Trap('исчерпан лимит инструкций', this.pc, `${limit} инструкций`)
       return this.result()
     } finally {
       if (options.keepFiles !== true) this.host.dispose()
@@ -494,10 +494,10 @@ function loadFlat(image, memory, address) {
 }
 
 function loadElf(image, memory) {
-  if (image.length < 52) throw new Error('ELF header is truncated')
-  if (image[4] !== 1) throw new Error('only ELF32 is supported')
-  if (image[5] !== 1) throw new Error('only little-endian ELF is supported')
-  if (image.readUInt16LE(18) !== 243) throw new Error('ELF machine is not RISC-V')
+  if (image.length < 52) throw new Error('заголовок ELF обрезан')
+  if (image[4] !== 1) throw new Error('поддерживается только ELF32')
+  if (image[5] !== 1) throw new Error('поддерживается только little-endian ELF')
+  if (image.readUInt16LE(18) !== 243) throw new Error('архитектура ELF отличается от RISC-V')
 
   const entry = image.readUInt32LE(24)
   const table = image.readUInt32LE(28)
@@ -507,19 +507,19 @@ function loadElf(image, memory) {
 
   for (let index = 0; index < count; index++) {
     const header = table + index * entrySize
-    if (header + 32 > image.length) throw new Error('ELF program header is truncated')
+    if (header + 32 > image.length) throw new Error('заголовок программы ELF обрезан')
     if (image.readUInt32LE(header) !== 1) continue
     const offset = image.readUInt32LE(header + 4)
     const virtualAddress = image.readUInt32LE(header + 8)
     const fileSize = image.readUInt32LE(header + 16)
     const memorySize = image.readUInt32LE(header + 20)
-    if (fileSize > memorySize || offset + fileSize > image.length) throw new Error('invalid ELF load segment')
+    if (fileSize > memorySize || offset + fileSize > image.length) throw new Error('некорректный загрузочный сегмент ELF')
     memory.copy(virtualAddress, image.subarray(offset, offset + fileSize))
     if (memorySize > fileSize) memory.fill(virtualAddress + fileSize, memorySize - fileSize)
     segments++
   }
 
-  if (segments === 0) throw new Error('ELF contains no loadable segments')
+  if (segments === 0) throw new Error('ELF не содержит загрузочных сегментов')
   return { format: 'elf', entry, segments }
 }
 
@@ -598,7 +598,7 @@ function parseCli(args) {
     else if (!file) file = arg
     else options.args.push(arg)
   }
-  if (!file) throw new Error('usage: node js/4-vm.js <program.elf|program.bin> [--root folder] [--steps count] [--progress] [-- args...]')
+  if (!file) throw new Error('использование: node js/4-vm.js <программа.elf|программа.bin> [--root папка] [--steps число] [--progress] [-- аргументы...]')
   return { file, options }
 }
 
