@@ -1,28 +1,22 @@
-# S Language VS Code Extension
+# Saltic для Visual Studio Code
 
-This extension adds early editor support for S:
+Расширение добавляет базовый визуальный слой Saltic:
 
-- `.saltic` language registration;
-- TextMate syntax highlighting;
-- bracket auto-closing;
-- language and file icons.
+- распознавание файлов `.saltic`;
+- подсветку актуального синтаксиса через TextMate;
+- комментарии, парные скобки и автоматические отступы;
+- иконку языка и файловую тему Saltic Icons.
 
-## Run Locally
+## Локальная проверка
 
-Open this directory in VS Code:
+Открой каталог расширения в VS Code:
 
 ```bash
 code editors/vscode-s
 ```
 
-Then press `F5` and open `examples/qemu-hello.saltic` from the Extension Development Host window.
+Нажми `F5`, затем открой `examples/qemu-hello.saltic` в окне Extension Development Host.
 
-## Current Scope
+## Граница
 
-Highlighting tracks the current `v0.1` language draft:
-
-- `skill`, `out`, `drum`, `stop`, `rescue`, `try`, `use`;
-- `enum`, `union`, `Box`;
-- constants, variables, enum values;
-- strings, numbers, paths, operators;
-- draft `@note { ... }` blocks.
+Это лексическая подсветка. Диагностика, переход к определению и автодополнение появятся вместе с языковым сервером.
