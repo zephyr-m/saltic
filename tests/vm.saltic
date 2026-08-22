@@ -1,0 +1,123 @@
+use seed
+use seed.vm
+use seed.vm.state
+
+skill vm_test_image(text) {
+    @chunks = []
+    @chunk = []
+    @index = 0
+    @length = seed.str.len(text)
+    drum (length) {
+        chunk = seed.group.add(chunk, seed.str.byte(text, index))
+        index = index + 1
+        (seed.group.count(chunk) == state.PAGE_SIZE) {
+            chunks = seed.group.add(chunks, chunk)
+            chunk = []
+        }
+    }
+    (seed.group.count(chunk) > 0) { chunks = seed.group.add(chunks, chunk) }
+    out chunks
+}
+
+skill vm_test_bytes(text) {
+    @bytes = []
+    @index = 0
+    @length = seed.str.len(text)
+    drum (length) {
+        bytes = seed.group.add(bytes, seed.str.byte(text, index))
+        index = index + 1
+    }
+    out bytes
+}
+
+skill vm_test_numbers(values) {
+    @text = ""
+    @index = 0
+    @count = seed.group.count(values)
+    drum (count) {
+        (index > 0) { text = seed.str.add(text, ",") }
+        text = seed.str.add(text, seed.num.text(seed.group.at(values, index)))
+        index = index + 1
+    }
+    out text
+}
+
+skill vm_test_strings(values) {
+    @text = ""
+    @index = 0
+    @count = seed.group.count(values)
+    drum (count) {
+        (index > 0) { text = seed.str.add(text, ",") }
+        text = seed.str.add(text, seed.group.at(values, index))
+        index = index + 1
+    }
+    out text
+}
+
+skill vm_test_output(files) {
+    @bytes = []
+    @index = 0
+    @count = seed.group.count(files)
+    drum (count) {
+        @file = seed.group.at(files, index)
+        (file.path == "output.txt") { bytes = file.data }
+        index = index + 1
+    }
+    out bytes
+}
+
+skill vm_test_snapshot(name, result) {
+    @text = seed.str.add("scenario=", name)
+    text = seed.str.add(text, "\nexit_code=")
+    text = seed.str.add(text, seed.num.text(result.exit_code))
+    text = seed.str.add(text, "\nreason=")
+    text = seed.str.add(text, result.reason)
+    text = seed.str.add(text, "\npc=")
+    text = seed.str.add(text, result.pc)
+    text = seed.str.add(text, "\nsteps=")
+    text = seed.str.add(text, seed.num.text(result.steps))
+    text = seed.str.add(text, "\nregisters=")
+    text = seed.str.add(text, vm_test_strings(result.registers))
+    text = seed.str.add(text, "\nstdout=")
+    text = seed.str.add(text, vm_test_numbers(result.stdout))
+    text = seed.str.add(text, "\nstderr=")
+    text = seed.str.add(text, vm_test_numbers(result.stderr))
+    text = seed.str.add(text, "\noutput=")
+    text = seed.str.add(text, vm_test_numbers(vm_test_output(result.files)))
+    text = seed.str.add(text, "\ntrap=")
+    text = seed.str.add(text, result.trap)
+    out seed.str.add(text, "\n")
+}
+
+skill vm_test_run(name, image, input, scenario) {
+    @arguments = [scenario]
+    (scenario == "normal") { arguments = ["normal", "input.txt", "output.txt"] }
+    @limit = 100000
+    (scenario == "timeout") { limit = 32 }
+    @options = state.Options {
+        load_address = 4096
+        memory_size = 262144
+        step_limit = limit
+        program_name = "vm-canonical"
+        arguments = arguments
+        files = [state.File { path = "input.txt" data = input }]
+    }
+    out vm_test_snapshot(name, vm.run(image, options))
+}
+
+program(elf_path, flat_path, input_path, output_path) {
+    @elf = vm_test_image(seed.file.read(elf_path))
+    @flat = vm_test_image(seed.file.read(flat_path))
+    @input = vm_test_bytes(seed.file.read(input_path))
+    @report = vm_test_run("elf-normal", elf, input, "normal")
+    report = seed.str.add(report, vm_test_run("flat-normal", flat, input, "normal"))
+    report = seed.str.add(report, vm_test_run("break", elf, input, "break"))
+    report = seed.str.add(report, vm_test_run("illegal", elf, input, "illegal"))
+    report = seed.str.add(report, vm_test_run("misaligned-pc", elf, input, "pc"))
+    report = seed.str.add(report, vm_test_run("load-fault", elf, input, "load"))
+    report = seed.str.add(report, vm_test_run("store-fault", elf, input, "store"))
+    report = seed.str.add(report, vm_test_run("unsupported-ecall", elf, input, "unsupported"))
+    report = seed.str.add(report, vm_test_run("step-limit", elf, input, "timeout"))
+    seed.file.write(output_path, report)
+    out none
+}

@@ -15,7 +15,7 @@
 code editors/vscode-s
 ```
 
-Нажми `F5`, затем открой `examples/qemu-hello.saltic` в окне Extension Development Host.
+Нажми `F5`, затем открой `os/target/qemu_virt/smoke.saltic` в окне Extension Development Host.
 
 ## Граница
 

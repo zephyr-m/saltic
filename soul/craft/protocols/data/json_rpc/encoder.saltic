@@ -1,0 +1,65 @@
+use seed
+use craft.protocols.data.json
+use craft.protocols.data.json.value
+use craft.protocols.data.json.writer
+use craft.protocols.data.json_rpc
+
+skill request_value(message) {
+    @members = [
+        value.field("jsonrpc", value.string("2.0")),
+        value.field_text(json_rpc.rpc_text("method"), value.string_text(message.method)),
+    ]
+    (message.has_params == yes) { members = seed.group.add(members, value.field("params", message.params)) }
+    (message.has_id == yes) { members = seed.group.add(members, value.field("id", message.id)) }
+    out value.object(members)
+}
+
+skill success_value(message) {
+    out value.object([
+        value.field("jsonrpc", value.string("2.0")),
+        value.field("result", message.result),
+        value.field("id", message.id),
+    ])
+}
+
+skill failure_value(message) {
+    @error_members = [
+        value.field("code", value.number_value(message.error_code)),
+        value.field_text(json_rpc.rpc_text("message"), value.string_text(message.error_message)),
+    ]
+    (message.has_error_data == yes) { error_members = seed.group.add(error_members, value.field("data", message.error_data)) }
+    out value.object([
+        value.field("jsonrpc", value.string("2.0")),
+        value.field("error", value.object(error_members)),
+        value.field("id", message.id),
+    ])
+}
+
+skill message_value(message) {
+    (message.kind == json_rpc.MessageKind.REQUEST) { out request_value(message) }
+    (message.kind == json_rpc.MessageKind.NOTIFICATION) { out request_value(message) }
+    (message.kind == json_rpc.MessageKind.SUCCESS) { out success_value(message) }
+    (message.kind == json_rpc.MessageKind.FAILURE) { out failure_value(message) }
+    out failure_value(message)
+}
+
+skill encode(message) {
+    out writer.encode(message_value(message))
+}
+
+skill encode_packet(packet) {
+    (packet.batch == yes) {
+        @items = []
+        @index = 0
+        @count = seed.group.count(packet.messages)
+        drum (count) {
+            (index < count) {
+                items = seed.group.add(items, message_value(seed.group.item(packet.messages, index)))
+                index = index + 1
+            }
+        }
+        out writer.encode(value.array(items))
+    }
+    (seed.group.count(packet.messages) > 0) { out encode(seed.group.item(packet.messages, 0)) }
+    out encode(json_rpc.invalid_request("пакет не содержит сообщений"))
+}

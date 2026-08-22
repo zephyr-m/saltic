@@ -1,0 +1,592 @@
+use seed
+use seed.ast
+use seed.diagnostic
+use seed.intrinsic.contract
+use seed.checker.names
+use seed.checker.types
+
+Result = Box {
+    diagnostics = []
+    globals = []
+}
+
+skill make_diagnostic(node, code, message) {
+    @place = ast.location(node)
+    out diagnostic.make(code, seed.group.item(place, 0), seed.group.item(place, 1), message)
+}
+
+skill add_diagnostic(diagnostics, diagnostic) {
+    out seed.group.add(diagnostics, diagnostic)
+}
+
+skill collect(program_ast) {
+    @result = Result {}
+    @program_seen = no
+    @index = 1
+    @count = seed.group.count(program_ast)
+    drum (count) {
+        (index < count) {
+            @item = seed.group.item(program_ast, index)
+            @tag = ast.tag(item)
+            @module = ast.module_name(item)
+            @name = ""
+            @kind = ""
+            (tag == "use") {
+                (ast.part(item, 1) == "seed") {
+                    (names.has(result.globals, "__seed__") == no) { result.globals = names.put(result.globals, "__seed__", "import", "module-path") }
+                }
+                @target = ast.path_text(item)
+                @plain_use = ast.plain(item)
+                @alias = seed.group.item(plain_use, seed.group.count(plain_use) - 1)
+                @alias_key = ast.alias_key(module, alias)
+                @old_alias = names.find(result.globals, alias_key)
+                (seed.str.len(old_alias.name) > 0) {
+                    ((old_alias.type == target) == no) { result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, seed.str.add("повторный псевдоним модуля '", seed.str.add(alias, "'")))) }
+                }
+                (seed.str.len(old_alias.name) == 0) { result.globals = names.put(result.globals, alias_key, "import", target) }
+            }
+            (tag == "entry") {
+                (program_seen == yes) { result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, "повторное объявление program")) }
+                program_seen = yes
+            }
+            (tag == "const") { name = ast.qualified(module, ast.part(item, 1)) kind = "const" }
+            (tag == "enum") { name = ast.qualified(module, ast.part(item, 1)) kind = "enum" }
+            (tag == "box") { name = ast.qualified(module, ast.part(item, 1)) kind = "box" }
+            (tag == "skill") { name = ast.qualified(module, ast.part(item, 1)) kind = "skill" }
+            (seed.str.len(name) > 0) {
+                (names.has(result.globals, name) == yes) {
+                    result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, seed.str.add("повторное имя верхнего уровня '", seed.str.add(name, "'"))))
+                }
+                @type = "unknown"
+                (kind == "const") { type = types.type_in_module(ast.part(item, 2), module, result.globals) }
+                (kind == "enum") { type = "enum-type" }
+                (kind == "box") { type = "box-type" }
+                (kind == "skill") { type = "function" }
+                (names.has(result.globals, name) == no) { result.globals = names.put_node(result.globals, name, kind, type, item) }
+            }
+            index = index + 1
+        }
+    }
+    out result
+}
+
+skill box_has_skill(globals, box_name, skill_name) {
+    @box = names.find(globals, box_name)
+    @found = no
+    @index = 2
+    @count = seed.group.count(ast.plain(box.node))
+    drum (count) {
+        (index < count) {
+            @member = ast.part(box.node, index)
+            (ast.tag(member) == "subject-skill") {
+                (ast.part(member, 1) == skill_name) { found = yes }
+            }
+            index = index + 1
+        }
+    }
+    out found
+}
+
+skill enum_has(globals, enum_name, variant) {
+    @model = names.find(globals, enum_name)
+    @found = no
+    @index = 2
+    @count = seed.group.count(ast.plain(model.node))
+    drum (count) {
+        (index < count) {
+            (ast.part(model.node, index) == variant) { found = yes }
+            index = index + 1
+        }
+    }
+    out found
+}
+
+skill check_path(node, scope, globals, diagnostics) {
+    @parts = ast.plain(node)
+    @name = seed.group.item(parts, 1)
+    @count = seed.group.count(parts)
+    @resolved = names.resolve_path(node, scope, globals)
+    (seed.str.len(resolved) > 0) { out diagnostics }
+    (count == 2) {
+        @known = names.has(scope.names, name)
+        (known == no) { known = names.has(globals, name) }
+        (name == "error") { known = yes }
+        (known == no) { out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_name", seed.str.add("неизвестное имя '", seed.str.add(name, "'")))) }
+        out diagnostics
+    }
+    (name == "error") { out diagnostics }
+    (name == "seed") {
+        (names.has(globals, "__seed__") == no) { out add_diagnostic(diagnostics, make_diagnostic(node, "seed_not_imported", "модуль 'seed' не импортирован; добавь 'use seed'")) }
+        @full = ast.path_text(node)
+        (contract.is_known(full) == no) { out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_seed_operation", seed.str.add("неизвестная операция seed '", seed.str.add(full, "'")))) }
+        out diagnostics
+    }
+    @enum_name = names.resolve_name(ast.path_prefix(node), scope.module, globals)
+    @enum_model = names.find(globals, enum_name)
+    (enum_model.kind == "enum") {
+        @variant = seed.group.item(parts, count - 1)
+        (enum_has(globals, enum_name, variant) == no) { out add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", seed.str.add("в enum '", seed.str.add(enum_name, seed.str.add("' нет варианта '", seed.str.add(variant, "'")))))) }
+        out diagnostics
+    }
+    @import = names.find(globals, ast.alias_key(scope.module, name))
+    (import.kind == "import") {
+        @full = ast.path_text(node)
+        out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_name", seed.str.add("неизвестное имя '", seed.str.add(full, "'"))))
+    }
+    @global = names.find(globals, name)
+    @base = names.find(scope.names, name)
+    (seed.str.len(base.name) == 0) { base = global }
+    (seed.str.len(base.name) == 0) { out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_namespace", seed.str.add("неизвестное пространство имён '", seed.str.add(name, "'")))) }
+    @type = base.type
+    @index = 2
+    drum (count) {
+        (index < count) {
+            @field_name = seed.group.item(parts, index)
+            (type == "unknown") { index = count }
+            (index < count) {
+                @was_box = seed.str.starts_with(type, "box:")
+                (was_box == yes) {
+                    @box_name = types.tail(type, 4)
+                    @field = types.box_field(globals, box_name, field_name)
+                    (seed.str.len(field.name) == 0) {
+                        @message = seed.str.add("в Box '", box_name)
+                        message = seed.str.add(message, "' нет поля '")
+                        message = seed.str.add(message, field_name)
+                        message = seed.str.add(message, "'")
+                        diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", message))
+                        index = count
+                    }
+                    (seed.str.len(field.name) > 0) { type = field.type }
+                }
+                (was_box == no) {
+                    @message = seed.str.add("нельзя обратиться к полю '", field_name)
+                    message = seed.str.add(message, "' у ")
+                    message = seed.str.add(message, types.type_text(type))
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", message))
+                    index = count
+                }
+            }
+            index = index + 1
+        }
+    }
+    out diagnostics
+}
+
+skill check_expression(node, scope, globals, diagnostics) {
+    @plain = ast.plain(node)
+    @tag = seed.group.item(plain, 0)
+    (tag == "path") { out check_path(node, scope, globals, diagnostics) }
+    (tag == "binary") {
+        @left_node = seed.group.item(plain, 2)
+        @right_node = seed.group.item(plain, 3)
+        diagnostics = check_expression(left_node, scope, globals, diagnostics)
+        diagnostics = check_expression(right_node, scope, globals, diagnostics)
+        @operator = seed.group.item(plain, 1)
+        @numeric = no
+        (operator == "+") { numeric = yes }
+        (operator == "-") { numeric = yes }
+        (operator == "*") { numeric = yes }
+        (operator == "/") { numeric = yes }
+        (operator == ">") { numeric = yes }
+        (operator == "<") { numeric = yes }
+        (numeric == yes) {
+            @left_type = types.value_type(left_node, scope, globals)
+            @right_type = types.value_type(right_node, scope, globals)
+            @known_types = yes
+            (left_type == "unknown") { known_types = no }
+            (right_type == "unknown") { known_types = no }
+            (known_types == yes) {
+                @both_numbers = no
+                (left_type == "number") {
+                    (right_type == "number") { both_numbers = yes }
+                }
+                @fixed = no
+                (contract.is_fixed_type(left_type) == yes) { fixed = yes }
+                (contract.is_fixed_type(right_type) == yes) { fixed = yes }
+                (fixed == yes) {
+                    both_numbers = yes
+                    @message = ""
+                    (left_type == "address") { message = "для арифметики адресов используй seed.address.add(address, usize)" }
+                    (right_type == "address") { message = "для арифметики адресов используй seed.address.add(address, usize)" }
+                    (left_type == "bits32") { message = seed.str.add("операция '", seed.str.add(operator, "' недоступна для bits32: используй операции seed.bits32")) }
+                    (right_type == "bits32") { message = seed.str.add("операция '", seed.str.add(operator, "' недоступна для bits32: используй операции seed.bits32")) }
+                    (seed.str.len(message) == 0) {
+                        (left_type == right_type) { message = "" }
+                        (left_type == "number") { message = seed.str.add("операция '", seed.str.add(operator, seed.str.add("' не может смешивать ", seed.str.add(right_type, " и number")))) }
+                        (right_type == "number") { message = seed.str.add("операция '", seed.str.add(operator, seed.str.add("' не может смешивать ", seed.str.add(left_type, " и number")))) }
+                        (seed.str.len(message) == 0) {
+                            (left_type == right_type) { message = "" }
+                            ((left_type == right_type) == no) { message = seed.str.add("операция '", seed.str.add(operator, seed.str.add("' требует одинаковые фиксированные целые типы: получены ", seed.str.add(left_type, seed.str.add(" и ", right_type))))) }
+                        }
+                    }
+                    (seed.str.len(message) > 0) { diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "operator_type_mismatch", message)) }
+                }
+                (both_numbers == no) {
+                    @message = seed.str.add("оператор '", operator)
+                    message = seed.str.add(message, "' ожидает числа, получено ")
+                    message = seed.str.add(message, types.type_text(left_type))
+                    message = seed.str.add(message, " и ")
+                    message = seed.str.add(message, types.type_text(right_type))
+                    diagnostics = add_diagnostic(diagnostics, diagnostic.make("operator_type_mismatch", 0, 0, message))
+                }
+            }
+        }
+        out diagnostics
+    }
+    (tag == "call") {
+        @callee = ast.plain(seed.group.item(plain, 1))
+        @skip_callee = no
+        (seed.group.item(callee, 0) == "path") {
+            @callee_count = seed.group.count(callee)
+            (callee_count == 2) {
+                (contract.is_fixed_type(seed.group.item(callee, 1)) == yes) { skip_callee = yes }
+                (seed.str.len(scope.subject) > 0) {
+                    (box_has_skill(globals, scope.subject, seed.group.item(callee, 1)) == yes) { skip_callee = yes }
+                }
+            }
+            (callee_count == 3) {
+                @receiver_path = ["path", seed.group.item(callee, 1)]
+                @receiver_type = types.path_type(receiver_path, scope, globals)
+                (seed.str.starts_with(receiver_type, "box:") == yes) {
+                    (box_has_skill(globals, types.tail(receiver_type, 4), seed.group.item(callee, 2)) == yes) { skip_callee = yes }
+                }
+            }
+        }
+        @index = 1
+        (skip_callee == yes) { index = 2 }
+        @count = seed.group.count(plain)
+        drum (count) {
+            (index < count) { diagnostics = check_expression(seed.group.item(plain, index), scope, globals, diagnostics) }
+            index = index + 1
+        }
+        @full = ast.path_text(callee)
+        (contract.is_fixed_type(full) == yes) {
+            @text = types.integer_text(seed.group.item(plain, 2))
+            (seed.str.len(text) > 0) {
+                (contract.fixed_in_range(full, text) == no) {
+                    @message = seed.str.add("значение ", text)
+                    message = seed.str.add(message, seed.str.add(" не помещается в ", full))
+                    message = seed.str.add(message, seed.str.add(": допустимо ", contract.fixed_range_text(full)))
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "fixed_integer_out_of_range", message))
+                }
+            }
+        }
+        @seed_kind = contract.find(full)
+        @address_type = "unknown"
+        (seed.group.count(plain) > 2) { address_type = types.value_type(seed.group.item(plain, 2), scope, globals) }
+        @expected = contract.store_type(seed_kind, address_type)
+        (seed.str.len(expected) > 0) {
+            (address_type == "address") {
+                @actual = types.value_type(seed.group.item(plain, 4), scope, globals)
+                (actual == expected) { expected = "" }
+                (seed.str.len(expected) > 0) {
+                    @message = seed.str.add(full, seed.str.add(" ожидает значение ", expected))
+                    message = seed.str.add(message, seed.str.add(", получено ", actual))
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "type_mismatch", message))
+                }
+            }
+        }
+        @checked_argument = contract.checked_argument(seed_kind)
+        ((checked_argument < 0) == no) {
+            @expected_type = contract.checked_type(seed_kind)
+            @argument_index = checked_argument + 2
+            (argument_index < seed.group.count(plain)) {
+                @actual = types.value_type(seed.group.item(plain, argument_index), scope, globals)
+                (actual == expected_type) { expected_type = "" }
+                (seed.str.len(expected_type) > 0) {
+                    @message = seed.str.add(full, " ожидает ")
+                    (expected_type == "u8") { message = seed.str.add(message, "сдвиг ") }
+                    message = seed.str.add(message, expected_type)
+                    message = seed.str.add(message, seed.str.add(", получено ", actual))
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "type_mismatch", message))
+                }
+            }
+        }
+        out diagnostics
+    }
+    (tag == "group") {
+        @index = 1
+        @count = seed.group.count(plain)
+        drum (count) {
+            (index < count) { diagnostics = check_expression(seed.group.item(plain, index), scope, globals, diagnostics) }
+            index = index + 1
+        }
+        out diagnostics
+    }
+    (tag == "box-new") {
+        @name = seed.group.item(plain, 1)
+        @resolved_box = names.resolve_name(name, scope.module, globals)
+        @model = names.find(globals, resolved_box)
+        (model.kind == "box") {
+            @seen = []
+            @index = 2
+            @count = seed.group.count(plain)
+            drum (count) {
+                (index < count) {
+                    @override = seed.group.item(plain, index)
+                    @field_name = ast.part(override, 1)
+                    @value = ast.part(override, 2)
+                    diagnostics = check_expression(value, scope, globals, diagnostics)
+                    (names.has(seen, field_name) == yes) {
+                        @message = seed.str.add("повторное поле '", field_name)
+                        message = seed.str.add(message, "' в литерале Box '")
+                        message = seed.str.add(message, name)
+                        message = seed.str.add(message, "'")
+                        diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "duplicate_definition", message))
+                    }
+                    seen = names.put(seen, field_name, "field", "unknown")
+                    @field = types.box_field(globals, resolved_box, field_name)
+                    (seed.str.len(field.name) == 0) {
+                        @message = seed.str.add("в Box '", name)
+                        message = seed.str.add(message, "' нет поля '")
+                        message = seed.str.add(message, field_name)
+                        message = seed.str.add(message, "'")
+                        diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", message))
+                    }
+                    (seed.str.len(field.name) > 0) {
+                        @value_type = types.value_type(value, scope, globals)
+                        (types.compatible(field.type, value_type) == no) {
+                            @message = seed.str.add("нельзя присвоить ", types.type_text(value_type))
+                            message = seed.str.add(message, " полю '")
+                            message = seed.str.add(message, field_name)
+                            message = seed.str.add(message, "' Box '")
+                            message = seed.str.add(message, name)
+                            message = seed.str.add(message, "' типа ")
+                            message = seed.str.add(message, types.type_text(field.type))
+                            diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", message))
+                        }
+                    }
+                    index = index + 1
+                }
+            }
+            out diagnostics
+        }
+        @message = seed.str.add("неизвестный Box '", name)
+        message = seed.str.add(message, "'")
+        diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", message))
+        out diagnostics
+    }
+    (tag == "rescue") {
+        diagnostics = check_expression(seed.group.item(plain, 1), scope, globals, diagnostics)
+        @child = names.Scope { names = scope.names subject = scope.subject module = scope.module }
+        child.names = names.put(child.names, seed.group.item(plain, 2), "variable", "error")
+        out check_block(seed.group.item(plain, 3), child, globals, diagnostics)
+    }
+    out diagnostics
+}
+
+skill check_statement(node, scope, globals, diagnostics) {
+    @plain = ast.plain(node)
+    @tag = seed.group.item(plain, 0)
+    (tag == "var") {
+        @name = seed.group.item(plain, 1)
+        @value = seed.group.item(plain, 2)
+        diagnostics = check_expression(value, scope, globals, diagnostics)
+        (names.has(scope.names, name) == yes) { diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", seed.str.add("переменная '", seed.str.add(name, "' уже объявлена в этой области")))) }
+        (names.has(scope.names, name) == no) {
+            (names.has(globals, name) == yes) {
+                @message = seed.str.add("переменная '", name)
+                message = seed.str.add(message, "' конфликтует с именем верхнего уровня")
+                diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", message))
+            }
+            (names.has(globals, name) == no) { scope.names = names.put(scope.names, name, "variable", types.value_type(value, scope, globals)) }
+        }
+        out diagnostics
+    }
+    (tag == "assign") {
+        @name = seed.group.item(plain, 1)
+        @value = seed.group.item(plain, 2)
+        diagnostics = check_expression(value, scope, globals, diagnostics)
+        (names.has(scope.names, name) == yes) {
+            @old = names.find(scope.names, name)
+            @value_type = types.value_type(value, scope, globals)
+            (types.compatible(old.type, value_type) == yes) { scope.names = names.update(scope.names, name, types.merge(old.type, value_type)) }
+            (types.compatible(old.type, value_type) == no) {
+                @message = ""
+                @fixed = contract.is_fixed_type(old.type)
+                (contract.is_fixed_type(value_type) == yes) { fixed = yes }
+                (fixed == yes) {
+                    message = seed.str.add("нельзя присвоить ", types.type_text(value_type))
+                    message = seed.str.add(message, " переменной '")
+                    message = seed.str.add(message, name)
+                    message = seed.str.add(message, "' типа ")
+                    message = seed.str.add(message, types.type_text(old.type))
+                }
+                (fixed == no) {
+                    message = seed.str.add("нельзя присвоить ", types.type_text(value_type))
+                    message = seed.str.add(message, " переменной '")
+                    message = seed.str.add(message, name)
+                    message = seed.str.add(message, "' типа ")
+                    message = seed.str.add(message, types.type_text(old.type))
+                }
+                diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "type_mismatch", message))
+            }
+        }
+        (names.has(scope.names, name) == no) {
+            @global = names.find(globals, name)
+            @is_constant = no
+            (global.kind == "const") { is_constant = yes }
+            (global.kind == "const") { diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "constant_assignment", seed.str.add("нельзя присвоить значение константе '", seed.str.add(name, "'")))) }
+            (seed.str.len(global.name) > 0) {
+                (is_constant == no) {
+                    @message = seed.str.add("нельзя присвоить значение имени верхнего уровня '", name)
+                    message = seed.str.add(message, "'")
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", message))
+                }
+            }
+            (seed.str.len(global.name) == 0) { diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "variable_not_declared", seed.str.add("переменная '", seed.str.add(name, "' не объявлена")))) }
+        }
+        out diagnostics
+    }
+    (tag == "field-assign") {
+        @target = ast.plain(seed.group.item(plain, 1))
+        @part_count = seed.group.count(target)
+        @base_parts = ["path"]
+        @part_index = 1
+        drum (part_count) {
+            (part_index + 1 < part_count) { base_parts = seed.group.add(base_parts, seed.group.item(target, part_index)) }
+            part_index = part_index + 1
+        }
+        diagnostics = check_path(base_parts, scope, globals, diagnostics)
+        @value = seed.group.item(plain, 2)
+        diagnostics = check_expression(value, scope, globals, diagnostics)
+        @base_type = types.path_type(base_parts, scope, globals)
+        (seed.str.starts_with(base_type, "box:") == yes) {
+            @box_name = types.tail(base_type, 4)
+            @field_name = seed.group.item(target, part_count - 1)
+            @field = types.box_field(globals, box_name, field_name)
+            (seed.str.len(field.name) == 0) {
+                @message = seed.str.add("в Box '", box_name)
+                message = seed.str.add(message, "' нет поля '")
+                message = seed.str.add(message, field_name)
+                message = seed.str.add(message, "'")
+                diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", message))
+            }
+            (seed.str.len(field.name) > 0) {
+                @value_type = types.value_type(value, scope, globals)
+                (types.compatible(field.type, value_type) == no) {
+                    @message = seed.str.add("нельзя присвоить ", types.type_text(value_type))
+                    message = seed.str.add(message, " полю '")
+                    message = seed.str.add(message, field_name)
+                    message = seed.str.add(message, "' Box '")
+                    message = seed.str.add(message, box_name)
+                    message = seed.str.add(message, "'")
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", message))
+                }
+            }
+        }
+        out diagnostics
+    }
+    (tag == "out") { out check_expression(seed.group.item(plain, 1), scope, globals, diagnostics) }
+    (tag == "expr") { out check_expression(seed.group.item(plain, 1), scope, globals, diagnostics) }
+    (tag == "if") {
+        diagnostics = check_expression(seed.group.item(plain, 1), scope, globals, diagnostics)
+        out check_block(seed.group.item(plain, 2), names.Scope { names = scope.names subject = scope.subject module = scope.module }, globals, diagnostics)
+    }
+    (tag == "drum") {
+        diagnostics = check_expression(seed.group.item(plain, 1), scope, globals, diagnostics)
+        out check_block(seed.group.item(plain, 2), names.Scope { names = scope.names subject = scope.subject module = scope.module }, globals, diagnostics)
+    }
+    (tag == "switch") {
+        diagnostics = check_expression(seed.group.item(plain, 1), scope, globals, diagnostics)
+        @index = 2
+        @count = seed.group.count(plain)
+        drum (count) {
+            (index < count) { diagnostics = check_expression(ast.part(seed.group.item(plain, index), 2), scope, globals, diagnostics) }
+            index = index + 1
+        }
+        out diagnostics
+    }
+    out add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", seed.str.add("неподдерживаемая инструкция ", tag)))
+}
+
+skill check_block(block, scope, globals, diagnostics) {
+    @plain = ast.plain(block)
+    @index = 1
+    @count = seed.group.count(plain)
+    drum (count) {
+        (index < count) { diagnostics = check_statement(seed.group.item(plain, index), scope, globals, diagnostics) }
+        index = index + 1
+    }
+    out diagnostics
+}
+
+skill check_params(params, globals, subject, module, body, diagnostics) {
+    @scope = names.Scope { subject = subject module = module }
+    (seed.str.len(subject) > 0) {
+        @model = names.find(globals, subject)
+        @member_index = 2
+        @member_count = seed.group.count(ast.plain(model.node))
+        drum (member_count) {
+            (member_index < member_count) {
+                @member = ast.part(model.node, member_index)
+                (ast.tag(member) == "field") { scope.names = names.put(scope.names, ast.part(member, 1), "field", types.type_in_module(ast.part(member, 2), module, globals)) }
+                member_index = member_index + 1
+            }
+        }
+    }
+    @index = 0
+    @count = seed.group.count(params)
+    drum (count) {
+        @name = seed.group.item(params, index)
+        (names.has(scope.names, name) == yes) { diagnostics = add_diagnostic(diagnostics, diagnostic.make("duplicate_definition", 0, 0, seed.str.add("повторный параметр '", seed.str.add(name, "'")))) }
+        (names.has(scope.names, name) == no) { scope.names = names.put(scope.names, name, "parameter", "unknown") }
+        index = index + 1
+    }
+    out check_block(body, scope, globals, diagnostics)
+}
+
+skill check(program_ast) {
+    @result = collect(program_ast)
+    @index = 1
+    @count = seed.group.count(program_ast)
+    drum (count) {
+        (index < count) {
+            @item = seed.group.item(program_ast, index)
+            @tag = ast.tag(item)
+            @module = ast.module_name(item)
+            (tag == "const") { result.diagnostics = check_expression(ast.part(item, 2), names.Scope { module = module }, result.globals, result.diagnostics) }
+            (tag == "skill") { result.diagnostics = check_params(ast.part(item, 2), result.globals, "", module, ast.part(item, 3), result.diagnostics) }
+            (tag == "entry") { result.diagnostics = check_params(ast.part(item, 1), result.globals, "", module, ast.part(item, 2), result.diagnostics) }
+            (tag == "box") {
+                @seen_fields = []
+                @seen_skills = []
+                @member_index = 2
+                @member_count = seed.group.count(ast.plain(item))
+                drum (member_count) {
+                    (member_index < member_count) {
+                        @member = ast.part(item, member_index)
+                        @member_tag = ast.tag(member)
+                        (member_tag == "field") {
+                            @field_name = ast.part(member, 1)
+                            (names.has(seen_fields, field_name) == yes) {
+                                @message = seed.str.add("повторное поле '", field_name)
+                                message = seed.str.add(message, "' в Box '")
+                                message = seed.str.add(message, ast.part(item, 1))
+                                message = seed.str.add(message, "'")
+                                result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, message))
+                            }
+                            seen_fields = names.put(seen_fields, field_name, "field", "unknown")
+                            result.diagnostics = check_expression(ast.part(member, 2), names.Scope { module = module }, result.globals, result.diagnostics)
+                        }
+                        (member_tag == "subject-skill") {
+                            @skill_name = ast.part(member, 1)
+                            (names.has(seen_skills, skill_name) == yes) {
+                                @message = seed.str.add("повторный skill '", skill_name)
+                                message = seed.str.add(message, "' в Box '")
+                                message = seed.str.add(message, ast.part(item, 1))
+                                message = seed.str.add(message, "'")
+                                result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, message))
+                            }
+                            seen_skills = names.put(seen_skills, skill_name, "skill", "function")
+                            result.diagnostics = check_params(ast.part(member, 2), result.globals, ast.qualified(module, ast.part(item, 1)), module, ast.part(member, 3), result.diagnostics)
+                        }
+                        member_index = member_index + 1
+                    }
+                }
+            }
+            index = index + 1
+        }
+    }
+    out result
+}

@@ -26,8 +26,8 @@ GitHub Actions сверит тег с `VERSION`, прогонит полный `
 
 ## Bootstrap
 
-Зафиксированный [bootstrap/compiler.elf](bootstrap/compiler.elf) запускается
-через QEMU и собирает актуальный тулчейн из `s2/`. Обычные `just compile` и
+Зафиксированный [os/bootstrap/compiler.elf](os/bootstrap/compiler.elf) запускается
+через QEMU и собирает актуальный тулчейн из `soul/`. Обычные `just compile` и
 `just run` не используют JavaScript. Старый JS-тулчейн сохранён как эталон и
 доступен через `just js-compile` и `just js-run`.
 
@@ -38,7 +38,7 @@ Saltic является закрытым программным обеспече
 Условия: [русский текст](LICENSE.ru) и [английский перевод](LICENSE).
 
 ```saltic
-use core
+use seed
 
 AppName = "Saltic"
 
@@ -82,13 +82,13 @@ skill spend(actor, cost) {
 
 skill show(actor) {
     (actor.state) {
-        .READY => core.io.show(actor.name, " is ready"),
-        .ACTIVE => core.io.show(actor.name, " is active"),
-        .FAILED => core.io.show(actor.name, " needs rescue"),
+        .READY => seed.io.show(actor.name, " is ready"),
+        .ACTIVE => seed.io.show(actor.name, " is active"),
+        .FAILED => seed.io.show(actor.name, " needs rescue"),
     }
 
-    core.io.show("energy: ", actor.energy)
-    core.io.show("position: ", actor.position.x, ",", actor.position.y)
+    seed.io.show("energy: ", actor.energy)
+    seed.io.show("position: ", actor.position.x, ",", actor.position.y)
     out none
 }
 
@@ -102,10 +102,10 @@ program() {
     @costs = [5, 7, 11]
     @index = 0
 
-    drum (core.group.count(costs)) {
-        @cost = core.group.at(costs, index)
+    drum (seed.group.count(costs)) {
+        @cost = seed.group.at(costs, index)
         actor = spend(actor, cost) rescue |err| {
-            core.io.show("failed: ", err)
+            seed.io.show("failed: ", err)
             actor
         }
         index = index + 1

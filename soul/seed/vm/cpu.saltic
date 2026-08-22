@@ -1,0 +1,326 @@
+use seed
+use seed.vm.state
+use seed.vm.syscalls
+
+skill decode(word) {
+    @opcode = state.mod(word.b0, 128)
+    @rd = word.b0 / 128 + state.mod(word.b1, 16) * 2
+    @funct3 = state.mod(word.b1 / 16, 8)
+    @rs1 = word.b1 / 128 + state.mod(word.b2, 16) * 2
+    @rs2 = word.b2 / 16 + state.mod(word.b3, 2) * 16
+    @funct7 = word.b3 / 2
+    out state.Instruction { word = word opcode = opcode rd = rd funct3 = funct3 rs1 = rs1 rs2 = rs2 funct7 = funct7 }
+}
+
+skill immediate_i(instruction) {
+    @value = instruction.word.b2 / 16 + instruction.word.b3 * 16
+    (value > 2047) { value = value - 4096 }
+    out value
+}
+
+skill immediate_s(instruction) {
+    @low = instruction.rd
+    @value = low + instruction.funct7 * 32
+    (value > 2047) { value = value - 4096 }
+    out value
+}
+
+skill immediate_b(instruction) {
+    @bit12 = instruction.word.b3 / 128
+    @bit11 = instruction.word.b0 / 128
+    @bits10_5 = state.mod(instruction.word.b3 / 2, 64)
+    @bits4_1 = state.mod(instruction.word.b1, 16)
+    @value = bit12 * 4096 + bit11 * 2048 + bits10_5 * 32 + bits4_1 * 2
+    (value > 4095) { value = value - 8192 }
+    out value
+}
+
+skill immediate_j(instruction) {
+    @bit20 = instruction.word.b3 / 128
+    @bit11 = state.mod(instruction.word.b2 / 16, 2)
+    @bits19_12 = instruction.word.b1 / 16 + state.mod(instruction.word.b2, 16) * 16
+    @bits10_1 = instruction.word.b2 / 32 + state.mod(instruction.word.b3, 128) * 8
+    @value = bit20 * 1048576 + bits19_12 * 4096 + bit11 * 2048 + bits10_1 * 2
+    (value > 1048575) { value = value - 2097152 }
+    out value
+}
+
+skill immediate_u(instruction) {
+    out state.word_bytes(0, instruction.word.b1 / 16 * 16, instruction.word.b2, instruction.word.b3)
+}
+
+skill boolean_word(value) {
+    (value == yes) { out state.word_number(1) }
+    out state.word_zero()
+}
+
+skill illegal(machine, instruction) {
+    state.trap(machine, "недопустимая инструкция", seed.str.add("0x", state.word_hex(instruction.word)))
+    out none
+}
+
+skill effective_address(machine, register_index, immediate) {
+    out state.word_add(state.register(machine, register_index), state.word_number(immediate))
+}
+
+skill execute_lui(machine, instruction, control) {
+    state.set_register(machine, instruction.rd, immediate_u(instruction))
+    control.handled = yes
+    out none
+}
+
+skill execute_auipc(machine, instruction, control) {
+    @value = state.word_add(state.word_number(machine.pc), immediate_u(instruction))
+    state.set_register(machine, instruction.rd, value)
+    control.handled = yes
+    out none
+}
+
+skill execute_jal(machine, instruction, control) {
+    state.set_register(machine, instruction.rd, state.word_number(machine.pc + 4))
+    control.next_pc = machine.pc + immediate_j(instruction)
+    control.handled = yes
+    out none
+}
+
+skill execute_jalr(machine, instruction, control) {
+    (instruction.funct3 > 0) { illegal(machine, instruction) control.handled = yes out none }
+    @target = effective_address(machine, instruction.rs1, immediate_i(instruction))
+    target.b0 = target.b0 - state.mod(target.b0, 2)
+    state.set_register(machine, instruction.rd, state.word_number(machine.pc + 4))
+    control.next_pc = state.word_address(target)
+    control.handled = yes
+    out none
+}
+
+skill execute_branch(machine, instruction, control) {
+    @left = state.register(machine, instruction.rs1)
+    @right = state.register(machine, instruction.rs2)
+    @take = no
+    @valid = yes
+    (instruction.funct3 == 0) { take = state.word_equal(left, right) }
+    (instruction.funct3 == 1) {
+        (state.word_equal(left, right) == no) { take = yes }
+    }
+    (instruction.funct3 == 4) { take = state.word_signed_less(left, right) }
+    (instruction.funct3 == 5) {
+        (state.word_signed_less(left, right) == no) { take = yes }
+    }
+    (instruction.funct3 == 6) { take = state.word_unsigned_less(left, right) }
+    (instruction.funct3 == 7) {
+        (state.word_unsigned_less(left, right) == no) { take = yes }
+    }
+    (instruction.funct3 == 2) { valid = no }
+    (instruction.funct3 == 3) { valid = no }
+    (valid == no) { illegal(machine, instruction) }
+    (valid == yes) {
+        (take == yes) { control.next_pc = machine.pc + immediate_b(instruction) }
+    }
+    control.handled = yes
+    out none
+}
+
+skill execute_load(machine, instruction, control) {
+    @size = 0
+    @signed = yes
+    (instruction.funct3 == 0) { size = 1 }
+    (instruction.funct3 == 1) { size = 2 }
+    (instruction.funct3 == 2) { size = 4 }
+    (instruction.funct3 == 4) { size = 1 signed = no }
+    (instruction.funct3 == 5) { size = 2 signed = no }
+    (size == 0) { illegal(machine, instruction) control.handled = yes out none }
+    @target = effective_address(machine, instruction.rs1, immediate_i(instruction))
+    @address = state.word_address(target)
+    (state.memory_check(machine, address, size, size, "чтение") == yes) {
+        @value = state.word_zero()
+        value.b0 = state.memory_raw_load8(machine.memory, address)
+        (size > 1) { value.b1 = state.memory_raw_load8(machine.memory, address + 1) }
+        (size > 2) {
+            value.b2 = state.memory_raw_load8(machine.memory, address + 2)
+            value.b3 = state.memory_raw_load8(machine.memory, address + 3)
+        }
+        (signed == yes) {
+            (size == 1) {
+                (value.b0 > 127) { value.b1 = 255 value.b2 = 255 value.b3 = 255 }
+            }
+            (size == 2) {
+                (value.b1 > 127) { value.b2 = 255 value.b3 = 255 }
+            }
+        }
+        state.set_register(machine, instruction.rd, value)
+    }
+    control.handled = yes
+    out none
+}
+
+skill execute_store(machine, instruction, control) {
+    @size = 0
+    (instruction.funct3 == 0) { size = 1 }
+    (instruction.funct3 == 1) { size = 2 }
+    (instruction.funct3 == 2) { size = 4 }
+    (size == 0) { illegal(machine, instruction) control.handled = yes out none }
+    @target = effective_address(machine, instruction.rs1, immediate_s(instruction))
+    @address = state.word_address(target)
+    (state.memory_check(machine, address, size, size, "запись") == yes) {
+        state.memory_store_word(machine.memory, address, state.register(machine, instruction.rs2), size)
+    }
+    control.handled = yes
+    out none
+}
+
+skill execute_immediate(machine, instruction, control) {
+    @left = state.register(machine, instruction.rs1)
+    @immediate = state.word_number(immediate_i(instruction))
+    @value = state.word_zero()
+    @valid = yes
+    (instruction.funct3 == 0) { value = state.word_add(left, immediate) }
+    (instruction.funct3 == 2) { value = boolean_word(state.word_signed_less(left, immediate)) }
+    (instruction.funct3 == 3) { value = boolean_word(state.word_unsigned_less(left, immediate)) }
+    (instruction.funct3 == 4) { value = state.word_xor(left, immediate) }
+    (instruction.funct3 == 6) { value = state.word_or(left, immediate) }
+    (instruction.funct3 == 7) { value = state.word_and(left, immediate) }
+    (instruction.funct3 == 1) {
+        (instruction.funct7 == 0) { value = state.word_shift_left(left, instruction.rs2) }
+        (instruction.funct7 > 0) { valid = no }
+    }
+    (instruction.funct3 == 5) {
+        (instruction.funct7 == 0) { value = state.word_shift_right(left, instruction.rs2) }
+        (instruction.funct7 == 32) { value = state.word_shift_right_arithmetic(left, instruction.rs2) }
+        (instruction.funct7 > 0) {
+            (instruction.funct7 < 32) { valid = no }
+            (instruction.funct7 > 32) { valid = no }
+        }
+    }
+    (instruction.funct3 > 7) { valid = no }
+    (valid == no) { illegal(machine, instruction) }
+    (valid == yes) { state.set_register(machine, instruction.rd, value) }
+    control.handled = yes
+    out none
+}
+
+skill execute_register(machine, instruction, control) {
+    @left = state.register(machine, instruction.rs1)
+    @right = state.register(machine, instruction.rs2)
+    @value = state.word_zero()
+    @valid = yes
+    (instruction.funct3 == 0) {
+        (instruction.funct7 == 0) { value = state.word_add(left, right) }
+        (instruction.funct7 == 32) { value = state.word_sub(left, right) }
+        (instruction.funct7 > 0) {
+            (instruction.funct7 < 32) { valid = no }
+            (instruction.funct7 > 32) { valid = no }
+        }
+    }
+    (instruction.funct3 == 1) {
+        (instruction.funct7 == 0) { value = state.word_shift_left(left, state.mod(right.b0, 32)) }
+        (instruction.funct7 > 0) { valid = no }
+    }
+    (instruction.funct3 == 2) {
+        (instruction.funct7 == 0) { value = boolean_word(state.word_signed_less(left, right)) }
+        (instruction.funct7 > 0) { valid = no }
+    }
+    (instruction.funct3 == 3) {
+        (instruction.funct7 == 0) { value = boolean_word(state.word_unsigned_less(left, right)) }
+        (instruction.funct7 > 0) { valid = no }
+    }
+    (instruction.funct3 == 4) {
+        (instruction.funct7 == 0) { value = state.word_xor(left, right) }
+        (instruction.funct7 > 0) { valid = no }
+    }
+    (instruction.funct3 == 5) {
+        (instruction.funct7 == 0) { value = state.word_shift_right(left, state.mod(right.b0, 32)) }
+        (instruction.funct7 == 32) { value = state.word_shift_right_arithmetic(left, state.mod(right.b0, 32)) }
+        (instruction.funct7 > 0) {
+            (instruction.funct7 < 32) { valid = no }
+            (instruction.funct7 > 32) { valid = no }
+        }
+    }
+    (instruction.funct3 == 6) {
+        (instruction.funct7 == 0) { value = state.word_or(left, right) }
+        (instruction.funct7 > 0) { valid = no }
+    }
+    (instruction.funct3 == 7) {
+        (instruction.funct7 == 0) { value = state.word_and(left, right) }
+        (instruction.funct7 > 0) { valid = no }
+    }
+    (valid == no) { illegal(machine, instruction) }
+    (valid == yes) { state.set_register(machine, instruction.rd, value) }
+    control.handled = yes
+    out none
+}
+
+skill execute_fence(machine, instruction, control) {
+    (instruction.funct3 > 0) { illegal(machine, instruction) }
+    control.handled = yes
+    out none
+}
+
+skill execute_environment(machine, instruction, control) {
+    @ecall = state.word_bytes(115, 0, 0, 0)
+    @ebreak = state.word_bytes(115, 0, 16, 0)
+    (state.word_equal(instruction.word, ecall) == yes) { syscalls.ecall(machine) control.handled = yes out none }
+    (state.word_equal(instruction.word, ebreak) == yes) {
+        machine.halted = yes
+        machine.halt_reason = "break"
+        control.handled = yes
+        out none
+    }
+    illegal(machine, instruction)
+    control.handled = yes
+    out none
+}
+
+skill execute(machine, instruction) {
+    @control = state.Control { next_pc = machine.pc + 4 }
+    (instruction.opcode == 55) { execute_lui(machine, instruction, control) }
+    (instruction.opcode == 23) { execute_auipc(machine, instruction, control) }
+    (instruction.opcode == 111) { execute_jal(machine, instruction, control) }
+    (instruction.opcode == 103) { execute_jalr(machine, instruction, control) }
+    (instruction.opcode == 99) { execute_branch(machine, instruction, control) }
+    (instruction.opcode == 3) { execute_load(machine, instruction, control) }
+    (instruction.opcode == 35) { execute_store(machine, instruction, control) }
+    (instruction.opcode == 19) { execute_immediate(machine, instruction, control) }
+    (instruction.opcode == 51) { execute_register(machine, instruction, control) }
+    (instruction.opcode == 15) { execute_fence(machine, instruction, control) }
+    (instruction.opcode == 115) { execute_environment(machine, instruction, control) }
+    (control.handled == no) { illegal(machine, instruction) }
+    out control
+}
+
+skill step(machine) {
+    (machine.halted == yes) { out none }
+    (state.mod(machine.pc, 4) > 0) {
+        state.trap(machine, "невыровненный адрес инструкции", "")
+        out none
+    }
+    (state.memory_check(machine, machine.pc, 4, 4, "инструкция") == no) { out none }
+    @instruction = decode(state.memory_load_word(machine.memory, machine.pc))
+    @control = execute(machine, instruction)
+    (seed.str.len(machine.trap) == 0) {
+        machine.pc = control.next_pc
+        machine.steps = machine.steps + 1
+    }
+    out none
+}
+
+skill result(machine) {
+    @registers = []
+    @index = 0
+    drum (32) {
+        registers = seed.group.add(registers, state.word_hex(state.register(machine, index)))
+        index = index + 1
+    }
+    @reason = machine.halt_reason
+    (seed.str.len(machine.trap) > 0) { reason = "trap" }
+    out state.Result {
+        exit_code = machine.exit_code
+        reason = reason
+        pc = state.number_hex(machine.pc)
+        steps = machine.steps
+        registers = registers
+        stdout = machine.stdout
+        stderr = machine.stderr
+        files = machine.files
+        trap = machine.trap
+    }
+}

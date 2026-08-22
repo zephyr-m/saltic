@@ -1,0 +1,762 @@
+use seed
+use seed.abi
+use seed.ast
+use seed.intrinsic.contract
+use seed.compiler.state
+
+STRING_DATA_LINE_BYTES = 64
+
+skill box_field_symbol(compiler, box_name, field_name) {
+    @box = state.symbol_find(compiler.boxes, box_name)
+    @result = state.Symbol {}
+    @index = 2
+    @count = seed.group.count(ast.plain(box.node))
+    drum (count) {
+        (index < count) {
+            @member = ast.part(box.node, index)
+            (ast.tag(member) == "field") {
+                (ast.part(member, 1) == field_name) { result = state.Symbol { name = field_name kind = "field" node = member } }
+            }
+            index = index + 1
+        }
+    }
+    out result
+}
+
+skill error_value(compiler, name) {
+    (name == "FixedIntegerOverflow") { out abi.error_value(abi.ERROR_FIXED_INTEGER_OVERFLOW) }
+    @error_item = state.symbol_find(compiler.errors, name)
+    (seed.str.len(error_item.name) == 0) {
+        @id = abi.user_error_id(seed.group.count(compiler.errors))
+        compiler.errors = state.symbol_add(compiler.errors, name, "error", [], id)
+        error_item = state.symbol_find(compiler.errors, name)
+    }
+    out abi.error_value(error_item.value)
+}
+
+skill compile_path(compiler, node) {
+    @parts = ast.plain(node)
+    @count = seed.group.count(parts)
+    @name = seed.group.item(parts, 1)
+    @path_name = ast.path_text(parts)
+    @constant_name = ""
+    @constant = state.Symbol {}
+    (name == "error") {
+        (count == 3) { out state.load_immediate(compiler, "a0", error_value(compiler, seed.group.item(parts, 2))) }
+    }
+    (count > 2) {
+        @enum_text = seed.group.item(parts, 1)
+        @enum_index = 2
+        drum (count - 1) {
+            (enum_index < count - 1) { enum_text = seed.str.add(enum_text, seed.str.add(".", seed.group.item(parts, enum_index))) enum_index = enum_index + 1 }
+        }
+        @enum_name = resolve_symbol(compiler.enums, compiler.aliases, enum_text, compiler.current_function.module)
+        (seed.str.len(enum_name) > 0) {
+            @full_name = seed.str.add(enum_name, ".")
+            full_name = seed.str.add(full_name, seed.group.item(parts, count - 1))
+            @variant = state.symbol_find(compiler.variants, full_name)
+            out state.load_immediate(compiler, "a0", variant.value)
+        }
+    }
+    (state.symbol_has(compiler.current_function.slots, name) == yes) {
+        @slot = state.slot(compiler, name)
+        compiler = state.emit(compiler, seed.str.add("  lw a0, ", seed.str.add(seed.num.text(slot), "(s0)")))
+    }
+    (state.symbol_has(compiler.current_function.slots, name) == no) {
+        constant_name = resolve_symbol(compiler.constants, compiler.aliases, path_name, compiler.current_function.module)
+        constant = state.symbol_find(compiler.constants, constant_name)
+        (seed.str.len(constant.name) > 0) {
+            @caller_module = compiler.current_function.module
+            compiler.current_function.module = constant.text
+            compiler = compile_expression(compiler, constant.node)
+            compiler.current_function.module = caller_module
+        }
+        (seed.str.len(constant.name) == 0) {
+            @subject_field = box_field_symbol(compiler, compiler.current_function.subject, name)
+            (seed.str.len(subject_field.name) > 0) {
+                @self_slot = state.slot(compiler, "$self")
+                compiler = state.emit(compiler, seed.str.add("  lw a0, ", seed.str.add(seed.num.text(self_slot), "(s0)")))
+                compiler = state.push(compiler, "a0")
+                compiler = state.load_immediate(compiler, "a1", state.field(compiler, name))
+                compiler = state.pop(compiler, "a0")
+                compiler = state.emit(compiler, "  call rt_box_get")
+            }
+        }
+    }
+    @index = 2
+    (seed.str.len(constant.name) > 0) { index = count }
+    drum (count) {
+        (index < count) {
+            compiler = state.push(compiler, "a0")
+            compiler = state.load_immediate(compiler, "a1", state.field(compiler, seed.group.item(parts, index)))
+            compiler = state.pop(compiler, "a0")
+            compiler = state.emit(compiler, "  call rt_box_get")
+            index = index + 1
+        }
+    }
+    out compiler
+}
+
+skill compile_binary(compiler, operator, left, right) {
+    compiler = compile_expression(compiler, left)
+    compiler = state.push(compiler, "a0")
+    compiler = compile_expression(compiler, right)
+    compiler = state.emit(compiler, "  addi a1, a0, 0")
+    compiler = state.pop(compiler, "a0")
+    @target = ""
+    @fixed = contract.is_fixed_type(infer_type(compiler, left))
+    (operator == "+") { target = "rt_add" }
+    (operator == "-") { target = "rt_sub" }
+    (operator == "*") { target = "rt_mul" }
+    (operator == "/") { target = "rt_div" }
+    (operator == "==") { target = "rt_equal" }
+    (operator == ">") { target = "rt_greater" }
+    (operator == "<") { target = "rt_less" }
+    (fixed == yes) {
+        (operator == "+") { target = "rt_fixed_add" }
+        (operator == "-") { target = "rt_fixed_sub" }
+        (operator == "*") { target = "rt_fixed_mul" }
+        (operator == "/") { target = "rt_fixed_div" }
+        (operator == "==") { target = "rt_fixed_equal" }
+        (operator == ">") { target = "rt_fixed_greater" }
+        (operator == "<") { target = "rt_fixed_less" }
+    }
+    out state.emit(compiler, seed.str.add("  call ", target))
+}
+
+skill compile_rescue(compiler, node) {
+    @plain = ast.plain(node)
+    @done = state.label(compiler, "rescue_done")
+    compiler = compile_expression(compiler, seed.group.item(plain, 1))
+    compiler = state.emit(compiler, "  andi t0, a0, SALTIC_ABI_TAG_MASK")
+    compiler = state.emit(compiler, "  addi t1, zero, SALTIC_ABI_TAG_ERROR")
+    compiler = state.emit(compiler, seed.str.add("  bne t0, t1, ", done))
+    @slot = state.slot(compiler, seed.group.item(plain, 2))
+    compiler = state.emit(compiler, seed.str.add("  sw a0, ", seed.str.add(seed.num.text(slot), "(s0)")))
+    compiler = compile_block(compiler, seed.group.item(plain, 3), yes)
+    out state.emit(compiler, seed.str.add(done, ":"))
+}
+
+skill box_has_skill(compiler, box_name, skill_name) {
+    @box = state.symbol_find(compiler.boxes, box_name)
+    @found = no
+    @index = 2
+    @count = seed.group.count(ast.plain(box.node))
+    drum (count) {
+        (index < count) {
+            @member = ast.part(box.node, index)
+            (ast.tag(member) == "subject-skill") {
+                (ast.part(member, 1) == skill_name) { found = yes }
+            }
+            index = index + 1
+        }
+    }
+    out found
+}
+
+skill infer_type(compiler, node) {
+    @plain = ast.plain(node)
+    @tag = seed.group.item(plain, 0)
+    (tag == "box-new") {
+        @box_name = resolve_symbol(compiler.boxes, compiler.aliases, seed.group.item(plain, 1), compiler.current_function.module)
+        out seed.str.add("box:", box_name)
+    }
+    (tag == "path") {
+        @name = seed.group.item(plain, 1)
+        @type_item = state.type_find(compiler.current_function.types, name)
+        @type = type_item.text
+        (seed.group.count(plain) == 2) { out type }
+        (seed.str.starts_with(type, "box:") == yes) {
+            @field = box_field_symbol(compiler, seed.str.slice(type, 4, seed.str.len(type)), seed.group.item(plain, 2))
+            (seed.str.len(field.name) > 0) {
+                @value = ast.part(field.node, 2)
+                (ast.tag(value) == "box-new") { out seed.str.add("box:", ast.part(value, 1)) }
+            }
+        }
+        out "unknown"
+    }
+    (tag == "call") {
+        @callee = ast.plain(seed.group.item(plain, 1))
+        (ast.tag(callee) == "path") {
+            @full = ast.path_text(callee)
+            (contract.is_fixed_type(full) == yes) { out full }
+            @input_type = "unknown"
+            (seed.group.count(plain) > 2) { input_type = infer_type(compiler, seed.group.item(plain, 2)) }
+            @result_type = contract.result(contract.find(full), input_type)
+            ((result_type == "unknown") == no) {
+                (result_type == "group-item") { out "unknown" }
+                (result_type == "group-add") { out "unknown" }
+                out result_type
+            }
+            @box_name = resolve_symbol(compiler.boxes, compiler.aliases, full, compiler.current_function.module)
+            (seed.str.len(box_name) > 0) { out seed.str.add("box:", box_name) }
+        }
+        out "unknown"
+    }
+    (tag == "binary") {
+        @operator = seed.group.item(plain, 1)
+        (operator == "==") { out "answer" }
+        (operator == ">") { out "answer" }
+        (operator == "<") { out "answer" }
+        out infer_type(compiler, seed.group.item(plain, 2))
+    }
+    (tag == "rescue") { out infer_type(compiler, seed.group.item(plain, 1)) }
+    out "unknown"
+}
+
+skill resolve_symbol(symbols, aliases, name, module) {
+    (state.symbol_has(symbols, name) == yes) { out name }
+    @local = ast.qualified(module, name)
+    (state.symbol_has(symbols, local) == yes) { out local }
+    @head = ast.name_head(name)
+    @import = state.symbol_find(aliases, ast.alias_key(module, head))
+    (import.kind == "import") {
+        @candidate = seed.str.add(import.text, ast.name_tail(name))
+        (state.symbol_has(symbols, candidate) == yes) { out candidate }
+    }
+    out ""
+}
+
+skill resolve_skill(compiler, path) {
+    out resolve_symbol(compiler.skills, compiler.aliases, ast.path_text(path), compiler.current_function.module)
+}
+
+skill call_arguments(node) {
+    @plain = ast.plain(node)
+    out state.group_slice(plain, 2, seed.group.count(plain))
+}
+
+skill compile_arguments(compiler, args) {
+    @index = 0
+    @count = seed.group.count(args)
+    drum (count) {
+        (index < count) {
+            compiler = compile_expression(compiler, seed.group.item(args, index))
+            compiler = state.push(compiler, "a0")
+            index = index + 1
+        }
+    }
+    index = 0
+    drum (count) {
+        (index < count) {
+            @register = seed.str.add("a", seed.num.text(index))
+            @offset = seed.num.text((count - index - 1) * 4)
+            compiler = state.emit(compiler, seed.str.add("  lw ", seed.str.add(register, seed.str.add(", ", seed.str.add(offset, "(sp)")))))
+            index = index + 1
+        }
+    }
+    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(count * 4))) }
+    out compiler
+}
+
+skill compile_show(compiler, args) {
+    @index = 0
+    @count = seed.group.count(args)
+    drum (count) {
+        (index < count) {
+            compiler = compile_expression(compiler, seed.group.item(args, index))
+            @type = infer_type(compiler, seed.group.item(args, index))
+            (contract.is_fixed_type(type) == yes) { compiler = state.emit(compiler, "  call rt_fixed_show") }
+            (contract.is_fixed_type(type) == no) { compiler = state.emit(compiler, "  call rt_show") }
+            index = index + 1
+        }
+    }
+    compiler = state.emit(compiler, "  call rt_newline")
+    out state.load_immediate(compiler, "a0", abi.NONE)
+}
+
+skill intrinsic(name) {
+    out contract.target(contract.find(name), "unknown")
+}
+
+skill ascii_code(ch) {
+    (ch == "\n") { out 10 }
+    (ch == "\t") { out 9 }
+    @index = 0
+    @length = seed.str.len(state.PRINTABLE)
+    @code = 0
+    drum (length) {
+        (index < length) {
+            (seed.str.at(state.PRINTABLE, index) == ch) { code = index + 32 }
+            index = index + 1
+        }
+    }
+    out code
+}
+
+skill string_find(compiler, text) {
+    @result = state.Symbol {}
+    @index = 0
+    @count = seed.group.count(compiler.strings)
+    drum (count) {
+        (index < count) {
+            @item = seed.group.item(compiler.strings, index)
+            (item.text == text) { result = item }
+            index = index + 1
+        }
+    }
+    out result
+}
+
+skill emit_string_data(compiler, text) {
+    @line = "  .byte "
+    @line_bytes = 0
+    @index = 0
+    @length = seed.str.len(text)
+    @total = length + 1
+    drum (total) {
+        @value = 0
+        (index < length) { value = seed.str.byte(text, index) }
+        (line_bytes > 0) { line = seed.str.add(line, ", ") }
+        line = seed.str.add(line, seed.num.text(value))
+        line_bytes = line_bytes + 1
+        index = index + 1
+
+        @flush = line_bytes == STRING_DATA_LINE_BYTES
+        (index == total) { flush = yes }
+        (flush == yes) {
+            compiler = state.emit_data(compiler, line)
+            line = "  .byte "
+            line_bytes = 0
+        }
+    }
+    out compiler
+}
+
+skill string_label(compiler, text) {
+    @known = string_find(compiler, text)
+    (seed.str.len(known.name) > 0) { out known.name }
+    @label = state.label(compiler, "string")
+    @length = seed.str.len(text)
+    compiler = state.emit_data(compiler, seed.str.add(label, ":"))
+    compiler = state.emit_data(compiler, seed.str.add("  .word ", seed.num.text(length)))
+    compiler = emit_string_data(compiler, text)
+    compiler = state.emit_data(compiler, "  .balign 8")
+    compiler.strings = seed.group.add(compiler.strings, state.Symbol { name = label kind = "string" text = text })
+    out label
+}
+
+skill compile_group(compiler, items) {
+    @index = 0
+    @count = seed.group.count(items)
+    drum (count) {
+        (index < count) {
+            compiler = compile_expression(compiler, seed.group.item(items, index))
+            compiler = state.push(compiler, "a0")
+            index = index + 1
+        }
+    }
+    compiler = state.load_immediate(compiler, "a0", state.align8(4 + count * 4))
+    compiler = state.emit(compiler, "  call rt_alloc")
+    compiler = state.emit(compiler, seed.str.add("  addi t3, zero, ", seed.num.text(count)))
+    compiler = state.emit(compiler, "  sw t3, 0(a0)")
+    index = 0
+    drum (count) {
+        (index < count) {
+            @source_offset = seed.num.text((count - index - 1) * 4)
+            @target_offset = seed.num.text(4 + index * 4)
+            compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(source_offset, "(sp)")))
+            compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(target_offset, "(a0)")))
+            index = index + 1
+        }
+    }
+    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(count * 4))) }
+    out state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_GROUP)))
+}
+
+skill box_override(overrides, field_name) {
+    @result = []
+    @index = 0
+    @count = seed.group.count(overrides)
+    drum (count) {
+        (index < count) {
+            @field = ast.plain(seed.group.item(overrides, index))
+            (seed.group.item(field, 1) == field_name) { result = seed.group.item(field, 2) }
+            index = index + 1
+        }
+    }
+    out result
+}
+
+skill compile_box(compiler, name, overrides) {
+    @model = state.symbol_find(compiler.boxes, name)
+    @fields = []
+    @index = 2
+    @member_count = seed.group.count(ast.plain(model.node))
+    drum (member_count) {
+        (index < member_count) {
+            @member = ast.part(model.node, index)
+            (ast.tag(member) == "field") { fields = seed.group.add(fields, member) }
+            index = index + 1
+        }
+    }
+    @count = seed.group.count(fields)
+    index = 0
+    drum (count) {
+        (index < count) {
+            @field = seed.group.item(fields, index)
+            @value = box_override(overrides, ast.part(field, 1))
+            @default_value = no
+            (seed.group.count(value) == 0) { value = ast.part(field, 2) default_value = yes }
+            @caller_module = compiler.current_function.module
+            (default_value == yes) { compiler.current_function.module = model.text }
+            compiler = compile_expression(compiler, value)
+            compiler.current_function.module = caller_module
+            compiler = state.push(compiler, "a0")
+            index = index + 1
+        }
+    }
+    compiler = state.load_immediate(compiler, "a0", state.align8(4 + count * 8))
+    compiler = state.emit(compiler, "  call rt_alloc")
+    compiler = state.emit(compiler, seed.str.add("  addi t3, zero, ", seed.num.text(count)))
+    compiler = state.emit(compiler, "  sw t3, 0(a0)")
+    index = 0
+    drum (count) {
+        (index < count) {
+            @field = seed.group.item(fields, index)
+            @field_id = state.field(compiler, ast.part(field, 1))
+            compiler = state.load_immediate(compiler, "t0", field_id)
+            compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(4 + index * 8), "(a0)")))
+            compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(seed.num.text((count - index - 1) * 4), "(sp)")))
+            compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(8 + index * 8), "(a0)")))
+            index = index + 1
+        }
+    }
+    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(count * 4))) }
+    out state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_BOX)))
+}
+
+skill compile_call(compiler, node) {
+    @plain = ast.plain(node)
+    @callee = ast.plain(seed.group.item(plain, 1))
+    @args = call_arguments(node)
+    @name = ast.path_text(callee)
+    @seed_kind = contract.find(name)
+    (contract.is_show(seed_kind) == yes) { out compile_show(compiler, args) }
+    (contract.is_fixed_type(name) == yes) {
+        @value = ast.plain(seed.group.item(args, 0))
+        @value_tag = seed.group.item(value, 0)
+        (value_tag == "wide-number") { compiler = state.emit(compiler, seed.str.add("  li a0, ", seed.group.item(value, 1))) }
+        (value_tag == "number") { compiler = state.load_immediate(compiler, "a0", seed.group.item(value, 1)) }
+        (value_tag == "binary") {
+            (seed.group.item(value, 1) == "-") {
+                @left = ast.plain(seed.group.item(value, 2))
+                @right = ast.plain(seed.group.item(value, 3))
+                (seed.group.item(left, 0) == "number") {
+                    (seed.group.item(left, 1) == 0) {
+                        @right_tag = seed.group.item(right, 0)
+                        (right_tag == "number") { compiler = state.emit(compiler, seed.str.add("  li a0, -", seed.num.text(seed.group.item(right, 1)))) value_tag = "ready" }
+                        (right_tag == "wide-number") { compiler = state.emit(compiler, seed.str.add("  li a0, -", seed.group.item(right, 1))) value_tag = "ready" }
+                    }
+                }
+            }
+        }
+        (value_tag == "wide-number") { value_tag = "ready" }
+        (value_tag == "number") { value_tag = "ready" }
+        (value_tag == "ready") { compiler = compiler }
+        (value_tag == "ready") { value_tag = "done" }
+        (value_tag == "done") { compiler = compiler }
+        ((value_tag == "done") == no) {
+            compiler = compile_expression(compiler, seed.group.item(args, 0))
+            @source_type = infer_type(compiler, seed.group.item(args, 0))
+            (contract.is_fixed_type(source_type) == yes) {
+                compiler = state.emit(compiler, "  andi a0, a0, SALTIC_ABI_PAYLOAD_MASK")
+                compiler = state.emit(compiler, "  lw a0, 0(a0)")
+            }
+            (contract.is_fixed_type(source_type) == no) { compiler = state.emit(compiler, "  srai a0, a0, SALTIC_ABI_TAG_SHIFT") }
+        }
+        compiler = state.load_immediate(compiler, "a1", contract.fixed_kind(name))
+        out state.emit(compiler, "  call rt_fixed_new")
+    }
+    @conversion = contract.conversion(seed_kind)
+    (seed.str.len(conversion) > 0) {
+        compiler = compile_arguments(compiler, args)
+        compiler = state.load_immediate(compiler, "a1", contract.fixed_kind(conversion))
+        out state.emit(compiler, "  call rt_fixed_convert")
+    }
+    @fixed_target = ""
+    (contract.is_fixed_call(seed_kind) == yes) { fixed_target = contract.target(seed_kind, "unknown") }
+    (seed.str.len(fixed_target) > 0) {
+        compiler = compile_arguments(compiler, args)
+        out state.emit(compiler, seed.str.add("  call ", fixed_target))
+    }
+    @memory_target = ""
+    (seed.group.count(args) > 0) {
+        @input_type = infer_type(compiler, seed.group.item(args, 0))
+        (contract.is_memory(seed_kind) == yes) { memory_target = contract.target(seed_kind, input_type) }
+    }
+    (seed.str.len(memory_target) > 0) {
+        compiler = compile_arguments(compiler, args)
+        out state.emit(compiler, seed.str.add("  call ", memory_target))
+    }
+    @resolved_box = resolve_symbol(compiler.boxes, compiler.aliases, name, compiler.current_function.module)
+    (seed.str.len(resolved_box) > 0) { out compile_box(compiler, resolved_box, []) }
+    (seed.group.count(callee) == 2) {
+        @short_name = seed.group.item(callee, 1)
+        (seed.str.len(compiler.current_function.subject) > 0) {
+            (box_has_skill(compiler, compiler.current_function.subject, short_name) == yes) {
+                @with_self = state.group_prepend(["path", "$self"], args)
+                compiler = compile_arguments(compiler, with_self)
+                @target = seed.str.add(compiler.current_function.subject, ".")
+                target = seed.str.add(target, short_name)
+                out state.emit(compiler, seed.str.add("  call saltic_", state.safe(target)))
+            }
+        }
+    }
+    (seed.group.count(callee) == 3) {
+        @receiver = ["path", seed.group.item(callee, 1)]
+        @receiver_type = infer_type(compiler, receiver)
+        (seed.str.starts_with(receiver_type, "box:") == yes) {
+            @box_name = seed.str.slice(receiver_type, 4, seed.str.len(receiver_type))
+            @method = seed.group.item(callee, 2)
+            (box_has_skill(compiler, box_name, method) == yes) {
+                @with_receiver = state.group_prepend(receiver, args)
+                compiler = compile_arguments(compiler, with_receiver)
+                @target = seed.str.add(box_name, ".")
+                target = seed.str.add(target, method)
+                out state.emit(compiler, seed.str.add("  call saltic_", state.safe(target)))
+            }
+        }
+    }
+    @target = intrinsic(name)
+    (seed.str.len(target) == 0) {
+        @resolved_skill = resolve_skill(compiler, callee)
+        (seed.str.len(resolved_skill) > 0) { target = seed.str.add("saltic_", state.safe(resolved_skill)) }
+    }
+    compiler = compile_arguments(compiler, args)
+    out state.emit(compiler, seed.str.add("  call ", target))
+}
+
+skill compile_expression(compiler, node) {
+    @plain = ast.plain(node)
+    @tag = seed.group.item(plain, 0)
+    (tag == "number") { out state.load_immediate(compiler, "a0", abi.tagged(seed.group.item(plain, 1), abi.TAG_NUMBER)) }
+    (tag == "string") {
+        @label = string_label(compiler, seed.group.item(plain, 1))
+        compiler = state.emit(compiler, seed.str.add("  la a0, ", label))
+        out state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_STRING)))
+    }
+    (tag == "answer") {
+        (seed.group.item(plain, 1) == "yes") { out state.load_immediate(compiler, "a0", abi.YES) }
+        out state.load_immediate(compiler, "a0", abi.NO)
+    }
+    (tag == "none") { out state.load_immediate(compiler, "a0", abi.NONE) }
+    (tag == "path") { out compile_path(compiler, node) }
+    (tag == "binary") { out compile_binary(compiler, seed.group.item(plain, 1), seed.group.item(plain, 2), seed.group.item(plain, 3)) }
+    (tag == "call") { out compile_call(compiler, node) }
+    (tag == "group") { out compile_group(compiler, state.group_slice(plain, 1, seed.group.count(plain))) }
+    (tag == "box-new") {
+        @box_name = resolve_symbol(compiler.boxes, compiler.aliases, seed.group.item(plain, 1), compiler.current_function.module)
+        out compile_box(compiler, box_name, state.group_slice(plain, 2, seed.group.count(plain)))
+    }
+    (tag == "rescue") { out compile_rescue(compiler, node) }
+    (tag == "enum-value") {
+        @variant = state.symbol_find(compiler.variants, seed.group.item(plain, 1))
+        out state.load_immediate(compiler, "a0", variant.value)
+    }
+    out compiler
+}
+
+skill compile_block(compiler, block, keep) {
+    @plain = ast.plain(block)
+    @index = 1
+    @count = seed.group.count(plain)
+    drum (count) {
+        (index < count) {
+            @last = no
+            (keep == yes) {
+                (index + 1 == count) { last = yes }
+            }
+            compiler = compile_statement(compiler, seed.group.item(plain, index), last)
+            index = index + 1
+        }
+    }
+    (keep == yes) {
+        (count == 1) { compiler = state.load_immediate(compiler, "a0", abi.NONE) }
+    }
+    out compiler
+}
+
+skill compile_statement(compiler, node, keep) {
+    @plain = ast.plain(node)
+    @tag = seed.group.item(plain, 0)
+    (tag == "var") {
+        @value = seed.group.item(plain, 2)
+        compiler = compile_expression(compiler, value)
+        @slot = state.slot(compiler, seed.group.item(plain, 1))
+        compiler = state.emit(compiler, seed.str.add("  sw a0, ", seed.str.add(seed.num.text(slot), "(s0)")))
+        @type = infer_type(compiler, value)
+        @known = state.type_find(compiler.current_function.types, seed.group.item(plain, 1))
+        (type == "unknown") {
+            (seed.str.len(known.name) == 0) { compiler.current_function.types = state.type_set(compiler.current_function.types, seed.group.item(plain, 1), type) }
+        }
+        (type == "unknown") { out compiler }
+        compiler.current_function.types = state.type_set(compiler.current_function.types, seed.group.item(plain, 1), type)
+        out compiler
+    }
+    (tag == "assign") {
+        @value = seed.group.item(plain, 2)
+        compiler = compile_expression(compiler, value)
+        @slot = state.slot(compiler, seed.group.item(plain, 1))
+        compiler = state.emit(compiler, seed.str.add("  sw a0, ", seed.str.add(seed.num.text(slot), "(s0)")))
+        @type = infer_type(compiler, value)
+        @known = state.type_find(compiler.current_function.types, seed.group.item(plain, 1))
+        (type == "unknown") {
+            (seed.str.len(known.name) == 0) { compiler.current_function.types = state.type_set(compiler.current_function.types, seed.group.item(plain, 1), type) }
+        }
+        (type == "unknown") { out compiler }
+        compiler.current_function.types = state.type_set(compiler.current_function.types, seed.group.item(plain, 1), type)
+        out compiler
+    }
+    (tag == "field-assign") {
+        @target = ast.plain(seed.group.item(plain, 1))
+        @part_count = seed.group.count(target)
+        @base = state.group_slice(target, 0, part_count - 1)
+        compiler = compile_expression(compiler, base)
+        compiler = state.push(compiler, "a0")
+        compiler = compile_expression(compiler, seed.group.item(plain, 2))
+        compiler = state.emit(compiler, "  addi a2, a0, 0")
+        compiler = state.pop(compiler, "a0")
+        compiler = state.load_immediate(compiler, "a1", state.field(compiler, seed.group.item(target, part_count - 1)))
+        out state.emit(compiler, "  call rt_box_set")
+    }
+    (tag == "out") {
+        compiler = compile_expression(compiler, seed.group.item(plain, 1))
+        out state.emit(compiler, seed.str.add("  j ", compiler.current_function.end))
+    }
+    (tag == "expr") { out compile_expression(compiler, seed.group.item(plain, 1)) }
+    (tag == "if") {
+        @end = state.label(compiler, "if_end")
+        compiler = compile_expression(compiler, seed.group.item(plain, 1))
+        compiler = state.emit(compiler, seed.str.add("  addi t0, zero, ", seed.num.text(abi.NO)))
+        compiler = state.emit(compiler, seed.str.add("  beq a0, t0, ", end))
+        compiler = state.emit(compiler, seed.str.add("  addi t0, zero, ", seed.num.text(abi.NONE)))
+        compiler = state.emit(compiler, seed.str.add("  beq a0, t0, ", end))
+        compiler = state.emit(compiler, seed.str.add("  beq a0, zero, ", end))
+        compiler = compile_block(compiler, seed.group.item(plain, 2), keep)
+        out state.emit(compiler, seed.str.add(end, ":"))
+    }
+    (tag == "switch") {
+        @end = state.label(compiler, "switch_end")
+        compiler = compile_expression(compiler, seed.group.item(plain, 1))
+        compiler = state.emit(compiler, "  addi t2, a0, 0")
+        @index = 2
+        @count = seed.group.count(plain)
+        drum (count) {
+            (index < count) {
+                @case_node = ast.plain(seed.group.item(plain, index))
+                @next = state.label(compiler, "case_next")
+                @variant = state.symbol_find(compiler.variants, seed.group.item(case_node, 1))
+                compiler = state.load_immediate(compiler, "t0", variant.value)
+                compiler = state.emit(compiler, seed.str.add("  bne t2, t0, ", next))
+                compiler = compile_expression(compiler, seed.group.item(case_node, 2))
+                compiler = state.emit(compiler, seed.str.add("  j ", end))
+                compiler = state.emit(compiler, seed.str.add(next, ":"))
+                index = index + 1
+            }
+        }
+        out state.emit(compiler, seed.str.add(end, ":"))
+    }
+    (tag == "drum") {
+        @drum_name = seed.str.add("$drum:", seed.num.text(compiler.current_function.next_drum))
+        compiler.current_function.next_drum = compiler.current_function.next_drum + 1
+        @counter = state.slot(compiler, drum_name)
+        @start = state.label(compiler, "drum")
+        @end = state.label(compiler, "drum_end")
+        compiler = compile_expression(compiler, seed.group.item(plain, 1))
+        compiler = state.emit(compiler, "  srai a0, a0, SALTIC_ABI_TAG_SHIFT")
+        compiler = state.emit(compiler, seed.str.add("  sw a0, ", seed.str.add(seed.num.text(counter), "(s0)")))
+        compiler = state.emit(compiler, seed.str.add(start, ":"))
+        compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(seed.num.text(counter), "(s0)")))
+        compiler = state.emit(compiler, seed.str.add("  beq t0, zero, ", end))
+        compiler = state.emit(compiler, "  addi t0, t0, -1")
+        compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(counter), "(s0)")))
+        compiler = compile_block(compiler, seed.group.item(plain, 2), no)
+        compiler = state.emit(compiler, seed.str.add("  j ", start))
+        out state.emit(compiler, seed.str.add(end, ":"))
+    }
+    out compiler
+}
+
+skill compile_function(compiler, name, params, body, subject, module) {
+    @locals = state.collect_locals(params, body)
+    @local_count = seed.group.count(locals.names)
+    @frame = state.align16((local_count + 2) * 4)
+    @slots = state.make_slots(locals.names)
+    @end = state.label(compiler, seed.str.add(name, "_return"))
+    @types = []
+    @type_index = 0
+    @type_count = seed.group.count(params)
+    drum (type_count) {
+        (type_index < type_count) {
+            types = state.type_set(types, seed.group.item(params, type_index), "unknown")
+            type_index = type_index + 1
+        }
+    }
+    (seed.str.len(subject) > 0) { types = state.type_set(types, "$self", seed.str.add("box:", subject)) }
+    compiler.current_function = state.Function { name = name slots = slots end = end subject = subject module = module types = types }
+    compiler = state.emit(compiler, seed.str.add("saltic_", seed.str.add(state.safe(name), ":")))
+    compiler = state.emit(compiler, seed.str.add("  addi sp, sp, -", seed.num.text(frame)))
+    compiler = state.emit(compiler, seed.str.add("  sw ra, ", seed.str.add(seed.num.text(frame - 4), "(sp)")))
+    compiler = state.emit(compiler, seed.str.add("  sw s0, ", seed.str.add(seed.num.text(frame - 8), "(sp)")))
+    compiler = state.emit(compiler, seed.str.add("  addi s0, sp, ", seed.num.text(frame)))
+    @index = 0
+    @param_count = seed.group.count(params)
+    drum (param_count) {
+        (index < param_count) {
+            @register = seed.str.add("a", seed.num.text(index))
+            @slot = state.slot(compiler, seed.group.item(params, index))
+            compiler = state.emit(compiler, seed.str.add("  sw ", seed.str.add(register, seed.str.add(", ", seed.str.add(seed.num.text(slot), "(s0)")))))
+            index = index + 1
+        }
+    }
+    compiler = compile_block(compiler, body, no)
+    compiler = state.emit(compiler, seed.str.add("  addi a0, zero, ", seed.num.text(abi.NONE)))
+    compiler = state.emit(compiler, seed.str.add("  j ", end))
+    compiler = state.emit(compiler, seed.str.add(end, ":"))
+    compiler = state.emit(compiler, "  lw ra, -4(s0)")
+    compiler = state.emit(compiler, "  lw t0, -8(s0)")
+    compiler = state.emit(compiler, "  addi sp, s0, 0")
+    compiler = state.emit(compiler, "  addi s0, t0, 0")
+    compiler = state.emit(compiler, "  jalr zero, 0(ra)")
+    compiler = state.emit_blank(compiler)
+    compiler.current_function = state.Function {}
+    out compiler
+}
+
+skill compile_functions(compiler) {
+    @index = 0
+    @count = seed.group.count(compiler.skills)
+    drum (count) {
+        (index < count) {
+            @symbol = seed.group.item(compiler.skills, index)
+            @skill_node = symbol.node
+            compiler = compile_function(compiler, symbol.name, ast.part(skill_node, 2), ast.part(skill_node, 3), "", symbol.text)
+            index = index + 1
+        }
+    }
+    @box_index = 0
+    @box_count = seed.group.count(compiler.boxes)
+    drum (box_count) {
+        (box_index < box_count) {
+            @box = seed.group.item(compiler.boxes, box_index)
+            @member_index = 2
+            @member_count = seed.group.count(ast.plain(box.node))
+            drum (member_count) {
+                (member_index < member_count) {
+                    @member = ast.part(box.node, member_index)
+                    (ast.tag(member) == "subject-skill") {
+                        @name = seed.str.add(box.name, ".")
+                        name = seed.str.add(name, ast.part(member, 1))
+                        @params = state.group_prepend("$self", ast.part(member, 2))
+                        compiler = compile_function(compiler, name, params, ast.part(member, 3), box.name, ast.module_name(box.node))
+                    }
+                    member_index = member_index + 1
+                }
+            }
+            box_index = box_index + 1
+        }
+    }
+    compiler = compile_function(compiler, "program", ast.part(compiler.entry, 1), ast.part(compiler.entry, 2), "", "")
+    out compiler
+}

@@ -1,0 +1,85 @@
+use seed
+use seed.abi
+use seed.vm.state
+
+skill raw_text(word) {
+    out seed.str.add("0x", state.word_hex(word))
+}
+
+skill pointer(word) {
+    @address = state.word_copy(word)
+    address.b0 = address.b0 - state.mod(address.b0, abi.TAG_SCALE)
+    out state.word_address(address)
+}
+
+skill hex_byte(value) {
+    @text = seed.str.at(state.HEX, value / 16)
+    out seed.str.add(text, seed.str.at(state.HEX, state.mod(value, 16)))
+}
+
+skill string_byte(value) {
+    (value == 9) { out "\\t" }
+    (value == 10) { out "\\n" }
+    (value == 13) { out "\\r" }
+    (value == 34) { out "\\\"" }
+    (value == 92) { out "\\\\" }
+    (value > 31) {
+        (value < 127) { out seed.str.at(state.PRINTABLE, value - 32) }
+    }
+    out seed.str.add("\\x", hex_byte(value))
+}
+
+skill string_value(machine, word) {
+    @address = pointer(word)
+    (address < 0) { out seed.str.add(raw_text(word), " (некорректная строка)") }
+    (address > machine.memory.size - 4) { out seed.str.add(raw_text(word), " (строка вне памяти)") }
+    @length = state.word_address(state.memory_load_word(machine.memory, address))
+    (length < 0) { out seed.str.add(raw_text(word), " (некорректная длина строки)") }
+    (address > machine.memory.size - length - 4) { out seed.str.add(raw_text(word), " (строка вне памяти)") }
+
+    @text = "\""
+    @limit = length
+    (limit > 80) { limit = 80 }
+    @index = 0
+    drum (limit) {
+        text = seed.str.add(text, string_byte(state.memory_raw_load8(machine.memory, address + 4 + index)))
+        index = index + 1
+    }
+    (length > limit) { text = seed.str.add(text, "…") }
+    text = seed.str.add(text, "\"")
+    out seed.str.add(raw_text(word), seed.str.add(" (", seed.str.add(text, ")")))
+}
+
+skill tagged_id(word) {
+    out state.word_address(word) / abi.TAG_SCALE
+}
+
+skill render(machine, word) {
+    @tag = state.mod(word.b0, abi.TAG_SCALE)
+    @raw = raw_text(word)
+    (tag == abi.TAG_NUMBER) {
+        @number = state.word_signed_number(word) / abi.TAG_SCALE
+        out seed.str.add(raw, seed.str.add(" (число ", seed.str.add(seed.num.text(number), ")")))
+    }
+    (tag == abi.TAG_ANSWER) {
+        (state.word_equal(word, state.word_number(abi.YES)) == yes) { out seed.str.add(raw, " (да)") }
+        (state.word_equal(word, state.word_number(abi.NO)) == yes) { out seed.str.add(raw, " (нет)") }
+        out seed.str.add(raw, " (ответ)")
+    }
+    (tag == abi.TAG_NONE) { out seed.str.add(raw, " (пусто)") }
+    (tag == abi.TAG_STRING) { out string_value(machine, word) }
+    (tag == abi.TAG_GROUP) { out seed.str.add(raw, " (группа)") }
+    (tag == abi.TAG_BOX) { out seed.str.add(raw, " (объект)") }
+    (tag == abi.TAG_ENUM) { out seed.str.add(raw, seed.str.add(" (перечисление #", seed.str.add(seed.num.text(tagged_id(word)), ")"))) }
+    out seed.str.add(raw, seed.str.add(" (ошибка #", seed.str.add(seed.num.text(tagged_id(word)), ")")))
+}
+
+skill registers(machine) {
+    @values = []
+    @index = 0
+    drum (4) {
+        values = seed.group.add(values, render(machine, state.register(machine, index + 10)))
+        index = index + 1
+    }
+    out values
+}
