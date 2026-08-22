@@ -6,7 +6,7 @@
 Зафиксированный интерфейс self-hosted слоя:
 
 ```s
-skill compiler_compile(ast) {
+skill compile(ast) {
     out assembly
 }
 ```

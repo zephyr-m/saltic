@@ -91,15 +91,15 @@ program(image_format, scenario, snapshot_path) {
     (scenario == "normal") { arguments = ["normal", "input.txt", "output.txt"] }
     @limit = 100000
     (scenario == "timeout") { limit = 32 }
-    @options = state.VmOptions {
+    @options = state.Options {
         load_address = 4096
         memory_size = 262144
         step_limit = limit
         program_name = "vm-canonical"
         arguments = arguments
-        files = [state.VmFile { path = "input.txt" data = VM_TEST_INPUT }]
+        files = [state.File { path = "input.txt" data = VM_TEST_INPUT }]
     }
-    @result = vm.vm_run(image, options)
+    @result = vm.run(image, options)
     core.file.write(snapshot_path, vm_test_snapshot(result))
     out none
 }

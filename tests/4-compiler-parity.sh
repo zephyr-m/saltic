@@ -7,8 +7,8 @@ work=".cache/build/compiler-parity"
 mkdir -p "$work/bootstrap" "$work/expected" "$work/actual" "$work/diff" "$work/run-host" "$work/run-saltic"
 
 echo "сравнение компиляторов: проверяю интерфейс"
-if ! grep -q '^skill compiler_compile(ast)' s2/compiler.saltic; then
-    echo "сравнение компиляторов: в s2/compiler.saltic ещё нет skill compiler_compile(ast)"
+if ! grep -q '^skill compile(ast)' s2/compiler.saltic; then
+    echo "сравнение компиляторов: в s2/compiler.saltic ещё нет skill compile(ast)"
     exit 1
 fi
 

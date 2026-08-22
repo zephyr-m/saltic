@@ -5,36 +5,20 @@
 
 Зафиксированный интерфейс self-hosted слоя:
 
-```s
-VmFile = Box {
-    path = ""
-    data = []
-}
+```saltic
+use s2.vm
+use s2.vm.state
 
-VmOptions = Box {
+@options = state.Options {
     load_address = 4096
     memory_size = 262144
     step_limit = 100000
     program_name = "program"
     arguments = []
-    files = []
+    files = [state.File { path = "input.txt" data = [] }]
 }
 
-VmResult = Box {
-    exit_code = 0
-    reason = ""
-    pc = "00000000"
-    steps = 0
-    registers = []
-    stdout = []
-    stderr = []
-    files = []
-    trap = ""
-}
-
-skill vm_run(image, options) {
-    out VmResult {}
-}
+@result = vm.run(image, options)
 ```
 
 `image` представлен группой страниц, каждая страница — группа не более чем

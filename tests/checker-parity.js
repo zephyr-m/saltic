@@ -9,9 +9,9 @@ use s2.parser
 use s2.checker
 
 program(path) {
-    @loaded = parser.parser_load_file_loc(path, ".")
+    @loaded = parser.load_file_loc(path, ".")
     (core.group.count(loaded.diagnostics) > 0) { out error.ParseFailed }
-    @result = checker.checker_check(loaded.ast)
+    @result = checker.check(loaded.ast)
     @index = 0
     @count = core.group.count(result.diagnostics)
     drum (count) {

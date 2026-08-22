@@ -7,8 +7,8 @@ work=".cache/build/vm-parity"
 mkdir -p "$work/bootstrap" "$work/guest" "$work/expected" "$work/actual" "$work/diff"
 
 echo "сравнение VM: проверяю интерфейс"
-if ! grep -q '^skill vm_run(image, options)' s2/vm.saltic; then
-    echo "сравнение VM: в s2/vm.saltic ещё нет skill vm_run(image, options)"
+if ! grep -q '^skill run(image, options)' s2/vm.saltic; then
+    echo "сравнение VM: в s2/vm.saltic ещё нет skill run(image, options)"
     exit 1
 fi
 
