@@ -2,9 +2,22 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
 cd "$root"
+
+work_root="${SALTIC_TEST_DIR:-.cache/build/tests}"
+mkdir -p "$work_root"
+work="$(mktemp -d "$work_root/run.XXXXXX")"
+
+cleanup() {
+    local status=$?
+    if (( status == 0 )); then
+        rm -rf "$work"
+    else
+        echo "проверка: артефакты сохранены в $work" >&2
+    fi
+}
+
+trap cleanup EXIT
 
 build() {
     local name="$1"
@@ -198,8 +211,13 @@ test_abi() {
     echo "ABI: единый контракт подтверждён"
 }
 
+test_qemu_virt() {
+    SALTIC_QEMU_GRAPHICS_DIR="$work/qemu-virt" \
+        bash os/target/qemu_virt/build-graphics.sh --check
+}
+
 test_bootstrap() {
-    local bootstrap_work=".cache/build/bootstrap-parity"
+    local bootstrap_work="$work/bootstrap"
     local heap_bytes=536870912
     mkdir -p \
         "$bootstrap_work/stage-1" \
@@ -273,6 +291,7 @@ run_case() {
         diagnostics) test_diagnostics ;;
         seed-contract) test_seed_contract ;;
         abi) test_abi ;;
+        qemu-virt) test_qemu_virt ;;
         bootstrap) test_bootstrap ;;
         *)
             echo "неизвестная проверка: $1" >&2
@@ -296,6 +315,7 @@ if [[ "$1" == "all" ]]; then
         diagnostics \
         seed-contract \
         abi \
+        qemu-virt \
         bootstrap
 fi
 

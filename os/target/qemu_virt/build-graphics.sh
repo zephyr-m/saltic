@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$root"
 
-work=".cache/build/qemu-graphics"
+work="${SALTIC_QEMU_GRAPHICS_DIR:-.cache/build/qemu-graphics}"
 mkdir -p "$work"
 
 echo "графика: создаю $work/program.s"
@@ -23,8 +23,7 @@ echo "графика: сборка готова"
 
 if [[ "${1:-}" == "--check" ]]; then
     stdout="$work/stdout.txt"
-    status=0
-    timeout 10s qemu-system-riscv32 \
+    qemu-system-riscv32 \
         -machine virt \
         -global virtio-mmio.force-legacy=false \
         -device ramfb \
@@ -34,11 +33,35 @@ if [[ "${1:-}" == "--check" ]]; then
         -monitor none \
         -bios none \
         -kernel "$work/program.elf" \
-        >"$stdout" || status=$?
-    if (( status != 0 && status != 124 )); then
-        exit "$status"
-    fi
+        >"$stdout" &
+    qemu_pid=$!
+
+    stop_qemu() {
+        if kill -0 "$qemu_pid" 2>/dev/null; then
+            kill "$qemu_pid" 2>/dev/null || true
+        fi
+        wait "$qemu_pid" 2>/dev/null || true
+    }
+    trap stop_qemu EXIT
+
+    ready=0
+    for (( attempt = 0; attempt < 600; attempt++ )); do
+        if grep -Fxq "клавиатура Saltic готова" "$stdout"; then
+            ready=1
+            break
+        fi
+        if ! kill -0 "$qemu_pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    stop_qemu
+    trap - EXIT
     cat "$stdout"
-    grep -Fxq "клавиатура Saltic готова" "$stdout"
+    if (( ready == 0 )); then
+        echo "графика: QEMU не сообщил о готовности за 60 секунд" >&2
+        exit 1
+    fi
     echo "графика: QEMU-контур пройден"
 fi

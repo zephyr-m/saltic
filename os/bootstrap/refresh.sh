@@ -11,18 +11,6 @@ source_path="${1:-soul/seed/toolchain.saltic}"
 mkdir -p "$work/stage-1" "$work/stage-2" "$work/stage-3"
 
 bootstrap_compiler="${SALTIC_BOOTSTRAP_COMPILER:-os/bootstrap/compiler.elf}"
-if grep -a -q 'core\.group\.count' "$bootstrap_compiler"; then
-    mkdir -p "$work/seed-transition"
-    transition_compiler="$work/seed-transition/compiler.elf"
-    cp "$bootstrap_compiler" "$transition_compiler"
-    LC_ALL=C perl -0pi -e 's/core/seed/g' "$transition_compiler"
-    if ! grep -a -q 'seed\.group\.count' "$transition_compiler"; then
-        echo "bootstrap refresh: не удалось подготовить переход core → seed" >&2
-        exit 1
-    fi
-    bootstrap_compiler="$transition_compiler"
-    echo "bootstrap refresh: подготовлен одноразовый переход core → seed"
-fi
 
 echo "bootstrap refresh: текущее поколение собирает stage-1"
 SALTIC_BOOTSTRAP_COMPILER="$bootstrap_compiler" \
