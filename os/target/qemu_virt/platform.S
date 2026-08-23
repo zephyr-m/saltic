@@ -29,7 +29,7 @@ platform_start:
 platform_trap:
   csrr t0, mcause
   addi t1, zero, 11
-  bne t0, t1, platform_exit_error
+  bne t0, t1, platform_report_trap
 
   addi t0, zero, 64
   beq a7, t0, platform_write
@@ -37,7 +37,50 @@ platform_trap:
   beq a7, t0, platform_exit
   addi t0, zero, 94
   beq a7, t0, platform_exit
+platform_report_trap:
+  csrr t1, mepc
+  addi sp, sp, -16
+  sw t0, 0(sp)
+  sw t1, 4(sp)
+
+  la a1, platform_trap_cause
+  la a2, platform_trap_cause_end
+  sub a2, a2, a1
+  call rt_platform_write
+  lw a0, 0(sp)
+  call platform_uart_bits
+
+  la a1, platform_trap_address
+  la a2, platform_trap_address_end
+  sub a2, a2, a1
+  call rt_platform_write
+  lw a0, 4(sp)
+  call platform_uart_bits
+
+  addi sp, sp, 16
   j platform_exit_error
+
+platform_uart_bits:
+  addi t5, zero, 32
+  li t4, UART_BASE
+.L_platform_bits_loop:
+  srli t2, a0, 31
+  addi t2, t2, 48
+.L_platform_bits_wait:
+  lbu t3, UART_LSR(t4)
+  andi t3, t3, UART_TX_READY
+  beq t3, zero, .L_platform_bits_wait
+  sb t2, 0(t4)
+  slli a0, a0, 1
+  addi t5, t5, -1
+  bne t5, zero, .L_platform_bits_loop
+.L_platform_bits_newline_wait:
+  lbu t3, UART_LSR(t4)
+  andi t3, t3, UART_TX_READY
+  beq t3, zero, .L_platform_bits_newline_wait
+  addi t2, zero, 10
+  sb t2, 0(t4)
+  jalr zero, 0(ra)
 
 .global rt_platform_write
 rt_platform_write:
@@ -62,6 +105,17 @@ rt_platform_write:
 .global rt_platform_exit
 rt_platform_exit:
   beq a0, zero, platform_exit_ok
+  addi sp, sp, -16
+  sw ra, 12(sp)
+  sw a0, 8(sp)
+  la a1, platform_exit_failure
+  la a2, platform_exit_failure_end
+  sub a2, a2, a1
+  call rt_platform_write
+  lw a0, 8(sp)
+  call platform_uart_bits
+  lw ra, 12(sp)
+  addi sp, sp, 16
   j platform_exit_error
 
 platform_write:
@@ -110,6 +164,15 @@ platform_halt:
 .align 2
 platform_name:
   .asciz "saltic"
+platform_trap_cause:
+  .ascii "ловушка процессора, причина: "
+platform_trap_cause_end:
+platform_trap_address:
+  .ascii "адрес остановки: "
+platform_trap_address_end:
+platform_exit_failure:
+  .ascii "системный выход с ошибкой: "
+platform_exit_failure_end:
 
 .section .data
 .align 2
