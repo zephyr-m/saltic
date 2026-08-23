@@ -1,0 +1,177 @@
+use seed
+use seed.abi
+use seed.compiler.state
+use seed.memory.model
+
+WORD_BYTES = abi.VALUE_WORD_BYTES
+STACK_ALIGNMENT = abi.CALL_STACK_ALIGNMENT
+DATA_ALIGNMENT = abi.OBJECT_ALIGNMENT
+HEAP_BYTES = model.DEFAULT_HEAP_BYTES
+
+SAVED_FRAME_WORDS = 2
+LOCAL_BASE_WORDS = SAVED_FRAME_WORDS + 1
+RETURN_ADDRESS_WORDS = 1
+PREVIOUS_FRAME_WORDS = 2
+CONSTANT_FRAME_WORDS = 4
+
+STRING_LENGTH_OFFSET = 0
+STRING_DATA_OFFSET = WORD_BYTES
+STRING_DATA_LINE_BYTES = 64
+
+GROUP_COUNT_OFFSET = 0
+GROUP_ITEMS_OFFSET = WORD_BYTES
+GROUP_ITEM_BYTES = WORD_BYTES
+
+BOX_COUNT_OFFSET = 0
+BOX_FIELDS_OFFSET = WORD_BYTES
+BOX_FIELD_ID_OFFSET = 0
+BOX_FIELD_VALUE_OFFSET = WORD_BYTES
+BOX_FIELD_BYTES = WORD_BYTES * 2
+
+STATE_EMPTY = 0
+STATE_INITIALIZING = 1
+STATE_READY = 2
+
+CONSTANT_STATE_OFFSET = 0
+CONSTANT_VALUE_OFFSET = WORD_BYTES
+CONSTANT_STORAGE_BYTES = WORD_BYTES * 2
+
+skill valid_state(value) {
+    (value == STATE_EMPTY) { out yes }
+    (value == STATE_INITIALIZING) { out yes }
+    (value == STATE_READY) { out yes }
+    out no
+}
+
+skill can_begin(value) {
+    out value == STATE_EMPTY
+}
+
+skill is_cycle(value) {
+    out value == STATE_INITIALIZING
+}
+
+skill is_ready(value) {
+    out value == STATE_READY
+}
+
+skill stack_bytes(word_count) {
+    (word_count < 0) { out 0 - 1 }
+    out word_count * WORD_BYTES
+}
+
+skill stack_source_offset(count, index) {
+    (count < 0) { out 0 - 1 }
+    (index < 0) { out 0 - 1 }
+    ((index < count) == no) { out 0 - 1 }
+    out stack_bytes(count - index - 1)
+}
+
+skill local_offset(index) {
+    (index < 0) { out 0 - 1 }
+    out 0 - stack_bytes(LOCAL_BASE_WORDS + index)
+}
+
+skill frame_bytes(local_count) {
+    out abi.frame_bytes(local_count, SAVED_FRAME_WORDS)
+}
+
+skill return_address_save_offset(frame) {
+    (frame < STACK_ALIGNMENT) { out 0 - 1 }
+    out frame - stack_bytes(RETURN_ADDRESS_WORDS)
+}
+
+skill previous_frame_save_offset(frame) {
+    (frame < STACK_ALIGNMENT) { out 0 - 1 }
+    out frame - stack_bytes(PREVIOUS_FRAME_WORDS)
+}
+
+skill return_address_load_offset() {
+    out 0 - stack_bytes(RETURN_ADDRESS_WORDS)
+}
+
+skill previous_frame_load_offset() {
+    out 0 - stack_bytes(PREVIOUS_FRAME_WORDS)
+}
+
+skill constant_frame_bytes() {
+    out stack_bytes(CONSTANT_FRAME_WORDS)
+}
+
+skill constant_return_address_offset() {
+    out stack_bytes(CONSTANT_FRAME_WORDS - RETURN_ADDRESS_WORDS)
+}
+
+skill string_storage_bytes(length) {
+    (length < 0) { out 0 - 1 }
+    out STRING_DATA_OFFSET + length + 1
+}
+
+skill group_storage_bytes(count) {
+    (count < 0) { out 0 - 1 }
+    out GROUP_ITEMS_OFFSET + count * GROUP_ITEM_BYTES
+}
+
+skill group_item_offset(index) {
+    (index < 0) { out 0 - 1 }
+    out GROUP_ITEMS_OFFSET + index * GROUP_ITEM_BYTES
+}
+
+skill box_storage_bytes(count) {
+    (count < 0) { out 0 - 1 }
+    out BOX_FIELDS_OFFSET + count * BOX_FIELD_BYTES
+}
+
+skill box_field_id_offset(index) {
+    (index < 0) { out 0 - 1 }
+    out BOX_FIELDS_OFFSET + index * BOX_FIELD_BYTES + BOX_FIELD_ID_OFFSET
+}
+
+skill box_field_value_offset(index) {
+    (index < 0) { out 0 - 1 }
+    out BOX_FIELDS_OFFSET + index * BOX_FIELD_BYTES + BOX_FIELD_VALUE_OFFSET
+}
+
+skill safe_name(text) {
+    @result = ""
+    @index = 0
+    @length = seed.str.len(text)
+    @allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    drum (length) {
+        (index < length) {
+            @ch = seed.str.at(text, index)
+            (seed.str.contains(allowed, ch) == yes) { result = seed.str.add(result, ch) }
+            (seed.str.contains(allowed, ch) == no) { result = seed.str.add(result, "_") }
+            index = index + 1
+        }
+    }
+    out result
+}
+
+skill getter_label(name) {
+    out seed.str.add("saltic_constant_get_", safe_name(name))
+}
+
+skill state_label(name) {
+    out seed.str.add("saltic_constant_state_", safe_name(name))
+}
+
+skill value_label(name) {
+    out seed.str.add("saltic_constant_value_", safe_name(name))
+}
+
+skill emit_storage(compiler) {
+    @index = 0
+    @count = seed.group.count(compiler.constants)
+    drum (count) {
+        (index < count) {
+            @constant = seed.group.item(compiler.constants, index)
+            compiler = state.emit_writable(compiler, seed.str.add(state_label(constant.name), ":"))
+            compiler = state.emit_writable(compiler, seed.str.add("  .word ", seed.num.text(STATE_EMPTY)))
+            compiler = state.emit_writable(compiler, seed.str.add(value_label(constant.name), ":"))
+            compiler = state.emit_writable(compiler, seed.str.add("  .word ", seed.num.text(abi.NONE)))
+            index = index + 1
+        }
+    }
+    out compiler
+}

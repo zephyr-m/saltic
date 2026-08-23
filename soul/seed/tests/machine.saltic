@@ -1,0 +1,78 @@
+use seed
+use craft.testing
+use seed.machine.instruction
+use seed.machine.codec
+use seed.machine.layout
+use seed.compiler.backend.rv32i
+use seed.vm
+use seed.vm.state
+
+skill encoding(suite) {
+    @encoded = codec.buffer()
+    @valid = yes
+    @index = 0
+    drum (instruction.count()) {
+        @item = instruction.at(index)
+        @word = codec.encode(item, 1, 2, 3, 4) rescue |failure| {
+            valid = no
+            codec.word(0, 0, 0, 0)
+        }
+        encoded = codec.append_word(encoded, word)
+        index = index + 1
+    }
+    @addi = codec.encode_kind(instruction.Kind.ADDI, 1, 2, 0, 3)
+    suite = testing.test_yes(suite, "кодировщик: все 44 команды кодируются", valid)
+    suite = testing.test_equal(suite, "кодировщик: каждая команда занимает четыре байта", encoded.length, 176)
+    suite = testing.test_equal(suite, "кодировщик: первый байт addi закреплён", addi.b0, 147)
+    suite = testing.test_equal(suite, "кодировщик: второй байт addi закреплён", addi.b1, 0)
+    suite = testing.test_equal(suite, "кодировщик: третий байт addi закреплён", addi.b2, 49)
+    suite = testing.test_equal(suite, "кодировщик: четвёртый байт addi закреплён", addi.b3, 0)
+    suite = testing.test_equal(
+        suite,
+        "кодировщик: машинное слово видно только нулями и единицами",
+        codec.word_bits(addi),
+        "10010011 00000000 00110001 00000000"
+    )
+    out suite
+}
+
+skill executable(suite) {
+    @target = rv32i.host("_start")
+    target = rv32i.label(target, layout.Section.CODE, "_start")
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.ZERO, codec.ZERO, "done")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, 9))
+    target = rv32i.label(target, layout.Section.CODE, "done")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+    target = rv32i.resolve(target)
+
+    @current_layout = layout.layout(target)
+    @done_offset = layout.label_offset(target, current_layout, "done")
+    @branch_byte = codec.byte_at(target.code, 1)
+    @output = rv32i.executable(target)
+    @chunks = codec.chunks(output, state.PAGE_SIZE)
+    @options = state.Options {
+        load_address = 4096
+        memory_size = 262144
+        step_limit = 16
+        program_name = "seed-machine-contract"
+        arguments = []
+        files = []
+    }
+    @result = vm.run(chunks, options)
+
+    suite = testing.test_equal(suite, "программа: метка получила точное смещение", done_offset, 8)
+    suite = testing.test_equal(suite, "программа: ссылка на метку исправлена", branch_byte, 4)
+    suite = testing.test_yes(suite, "образ: исполняемый файл создан", output.length > 4096)
+    suite = testing.test_equal(suite, "образ: наша VM загрузила собственный файл", result.trap, "")
+    suite = testing.test_equal(suite, "образ: переход пропустил лишнюю команду", result.steps, 2)
+    suite = testing.test_equal(suite, "образ: программа остановилась штатно", result.reason, "break")
+    out suite
+}
+
+program() {
+    @suite = testing.test_new()
+    suite = encoding(suite)
+    suite = executable(suite)
+    testing.test_finish(suite)
+    out none
+}

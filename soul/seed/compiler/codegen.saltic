@@ -3,8 +3,7 @@ use seed.abi
 use seed.ast
 use seed.intrinsic.contract
 use seed.compiler.state
-
-STRING_DATA_LINE_BYTES = 64
+use seed.compiler.constants
 
 skill box_field_symbol(compiler, box_name, field_name) {
     @box = state.symbol_find(compiler.boxes, box_name)
@@ -66,10 +65,7 @@ skill compile_path(compiler, node) {
         constant_name = resolve_symbol(compiler.constants, compiler.aliases, path_name, compiler.current_function.module)
         constant = state.symbol_find(compiler.constants, constant_name)
         (seed.str.len(constant.name) > 0) {
-            @caller_module = compiler.current_function.module
-            compiler.current_function.module = constant.text
-            compiler = compile_expression(compiler, constant.node)
-            compiler.current_function.module = caller_module
+            compiler = state.emit(compiler, seed.str.add("  call ", constants.getter_label(constant.name)))
         }
         (seed.str.len(constant.name) == 0) {
             @subject_field = box_field_symbol(compiler, compiler.current_function.subject, name)
@@ -240,12 +236,12 @@ skill compile_arguments(compiler, args) {
     drum (count) {
         (index < count) {
             @register = seed.str.add("a", seed.num.text(index))
-            @offset = seed.num.text((count - index - 1) * 4)
+            @offset = seed.num.text(constants.stack_source_offset(count, index))
             compiler = state.emit(compiler, seed.str.add("  lw ", seed.str.add(register, seed.str.add(", ", seed.str.add(offset, "(sp)")))))
             index = index + 1
         }
     }
-    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(count * 4))) }
+    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(constants.stack_bytes(count)))) }
     out compiler
 }
 
@@ -312,7 +308,7 @@ skill emit_string_data(compiler, text) {
         line_bytes = line_bytes + 1
         index = index + 1
 
-        @flush = line_bytes == STRING_DATA_LINE_BYTES
+        @flush = line_bytes == constants.STRING_DATA_LINE_BYTES
         (index == total) { flush = yes }
         (flush == yes) {
             compiler = state.emit_data(compiler, line)
@@ -331,7 +327,7 @@ skill string_label(compiler, text) {
     compiler = state.emit_data(compiler, seed.str.add(label, ":"))
     compiler = state.emit_data(compiler, seed.str.add("  .word ", seed.num.text(length)))
     compiler = emit_string_data(compiler, text)
-    compiler = state.emit_data(compiler, "  .balign 8")
+    compiler = state.emit_data(compiler, seed.str.add("  .balign ", seed.num.text(constants.DATA_ALIGNMENT)))
     compiler.strings = seed.group.add(compiler.strings, state.Symbol { name = label kind = "string" text = text })
     out label
 }
@@ -346,21 +342,21 @@ skill compile_group(compiler, items) {
             index = index + 1
         }
     }
-    compiler = state.load_immediate(compiler, "a0", state.align8(4 + count * 4))
+    compiler = state.load_immediate(compiler, "a0", state.align8(constants.group_storage_bytes(count)))
     compiler = state.emit(compiler, "  call rt_alloc")
     compiler = state.emit(compiler, seed.str.add("  addi t3, zero, ", seed.num.text(count)))
     compiler = state.emit(compiler, "  sw t3, 0(a0)")
     index = 0
     drum (count) {
         (index < count) {
-            @source_offset = seed.num.text((count - index - 1) * 4)
-            @target_offset = seed.num.text(4 + index * 4)
+            @source_offset = seed.num.text(constants.stack_source_offset(count, index))
+            @target_offset = seed.num.text(constants.group_item_offset(index))
             compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(source_offset, "(sp)")))
             compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(target_offset, "(a0)")))
             index = index + 1
         }
     }
-    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(count * 4))) }
+    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(constants.stack_bytes(count)))) }
     out state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_GROUP)))
 }
 
@@ -406,7 +402,7 @@ skill compile_box(compiler, name, overrides) {
             index = index + 1
         }
     }
-    compiler = state.load_immediate(compiler, "a0", state.align8(4 + count * 8))
+    compiler = state.load_immediate(compiler, "a0", state.align8(constants.box_storage_bytes(count)))
     compiler = state.emit(compiler, "  call rt_alloc")
     compiler = state.emit(compiler, seed.str.add("  addi t3, zero, ", seed.num.text(count)))
     compiler = state.emit(compiler, "  sw t3, 0(a0)")
@@ -416,13 +412,13 @@ skill compile_box(compiler, name, overrides) {
             @field = seed.group.item(fields, index)
             @field_id = state.field(compiler, ast.part(field, 1))
             compiler = state.load_immediate(compiler, "t0", field_id)
-            compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(4 + index * 8), "(a0)")))
-            compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(seed.num.text((count - index - 1) * 4), "(sp)")))
-            compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(8 + index * 8), "(a0)")))
+            compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(constants.box_field_id_offset(index)), "(a0)")))
+            compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(seed.num.text(constants.stack_source_offset(count, index)), "(sp)")))
+            compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(constants.box_field_value_offset(index)), "(a0)")))
             index = index + 1
         }
     }
-    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(count * 4))) }
+    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(constants.stack_bytes(count)))) }
     out state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_BOX)))
 }
 
@@ -681,7 +677,7 @@ skill compile_statement(compiler, node, keep) {
 skill compile_function(compiler, name, params, body, subject, module) {
     @locals = state.collect_locals(params, body)
     @local_count = seed.group.count(locals.names)
-    @frame = state.align16((local_count + 2) * 4)
+    @frame = constants.frame_bytes(local_count)
     @slots = state.make_slots(locals.names)
     @end = state.label(compiler, seed.str.add(name, "_return"))
     @types = []
@@ -697,8 +693,8 @@ skill compile_function(compiler, name, params, body, subject, module) {
     compiler.current_function = state.Function { name = name slots = slots end = end subject = subject module = module types = types }
     compiler = state.emit(compiler, seed.str.add("saltic_", seed.str.add(state.safe(name), ":")))
     compiler = state.emit(compiler, seed.str.add("  addi sp, sp, -", seed.num.text(frame)))
-    compiler = state.emit(compiler, seed.str.add("  sw ra, ", seed.str.add(seed.num.text(frame - 4), "(sp)")))
-    compiler = state.emit(compiler, seed.str.add("  sw s0, ", seed.str.add(seed.num.text(frame - 8), "(sp)")))
+    compiler = state.emit(compiler, seed.str.add("  sw ra, ", seed.str.add(seed.num.text(constants.return_address_save_offset(frame)), "(sp)")))
+    compiler = state.emit(compiler, seed.str.add("  sw s0, ", seed.str.add(seed.num.text(constants.previous_frame_save_offset(frame)), "(sp)")))
     compiler = state.emit(compiler, seed.str.add("  addi s0, sp, ", seed.num.text(frame)))
     @index = 0
     @param_count = seed.group.count(params)
@@ -714,13 +710,71 @@ skill compile_function(compiler, name, params, body, subject, module) {
     compiler = state.emit(compiler, seed.str.add("  addi a0, zero, ", seed.num.text(abi.NONE)))
     compiler = state.emit(compiler, seed.str.add("  j ", end))
     compiler = state.emit(compiler, seed.str.add(end, ":"))
-    compiler = state.emit(compiler, "  lw ra, -4(s0)")
-    compiler = state.emit(compiler, "  lw t0, -8(s0)")
+    compiler = state.emit(compiler, seed.str.add("  lw ra, ", seed.str.add(seed.num.text(constants.return_address_load_offset()), "(s0)")))
+    compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(seed.num.text(constants.previous_frame_load_offset()), "(s0)")))
     compiler = state.emit(compiler, "  addi sp, s0, 0")
     compiler = state.emit(compiler, "  addi s0, t0, 0")
     compiler = state.emit(compiler, "  jalr zero, 0(ra)")
     compiler = state.emit_blank(compiler)
     compiler.current_function = state.Function {}
+    out compiler
+}
+
+skill compile_constant(compiler, constant) {
+    @ready = state.label(compiler, "constant_ready")
+    @cycle = state.label(compiler, "constant_cycle")
+    @finish = state.label(compiler, "constant_finish")
+    @before = compiler.current_function
+    compiler.current_function = state.Function { name = constant.name module = constant.text }
+
+    compiler = state.emit(compiler, seed.str.add(constants.getter_label(constant.name), ":"))
+    @frame = constants.constant_frame_bytes()
+    @return_address_offset = constants.constant_return_address_offset()
+    compiler = state.emit(compiler, seed.str.add("  addi sp, sp, -", seed.num.text(frame)))
+    compiler = state.emit(compiler, seed.str.add("  sw ra, ", seed.str.add(seed.num.text(return_address_offset), "(sp)")))
+    compiler = state.emit(compiler, seed.str.add("  la t0, ", constants.state_label(constant.name)))
+    compiler = state.emit(compiler, "  lw t1, 0(t0)")
+    compiler = state.emit(compiler, seed.str.add("  addi t2, zero, ", seed.num.text(constants.STATE_READY)))
+    compiler = state.emit(compiler, seed.str.add("  beq t1, t2, ", ready))
+    compiler = state.emit(compiler, seed.str.add("  addi t2, zero, ", seed.num.text(constants.STATE_INITIALIZING)))
+    compiler = state.emit(compiler, seed.str.add("  beq t1, t2, ", cycle))
+    compiler = state.emit(compiler, seed.str.add("  addi t1, zero, ", seed.num.text(constants.STATE_INITIALIZING)))
+    compiler = state.emit(compiler, "  sw t1, 0(t0)")
+
+    compiler = compile_expression(compiler, constant.node)
+    compiler = state.emit(compiler, seed.str.add("  la t0, ", constants.value_label(constant.name)))
+    compiler = state.emit(compiler, "  sw a0, 0(t0)")
+    compiler = state.emit(compiler, seed.str.add("  la t0, ", constants.state_label(constant.name)))
+    compiler = state.emit(compiler, seed.str.add("  addi t1, zero, ", seed.num.text(constants.STATE_READY)))
+    compiler = state.emit(compiler, "  sw t1, 0(t0)")
+    compiler = state.emit(compiler, seed.str.add("  j ", finish))
+
+    compiler = state.emit(compiler, seed.str.add(ready, ":"))
+    compiler = state.emit(compiler, seed.str.add("  la t0, ", constants.value_label(constant.name)))
+    compiler = state.emit(compiler, "  lw a0, 0(t0)")
+    compiler = state.emit(compiler, seed.str.add("  j ", finish))
+
+    compiler = state.emit(compiler, seed.str.add(cycle, ":"))
+    compiler = state.load_immediate(compiler, "a0", abi.error_value(abi.ERROR_CONSTANT_CYCLE))
+
+    compiler = state.emit(compiler, seed.str.add(finish, ":"))
+    compiler = state.emit(compiler, seed.str.add("  lw ra, ", seed.str.add(seed.num.text(return_address_offset), "(sp)")))
+    compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(frame)))
+    compiler = state.emit(compiler, "  jalr zero, 0(ra)")
+    compiler = state.emit_blank(compiler)
+    compiler.current_function = before
+    out compiler
+}
+
+skill compile_constants(compiler) {
+    @index = 0
+    @count = seed.group.count(compiler.constants)
+    drum (count) {
+        (index < count) {
+            compiler = compile_constant(compiler, seed.group.item(compiler.constants, index))
+            index = index + 1
+        }
+    }
     out compiler
 }
 

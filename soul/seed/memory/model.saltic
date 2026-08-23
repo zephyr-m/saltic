@@ -1,0 +1,199 @@
+use seed
+use seed.abi.object
+use seed.abi.value
+
+ADDRESS_BITS = value.WORD_BITS
+ADDRESS_MAXIMUM_TEXT = "4294967295"
+ADDRESS_SPACE_BYTES_TEXT = "4294967296"
+
+DEFAULT_HEAP_BYTES = 16777216
+MINIMUM_HEAP_BYTES = object.HEADER_BYTES
+ALIGNMENT = object.ALIGNMENT
+OUT_OF_MEMORY_EXIT_STATUS = 65
+
+REGION_STATIC = 1
+REGION_HEAP = 2
+REGION_STACK = 3
+REGION_DEVICE = 4
+
+LIFETIME_PERMANENT = 1
+LIFETIME_MANAGED = 2
+LIFETIME_SCOPED = 3
+LIFETIME_EXTERNAL = 4
+
+STATE_EMPTY = 0
+STATE_LIVE = 1
+STATE_MARKED = 2
+STATE_RELEASED = 3
+
+Allocation = Box {
+    region = REGION_HEAP
+    lifetime = LIFETIME_MANAGED
+    state = STATE_EMPTY
+    payload_bytes = 0
+    bytes = 0
+}
+
+skill valid_region(region) {
+    (region == REGION_STATIC) { out yes }
+    (region == REGION_HEAP) { out yes }
+    (region == REGION_STACK) { out yes }
+    (region == REGION_DEVICE) { out yes }
+    out no
+}
+
+skill valid_lifetime(lifetime) {
+    (lifetime == LIFETIME_PERMANENT) { out yes }
+    (lifetime == LIFETIME_MANAGED) { out yes }
+    (lifetime == LIFETIME_SCOPED) { out yes }
+    (lifetime == LIFETIME_EXTERNAL) { out yes }
+    out no
+}
+
+skill valid_state(state) {
+    (state == STATE_EMPTY) { out yes }
+    (state == STATE_LIVE) { out yes }
+    (state == STATE_MARKED) { out yes }
+    (state == STATE_RELEASED) { out yes }
+    out no
+}
+
+skill aligned(bytes) {
+    (bytes < 0) { out no }
+    out bytes / ALIGNMENT * ALIGNMENT == bytes
+}
+
+skill align(bytes) {
+    (bytes < 0) { out 0 - 1 }
+    @remainder = bytes - bytes / ALIGNMENT * ALIGNMENT
+    (remainder == 0) { out bytes }
+    out bytes + ALIGNMENT - remainder
+}
+
+skill allocation_bytes(payload_bytes) {
+    (payload_bytes < 0) { out 0 - 1 }
+    out object.allocation_size(payload_bytes)
+}
+
+skill compatible(region, lifetime) {
+    (region == REGION_STATIC) { out lifetime == LIFETIME_PERMANENT }
+    (region == REGION_HEAP) { out lifetime == LIFETIME_MANAGED }
+    (region == REGION_STACK) { out lifetime == LIFETIME_SCOPED }
+    (region == REGION_DEVICE) { out lifetime == LIFETIME_EXTERNAL }
+    out no
+}
+
+skill valid(allocation) {
+    (valid_region(allocation.region) == no) { out no }
+    (valid_lifetime(allocation.lifetime) == no) { out no }
+    (valid_state(allocation.state) == no) { out no }
+    (compatible(allocation.region, allocation.lifetime) == no) { out no }
+    (allocation.payload_bytes < 0) { out no }
+    out allocation.bytes == allocation_bytes(allocation.payload_bytes)
+}
+
+skill create(region, lifetime, payload_bytes) {
+    out Allocation {
+        region = region
+        lifetime = lifetime
+        state = STATE_LIVE
+        payload_bytes = payload_bytes
+        bytes = allocation_bytes(payload_bytes)
+    }
+}
+
+skill static(payload_bytes) {
+    out create(REGION_STATIC, LIFETIME_PERMANENT, payload_bytes)
+}
+
+skill managed(payload_bytes) {
+    out create(REGION_HEAP, LIFETIME_MANAGED, payload_bytes)
+}
+
+skill scoped(payload_bytes) {
+    out create(REGION_STACK, LIFETIME_SCOPED, payload_bytes)
+}
+
+skill external(payload_bytes) {
+    out create(REGION_DEVICE, LIFETIME_EXTERNAL, payload_bytes)
+}
+
+skill valid_capacity(bytes) {
+    (bytes < MINIMUM_HEAP_BYTES) { out no }
+    out aligned(bytes)
+}
+
+skill contains(capacity, offset, width) {
+    (capacity < 0) { out no }
+    (offset < 0) { out no }
+    (width < 0) { out no }
+    (offset > capacity) { out no }
+    (width > capacity - offset) { out no }
+    out yes
+}
+
+skill valid_usage(capacity, used) {
+    (valid_capacity(capacity) == no) { out no }
+    (used < 0) { out no }
+    (aligned(used) == no) { out no }
+    (used > capacity) { out no }
+    out yes
+}
+
+skill remaining(capacity, used) {
+    (valid_usage(capacity, used) == no) { out 0 - 1 }
+    out capacity - used
+}
+
+skill can_allocate(capacity, used, payload_bytes) {
+    (valid_usage(capacity, used) == no) { out no }
+    @bytes = allocation_bytes(payload_bytes)
+    (bytes < 0) { out no }
+    (bytes > capacity - used) { out no }
+    out yes
+}
+
+skill used_after(capacity, used, payload_bytes) {
+    (can_allocate(capacity, used, payload_bytes) == no) { out 0 - 1 }
+    out used + allocation_bytes(payload_bytes)
+}
+
+skill definition(name, value) {
+    @line = seed.str.add(".set ", name)
+    line = seed.str.add(line, ", ")
+    out seed.str.add(line, seed.str.add(seed.num.text(value), "\n"))
+}
+
+skill assembly() {
+    @text = definition("SALTIC_MEMORY_ALIGNMENT", ALIGNMENT)
+    text = seed.str.add(text, definition("SALTIC_MEMORY_DEFAULT_HEAP_BYTES", DEFAULT_HEAP_BYTES))
+    text = seed.str.add(text, definition("SALTIC_MEMORY_OUT_OF_MEMORY_EXIT_STATUS", OUT_OF_MEMORY_EXIT_STATUS))
+    out seed.str.add(text, "\n")
+}
+
+skill can_mark(allocation) {
+    (valid(allocation) == no) { out no }
+    (allocation.lifetime == LIFETIME_MANAGED) {
+        (allocation.state == STATE_LIVE) { out yes }
+    }
+    out no
+}
+
+skill can_release(allocation) {
+    (valid(allocation) == no) { out no }
+    (allocation.lifetime == LIFETIME_PERMANENT) { out no }
+    (allocation.lifetime == LIFETIME_EXTERNAL) { out no }
+    (allocation.state == STATE_RELEASED) { out no }
+    (allocation.state == STATE_EMPTY) { out no }
+    out yes
+}
+
+skill mark(allocation) {
+    (can_mark(allocation) == yes) { allocation.state = STATE_MARKED }
+    out allocation
+}
+
+skill release(allocation) {
+    (can_release(allocation) == yes) { allocation.state = STATE_RELEASED }
+    out allocation
+}

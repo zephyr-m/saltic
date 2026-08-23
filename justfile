@@ -64,6 +64,9 @@ diagnostics:
 seed-contract:
     just test seed-contract
 
+machine:
+    just test machine
+
 abi:
     just test abi
 

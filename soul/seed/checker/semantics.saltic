@@ -4,6 +4,8 @@ use seed.diagnostic
 use seed.intrinsic.contract
 use seed.checker.names
 use seed.checker.types
+use seed.checker.signatures
+use seed.checker.rules
 
 Result = Box {
     diagnostics = []
@@ -54,6 +56,7 @@ skill collect(program_ast) {
             (tag == "box") { name = ast.qualified(module, ast.part(item, 1)) kind = "box" }
             (tag == "skill") { name = ast.qualified(module, ast.part(item, 1)) kind = "skill" }
             (seed.str.len(name) > 0) {
+                @added = no
                 (names.has(result.globals, name) == yes) {
                     result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, seed.str.add("повторное имя верхнего уровня '", seed.str.add(name, "'"))))
                 }
@@ -62,10 +65,38 @@ skill collect(program_ast) {
                 (kind == "enum") { type = "enum-type" }
                 (kind == "box") { type = "box-type" }
                 (kind == "skill") { type = "function" }
-                (names.has(result.globals, name) == no) { result.globals = names.put_node(result.globals, name, kind, type, item) }
+                (names.has(result.globals, name) == no) {
+                    result.globals = names.put_node(result.globals, name, kind, type, item)
+                    added = yes
+                }
+                (kind == "enum") {
+                    (added == yes) {
+                        @variant_index = 0
+                        @variant_count = ast.enum_variant_count(item)
+                        drum (variant_count) {
+                            (variant_index < variant_count) {
+                                @variant = ast.enum_variant(item, variant_index)
+                                @variant_key = names.variant_key(variant)
+                                @old_variant = names.find(result.globals, variant_key)
+                                (seed.str.len(old_variant.name) > 0) {
+                                    @message = seed.str.add("вариант '", variant)
+                                    message = seed.str.add(message, "' уже принадлежит другому enum")
+                                    result.diagnostics = add_diagnostic(result.diagnostics, make_diagnostic(item, "duplicate_enum_variant", message))
+                                }
+                                (seed.str.len(old_variant.name) == 0) {
+                                    result.globals = names.put_node(result.globals, variant_key, "enum-variant", seed.str.add("enum:", name), item)
+                                }
+                                variant_index = variant_index + 1
+                            }
+                        }
+                    }
+                }
             }
             index = index + 1
         }
+    }
+    (program_seen == no) {
+        result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("missing_program", 0, 0, "объявление program обязательно"))
     }
     out result
 }
@@ -90,11 +121,11 @@ skill box_has_skill(globals, box_name, skill_name) {
 skill enum_has(globals, enum_name, variant) {
     @model = names.find(globals, enum_name)
     @found = no
-    @index = 2
-    @count = seed.group.count(ast.plain(model.node))
+    @index = 0
+    @count = ast.enum_variant_count(model.node)
     drum (count) {
         (index < count) {
-            (ast.part(model.node, index) == variant) { found = yes }
+            (ast.enum_variant(model.node, index) == variant) { found = yes }
             index = index + 1
         }
     }
@@ -175,6 +206,19 @@ skill check_path(node, scope, globals, diagnostics) {
 skill check_expression(node, scope, globals, diagnostics) {
     @plain = ast.plain(node)
     @tag = seed.group.item(plain, 0)
+    (tag == "fraction-number") {
+        out add_diagnostic(diagnostics, make_diagnostic(node, "fraction_not_supported", "дробные числа в языке не поддерживаются"))
+    }
+    (tag == "wide-number") {
+        out add_diagnostic(diagnostics, make_diagnostic(node, "number_out_of_range", "обычное число не помещается в непосредственное значение; используй фиксированный целый тип"))
+    }
+    (tag == "enum-value") {
+        @variant = names.find(globals, names.variant_key(seed.group.item(plain, 1)))
+        (seed.str.len(variant.name) == 0) {
+            out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_enum_variant", seed.str.add("неизвестный вариант enum '", seed.str.add(seed.group.item(plain, 1), "'"))))
+        }
+        out diagnostics
+    }
     (tag == "path") { out check_path(node, scope, globals, diagnostics) }
     (tag == "binary") {
         @left_node = seed.group.item(plain, 2)
@@ -234,7 +278,9 @@ skill check_expression(node, scope, globals, diagnostics) {
         out diagnostics
     }
     (tag == "call") {
-        @callee = ast.plain(seed.group.item(plain, 1))
+        @callee = ast.plain(ast.call_callee(node))
+        @full = ast.path_text(callee)
+        @fixed_call = contract.is_fixed_type(full)
         @skip_callee = no
         (seed.group.item(callee, 0) == "path") {
             @callee_count = seed.group.count(callee)
@@ -252,22 +298,51 @@ skill check_expression(node, scope, globals, diagnostics) {
                 }
             }
         }
-        @index = 1
-        (skip_callee == yes) { index = 2 }
-        @count = seed.group.count(plain)
-        drum (count) {
-            (index < count) { diagnostics = check_expression(seed.group.item(plain, index), scope, globals, diagnostics) }
+        (skip_callee == no) {
+            diagnostics = check_expression(ast.call_callee(node), scope, globals, diagnostics)
+        }
+        @index = 0
+        @argument_count = ast.call_argument_count(node)
+        drum (argument_count) {
+            (index < argument_count) {
+                @argument = ast.call_argument(node, index)
+                @skip_argument = no
+                (fixed_call == yes) {
+                    (index == 0) {
+                        (rules.is_integer_literal(argument) == yes) { skip_argument = yes }
+                        (rules.is_fraction(argument) == yes) { skip_argument = yes }
+                    }
+                }
+                (skip_argument == no) { diagnostics = check_expression(argument, scope, globals, diagnostics) }
+            }
             index = index + 1
         }
-        @full = ast.path_text(callee)
-        (contract.is_fixed_type(full) == yes) {
-            @text = types.integer_text(seed.group.item(plain, 2))
-            (seed.str.len(text) > 0) {
-                (contract.fixed_in_range(full, text) == no) {
-                    @message = seed.str.add("значение ", text)
-                    message = seed.str.add(message, seed.str.add(" не помещается в ", full))
-                    message = seed.str.add(message, seed.str.add(": допустимо ", contract.fixed_range_text(full)))
-                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "fixed_integer_out_of_range", message))
+        @receiver_type = "unknown"
+        (seed.group.count(callee) == 3) {
+            @receiver_path = ["path", seed.group.item(callee, 1)]
+            receiver_type = types.path_type(receiver_path, scope, globals)
+        }
+        @signature = signatures.resolve(callee, scope, globals, receiver_type)
+        @arity_message = rules.arity_message(signature, argument_count)
+        (seed.str.len(arity_message) > 0) {
+            diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "call_arity", arity_message))
+        }
+        (fixed_call == yes) {
+            (argument_count > 0) {
+                @fixed_argument = ast.call_argument(node, 0)
+                @text = types.integer_text(fixed_argument)
+                (seed.str.len(text) > 0) {
+                    (contract.fixed_in_range(full, text) == no) {
+                        @message = seed.str.add("значение ", text)
+                        message = seed.str.add(message, seed.str.add(" не помещается в ", full))
+                        message = seed.str.add(message, seed.str.add(": допустимо ", contract.fixed_range_text(full)))
+                        diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "fixed_integer_out_of_range", message))
+                    }
+                }
+                @actual_type = types.value_type(fixed_argument, scope, globals)
+                @fixed_message = rules.fixed_argument_message(fixed_argument, actual_type)
+                (seed.str.len(fixed_message) > 0) {
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "fixed_integer_argument", fixed_message))
                 }
             }
         }
@@ -277,12 +352,14 @@ skill check_expression(node, scope, globals, diagnostics) {
         @expected = contract.store_type(seed_kind, address_type)
         (seed.str.len(expected) > 0) {
             (address_type == "address") {
+                (seed.group.count(plain) > 4) {
                 @actual = types.value_type(seed.group.item(plain, 4), scope, globals)
                 (actual == expected) { expected = "" }
                 (seed.str.len(expected) > 0) {
                     @message = seed.str.add(full, seed.str.add(" ожидает значение ", expected))
                     message = seed.str.add(message, seed.str.add(", получено ", actual))
                     diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "type_mismatch", message))
+                }
                 }
             }
         }
@@ -484,15 +561,50 @@ skill check_statement(node, scope, globals, diagnostics) {
         out check_block(seed.group.item(plain, 2), names.Scope { names = scope.names subject = scope.subject module = scope.module }, globals, diagnostics)
     }
     (tag == "drum") {
-        diagnostics = check_expression(seed.group.item(plain, 1), scope, globals, diagnostics)
+        @count_node = seed.group.item(plain, 1)
+        diagnostics = check_expression(count_node, scope, globals, diagnostics)
+        @count_type = types.value_type(count_node, scope, globals)
+        @drum_message = rules.drum_message(count_type)
+        (seed.str.len(drum_message) > 0) {
+            diagnostics = add_diagnostic(diagnostics, make_diagnostic(count_node, "drum_type", drum_message))
+        }
         out check_block(seed.group.item(plain, 2), names.Scope { names = scope.names subject = scope.subject module = scope.module }, globals, diagnostics)
     }
     (tag == "switch") {
-        diagnostics = check_expression(seed.group.item(plain, 1), scope, globals, diagnostics)
-        @index = 2
-        @count = seed.group.count(plain)
+        @subject_node = ast.switch_subject(node)
+        diagnostics = check_expression(subject_node, scope, globals, diagnostics)
+        @subject_type = types.value_type(subject_node, scope, globals)
+        @seen = []
+        @index = 0
+        @count = ast.switch_case_count(node)
         drum (count) {
-            (index < count) { diagnostics = check_expression(ast.part(seed.group.item(plain, index), 2), scope, globals, diagnostics) }
+            (index < count) {
+                @case_node = ast.switch_case(node, index)
+                @variant_name = ast.case_variant(case_node)
+                (names.has(seen, variant_name) == yes) {
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(case_node, "duplicate_switch_case", seed.str.add("повторная ветка enum '", seed.str.add(variant_name, "'"))))
+                }
+                (names.has(seen, variant_name) == no) {
+                    seen = names.put(seen, variant_name, "case", "unknown")
+                }
+                @variant = names.find(globals, names.variant_key(variant_name))
+                (seed.str.len(variant.name) == 0) {
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(case_node, "unknown_enum_variant", seed.str.add("неизвестный вариант enum '", seed.str.add(variant_name, "'"))))
+                }
+                (seed.str.len(variant.name) > 0) {
+                    (seed.str.starts_with(subject_type, "enum:") == yes) {
+                        ((variant.type == subject_type) == no) {
+                            @message = seed.str.add("вариант '", variant_name)
+                            message = seed.str.add(message, "' принадлежит ")
+                            message = seed.str.add(message, types.type_text(variant.type))
+                            message = seed.str.add(message, ", а выбирается ")
+                            message = seed.str.add(message, types.type_text(subject_type))
+                            diagnostics = add_diagnostic(diagnostics, make_diagnostic(case_node, "enum_type_mismatch", message))
+                        }
+                    }
+                }
+                diagnostics = check_expression(ast.case_body(case_node), scope, globals, diagnostics)
+            }
             index = index + 1
         }
         out diagnostics

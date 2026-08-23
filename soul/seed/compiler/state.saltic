@@ -1,6 +1,7 @@
 use seed
 use seed.abi
 use seed.ast
+use seed.memory.model
 
 Symbol = Box {
     name = ""
@@ -33,6 +34,7 @@ State = Box {
     ast = []
     lines = Output {}
     data = Output {}
+    writable = Output {}
     strings = []
     serial = 0
     constants = []
@@ -148,6 +150,11 @@ skill emit_data(compiler, line) {
     out compiler
 }
 
+skill emit_writable(compiler, line) {
+    compiler.writable = output_add(compiler.writable, seed.str.add(line, "\n"))
+    out compiler
+}
+
 skill emit_blank(compiler) {
     out emit(compiler, "")
 }
@@ -177,15 +184,15 @@ skill label(compiler, prefix) {
 }
 
 skill align16(value) {
-    @quotient = value / 16
-    (quotient * 16 == value) { out value }
-    out (quotient + 1) * 16
+    @quotient = value / abi.CALL_STACK_ALIGNMENT
+    (quotient * abi.CALL_STACK_ALIGNMENT == value) { out value }
+    out (quotient + 1) * abi.CALL_STACK_ALIGNMENT
 }
 
 skill align8(value) {
-    @quotient = value / abi.TAG_SCALE
-    (quotient * abi.TAG_SCALE == value) { out value }
-    out (quotient + 1) * abi.TAG_SCALE
+    @quotient = value / abi.OBJECT_ALIGNMENT
+    (quotient * abi.OBJECT_ALIGNMENT == value) { out value }
+    out (quotient + 1) * abi.OBJECT_ALIGNMENT
 }
 
 skill name_add(names, name) {
@@ -293,14 +300,14 @@ skill collect_locals(params, body) {
 
 skill make_slots(names) {
     @slots = []
-    @slot = 0 - 12
+    @slot = 0 - abi.VALUE_WORD_BYTES * 3
     @index = 0
     @count = seed.group.count(names)
     drum (count) {
         (index < count) {
             @item = seed.group.item(names, index)
             slots = symbol_add(slots, item.name, "slot", [], slot)
-            slot = slot - 4
+            slot = slot - abi.VALUE_WORD_BYTES
             index = index + 1
         }
     }
@@ -335,14 +342,14 @@ skill group_slice(group, start, end) {
 }
 
 skill push(compiler, register) {
-    compiler = emit(compiler, "  addi sp, sp, -4")
+    compiler = emit(compiler, seed.str.add("  addi sp, sp, -", seed.num.text(abi.VALUE_WORD_BYTES)))
     compiler = emit(compiler, seed.str.add("  sw ", seed.str.add(register, ", 0(sp)")))
     out compiler
 }
 
 skill pop(compiler, register) {
     compiler = emit(compiler, seed.str.add("  lw ", seed.str.add(register, ", 0(sp)")))
-    compiler = emit(compiler, "  addi sp, sp, 4")
+    compiler = emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(abi.VALUE_WORD_BYTES)))
     out compiler
 }
 
@@ -439,7 +446,7 @@ skill start(compiler) {
     @param_count = seed.group.count(params)
     compiler = emit(compiler, "_start:")
     compiler = emit(compiler, "  lw a0, 0(sp)")
-    compiler = emit(compiler, "  addi a1, sp, 4")
+    compiler = emit(compiler, seed.str.add("  addi a1, sp, ", seed.num.text(abi.VALUE_WORD_BYTES)))
     compiler = emit(compiler, "  la s1, saltic_heap")
     compiler = emit(compiler, "  la s2, saltic_heap_end")
     @required = seed.num.text(param_count + 1)
@@ -447,21 +454,21 @@ skill start(compiler) {
     compiler = emit(compiler, "  blt a0, t0, rt_missing_args")
     @index = 0
     drum (param_count) {
-        @offset = seed.num.text((index + 1) * 4)
+        @offset = seed.num.text((index + 1) * abi.VALUE_WORD_BYTES)
         compiler = emit(compiler, seed.str.add("  lw a0, ", seed.str.add(offset, "(a1)")))
         compiler = emit(compiler, "  call rt_cstring")
-        compiler = emit(compiler, "  addi sp, sp, -4")
+        compiler = emit(compiler, seed.str.add("  addi sp, sp, -", seed.num.text(abi.VALUE_WORD_BYTES)))
         compiler = emit(compiler, "  sw a0, 0(sp)")
         index = index + 1
     }
     index = 0
     drum (param_count) {
         @register = seed.str.add("a", seed.num.text(index))
-        @offset = seed.num.text((param_count - index - 1) * 4)
+        @offset = seed.num.text((param_count - index - 1) * abi.VALUE_WORD_BYTES)
         compiler = emit(compiler, seed.str.add("  lw ", seed.str.add(register, seed.str.add(", ", seed.str.add(offset, "(sp)")))))
         index = index + 1
     }
-    (param_count > 0) { compiler = emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(param_count * 4))) }
+    (param_count > 0) { compiler = emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(param_count * abi.VALUE_WORD_BYTES))) }
     compiler = emit(compiler, "  call saltic_program")
     compiler = emit(compiler, "  andi t0, a0, SALTIC_ABI_TAG_MASK")
     compiler = emit(compiler, "  addi t1, zero, SALTIC_ABI_TAG_ERROR")
@@ -474,13 +481,16 @@ skill start(compiler) {
 }
 
 skill finish_data(compiler) {
+    compiler = emit(compiler, ".section .data")
+    compiler = emit(compiler, seed.str.add(".balign ", seed.num.text(abi.OBJECT_ALIGNMENT)))
+    compiler.lines = output_add(compiler.lines, output_text(compiler.writable))
     compiler = emit(compiler, ".section .rodata")
-    compiler = emit(compiler, ".balign 8")
+    compiler = emit(compiler, seed.str.add(".balign ", seed.num.text(abi.OBJECT_ALIGNMENT)))
     compiler.lines = output_add(compiler.lines, output_text(compiler.data))
     compiler = emit(compiler, ".section .bss")
-    compiler = emit(compiler, ".balign 8")
+    compiler = emit(compiler, seed.str.add(".balign ", seed.num.text(abi.OBJECT_ALIGNMENT)))
     compiler = emit(compiler, "saltic_heap:")
-    compiler = emit(compiler, ".space 16777216")
+    compiler = emit(compiler, seed.str.add(".space ", seed.num.text(model.DEFAULT_HEAP_BYTES)))
     compiler = emit(compiler, "saltic_heap_end:")
     out compiler
 }

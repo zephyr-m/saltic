@@ -46,6 +46,8 @@ test_checker() {
         soul/seed/canonical/main.saltic >"$work/checker/canonical.txt"
     qemu-riscv32 -B 0x100000000 "$checker_elf" \
         soul/seed/canonical/errors.saltic >"$work/checker/errors.txt"
+    qemu-riscv32 -B 0x100000000 "$checker_elf" \
+        soul/seed/canonical/support.saltic >>"$work/checker/errors.txt"
 
     test ! -s "$work/checker/canonical.txt"
     diff -u \
@@ -197,6 +199,16 @@ test_seed_contract() {
     echo "seed: единый контракт подтверждён"
 }
 
+test_machine() {
+    mkdir -p "$work/machine"
+    build machine \
+        soul/seed/tests/machine.saltic \
+        "$work/machine/program.elf"
+    qemu-riscv32 -B 0x100000000 \
+        "$work/machine/program.elf"
+    echo "машина: кодирование и образ подтверждены"
+}
+
 test_abi() {
     mkdir -p "$work/abi"
     build abi \
@@ -290,6 +302,7 @@ run_case() {
         tracer) test_tracer ;;
         diagnostics) test_diagnostics ;;
         seed-contract) test_seed_contract ;;
+        machine) test_machine ;;
         abi) test_abi ;;
         qemu-virt) test_qemu_virt ;;
         bootstrap) test_bootstrap ;;
@@ -314,6 +327,7 @@ if [[ "$1" == "all" ]]; then
         tracer \
         diagnostics \
         seed-contract \
+        machine \
         abi \
         qemu-virt \
         bootstrap

@@ -1,0 +1,272 @@
+use seed
+use seed.machine.codec
+use seed.machine.layout
+
+Tables = Box {
+    symbols = codec.Buffer {}
+    names = codec.Buffer {}
+}
+
+ProgramHeader = Box {
+    type = 0
+    offset = 0
+    virtual_address = codec.Word {}
+    physical_address = codec.Word {}
+    file_size = 0
+    memory_size = 0
+    flags = 0
+    alignment = 0
+}
+
+SectionHeader = Box {
+    name = 0
+    type = 0
+    flags = 0
+    address = codec.Word {}
+    offset = 0
+    size = 0
+    link = 0
+    info = 0
+    alignment = 0
+    entry_size = 0
+}
+
+skill pad_to(target, offset) {
+    (offset < target.length) { out error.InvalidFileLayout }
+    out codec.append_zeroes(target, offset - target.length)
+}
+
+skill append_u16(target, value) {
+    (codec.valid_unsigned(value, 16) == no) { out error.ValueOutsideRange }
+    target = codec.append_byte(target, codec.mod(value, 256))
+    out codec.append_byte(target, value / 256)
+}
+
+skill append_u32(target, value) {
+    out codec.append_word(target, value)
+}
+
+skill append_number32(target, value) {
+    (value < 0) { out error.ValueOutsideRange }
+    @word = layout.address_from_number(value)
+    out append_u32(target, word)
+}
+
+skill append_text(target, text) {
+    @index = 0
+    @length = seed.str.len(text)
+    drum (length) {
+        target = codec.append_byte(target, seed.str.byte(text, index))
+        index = index + 1
+    }
+    out target
+}
+
+skill append_cstring(target, text) {
+    target = append_text(target, text)
+    out codec.append_byte(target, 0)
+}
+
+skill payload(value, current_layout) {
+    @result = codec.buffer()
+    result = codec.append_buffer(result, value.code)
+    result = pad_to(result, current_layout.rodata_offset)
+    result = codec.append_buffer(result, value.rodata)
+    result = pad_to(result, current_layout.data_offset)
+    result = codec.append_buffer(result, value.data)
+    out pad_to(result, current_layout.file_size)
+}
+
+skill section_index(section) {
+    (section == layout.Section.CODE) { out 1 }
+    (section == layout.Section.RODATA) { out 2 }
+    (section == layout.Section.DATA) { out 3 }
+    out 4
+}
+
+skill symbol_tables(value, current_layout) {
+    @symbols = codec.buffer()
+    symbols = codec.append_zeroes(symbols, 16)
+    @names = codec.buffer()
+    names = codec.append_byte(names, 0)
+    @index = 0
+    @count = seed.group.count(value.labels)
+    drum (count) {
+        @label = seed.group.item(value.labels, index)
+        @name_offset = names.length
+        names = append_cstring(names, label.name)
+        @address = layout.address_add(value.load_address, layout.section_offset(current_layout, label.section) + label.offset)
+        @info = 17
+        (label.section == layout.Section.CODE) { info = 18 }
+        symbols = append_number32(symbols, name_offset)
+        symbols = append_u32(symbols, address)
+        symbols = append_number32(symbols, 0)
+        symbols = codec.append_byte(symbols, info)
+        symbols = codec.append_byte(symbols, 0)
+        symbols = append_u16(symbols, section_index(label.section))
+        index = index + 1
+    }
+    out Tables { symbols = symbols names = names }
+}
+
+skill section_names() {
+    @names = codec.buffer()
+    names = codec.append_byte(names, 0)
+    names = append_cstring(names, ".text")
+    names = append_cstring(names, ".rodata")
+    names = append_cstring(names, ".data")
+    names = append_cstring(names, ".bss")
+    names = append_cstring(names, ".symtab")
+    names = append_cstring(names, ".strtab")
+    names = append_cstring(names, ".shstrtab")
+    out names
+}
+
+skill append_program_header(target, header) {
+    target = append_number32(target, header.type)
+    target = append_number32(target, header.offset)
+    target = append_u32(target, header.virtual_address)
+    target = append_u32(target, header.physical_address)
+    target = append_number32(target, header.file_size)
+    target = append_number32(target, header.memory_size)
+    target = append_number32(target, header.flags)
+    target = append_number32(target, header.alignment)
+    out target
+}
+
+skill append_section_header(target, header) {
+    target = append_number32(target, header.name)
+    target = append_number32(target, header.type)
+    target = append_number32(target, header.flags)
+    target = append_u32(target, header.address)
+    target = append_number32(target, header.offset)
+    target = append_number32(target, header.size)
+    target = append_number32(target, header.link)
+    target = append_number32(target, header.info)
+    target = append_number32(target, header.alignment)
+    target = append_number32(target, header.entry_size)
+    out target
+}
+
+skill append_header(target, entry, program_count, section_table_offset) {
+    target = codec.append_byte(target, 127)
+    target = codec.append_byte(target, 69)
+    target = codec.append_byte(target, 76)
+    target = codec.append_byte(target, 70)
+    target = codec.append_byte(target, 1)
+    target = codec.append_byte(target, 1)
+    target = codec.append_byte(target, 1)
+    target = codec.append_zeroes(target, 9)
+    target = append_u16(target, 2)
+    target = append_u16(target, 243)
+    target = append_number32(target, 1)
+    target = append_u32(target, entry)
+    target = append_number32(target, 52)
+    target = append_number32(target, section_table_offset)
+    target = append_number32(target, 0)
+    target = append_u16(target, 52)
+    target = append_u16(target, 32)
+    target = append_u16(target, program_count)
+    target = append_u16(target, 40)
+    target = append_u16(target, 8)
+    target = append_u16(target, 7)
+    out target
+}
+
+skill executable(value) {
+    (value.resolved == no) { value = layout.resolve(value) }
+    @current_layout = layout.layout(value)
+    @entry = layout.label_address(value, current_layout, value.entry, 0)
+    @page_offset = value.load_address.b0 + codec.mod(value.load_address.b1, 16) * 256
+    (page_offset > 0) { out error.LoadAddressNotAligned }
+
+    @body = payload(value, current_layout)
+    @tables = symbol_tables(value, current_layout)
+    @names = section_names()
+    @segment_offset = 4096
+    @symbols_offset = layout.align(segment_offset + body.length, 4)
+    @strings_offset = symbols_offset + tables.symbols.length
+    @section_names_offset = strings_offset + tables.names.length
+    @section_table_offset = layout.align(section_names_offset + names.length, 4)
+    @program_count = 1
+    (value.low_memory_size > 0) { program_count = 2 }
+
+    @result = codec.buffer()
+    result = append_header(result, entry, program_count, section_table_offset)
+    (value.low_memory_size > 0) {
+        result = append_program_header(result, ProgramHeader {
+            type = 1
+            offset = 0
+            virtual_address = codec.word(0, 0, 0, 0)
+            physical_address = codec.word(0, 0, 0, 0)
+            file_size = 52 + program_count * 32
+            memory_size = value.low_memory_size
+            flags = 6
+            alignment = 4096
+        })
+    }
+    result = append_program_header(result, ProgramHeader {
+        type = 1
+        offset = segment_offset
+        virtual_address = value.load_address
+        physical_address = value.load_address
+        file_size = current_layout.file_size
+        memory_size = current_layout.memory_size
+        flags = 7
+        alignment = 4096
+    })
+    result = pad_to(result, segment_offset)
+    result = codec.append_buffer(result, body)
+    result = pad_to(result, symbols_offset)
+    result = codec.append_buffer(result, tables.symbols)
+    result = codec.append_buffer(result, tables.names)
+    result = codec.append_buffer(result, names)
+    result = pad_to(result, section_table_offset)
+
+    result = codec.append_zeroes(result, 40)
+    result = append_section_header(result, SectionHeader {
+        name = 1 type = 1 flags = 6
+        address = layout.address_add(value.load_address, current_layout.code_offset)
+        offset = segment_offset + current_layout.code_offset
+        size = value.code.length link = 0 info = 0 alignment = 4 entry_size = 0
+    })
+    result = append_section_header(result, SectionHeader {
+        name = 7 type = 1 flags = 2
+        address = layout.address_add(value.load_address, current_layout.rodata_offset)
+        offset = segment_offset + current_layout.rodata_offset
+        size = value.rodata.length link = 0 info = 0 alignment = 8 entry_size = 0
+    })
+    result = append_section_header(result, SectionHeader {
+        name = 15 type = 1 flags = 3
+        address = layout.address_add(value.load_address, current_layout.data_offset)
+        offset = segment_offset + current_layout.data_offset
+        size = value.data.length link = 0 info = 0 alignment = 8 entry_size = 0
+    })
+    result = append_section_header(result, SectionHeader {
+        name = 21 type = 8 flags = 3
+        address = layout.address_add(value.load_address, current_layout.bss_offset)
+        offset = segment_offset + current_layout.bss_offset
+        size = value.bss_size link = 0 info = 0 alignment = 8 entry_size = 0
+    })
+    result = append_section_header(result, SectionHeader {
+        name = 26 type = 2 flags = 0 address = codec.word(0, 0, 0, 0)
+        offset = symbols_offset size = tables.symbols.length
+        link = 6 info = 1 alignment = 4 entry_size = 16
+    })
+    result = append_section_header(result, SectionHeader {
+        name = 34 type = 3 flags = 0 address = codec.word(0, 0, 0, 0)
+        offset = strings_offset size = tables.names.length
+        link = 0 info = 0 alignment = 1 entry_size = 0
+    })
+    result = append_section_header(result, SectionHeader {
+        name = 42 type = 3 flags = 0 address = codec.word(0, 0, 0, 0)
+        offset = section_names_offset size = names.length
+        link = 0 info = 0 alignment = 1 entry_size = 0
+    })
+    out result
+}
+
+skill write(path, value) {
+    @output = executable(value)
+    out seed.file.write_bytes(path, codec.bytes(output))
+}
