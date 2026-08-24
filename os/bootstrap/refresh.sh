@@ -4,13 +4,53 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 
+if ! command -v qemu-riscv32 >/dev/null 2>&1; then
+    if [[ "${SALTIC_BOOTSTRAP_REFRESH_IN_DEV_SHELL:-}" == "1" ]]; then
+        echo "bootstrap refresh: qemu-riscv32 отсутствует внутри проектного Nix shell" >&2
+        exit 1
+    fi
+    if ! command -v nix >/dev/null 2>&1; then
+        echo "bootstrap refresh: не найдены ни qemu-riscv32, ни nix" >&2
+        exit 1
+    fi
+
+    echo "bootstrap refresh: вхожу в проектный Nix shell"
+    bootstrap_override="${SALTIC_BOOTSTRAP_COMPILER:-}"
+    rescue_assembly="${SALTIC_BOOTSTRAP_RESCUE_ASSEMBLY:-}"
+    refresh_work="${SALTIC_BOOTSTRAP_REFRESH_DIR:-}"
+    refresh_heap="${SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES:-}"
+    exec nix \
+        --extra-experimental-features "nix-command flakes" \
+        develop "$root" --command \
+        env \
+        SALTIC_BOOTSTRAP_REFRESH_IN_DEV_SHELL=1 \
+        SALTIC_BOOTSTRAP_COMPILER="$bootstrap_override" \
+        SALTIC_BOOTSTRAP_RESCUE_ASSEMBLY="$rescue_assembly" \
+        SALTIC_BOOTSTRAP_REFRESH_DIR="$refresh_work" \
+        SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES="$refresh_heap" \
+        bash "$root/os/bootstrap/refresh.sh" "$@"
+fi
+
 work="${SALTIC_BOOTSTRAP_REFRESH_DIR:-.cache/build/bootstrap-refresh}"
-heap_bytes="${SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES:-536870912}"
+heap_bytes="${SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES:-4026531840}"
 source_path="${1:-soul/seed/toolchain.saltic}"
 
 mkdir -p "$work/stage-1" "$work/stage-2" "$work/stage-3"
 
 bootstrap_compiler="${SALTIC_BOOTSTRAP_COMPILER:-os/bootstrap/compiler.elf}"
+rescue_assembly="${SALTIC_BOOTSTRAP_RESCUE_ASSEMBLY:-}"
+
+if [[ -n "$rescue_assembly" ]]; then
+    echo "bootstrap refresh: собираю аварийный compiler с heap $heap_bytes"
+    bash os/bootstrap/link.sh \
+        "$rescue_assembly" \
+        "$work/rescue/toolchain.elf" \
+        "$work/rescue" \
+        "$heap_bytes"
+    bootstrap_compiler="$work/rescue/toolchain.elf"
+fi
+
+echo "bootstrap refresh: исходный compiler $bootstrap_compiler"
 
 echo "bootstrap refresh: текущее поколение собирает stage-1"
 SALTIC_BOOTSTRAP_COMPILER="$bootstrap_compiler" \

@@ -14,8 +14,7 @@ output_path="$2"
 work="${SALTIC_BUILD_DIR:-.cache/build/bootstrap}"
 assembly_path="${3:-$work/program.s}"
 compiler="${SALTIC_BOOTSTRAP_COMPILER:-os/bootstrap/compiler.elf}"
-heap_bytes="${SALTIC_HEAP_BYTES:-16777216}"
-link_assembly="$assembly_path"
+heap_bytes="${SALTIC_HEAP_BYTES:-536870912}"
 
 if [[ ! -f "$compiler" ]]; then
     echo "bootstrap compiler не найден: $compiler" >&2
@@ -26,25 +25,12 @@ if [[ ! "$heap_bytes" =~ ^[0-9]+$ ]] || (( heap_bytes < 1 )); then
     exit 2
 fi
 
-mkdir -p "$work" "$(dirname "$assembly_path")" "$(dirname "$output_path")"
+mkdir -p "$work" "$(dirname "$assembly_path")"
 
 qemu-riscv32 -B 0x100000000 "$compiler" "$source_path" "$assembly_path"
 
-if (( heap_bytes != 16777216 )); then
-    if ! grep -q '^\.space 16777216$' "$assembly_path"; then
-        echo "стандартный heap не найден в $assembly_path" >&2
-        exit 1
-    fi
-    link_assembly="$work/program-heap.s"
-    sed "s/^\.space 16777216$/.space $heap_bytes/" \
-        "$assembly_path" >"$link_assembly"
-fi
-
-riscv32-none-elf-as -march=rv32i -mabi=ilp32 \
-    os/bootstrap/linux-memory.S -o "$work/linux-memory.o"
-riscv32-none-elf-as -march=rv32i -mabi=ilp32 \
-    "$link_assembly" -o "$work/program.o"
-riscv32-none-elf-gcc \
-    -march=rv32i -mabi=ilp32 -mno-relax -nostdlib \
-    -Wl,--no-relax,--section-start=.saltic_low_memory=0x1000,-Ttext=0x10000,-e,_start \
-    "$work/linux-memory.o" "$work/program.o" -o "$output_path"
+bash os/bootstrap/link.sh \
+    "$assembly_path" \
+    "$output_path" \
+    "$work" \
+    "$heap_bytes"

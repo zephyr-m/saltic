@@ -136,6 +136,9 @@ bootstrap-parity:
 bootstrap-refresh source="soul/seed/toolchain.saltic":
     bash os/bootstrap/refresh.sh "$1"
 
+bootstrap-rescue assembly=".cache/build/bootstrap-refresh/stage-3/toolchain.s":
+    SALTIC_BOOTSTRAP_RESCUE_ASSEMBLY="$1" SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES=4026531840 bash os/bootstrap/refresh.sh
+
 toolchain-step:
     just checker
     just bootstrap-refresh

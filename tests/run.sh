@@ -23,7 +23,7 @@ build() {
     local name="$1"
     local source="$2"
     local output="$3"
-    local heap_bytes="${4:-16777216}"
+    local heap_bytes="${4:-536870912}"
 
     SALTIC_BUILD_DIR="$work/build/$name" \
     SALTIC_HEAP_BYTES="$heap_bytes" \

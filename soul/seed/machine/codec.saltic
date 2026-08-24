@@ -46,8 +46,16 @@ Cell = Box {
     value = 0
 }
 
-Buffer = Box {
+CHUNK_SIZE = 256
+
+Chunk = Box {
     cells = []
+    used = 0
+}
+
+Buffer = Box {
+    chunks = []
+    tail = Chunk {}
     length = 0
 }
 
@@ -99,13 +107,87 @@ skill word(b0, b1, b2, b3) {
     out Word { b0 = b0 b1 = b1 b2 = b2 b3 = b3 }
 }
 
+skill fresh_chunk() {
+    out Chunk { cells = [
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+    ] }
+}
+
 skill buffer() {
-    out Buffer {}
+    out Buffer { tail = fresh_chunk() }
+}
+
+skill prepare_tail(target) {
+    (seed.group.count(target.tail.cells) == 0) { target.tail = fresh_chunk() }
+    (target.tail.used == CHUNK_SIZE) {
+        target.chunks = seed.group.add(target.chunks, target.tail)
+        target.tail = fresh_chunk()
+    }
+    out target
+}
+
+skill chunk_count(target) {
+    @count = seed.group.count(target.chunks)
+    (target.tail.used > 0) { count = count + 1 }
+    out count
+}
+
+skill chunk_at(target, index) {
+    (index < 0) { out error.BufferOutsideRange }
+    @complete = seed.group.count(target.chunks)
+    (index < complete) { out seed.group.item(target.chunks, index) }
+    (index == complete) {
+        (target.tail.used > 0) { out target.tail }
+    }
+    out error.BufferOutsideRange
+}
+
+skill cell_at(target, offset) {
+    (offset < 0) { out error.BufferOutsideRange }
+    (offset > target.length - 1) { out error.BufferOutsideRange }
+    @chunk_index = offset / CHUNK_SIZE
+    @cell_index = mod(offset, CHUNK_SIZE)
+    @chunk = chunk_at(target, chunk_index)
+    out seed.group.item(chunk.cells, cell_index)
 }
 
 skill append_byte(target, value) {
     (valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
-    target.cells = seed.group.add(target.cells, Cell { value = value })
+    target = prepare_tail(target)
+    @cell = seed.group.item(target.tail.cells, target.tail.used)
+    cell.value = value
+    target.tail.used = target.tail.used + 1
     target.length = target.length + 1
     out target
 }
@@ -119,17 +201,13 @@ skill append_word(target, value) {
 }
 
 skill byte_at(target, offset) {
-    (offset < 0) { out error.BufferOutsideRange }
-    (offset > target.length - 1) { out error.BufferOutsideRange }
-    @cell = seed.group.item(target.cells, offset)
+    @cell = cell_at(target, offset)
     out cell.value
 }
 
 skill set_byte(target, offset, value) {
-    (offset < 0) { out error.BufferOutsideRange }
-    (offset > target.length - 1) { out error.BufferOutsideRange }
     (valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
-    @cell = seed.group.item(target.cells, offset)
+    @cell = cell_at(target, offset)
     cell.value = value
     out target
 }
@@ -152,26 +230,30 @@ skill append_zeroes(target, count) {
 }
 
 skill append_buffer(target, source) {
-    @index = 0
-    drum (source.length) {
-        target = append_byte(target, byte_at(source, index))
-        index = index + 1
+    @chunk_index = 0
+    @count = chunk_count(source)
+    drum (count) {
+        @source_chunk = chunk_at(source, chunk_index)
+        @cell_index = 0
+        drum (source_chunk.used) {
+            @cell = seed.group.item(source_chunk.cells, cell_index)
+            target = append_byte(target, cell.value)
+            cell_index = cell_index + 1
+        }
+        chunk_index = chunk_index + 1
     }
     out target
 }
 
-skill bytes(target) {
-    @result = []
-    @index = 0
-    drum (target.length) {
-        result = seed.group.add(result, byte_at(target, index))
-        index = index + 1
-    }
+skill file_chunks(target) {
+    @result = target.chunks
+    (target.tail.used > 0) { result = seed.group.add(result, target.tail) }
     out result
 }
 
 skill chunks(target, chunk_size) {
     (chunk_size < 1) { out error.InvalidChunkSize }
+    (chunk_size > CHUNK_SIZE) { out error.InvalidChunkSize }
     @result = []
     @chunk = []
     @index = 0

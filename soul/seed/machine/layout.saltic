@@ -24,6 +24,7 @@ Label = Box {
     section = Section.CODE
     offset = 0
     present = no
+    next = none
 }
 
 Patch = Box {
@@ -37,6 +38,7 @@ Patch = Box {
     rd = 0
     rs1 = 0
     rs2 = 0
+    next = none
 }
 
 Layout = Box {
@@ -56,8 +58,12 @@ Program = Box {
     rodata = codec.Buffer {}
     data = codec.Buffer {}
     bss_size = 0
-    labels = []
-    patches = []
+    labels_first = none
+    labels_last = none
+    label_count = 0
+    patches_first = none
+    patches_last = none
+    patch_count = 0
     resolved = no
 }
 
@@ -201,17 +207,18 @@ skill emit(value, kind, rd, rs1, rs2, immediate) {
 
 skill emit_patch(value, patch, placeholder) {
     patch.offset = value.code.length
-    value.patches = seed.group.add(value.patches, patch)
+    (value.patch_count == 0) { value.patches_first = patch }
+    (value.patch_count > 0) { value.patches_last.next = patch }
+    value.patches_last = patch
+    value.patch_count = value.patch_count + 1
     out emit_word(value, placeholder)
 }
 
 skill find_label(value, name) {
-    @index = 0
-    @count = seed.group.count(value.labels)
-    drum (count) {
-        @label = seed.group.item(value.labels, index)
+    @label = value.labels_first
+    drum (value.label_count) {
         (label.name == name) { out label }
-        index = index + 1
+        label = label.next
     }
     out Label {}
 }
@@ -219,12 +226,16 @@ skill find_label(value, name) {
 skill define_label(value, section, name) {
     @old = find_label(value, name)
     (old.present == yes) { out error.DuplicateLabel }
-    value.labels = seed.group.add(value.labels, Label {
+    @label = Label {
         name = name
         section = section
         offset = section_length(value, section)
         present = yes
-    })
+    }
+    (value.label_count == 0) { value.labels_first = label }
+    (value.label_count > 0) { value.labels_last.next = label }
+    value.labels_last = label
+    value.label_count = value.label_count + 1
     value.resolved = no
     out value
 }
@@ -358,13 +369,18 @@ skill append_label_address(value, section, label, addend) {
     @offset = target.length
     target = codec.append_word(target, codec.word(0, 0, 0, 0))
     value = assign_section(value, section, target)
-    value.patches = seed.group.add(value.patches, Patch {
+    @patch = Patch {
         kind = PatchKind.ADDRESS_WORD
         section = section
         offset = offset
         label = label
         addend = addend
-    })
+    }
+    (value.patch_count == 0) { value.patches_first = patch }
+    (value.patch_count > 0) { value.patches_last.next = patch }
+    value.patches_last = patch
+    value.patch_count = value.patch_count + 1
+    value.resolved = no
     out value
 }
 
@@ -450,12 +466,10 @@ skill resolve_patch(value, current_layout, patch) {
 
 skill resolve(value) {
     @current_layout = layout(value)
-    @index = 0
-    @count = seed.group.count(value.patches)
-    drum (count) {
-        @patch = seed.group.item(value.patches, index)
+    @patch = value.patches_first
+    drum (value.patch_count) {
         value = resolve_patch(value, current_layout, patch)
-        index = index + 1
+        patch = patch.next
     }
     value.resolved = yes
     out value
