@@ -1,0 +1,125 @@
+use seed
+use seed.machine.instruction
+use seed.vm.state
+
+CSR_MSTATUS = 768
+CSR_MTVEC = 773
+CSR_MEPC = 833
+CSR_MCAUSE = 834
+
+Access = Box {
+    handled = no
+    value = state.Word {}
+}
+
+skill uart_base() {
+    out state.word_bytes(0, 0, 0, 16)
+}
+
+skill uart_lsr() {
+    out state.word_bytes(5, 0, 0, 16)
+}
+
+skill qemu_test() {
+    out state.word_bytes(0, 0, 16, 0)
+}
+
+skill memory_load(machine, address, size) {
+    (machine.mode == state.Mode.MACHINE) {
+        (state.word_equal(address, uart_lsr()) == yes) {
+            (size == 1) { out Access { handled = yes value = state.word_number(32) } }
+        }
+    }
+    out Access {}
+}
+
+skill memory_store(machine, address, value, size) {
+    (machine.mode == state.Mode.MACHINE) {
+        (state.word_equal(address, uart_base()) == yes) {
+            (size == 1) {
+                machine.stdout = seed.group.add(machine.stdout, value.b0)
+                out yes
+            }
+        }
+        (state.word_equal(address, qemu_test()) == yes) {
+            (size == 4) {
+                @success = state.word_bytes(85, 85, 0, 0)
+                machine.exit_code = 1
+                (state.word_equal(value, success) == yes) { machine.exit_code = 0 }
+                machine.halted = yes
+                machine.halt_reason = "exit"
+                out yes
+            }
+        }
+    }
+    out no
+}
+
+skill csr_supported(index) {
+    (index == CSR_MSTATUS) { out yes }
+    (index == CSR_MTVEC) { out yes }
+    (index == CSR_MEPC) { out yes }
+    (index == CSR_MCAUSE) { out yes }
+    out no
+}
+
+skill csr_read(machine, index) {
+    (index == CSR_MSTATUS) { out state.word_copy(machine.mstatus) }
+    (index == CSR_MTVEC) { out state.word_copy(machine.mtvec) }
+    (index == CSR_MEPC) { out state.word_copy(machine.mepc) }
+    (index == CSR_MCAUSE) { out state.word_copy(machine.mcause) }
+    out state.word_zero()
+}
+
+skill csr_write(machine, index, value) {
+    (index == CSR_MSTATUS) { state.word_assign(machine.mstatus, value) out none }
+    (index == CSR_MTVEC) { state.word_assign(machine.mtvec, value) out none }
+    (index == CSR_MEPC) { state.word_assign(machine.mepc, value) out none }
+    (index == CSR_MCAUSE) { state.word_assign(machine.mcause, value) out none }
+    out none
+}
+
+skill execute_csr(machine, decoded, control) {
+    (csr_supported(decoded.system) == no) { out no }
+    @previous = csr_read(machine, decoded.system)
+    @source = state.register(machine, decoded.rs1)
+    (decoded.kind == instruction.Kind.CSRRW) {
+        csr_write(machine, decoded.system, source)
+    }
+    (decoded.kind == instruction.Kind.CSRRS) {
+        (decoded.rs1 > 0) {
+            csr_write(machine, decoded.system, state.word_or(previous, source))
+        }
+    }
+    state.set_register(machine, decoded.rd, previous)
+    control.handled = yes
+    out yes
+}
+
+skill enter_ecall(machine, control) {
+    state.word_assign(machine.mepc, state.pc_word(machine))
+    state.word_assign(machine.mcause, state.word_number(11))
+    @target = state.memory_translate(machine, machine.mtvec, 4, 4, "ловушка")
+    (target > 0 - 1) { control.next_pc = target }
+    control.handled = yes
+    out none
+}
+
+skill execute(machine, decoded, control) {
+    (machine.mode == state.Mode.PROCESS) { out no }
+    (decoded.kind == instruction.Kind.CSRRW) { out execute_csr(machine, decoded, control) }
+    (decoded.kind == instruction.Kind.CSRRS) { out execute_csr(machine, decoded, control) }
+    (decoded.kind == instruction.Kind.MRET) {
+        @target = state.memory_translate(machine, machine.mepc, 4, 4, "возврат из ловушки")
+        (target > 0 - 1) { control.next_pc = target }
+        control.handled = yes
+        out yes
+    }
+    (decoded.kind == instruction.Kind.WFI) {
+        machine.halted = yes
+        machine.halt_reason = "wait"
+        control.handled = yes
+        out yes
+    }
+    out no
+}

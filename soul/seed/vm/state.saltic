@@ -4,6 +4,11 @@ PAGE_SIZE = 256
 HEX = "0123456789abcdef"
 PRINTABLE = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 
+Mode = enum {
+    PROCESS,
+    MACHINE,
+}
+
 Word = Box {
     b0 = 0
     b1 = 0
@@ -22,6 +27,7 @@ Page = Box {
 }
 
 Memory = Box {
+    base = Word {}
     size = 0
     pages = []
 }
@@ -48,6 +54,8 @@ Handle = Box {
 }
 
 Options = Box {
+    mode = Mode.PROCESS
+    memory_base = Word {}
     load_address = 4096
     memory_size = 262144
     step_limit = 100000
@@ -69,6 +77,7 @@ Result = Box {
 }
 
 Machine = Box {
+    mode = Mode.PROCESS
     memory = Memory {}
     registers = []
     pc = 0
@@ -83,16 +92,22 @@ Machine = Box {
     names = []
     handles = []
     next_fd = 3
+    mstatus = Word {}
+    mtvec = Word {}
+    mepc = Word {}
+    mcause = Word {}
 }
 
 Instruction = Box {
     word = Word {}
+    kind = 0
     opcode = 0
     rd = 0
     funct3 = 0
     rs1 = 0
     rs2 = 0
     funct7 = 0
+    system = 0
 }
 
 Control = Box {
@@ -114,6 +129,14 @@ skill word_zero() {
 
 skill word_copy(word) {
     out word_bytes(word.b0, word.b1, word.b2, word.b3)
+}
+
+skill word_assign(target, value) {
+    target.b0 = value.b0
+    target.b1 = value.b1
+    target.b2 = value.b2
+    target.b3 = value.b3
+    out none
 }
 
 skill byte_and(left, right) {
@@ -306,6 +329,18 @@ skill word_signed_number(word) {
     out 0 - magnitude
 }
 
+skill memory_offset(memory, address) {
+    out word_address(word_sub(address, memory.base))
+}
+
+skill memory_address(memory, offset) {
+    out word_add(memory.base, word_number(offset))
+}
+
+skill pc_word(machine) {
+    out memory_address(machine.memory, machine.pc)
+}
+
 skill word_hex(word) {
     @text = seed.str.at(HEX, word.b3 / 16)
     text = seed.str.add(text, seed.str.at(HEX, mod(word.b3, 16)))
@@ -392,7 +427,7 @@ skill memory_fill_zero(memory, address, size) {
 
 skill trap(machine, reason, detail) {
     @message = seed.str.add(reason, " по адресу 0x")
-    message = seed.str.add(message, number_hex(machine.pc))
+    message = seed.str.add(message, word_hex(pc_word(machine)))
     (seed.str.len(detail) > 0) {
         message = seed.str.add(message, ": ")
         message = seed.str.add(message, detail)
@@ -422,6 +457,30 @@ skill memory_check(machine, address, size, alignment, access) {
         out no
     }
     out yes
+}
+
+skill memory_translate(machine, address, size, alignment, access) {
+    @offset = memory_offset(machine.memory, address)
+    @valid = yes
+    (offset < 0) { valid = no }
+    (offset > machine.memory.size - size) { valid = no }
+    (valid == no) {
+        @detail = seed.str.add("обращение к памяти 0x", word_hex(address))
+        detail = seed.str.add(detail, "..0x")
+        @last = word_add(address, word_number(size - 1))
+        detail = seed.str.add(detail, word_hex(last))
+        detail = seed.str.add(detail, " выходит за пределы ОЗУ")
+        trap(machine, seed.str.add("ошибка доступа: ", access), detail)
+        out 0 - 1
+    }
+    (mod(address.b0, alignment) > 0) {
+        @detail = seed.str.add("невыровненный доступ размером ", seed.num.text(alignment))
+        detail = seed.str.add(detail, " байт по адресу 0x")
+        detail = seed.str.add(detail, word_hex(address))
+        trap(machine, seed.str.add("ошибка доступа: ", access), detail)
+        out 0 - 1
+    }
+    out offset
 }
 
 skill memory_load_word(memory, address) {
@@ -498,7 +557,8 @@ skill new_machine(options) {
         index = index + 1
     }
     @machine = Machine {
-        memory = Memory { size = options.memory_size pages = [] }
+        mode = options.mode
+        memory = Memory { base = options.memory_base size = options.memory_size pages = [] }
         registers = registers
         files = options.files
     }

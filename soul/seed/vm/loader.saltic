@@ -6,8 +6,11 @@ skill image_u16(image, offset) {
 }
 
 skill image_u32(image, offset) {
-    @word = state.word_bytes(image_byte(image, offset), image_byte(image, offset + 1), image_byte(image, offset + 2), image_byte(image, offset + 3))
-    out state.word_address(word)
+    out state.word_address(image_word(image, offset))
+}
+
+skill image_word(image, offset) {
+    out state.word_bytes(image_byte(image, offset), image_byte(image, offset + 1), image_byte(image, offset + 2), image_byte(image, offset + 3))
 }
 
 skill image_length(image) {
@@ -62,7 +65,7 @@ skill load_elf(machine, image) {
     (image_byte(image, 4) == 1) {
         (image_byte(image, 5) == 1) {
             (image_u16(image, 18) == 243) {
-                @entry = image_u32(image, 24)
+                @entry_word = image_word(image, 24)
                 @table = image_u32(image, 28)
                 @entry_size = image_u16(image, 42)
                 @count = image_u16(image, 44)
@@ -77,7 +80,8 @@ skill load_elf(machine, image) {
                         (header < length - 31) {
                             (image_u32(image, header) == 1) {
                                 @offset = image_u32(image, header + 4)
-                                @address = image_u32(image, header + 8)
+                                @address_word = image_word(image, header + 8)
+                                @address = state.memory_offset(machine.memory, address_word)
                                 @file_size = image_u32(image, header + 16)
                                 @memory_size = image_u32(image, header + 20)
                                 @valid = yes
@@ -98,7 +102,12 @@ skill load_elf(machine, image) {
                 }
                 (seed.str.len(machine.trap) == 0) {
                     (segments == 0) { load_error(machine, "ELF не содержит загрузочных сегментов") }
-                    (segments > 0) { machine.pc = entry }
+                    (segments > 0) {
+                        @entry = state.memory_offset(machine.memory, entry_word)
+                        (entry < 0) { load_error(machine, "точка входа ELF находится за пределами ОЗУ") }
+                        (entry > machine.memory.size - 4) { load_error(machine, "точка входа ELF находится за пределами ОЗУ") }
+                        (seed.str.len(machine.trap) == 0) { machine.pc = entry }
+                    }
                 }
                 out none
             }
@@ -163,12 +172,13 @@ skill prepare_stack(machine, options) {
     index = 0
     drum (count) {
         @reverse_index = count - index - 1
-        state.memory_store_word(machine.memory, argv + reverse_index * 4, state.word_number(seed.group.at(addresses, index)), 4)
+        @address = state.memory_address(machine.memory, seed.group.at(addresses, index))
+        state.memory_store_word(machine.memory, argv + reverse_index * 4, address, 4)
         index = index + 1
     }
     state.memory_store_word(machine.memory, argv + count * 4, state.word_zero(), 4)
-    state.set_register(machine, 2, state.word_number(stack))
+    state.set_register(machine, 2, state.memory_address(machine.memory, stack))
     state.set_register(machine, 10, state.word_number(count))
-    state.set_register(machine, 11, state.word_number(argv))
+    state.set_register(machine, 11, state.memory_address(machine.memory, argv))
     out none
 }

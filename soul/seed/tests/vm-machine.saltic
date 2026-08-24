@@ -1,0 +1,76 @@
+use seed
+use craft.testing
+use seed.machine.instruction
+use seed.machine.codec
+use seed.machine.layout
+use seed.compiler.backend.rv32i
+use seed.vm
+use seed.vm.state
+
+skill options(limit) {
+    out state.Options {
+        mode = state.Mode.MACHINE
+        memory_base = state.word_bytes(0, 0, 0, 128)
+        load_address = 0
+        memory_size = 262144
+        step_limit = limit
+        program_name = "seed-vm-machine"
+        arguments = []
+        files = []
+    }
+}
+
+skill machine_image() {
+    @target = rv32i.qemu_virt("_start")
+    target = rv32i.label(target, layout.Section.CODE, "_start")
+    target = rv32i.relative_address(target, codec.T0, "trap", 0)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.CSRRW, codec.ZERO, codec.T0, codec.ZERO, 773))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ECALL, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LUI, codec.T3, codec.ZERO, codec.ZERO, 65536))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T4, codec.ZERO, codec.ZERO, 65))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SB, codec.ZERO, codec.T3, codec.T4, 0))
+
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LUI, codec.T3, codec.ZERO, codec.ZERO, 256))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LUI, codec.T4, codec.ZERO, codec.ZERO, 5))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T4, codec.T4, codec.ZERO, 1365))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.T3, codec.T4, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.WFI, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+
+    target = rv32i.label(target, layout.Section.CODE, "trap")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.CSRRS, codec.T1, codec.ZERO, codec.ZERO, 834))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.CSRRS, codec.T2, codec.ZERO, codec.ZERO, 833))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T2, codec.T2, codec.ZERO, 4))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.CSRRW, codec.ZERO, codec.T2, codec.ZERO, 833))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.MRET, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+    out rv32i.executable(target)
+}
+
+skill wait_image() {
+    @target = rv32i.qemu_virt("_start")
+    target = rv32i.label(target, layout.Section.CODE, "_start")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.WFI, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+    out rv32i.executable(target)
+}
+
+program() {
+    @suite = testing.test_new()
+    @decoded = instruction.decode(115, 1, 0, 773)
+    @unknown = instruction.decode(115, 7, 0, 0)
+    suite = testing.test_equal(suite, "VM: общий decoder распознал csrrw", decoded.kind, instruction.Kind.CSRRW)
+    suite = testing.test_equal(suite, "VM: общий decoder отверг неизвестную кодировку", unknown.kind, instruction.Kind.UNKNOWN_INSTRUCTION)
+
+    @result = vm.run(codec.chunks(machine_image(), state.PAGE_SIZE), options(64))
+    suite = testing.test_equal(suite, "VM machine: ELF 0x80000000 загружен без trap", result.trap, "")
+    suite = testing.test_equal(suite, "VM machine: ecall прошёл через mtvec и mret", seed.group.at(result.registers, codec.T1), "0000000b")
+    suite = testing.test_equal(suite, "VM machine: UART получил один байт", seed.group.count(result.stdout), 1)
+    suite = testing.test_equal(suite, "VM machine: UART получил A", seed.group.at(result.stdout, 0), 65)
+    suite = testing.test_equal(suite, "VM machine: QEMU test device завершил программу", result.reason, "exit")
+    suite = testing.test_equal(suite, "VM machine: QEMU test device вернул успех", result.exit_code, 0)
+
+    @wait = vm.run(codec.chunks(wait_image(), state.PAGE_SIZE), options(4))
+    suite = testing.test_equal(suite, "VM machine: wfi остановил процессор", wait.reason, "wait")
+    suite = testing.test_equal(suite, "VM machine: wfi не создал trap", wait.trap, "")
+    testing.test_finish(suite)
+    out none
+}

@@ -209,6 +209,16 @@ test_machine() {
     echo "машина: кодирование и образ подтверждены"
 }
 
+test_vm_machine() {
+    mkdir -p "$work/vm-machine"
+    build vm-machine \
+        soul/seed/tests/vm-machine.saltic \
+        "$work/vm-machine/program.elf"
+    qemu-riscv32 -B 0x100000000 \
+        "$work/vm-machine/program.elf"
+    echo "VM: общий профиль и machine mode подтверждены"
+}
+
 test_abi() {
     mkdir -p "$work/abi"
     build abi \
@@ -303,6 +313,7 @@ run_case() {
         diagnostics) test_diagnostics ;;
         seed-contract) test_seed_contract ;;
         machine) test_machine ;;
+        vm-machine) test_vm_machine ;;
         abi) test_abi ;;
         qemu-virt) test_qemu_virt ;;
         bootstrap) test_bootstrap ;;
