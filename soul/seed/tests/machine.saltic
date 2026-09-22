@@ -1,6 +1,7 @@
 use seed
 use craft.testing
 use seed.machine.instruction
+use seed.machine.profile
 use seed.machine.codec
 use seed.machine.layout
 use seed.compiler.backend.rv32i
@@ -11,6 +12,55 @@ use seed.tests.machine.immediate
 use seed.tests.machine.patches
 use seed.tests.machine.elf
 use seed.tests.machine.scale
+
+skill machine_profile(suite) {
+    @names = [
+        "lui", "auipc", "jal", "jalr",
+        "beq", "bne", "blt", "bge", "bltu", "bgeu",
+        "lb", "lh", "lw", "lbu", "lhu",
+        "sb", "sh", "sw",
+        "addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli", "srai",
+        "add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and",
+        "fence", "ecall", "ebreak",
+        "csrrw", "csrrs", "mret", "wfi",
+    ]
+    @known = yes
+    @machine_count = 0
+    @index = 0
+    drum (profile.INSTRUCTION_COUNT) {
+        @name = seed.group.item(names, index)
+        (profile.supports(name) == no) { known = no }
+        @item = instruction.at(index)
+        (profile.is_machine(item.kind) == yes) { machine_count = machine_count + 1 }
+        index = index + 1
+    }
+    @add = instruction.find("add")
+    @csrrw = instruction.find("csrrw")
+    @mret = instruction.find("mret")
+    @wfi = instruction.find("wfi")
+    @ecall = instruction.find("ecall")
+    @outside = instruction.at(44)
+    suite = testing.test_yes(suite, "профиль: внутренне согласован", profile.valid())
+    suite = testing.test_yes(suite, "профиль: таблица не имеет дыр и пересечений", instruction.valid_table())
+    suite = testing.test_equal(suite, "профиль: слово содержит 32 бита", profile.WORD_BITS, 32)
+    suite = testing.test_equal(suite, "профиль: регистров ровно 32", profile.REGISTER_COUNT, 32)
+    suite = testing.test_equal(suite, "профиль: команда занимает 4 байта", profile.INSTRUCTION_BYTES, 4)
+    suite = testing.test_equal(suite, "профиль: базовых команд ровно 40", profile.BASE_INSTRUCTION_COUNT, 40)
+    suite = testing.test_equal(suite, "профиль: добавочных машинных команд ровно 4", profile.MACHINE_INSTRUCTION_COUNT, 4)
+    suite = testing.test_equal(suite, "профиль: полный профиль содержит 44 команды", instruction.count(), 44)
+    suite = testing.test_equal(suite, "профиль: независимый список содержит 44 команды", seed.group.count(names), 44)
+    suite = testing.test_yes(suite, "профиль: все 44 имени найдены", known)
+    suite = testing.test_equal(suite, "профиль: четыре машинные команды отделены", machine_count, 4)
+    suite = testing.test_no(suite, "профиль: сжатых команд нет", profile.HAS_COMPRESSED_INSTRUCTIONS)
+    suite = testing.test_equal(suite, "профиль: код операции add закреплён", add.opcode, 51)
+    suite = testing.test_equal(suite, "профиль: вид CSR-записи закреплён", csrrw.funct3, 1)
+    suite = testing.test_equal(suite, "профиль: возврат из ловушки закреплён", mret.system, 770)
+    suite = testing.test_equal(suite, "профиль: ожидание процессора закреплено", wfi.system, 261)
+    suite = testing.test_yes(suite, "профиль: возврат распознаётся однозначно", instruction.matches(mret, 115, 0, 24, 770))
+    suite = testing.test_no(suite, "профиль: системный вызов не становится возвратом", instruction.matches(ecall, 115, 0, 0, 770))
+    suite = testing.test_equal(suite, "профиль: выход за таблицу даёт неизвестную команду", outside.kind, instruction.Kind.UNKNOWN_INSTRUCTION)
+    out suite
+}
 
 skill encoding(suite) {
     @encoded = codec.buffer()
@@ -76,6 +126,7 @@ skill executable(suite) {
 
 program() {
     @suite = testing.test_new()
+    suite = machine_profile(suite)
     suite = encoding(suite)
     suite = executable(suite)
     suite = golden.run(suite)

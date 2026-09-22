@@ -9,14 +9,6 @@ use seed.memory.model
 use seed.compiler.constants
 use seed.runtime.memory
 use seed.runtime.runtime
-use seed.machine.instruction
-use seed.machine.profile
-use seed.machine.codec
-use seed.machine.layout
-use seed.machine.image
-use seed.compiler.backend.rv32i
-use seed.vm
-use seed.vm.state
 
 StableConstant = [1]
 CycleLeft = CycleRight
@@ -27,7 +19,7 @@ skill catalog(suite) {
         "seed.group.count", "seed.group.at", "seed.group.item", "seed.group.add", "seed.group.append",
         "seed.mem.load8", "seed.mem.load16", "seed.mem.load32",
         "seed.mem.store8", "seed.mem.store16", "seed.mem.store32", "seed.mem.store_address32",
-        "seed.cpu.wait", "seed.cpu.fence", "seed.file.read", "seed.file.write",
+        "seed.cpu.wait", "seed.cpu.fence", "seed.file.read", "seed.file.write", "seed.file.write_bytes",
         "seed.str.line_count", "seed.str.add", "seed.str.join", "seed.str.len",
         "seed.str.at", "seed.str.byte", "seed.str.slice", "seed.str.contains",
         "seed.str.starts_with", "seed.str.ends_with", "seed.str.lower", "seed.str.upper",
@@ -56,7 +48,7 @@ skill catalog(suite) {
             index = index + 1
         }
     }
-    suite = testing.test_equal(suite, "seed: количество операций", count, 42)
+    suite = testing.test_equal(suite, "seed: количество операций", count, 43)
     suite = testing.test_yes(suite, "seed: все операции известны", known)
     suite = testing.test_yes(suite, "seed: все результаты определены", typed)
     suite = testing.test_yes(suite, "seed: все операции исполнимы", runnable)
@@ -163,117 +155,6 @@ skill runtime_memory(suite) {
     out suite
 }
 
-skill machine_profile(suite) {
-    @names = [
-        "lui", "auipc", "jal", "jalr",
-        "beq", "bne", "blt", "bge", "bltu", "bgeu",
-        "lb", "lh", "lw", "lbu", "lhu",
-        "sb", "sh", "sw",
-        "addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli", "srai",
-        "add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and",
-        "fence", "ecall", "ebreak",
-        "csrrw", "csrrs", "mret", "wfi",
-    ]
-    @known = yes
-    @machine_count = 0
-    @index = 0
-    drum (profile.INSTRUCTION_COUNT) {
-        @name = seed.group.item(names, index)
-        (profile.supports(name) == no) { known = no }
-        @item = instruction.at(index)
-        (profile.is_machine(item.kind) == yes) { machine_count = machine_count + 1 }
-        index = index + 1
-    }
-    @add = instruction.find("add")
-    @csrrw = instruction.find("csrrw")
-    @mret = instruction.find("mret")
-    @wfi = instruction.find("wfi")
-    @ecall = instruction.find("ecall")
-    @outside = instruction.at(44)
-    suite = testing.test_yes(suite, "машина: профиль внутренне согласован", profile.valid())
-    suite = testing.test_yes(suite, "машина: таблица не имеет дыр и пересечений", instruction.valid_table())
-    suite = testing.test_equal(suite, "машина: слово содержит 32 бита", profile.WORD_BITS, 32)
-    suite = testing.test_equal(suite, "машина: регистров ровно 32", profile.REGISTER_COUNT, 32)
-    suite = testing.test_equal(suite, "машина: команда занимает 4 байта", profile.INSTRUCTION_BYTES, 4)
-    suite = testing.test_equal(suite, "машина: базовых команд ровно 40", profile.BASE_INSTRUCTION_COUNT, 40)
-    suite = testing.test_equal(suite, "машина: добавочных машинных команд ровно 4", profile.MACHINE_INSTRUCTION_COUNT, 4)
-    suite = testing.test_equal(suite, "машина: полный профиль содержит 44 команды", instruction.count(), 44)
-    suite = testing.test_equal(suite, "машина: независимый список содержит 44 команды", seed.group.count(names), 44)
-    suite = testing.test_yes(suite, "машина: все 44 имени найдены", known)
-    suite = testing.test_equal(suite, "машина: четыре машинные команды отделены", machine_count, 4)
-    suite = testing.test_no(suite, "машина: сжатых команд нет", profile.HAS_COMPRESSED_INSTRUCTIONS)
-    suite = testing.test_equal(suite, "машина: код операции add закреплён", add.opcode, 51)
-    suite = testing.test_equal(suite, "машина: вид CSR-записи закреплён", csrrw.funct3, 1)
-    suite = testing.test_equal(suite, "машина: возврат из ловушки закреплён", mret.system, 770)
-    suite = testing.test_equal(suite, "машина: ожидание процессора закреплено", wfi.system, 261)
-    suite = testing.test_yes(suite, "машина: возврат распознаётся однозначно", instruction.matches(mret, 115, 0, 24, 770))
-    suite = testing.test_no(suite, "машина: системный вызов не становится возвратом", instruction.matches(ecall, 115, 0, 0, 770))
-    suite = testing.test_equal(suite, "машина: выход за таблицу даёт неизвестную команду", outside.kind, instruction.Kind.UNKNOWN_INSTRUCTION)
-    out suite
-}
-
-skill machine_encoding(suite) {
-    @encoded = codec.buffer()
-    @valid = yes
-    @index = 0
-    drum (instruction.count()) {
-        @item = instruction.at(index)
-        @word = codec.encode(item, 1, 2, 3, 4) rescue |failure| {
-            valid = no
-            codec.word(0, 0, 0, 0)
-        }
-        encoded = codec.append_word(encoded, word)
-        index = index + 1
-    }
-    @addi = codec.encode_kind(instruction.Kind.ADDI, 1, 2, 0, 3)
-    suite = testing.test_yes(suite, "кодировщик: все 44 команды кодируются", valid)
-    suite = testing.test_equal(suite, "кодировщик: каждая команда занимает четыре байта", encoded.length, 176)
-    suite = testing.test_equal(suite, "кодировщик: первый байт addi закреплён", addi.b0, 147)
-    suite = testing.test_equal(suite, "кодировщик: второй байт addi закреплён", addi.b1, 0)
-    suite = testing.test_equal(suite, "кодировщик: третий байт addi закреплён", addi.b2, 49)
-    suite = testing.test_equal(suite, "кодировщик: четвёртый байт addi закреплён", addi.b3, 0)
-    suite = testing.test_equal(
-        suite,
-        "кодировщик: машинное слово видно только нулями и единицами",
-        codec.word_bits(addi),
-        "10010011 00000000 00110001 00000000"
-    )
-    out suite
-}
-
-skill machine_executable(suite) {
-    @target = rv32i.host("_start")
-    target = rv32i.label(target, layout.Section.CODE, "_start")
-    target = rv32i.branch(target, instruction.Kind.BEQ, codec.ZERO, codec.ZERO, "done")
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, 9))
-    target = rv32i.label(target, layout.Section.CODE, "done")
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0))
-    target = rv32i.resolve(target)
-
-    @current_layout = layout.layout(target)
-    @done_offset = layout.label_offset(target, current_layout, "done")
-    @branch_byte = codec.byte_at(target.code, 1)
-    @output = rv32i.executable(target)
-    @chunks = codec.chunks(output, state.PAGE_SIZE)
-    @options = state.Options {
-        load_address = 4096
-        memory_size = 262144
-        step_limit = 16
-        program_name = "seed-machine-contract"
-        arguments = []
-        files = []
-    }
-    @result = vm.run(chunks, options)
-
-    suite = testing.test_equal(suite, "программа: метка получила точное смещение", done_offset, 8)
-    suite = testing.test_equal(suite, "программа: ссылка на метку исправлена", branch_byte, 4)
-    suite = testing.test_yes(suite, "образ: исполняемый файл создан", output.length > 4096)
-    suite = testing.test_equal(suite, "образ: наша VM загрузила собственный файл", result.trap, "")
-    suite = testing.test_equal(suite, "образ: переход пропустил лишнюю команду", result.steps, 2)
-    suite = testing.test_equal(suite, "образ: программа остановилась штатно", result.reason, "break")
-    out suite
-}
-
 skill ast_contract(suite) {
     @path = ast.in_module("demo", ast.located(["path", "tool", "run"], 12, 34))
     @place = ast.location(path)
@@ -327,9 +208,6 @@ program() {
     suite = memory_model(suite)
     suite = compiler_memory_layout(suite)
     suite = runtime_memory(suite)
-    suite = machine_profile(suite)
-    suite = machine_encoding(suite)
-    suite = machine_executable(suite)
     suite = ast_contract(suite)
     suite = loader_modes(suite)
     suite = checker_contract(suite)
