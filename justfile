@@ -5,10 +5,10 @@ default:
     just --list
 
 compile file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf":
-    bash os/bootstrap/build.sh "$1" "$2"
+    SALTIC_DIRECT_ONLY=1 bash os/bootstrap/build.sh "$1" "$2"
 
 run file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf" *args:
-    bash os/bootstrap/build.sh "$1" "$2"
+    SALTIC_DIRECT_ONLY=1 bash os/bootstrap/build.sh "$1" "$2"
     qemu-riscv32 -B 0x100000000 "$2" "${@:3}"
 
 qemu file="os/target/qemu_virt/smoke.saltic":

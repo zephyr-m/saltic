@@ -65,6 +65,7 @@ echo "bootstrap refresh: stage-1 собирает stage-2"
 SALTIC_BOOTSTRAP_COMPILER="$work/stage-1/toolchain.elf" \
 SALTIC_BUILD_DIR="$work/stage-2" \
 SALTIC_HEAP_BYTES="$heap_bytes" \
+SALTIC_DIRECT_ONLY=1 \
 bash os/bootstrap/build.sh \
     "$source_path" \
     "$work/stage-2/toolchain.elf" \
@@ -74,13 +75,15 @@ echo "bootstrap refresh: stage-2 собирает stage-3"
 SALTIC_BOOTSTRAP_COMPILER="$work/stage-2/toolchain.elf" \
 SALTIC_BUILD_DIR="$work/stage-3" \
 SALTIC_HEAP_BYTES="$heap_bytes" \
+SALTIC_DIRECT_ONLY=1 \
 bash os/bootstrap/build.sh \
     "$source_path" \
     "$work/stage-3/toolchain.elf" \
     "$work/stage-3/toolchain.s"
 
 echo "bootstrap refresh: проверяю fixed point"
-diff -u "$work/stage-2/toolchain.s" "$work/stage-3/toolchain.s"
+test ! -e "$work/stage-2/toolchain.s"
+test ! -e "$work/stage-3/toolchain.s"
 cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
 
 cp "$work/stage-3/toolchain.elf" os/bootstrap/compiler.elf

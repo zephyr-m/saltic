@@ -3,9 +3,12 @@ use craft.testing
 use seed.machine.instruction
 use seed.machine.codec
 use seed.machine.layout
+use seed.machine.image
+use seed.compiler
 use seed.compiler.backend.rv32i
 use seed.vm
 use seed.vm.state
+use os.target.qemu_virt.platform
 
 skill options(limit) {
     out state.Options {
@@ -18,6 +21,12 @@ skill options(limit) {
         arguments = []
         files = []
     }
+}
+
+skill platform_options(limit) {
+    @result = options(limit)
+    result.memory_size = 16777216 * 8
+    out result
 }
 
 skill machine_image() {
@@ -53,7 +62,38 @@ skill wait_image() {
     out rv32i.executable(target)
 }
 
-program() {
+skill platform_image() {
+    @target = rv32i.qemu_virt("platform_start")
+    target = platform.append(target)
+    target = rv32i.label(target, layout.Section.CODE, "_start")
+    target = rv32i.relative_address(target, codec.A1, "vm_platform_direct", 0)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A2, codec.ZERO, codec.ZERO, 1))
+    target = rv32i.call(target, "rt_platform_write")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, 1))
+    target = rv32i.relative_address(target, codec.A1, "vm_platform_trap", 0)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A2, codec.ZERO, codec.ZERO, 1))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A7, codec.ZERO, codec.ZERO, 64))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ECALL, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, 0))
+    target = rv32i.call(target, "rt_platform_exit")
+    target = rv32i.label(target, layout.Section.RODATA, "vm_platform_direct")
+    target = layout.append_section_text(target, layout.Section.RODATA, "A", no)
+    target = rv32i.label(target, layout.Section.RODATA, "vm_platform_trap")
+    target = layout.append_section_text(target, layout.Section.RODATA, "B", no)
+    out rv32i.executable(target)
+}
+
+skill compiled_platform_image() {
+    @ast = ["program", ["entry", [], ["block",
+        ["expr", ["call", ["path", "seed", "io", "show"], ["string", "A"], ["string", "B"]]],
+        ["out", ["none"]]
+    ]]]
+    @target = compiler.compile_machine_common_with_heap(ast, codec.word_from_number(64))
+    target = platform.append(target)
+    out rv32i.executable(target)
+}
+
+program(output_path) {
     @suite = testing.test_new()
     @decoded = instruction.decode(115, 1, 0, 773)
     @unknown = instruction.decode(115, 7, 0, 0)
@@ -71,5 +111,24 @@ program() {
     @wait = vm.run(codec.chunks(wait_image(), state.PAGE_SIZE), options(4))
     suite = testing.test_equal(suite, "VM machine: wfi остановил процессор", wait.reason, "wait")
     suite = testing.test_equal(suite, "VM machine: wfi не создал trap", wait.trap, "")
+
+    @platform_output = platform_image()
+    @platform_result = vm.run(codec.chunks(platform_output, state.PAGE_SIZE), platform_options(512))
+    suite = testing.test_equal(suite, "VM platform: образ выполнился без trap", platform_result.trap, "")
+    suite = testing.test_equal(suite, "VM platform: QEMU test device завершил программу", platform_result.reason, "exit")
+    suite = testing.test_equal(suite, "VM platform: успешный exit", platform_result.exit_code, 0)
+    suite = testing.test_equal(suite, "VM platform: direct и trap write дали два байта", seed.group.count(platform_result.stdout), 2)
+    suite = testing.test_equal(suite, "VM platform: direct write вывел A", seed.group.at(platform_result.stdout, 0), 65)
+    suite = testing.test_equal(suite, "VM platform: trap write вывел B", seed.group.at(platform_result.stdout, 1), 66)
+
+    @compiled_output = compiled_platform_image()
+    @compiled_result = vm.run(codec.chunks(compiled_output, state.PAGE_SIZE), platform_options(2048))
+    suite = testing.test_equal(suite, "VM virt compiler: образ выполнился без trap", compiled_result.trap, "")
+    suite = testing.test_equal(suite, "VM virt compiler: программа завершилась через platform", compiled_result.reason, "exit")
+    suite = testing.test_equal(suite, "VM virt compiler: успешный exit", compiled_result.exit_code, 0)
+    suite = testing.test_equal(suite, "VM virt compiler: show вывел AB и newline", seed.group.count(compiled_result.stdout), 3)
+    suite = testing.test_equal(suite, "VM virt compiler: первый байт A", seed.group.at(compiled_result.stdout, 0), 65)
+    suite = testing.test_equal(suite, "VM virt compiler: второй байт B", seed.group.at(compiled_result.stdout, 1), 66)
+    image.write_buffer(output_path, compiled_output)
     out testing.test_finish(suite)
 }

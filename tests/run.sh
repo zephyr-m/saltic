@@ -227,12 +227,24 @@ test_machine() {
 
 test_vm_machine() {
     mkdir -p "$work/vm-machine"
+    local platform_elf="$work/vm-machine/platform.elf"
     build vm-machine \
         soul/seed/tests/vm-machine.saltic \
         "$work/vm-machine/program.elf"
     qemu-riscv32 -B 0x100000000 \
-        "$work/vm-machine/program.elf"
-    echo "VM: общий профиль и machine mode подтверждены"
+        "$work/vm-machine/program.elf" \
+        "$platform_elf"
+    test -s "$platform_elf"
+    timeout 10 qemu-system-riscv32 \
+        -machine virt -m 128M -display none -monitor none \
+        -serial file:"$work/vm-machine/qemu-serial.txt" \
+        -d in_asm,guest_errors \
+        -D "$work/vm-machine/qemu.log" \
+        -bios none \
+        -kernel "$platform_elf" \
+        </dev/null
+    test "$(<"$work/vm-machine/qemu-serial.txt")" = "AB"
+    echo "VM: общий профиль, machine mode и qemu-virt подтверждены"
 }
 
 test_abi() {
@@ -252,10 +264,11 @@ test_qemu_virt() {
 
 test_bootstrap() {
     local bootstrap_work="$work/bootstrap"
-    local heap_bytes=536870912
+    local heap_bytes=4026531840
     mkdir -p \
         "$bootstrap_work/stage-1" \
         "$bootstrap_work/stage-2" \
+        "$bootstrap_work/stage-3" \
         "$bootstrap_work/canonical"
 
     echo "bootstrap: зафиксированный компилятор собирает toolchain"
@@ -266,41 +279,45 @@ test_bootstrap() {
         "$bootstrap_work/stage-1/toolchain.elf" \
         "$bootstrap_work/stage-1/toolchain.s"
 
-    echo "bootstrap: сравниваю исполняемый образ с зафиксированным компилятором"
-    riscv32-none-elf-objcopy \
-        -O binary -j .text -j .rodata \
-        os/bootstrap/compiler.elf \
-        "$bootstrap_work/stage-1/bootstrap.bin"
-    riscv32-none-elf-objcopy \
-        -O binary -j .text -j .rodata \
-        "$bootstrap_work/stage-1/toolchain.elf" \
-        "$bootstrap_work/stage-1/toolchain.bin"
-    cmp \
-        "$bootstrap_work/stage-1/bootstrap.bin" \
-        "$bootstrap_work/stage-1/toolchain.bin"
-
-    echo "bootstrap: собранный toolchain повторяет себя"
+    echo "bootstrap: stage-1 создаёт прямой ELF stage-2"
     SALTIC_BOOTSTRAP_COMPILER="$bootstrap_work/stage-1/toolchain.elf" \
     SALTIC_BUILD_DIR="$bootstrap_work/stage-2" \
     SALTIC_HEAP_BYTES="$heap_bytes" \
+    SALTIC_DIRECT_ONLY=1 \
     bash os/bootstrap/build.sh \
         soul/seed/toolchain.saltic \
         "$bootstrap_work/stage-2/toolchain.elf" \
         "$bootstrap_work/stage-2/toolchain.s"
-    diff -u \
-        "$bootstrap_work/stage-1/toolchain.s" \
-        "$bootstrap_work/stage-2/toolchain.s"
-    cmp \
-        "$bootstrap_work/stage-1/toolchain.elf" \
-        "$bootstrap_work/stage-2/toolchain.elf"
+    test -x "$bootstrap_work/stage-2/toolchain.elf"
+    test ! -e "$bootstrap_work/stage-2/toolchain.s"
 
-    echo "bootstrap: собранный toolchain компилирует канон"
+    echo "bootstrap: stage-2 создаёт прямой ELF stage-3"
+    SALTIC_BOOTSTRAP_COMPILER="$bootstrap_work/stage-2/toolchain.elf" \
+    SALTIC_BUILD_DIR="$bootstrap_work/stage-3" \
+    SALTIC_HEAP_BYTES="$heap_bytes" \
+    SALTIC_DIRECT_ONLY=1 \
+    bash os/bootstrap/build.sh \
+        soul/seed/toolchain.saltic \
+        "$bootstrap_work/stage-3/toolchain.elf" \
+        "$bootstrap_work/stage-3/toolchain.s"
+    test -x "$bootstrap_work/stage-3/toolchain.elf"
+    test ! -e "$bootstrap_work/stage-3/toolchain.s"
+
+    echo "bootstrap: сравниваю прямые stage-2 и stage-3"
+    cmp \
+        "$bootstrap_work/stage-2/toolchain.elf" \
+        "$bootstrap_work/stage-3/toolchain.elf"
+
+    echo "bootstrap: прямой toolchain компилирует канон"
     SALTIC_BOOTSTRAP_COMPILER="$bootstrap_work/stage-2/toolchain.elf" \
     SALTIC_BUILD_DIR="$bootstrap_work/canonical" \
+    SALTIC_DIRECT_ONLY=1 \
     bash os/bootstrap/build.sh \
         soul/seed/canonical/main.saltic \
         "$bootstrap_work/canonical/canonical.elf" \
         "$bootstrap_work/canonical/canonical.s"
+    test -x "$bootstrap_work/canonical/canonical.elf"
+    test ! -e "$bootstrap_work/canonical/canonical.s"
     cp tests/fixtures/input.txt "$bootstrap_work/canonical/input.txt"
     qemu-riscv32 -B 0x100000000 \
         "$bootstrap_work/canonical/canonical.elf" \

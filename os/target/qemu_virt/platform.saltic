@@ -1,4 +1,216 @@
 use seed
+use seed.abi
+use seed.machine.instruction
+use seed.machine.codec
+use seed.machine.layout
+use seed.compiler.backend.rv32i
+
+UART_BASE_UPPER = 65536
+UART_LSR = 5
+UART_TX_READY = 32
+QEMU_TEST_UPPER = 256
+QEMU_EXIT_OK = 21845
+QEMU_EXIT_ERROR = 13107
+STACK_TOP_UPPER = 557056
+
+skill append_entry(target, boot_trampoline) {
+    target = rv32i.label(target, layout.Section.CODE, "platform_start")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LUI, codec.SP, codec.ZERO, codec.ZERO, STACK_TOP_UPPER))
+    target = rv32i.relative_address(target, codec.T0, "platform_trap", 0)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.CSRRW, codec.ZERO, codec.T0, codec.ZERO, 773))
+    target = rv32i.relative_address(target, codec.A1, "platform_argv", 0)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, 1))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - 16))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.SP, codec.A0, 0))
+    target = rv32i.relative_address(target, codec.T0, "platform_name", 0)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.SP, codec.T0, 4))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.SP, codec.ZERO, 8))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.SP, codec.ZERO, 12))
+    (boot_trampoline == yes) {
+        target = rv32i.relative_address(target, codec.T0, "_start", 4)
+        out rv32i.emit(target, rv32i.operation(instruction.Kind.JALR, codec.ZERO, codec.T0, codec.ZERO, 0))
+    }
+    out rv32i.jump(target, codec.ZERO, "_start")
+}
+
+skill append_trap(target) {
+    target = rv32i.label(target, layout.Section.CODE, "platform_trap")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.CSRRS, codec.T0, codec.ZERO, codec.ZERO, 834))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, 11))
+    target = rv32i.branch(target, instruction.Kind.BNE, codec.T0, codec.T1, "platform_report_trap")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, 64))
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.A7, codec.T0, "platform_write")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, 93))
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.A7, codec.T0, "platform_exit")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, 94))
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.A7, codec.T0, "platform_exit")
+
+    target = rv32i.label(target, layout.Section.CODE, "platform_report_trap")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.CSRRS, codec.T1, codec.ZERO, codec.ZERO, 833))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - 16))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.SP, codec.T0, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.SP, codec.T1, 4))
+    target = rv32i.relative_address(target, codec.A1, "platform_trap_cause", 0)
+    target = rv32i.relative_address(target, codec.A2, "platform_trap_cause_end", 0)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SUB, codec.A2, codec.A2, codec.A1, 0))
+    target = rv32i.call(target, "rt_platform_write")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LW, codec.A0, codec.SP, codec.ZERO, 0))
+    target = rv32i.call(target, "platform_uart_bits")
+    target = rv32i.relative_address(target, codec.A1, "platform_trap_address", 0)
+    target = rv32i.relative_address(target, codec.A2, "platform_trap_address_end", 0)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SUB, codec.A2, codec.A2, codec.A1, 0))
+    target = rv32i.call(target, "rt_platform_write")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LW, codec.A0, codec.SP, codec.ZERO, 4))
+    target = rv32i.call(target, "platform_uart_bits")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 16))
+    out rv32i.jump(target, codec.ZERO, "platform_exit_error")
+}
+
+skill append_uart_bits(target) {
+    target = rv32i.label(target, layout.Section.CODE, "platform_uart_bits")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T5, codec.ZERO, codec.ZERO, 32))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LUI, codec.T4, codec.ZERO, codec.ZERO, UART_BASE_UPPER))
+    target = rv32i.label(target, layout.Section.CODE, ".L_platform_bits_loop")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SRLI, codec.T2, codec.A0, codec.ZERO, 31))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T2, codec.T2, codec.ZERO, 48))
+    target = rv32i.label(target, layout.Section.CODE, ".L_platform_bits_wait")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LBU, codec.T3, codec.T4, codec.ZERO, UART_LSR))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ANDI, codec.T3, codec.T3, codec.ZERO, UART_TX_READY))
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.T3, codec.ZERO, ".L_platform_bits_wait")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SB, codec.ZERO, codec.T4, codec.T2, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SLLI, codec.A0, codec.A0, codec.ZERO, 1))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T5, codec.T5, codec.ZERO, 0 - 1))
+    target = rv32i.branch(target, instruction.Kind.BNE, codec.T5, codec.ZERO, ".L_platform_bits_loop")
+    target = rv32i.label(target, layout.Section.CODE, ".L_platform_bits_newline_wait")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LBU, codec.T3, codec.T4, codec.ZERO, UART_LSR))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ANDI, codec.T3, codec.T3, codec.ZERO, UART_TX_READY))
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.T3, codec.ZERO, ".L_platform_bits_newline_wait")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, 10))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SB, codec.ZERO, codec.T4, codec.T2, 0))
+    out rv32i.emit(target, rv32i.operation(instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0))
+}
+
+skill append_direct_write(target) {
+    target = rv32i.label(target, layout.Section.CODE, "rt_platform_write")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T0, codec.A1, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T1, codec.A2, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LUI, codec.T4, codec.ZERO, codec.ZERO, UART_BASE_UPPER))
+    target = rv32i.label(target, layout.Section.CODE, ".L_platform_direct_write_loop")
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.T1, codec.ZERO, ".L_platform_direct_write_done")
+    target = rv32i.label(target, layout.Section.CODE, ".L_platform_direct_uart_wait")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LBU, codec.T2, codec.T4, codec.ZERO, UART_LSR))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ANDI, codec.T2, codec.T2, codec.ZERO, UART_TX_READY))
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.T2, codec.ZERO, ".L_platform_direct_uart_wait")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LBU, codec.T2, codec.T0, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SB, codec.ZERO, codec.T4, codec.T2, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T0, codec.T0, codec.ZERO, 1))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T1, codec.T1, codec.ZERO, 0 - 1))
+    target = rv32i.jump(target, codec.ZERO, ".L_platform_direct_write_loop")
+    target = rv32i.label(target, layout.Section.CODE, ".L_platform_direct_write_done")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A0, codec.A2, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR))
+    out rv32i.emit(target, rv32i.operation(instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0))
+}
+
+skill append_direct_exit(target) {
+    target = rv32i.label(target, layout.Section.CODE, "rt_platform_exit")
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.A0, codec.ZERO, "platform_exit_ok")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - 16))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.SP, codec.RA, 12))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.SP, codec.A0, 8))
+    target = rv32i.relative_address(target, codec.A1, "platform_exit_failure", 0)
+    target = rv32i.relative_address(target, codec.A2, "platform_exit_failure_end", 0)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SUB, codec.A2, codec.A2, codec.A1, 0))
+    target = rv32i.call(target, "rt_platform_write")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LW, codec.A0, codec.SP, codec.ZERO, 8))
+    target = rv32i.call(target, "platform_uart_bits")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LW, codec.RA, codec.SP, codec.ZERO, 12))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 16))
+    out rv32i.jump(target, codec.ZERO, "platform_exit_error")
+}
+
+skill append_trap_write(target) {
+    target = rv32i.label(target, layout.Section.CODE, "platform_write")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T0, codec.A1, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T1, codec.A2, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T3, codec.A2, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LUI, codec.T4, codec.ZERO, codec.ZERO, UART_BASE_UPPER))
+    target = rv32i.label(target, layout.Section.CODE, ".L_platform_write_loop")
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.T1, codec.ZERO, ".L_platform_write_done")
+    target = rv32i.label(target, layout.Section.CODE, ".L_platform_uart_wait")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LBU, codec.T2, codec.T4, codec.ZERO, UART_LSR))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ANDI, codec.T2, codec.T2, codec.ZERO, UART_TX_READY))
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.T2, codec.ZERO, ".L_platform_uart_wait")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LBU, codec.T2, codec.T0, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SB, codec.ZERO, codec.T4, codec.T2, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T0, codec.T0, codec.ZERO, 1))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T1, codec.T1, codec.ZERO, 0 - 1))
+    target = rv32i.jump(target, codec.ZERO, ".L_platform_write_loop")
+    target = rv32i.label(target, layout.Section.CODE, ".L_platform_write_done")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A0, codec.T3, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.CSRRS, codec.T0, codec.ZERO, codec.ZERO, 833))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.T0, codec.T0, codec.ZERO, 4))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.CSRRW, codec.ZERO, codec.T0, codec.ZERO, 833))
+    out rv32i.emit(target, rv32i.operation(instruction.Kind.MRET, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+}
+
+skill append_exit(target) {
+    target = rv32i.label(target, layout.Section.CODE, "platform_exit")
+    target = rv32i.branch(target, instruction.Kind.BEQ, codec.A0, codec.ZERO, "platform_exit_ok")
+    target = rv32i.label(target, layout.Section.CODE, "platform_exit_error")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LUI, codec.T0, codec.ZERO, codec.ZERO, QEMU_TEST_UPPER))
+    target = rv32i.load_immediate(target, codec.T1, QEMU_EXIT_ERROR)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.T0, codec.T1, 0))
+    target = rv32i.jump(target, codec.ZERO, "platform_halt")
+    target = rv32i.label(target, layout.Section.CODE, "platform_exit_ok")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.LUI, codec.T0, codec.ZERO, codec.ZERO, QEMU_TEST_UPPER))
+    target = rv32i.load_immediate(target, codec.T1, QEMU_EXIT_OK)
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.SW, codec.ZERO, codec.T0, codec.T1, 0))
+    target = rv32i.label(target, layout.Section.CODE, "platform_halt")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.WFI, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+    out rv32i.jump(target, codec.ZERO, "platform_halt")
+}
+
+skill append_data(target) {
+    target = layout.align_section(target, layout.Section.RODATA, 4)
+    target = rv32i.label(target, layout.Section.RODATA, "platform_name")
+    target = layout.append_section_text(target, layout.Section.RODATA, "saltic", yes)
+    target = rv32i.label(target, layout.Section.RODATA, "platform_trap_cause")
+    target = layout.append_section_text(target, layout.Section.RODATA, "ловушка процессора, причина: ", no)
+    target = rv32i.label(target, layout.Section.RODATA, "platform_trap_cause_end")
+    target = rv32i.label(target, layout.Section.RODATA, "platform_trap_address")
+    target = layout.append_section_text(target, layout.Section.RODATA, "адрес остановки: ", no)
+    target = rv32i.label(target, layout.Section.RODATA, "platform_trap_address_end")
+    target = rv32i.label(target, layout.Section.RODATA, "platform_exit_failure")
+    target = layout.append_section_text(target, layout.Section.RODATA, "системный выход с ошибкой: ", no)
+    target = rv32i.label(target, layout.Section.RODATA, "platform_exit_failure_end")
+    target = layout.align_section(target, layout.Section.DATA, 4)
+    target = rv32i.label(target, layout.Section.DATA, "platform_argv")
+    target = layout.append_label_address(target, layout.Section.DATA, "platform_name", 0)
+    out layout.append_section_word(target, layout.Section.DATA, codec.word(0, 0, 0, 0))
+}
+
+skill append(target) {
+    @program_code_size = target.code.length
+    @boot_trampoline = program_code_size > 0
+    target.load_address = layout.word_address(0, 0, 0, 128)
+    target.low_memory_size = 0
+    target.entry = "platform_start"
+    target.resolved = no
+    target = append_entry(target, boot_trampoline)
+    target = append_trap(target)
+    target = append_uart_bits(target)
+    target = append_direct_write(target)
+    target = append_direct_exit(target)
+    target = append_trap_write(target)
+    target = append_exit(target)
+    target = append_data(target)
+    (boot_trampoline == yes) {
+        @jump = codec.encode_kind(instruction.Kind.JAL, codec.ZERO, codec.ZERO, codec.ZERO, program_code_size)
+        target = layout.set_section_word(target, layout.Section.CODE, 0, jump)
+    }
+    out target
+}
 
 skill show_banner() {
     seed.io.show("Saltic работает прямо на RV32I")
