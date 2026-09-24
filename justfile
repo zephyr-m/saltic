@@ -105,8 +105,8 @@ native-trace assembly=".cache/build/bootstrap-refresh/stage-3/toolchain.s" sourc
         echo "нативная трассировка: обработчик исчерпания памяти не найден" >&2
         exit 1
     fi
-    if ! grep -q '^\.space 16777216$' "$1"; then
-        echo "нативная трассировка: стандартная куча не найдена" >&2
+    if ! grep -q '^\.space SALTIC_HEAP_BYTES$' "$1"; then
+        echo "нативная трассировка: параметрическая куча не найдена" >&2
         exit 1
     fi
     qemu-riscv32 -B 4294967296 \
@@ -115,11 +115,11 @@ native-trace assembly=".cache/build/bootstrap-refresh/stage-3/toolchain.s" sourc
         -e '/^\.section \.text$/a\  .include ".cache/build/native-trace/support.s"' \
         -e '/^rt_alloc:$/a\  SALTIC_NATIVE_TRACE_ALLOC_HOOK' \
         -e '/^rt_out_of_memory:$/a\  SALTIC_NATIVE_TRACE_FAILURE_HOOK' \
-        -e 's/^\.space 16777216$/.space 536870912/' \
         "$1" >"$work/instrumented.s"
     riscv32-none-elf-as -march=rv32i -mabi=ilp32 \
         os/bootstrap/linux-memory.S -o "$work/linux-memory.o"
     riscv32-none-elf-as -march=rv32i -mabi=ilp32 \
+        --defsym SALTIC_HEAP_BYTES=536870912 \
         "$work/instrumented.s" -o "$work/instrumented.o"
     riscv32-none-elf-gcc \
         -march=rv32i -mabi=ilp32 -mno-relax -nostdlib \

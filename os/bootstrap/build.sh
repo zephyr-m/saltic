@@ -20,7 +20,7 @@ if [[ ! -f "$compiler" ]]; then
     echo "bootstrap compiler не найден: $compiler" >&2
     exit 1
 fi
-if [[ ! "$heap_bytes" =~ ^[0-9]+$ ]] || (( heap_bytes < 1 )); then
+if [[ ! "$heap_bytes" =~ ^[0-9]+$ ]] || (( heap_bytes < 12 || heap_bytes % 8 != 0 )); then
     echo "неверный SALTIC_HEAP_BYTES: $heap_bytes" >&2
     exit 2
 fi

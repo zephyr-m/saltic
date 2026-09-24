@@ -19,9 +19,15 @@ skill make_image() {
     out rv32i.executable(target)
 }
 
-skill ordinary_program() {
+skill ordinary_program(heap_bytes) {
     @ast = ["program", ["entry", [], ["block", ["out", ["number", 7]]]]]
-    @target = compiler.compile_machine(ast)
+    @target = compiler.compile_machine_with_heap(ast, heap_bytes)
+    out layout.resolve(target)
+}
+
+skill exhausted_program() {
+    @ast = ["program", ["entry", [], ["block", ["out", ["group", ["number", 1]]]]]]
+    @target = compiler.compile_machine_with_heap(ast, 16)
     out layout.resolve(target)
 }
 
@@ -38,7 +44,7 @@ skill execute(output, limit) {
 }
 
 skill run(suite, output_path) {
-    @ordinary = ordinary_program()
+    @ordinary = ordinary_program(64)
     @output = image.executable(ordinary)
     @start = layout.find_label(ordinary, "_start")
     @entry = layout.find_label(ordinary, "saltic_program")
@@ -47,13 +53,20 @@ skill run(suite, output_path) {
     suite = testing.test_yes(suite, "обычная программа: _start существует", start.present)
     suite = testing.test_yes(suite, "обычная программа: program существует", entry.present)
     suite = testing.test_yes(suite, "обычная программа: runtime существует", exit_label.present)
-    suite = testing.test_equal(suite, "обычная программа: compiler heap", ordinary.bss_size, model.DEFAULT_HEAP_BYTES)
+    suite = testing.test_equal(suite, "обычная программа: параметр heap", ordinary.heap_size, 64)
+    suite = testing.test_equal(suite, "обычная программа: compiler heap", ordinary.bss_size, 64)
     suite = testing.test_equal(suite, "обычная программа: ELF magic", codec.byte_at(output, 0), 127)
     suite = testing.test_yes(suite, "обычная программа: ELF содержит payload", output.length > 4096)
     @result = execute(output, 96)
     suite = testing.test_equal(suite, "обычная программа: нет trap", result.trap, "")
     suite = testing.test_equal(suite, "обычная программа: завершилась через runtime", result.reason, "exit")
     suite = testing.test_equal(suite, "обычная программа: успешный exit", result.exit_code, 0)
+    @exhausted = exhausted_program()
+    @exhausted_result = execute(image.executable(exhausted), 96)
+    suite = testing.test_equal(suite, "квота: маленький heap сохранён", exhausted.heap_size, 16)
+    suite = testing.test_equal(suite, "квота: исчерпание не повреждает VM", exhausted_result.trap, "")
+    suite = testing.test_equal(suite, "квота: исчерпание завершает программу", exhausted_result.reason, "exit")
+    suite = testing.test_equal(suite, "квота: канонический статус исчерпания", exhausted_result.exit_code, model.OUT_OF_MEMORY_EXIT_STATUS)
     image.write_buffer(output_path, output)
     out suite
 }

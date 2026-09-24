@@ -149,6 +149,22 @@
 - [x] Тестовая Saltic VM вмещает канонический heap 16 МиБ и загрузочные области ELF.
 - [x] Getter констант читает и пишет DATA через существующие relative-address patches.
 - [x] Подтверждён будущий контракт `rt_alloc`: `a0` содержит payload bytes; allocator добавляет 12-байтный header и выравнивание, записывает `payload_bytes` и нулевые flags; caller записывает `kind`.
-- [ ] БЛОКИРОВКА object ABI: канон хранит fixed как raw 32-bit word и берёт тип из сигнатуры; текущий runtime хранит value и kind внутри tagged BOX.
-- [ ] Для raw fixed runtime должен получать `u8/u16/u32/i32/bits32/address/usize` без чтения BOX; предложенный скрытый register-аргумент отклонён, другой механизм пока не выбран.
-- [ ] Точка продолжения: сначала владелец определяет источник fixed kind для `rt_fixed_*`, затем переводятся `rt_alloc`, String/Group/Box headers и fixed; после 5767/0 эта подгруппа код не меняла.
+- [x] БЛОКИРОВКА object ABI снята: fixed хранится как raw 32-bit word, boxed-представление удалено.
+- [x] Механизм fixed kind выбран: source kind передаётся в `a6`, conversion target kind — в `a7`.
+- [x] Точка продолжения выполнена: `rt_alloc`, String/Group/Box headers и fixed переведены на утверждённый ABI.
+- [x] Решение fixed ABI: raw-значение не несёт kind; компилятор вызывает отдельную runtime-точку для каждого `u8/u16/u32/i32/bits32/address/usize`.
+- [x] Блокировка object ABI снята; скрытый register-аргумент не используется, boxed fixed подлежит удалению.
+- [x] Решение fixed ABI пересмотрено: единые `rt_fixed_*`, source kind в `a6`, conversion target kind в `a7`; отдельные точки по kind не создаются.
+- [x] Компилятор передаёт fixed kind через канонические `a6/a7`; boxed runtime временно сохраняет совместимость до следующей группы.
+- [x] Fixed runtime переведён с tagged `BOX` на raw word: операции читают kind из `a6/a7`, typed memory и конструкторы heap не используют.
+- [x] String/Group/Box и `rt_alloc` переведены на единый 12-байтный header; static strings отмечены flag STATIC.
+- [x] После итогов тестов повторно печатается короткий список всех `[FAIL]` с actual и expected.
+- [x] Исправлен эталон `rt_missing_field`: error value 15 кодируется как `addi a0, zero, 15`.
+- [x] Object ABI подтверждён полным прогоном: 5462 пройдено, 0 провалено.
+- [x] `rt_alloc` проверяет сломанные границы, 32-битное переполнение и остаток квоты до сдвига cursor.
+- [x] `compile_machine_with_heap` проводит размер heap в `machine.Program`, BSS и метки границ.
+- [x] Heap `sed`: после bootstrap fixed point legacy-подмена удалена; сборка принимает только `.space SALTIC_HEAP_BYTES` и передаёт размер через `as --defsym`.
+- [x] Memory ABI/data-layout/quota подтверждены полным прогоном: 5481 пройдено, 0 провалено.
+- [x] Bootstrap refresh: исправлено затирание знака и буфера цифр в `rt_number_text` при вызове `rt_alloc`; добавлена VM-проверка строки `-42`.
+- [x] Новый runtime подтверждён: 5503 пройдено, 0 провалено; bootstrap достиг fixed point и обновил `os/bootstrap/compiler.elf`.
+- [ ] Остаток контрольной точки 3: runtime ещё возвращает tagged `Error` в `a0`, хотя call ABI задаёт raw error id в `a1`.
