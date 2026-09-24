@@ -4,7 +4,9 @@ use seed.machine.instruction
 use seed.machine.codec
 use seed.machine.layout
 use seed.machine.image
+use seed.compiler
 use seed.compiler.backend.rv32i
+use seed.memory.model
 use seed.vm
 use seed.vm.state
 
@@ -15,6 +17,45 @@ skill make_image() {
     target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A7, codec.ZERO, codec.ZERO, 93))
     target = rv32i.emit(target, rv32i.operation(instruction.Kind.ECALL, codec.ZERO, codec.ZERO, codec.ZERO, 0))
     out rv32i.executable(target)
+}
+
+skill ordinary_program() {
+    @ast = ["program", ["entry", [], ["block", ["out", ["number", 7]]]]]
+    @target = compiler.compile_machine(ast)
+    out layout.resolve(target)
+}
+
+skill execute(output, limit) {
+    @options = state.Options {
+        load_address = 4096
+        memory_size = model.DEFAULT_HEAP_BYTES + 1048576
+        step_limit = limit
+        program_name = "machine-codegen"
+        arguments = []
+        files = []
+    }
+    out vm.run(codec.chunks(output, state.PAGE_SIZE), options)
+}
+
+skill run(suite, output_path) {
+    @ordinary = ordinary_program()
+    @output = image.executable(ordinary)
+    @start = layout.find_label(ordinary, "_start")
+    @entry = layout.find_label(ordinary, "saltic_program")
+    @exit_label = layout.find_label(ordinary, "rt_platform_exit")
+    suite = testing.test_yes(suite, "обычная программа: машинный канал разрешён", ordinary.resolved)
+    suite = testing.test_yes(suite, "обычная программа: _start существует", start.present)
+    suite = testing.test_yes(suite, "обычная программа: program существует", entry.present)
+    suite = testing.test_yes(suite, "обычная программа: runtime существует", exit_label.present)
+    suite = testing.test_equal(suite, "обычная программа: compiler heap", ordinary.bss_size, model.DEFAULT_HEAP_BYTES)
+    suite = testing.test_equal(suite, "обычная программа: ELF magic", codec.byte_at(output, 0), 127)
+    suite = testing.test_yes(suite, "обычная программа: ELF содержит payload", output.length > 4096)
+    @result = execute(output, 96)
+    suite = testing.test_equal(suite, "обычная программа: нет trap", result.trap, "")
+    suite = testing.test_equal(suite, "обычная программа: завершилась через runtime", result.reason, "exit")
+    suite = testing.test_equal(suite, "обычная программа: успешный exit", result.exit_code, 0)
+    image.write_buffer(output_path, output)
+    out suite
 }
 
 program(output_path) {

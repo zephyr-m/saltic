@@ -26,15 +26,25 @@ fi
 
 mkdir -p "$work" "$(dirname "$output_path")"
 link_assembly="$assembly_path"
+legacy_start_markers="$(grep -c '^  blt a0, t0, rt_missing_args$' "$assembly_path" || true)"
 
-if (( heap_bytes != default_heap_bytes )); then
+if (( legacy_start_markers > 1 )); then
+    echo "bootstrap link: ожидался не более чем один старый переход _start, найдено: $legacy_start_markers" >&2
+    exit 1
+fi
+
+if (( heap_bytes != default_heap_bytes || legacy_start_markers == 1 )); then
     heap_markers="$(grep -c '^\.space 16777216$' "$assembly_path" || true)"
-    if (( heap_markers != 1 )); then
+    if (( heap_bytes != default_heap_bytes && heap_markers != 1 )); then
         echo "bootstrap link: ожидался один стандартный heap, найдено: $heap_markers" >&2
         exit 1
     fi
-    link_assembly="$work/program-heap.s"
-    sed "s/^\.space 16777216$/.space $heap_bytes/" \
+    link_assembly="$work/program-link.s"
+    sed \
+        -e "s/^\.space 16777216$/.space $heap_bytes/" \
+        -e '/^  blt a0, t0, rt_missing_args$/c\  bge a0, t0, .L_bootstrap_start_args_ready\
+  tail rt_missing_args\
+.L_bootstrap_start_args_ready:' \
         "$assembly_path" >"$link_assembly"
 fi
 

@@ -13,6 +13,7 @@ use seed.tests.machine.patches
 use seed.tests.machine.elf
 use seed.tests.machine.scale
 use seed.tests.machine.translation
+use seed.tests.machine.qemu
 
 skill machine_profile(suite) {
     @names = [
@@ -144,10 +145,53 @@ skill executable(suite) {
     out suite
 }
 
-program() {
+skill codegen_execute(target, limit) {
+    @output = rv32i.executable(target)
+    @options = state.Options {
+        load_address = 4096
+        memory_size = 262144
+        step_limit = limit
+        program_name = "machine-codegen"
+        arguments = []
+        files = []
+    }
+    out vm.run(codec.chunks(output, state.PAGE_SIZE), options)
+}
+
+skill codegen_behavior(suite) {
+    @string_result = codegen_execute(translation.behavior_string_program(), 32)
+    suite = testing.test_equal(suite, "поведение string: нет trap", string_result.trap, "")
+    suite = testing.test_equal(suite, "поведение string: остановка", string_result.reason, "break")
+    suite = testing.test_equal(suite, "поведение string: длина saltic", seed.group.at(string_result.registers, codec.A0), "00000030")
+
+    @arithmetic_result = codegen_execute(translation.behavior_arithmetic_program(), 32)
+    suite = testing.test_equal(suite, "поведение арифметики: нет trap", arithmetic_result.trap, "")
+    suite = testing.test_equal(suite, "поведение арифметики: остановка", arithmetic_result.reason, "break")
+    suite = testing.test_equal(suite, "поведение арифметики: 2 + 3", seed.group.at(arithmetic_result.registers, codec.A0), "00000028")
+
+    @if_result = codegen_execute(translation.behavior_if_program(), 32)
+    suite = testing.test_equal(suite, "поведение if: нет trap", if_result.trap, "")
+    suite = testing.test_equal(suite, "поведение if: остановка", if_result.reason, "break")
+    suite = testing.test_equal(suite, "поведение if: ветка выполнена", seed.group.at(if_result.registers, codec.A0), "00000038")
+
+    @group_result = codegen_execute(translation.behavior_group_program(), 96)
+    suite = testing.test_equal(suite, "поведение group: нет trap", group_result.trap, "")
+    suite = testing.test_equal(suite, "поведение group: остановка", group_result.reason, "break")
+    suite = testing.test_equal(suite, "поведение group: два элемента", seed.group.at(group_result.registers, codec.A0), "00000010")
+
+    @box_result = codegen_execute(translation.behavior_box_program(), 192)
+    suite = testing.test_equal(suite, "поведение box: нет trap", box_result.trap, "")
+    suite = testing.test_equal(suite, "поведение box: остановка", box_result.reason, "break")
+    suite = testing.test_equal(suite, "поведение box: запись и чтение поля", seed.group.at(box_result.registers, codec.A0), "00000038")
+
+    out suite
+}
+
+program(output_path) {
     @suite = testing.test_new()
     suite = lowering(suite)
     suite = translation.run(suite)
+    suite = codegen_behavior(suite)
     suite = machine_profile(suite)
     suite = encoding(suite)
     suite = executable(suite)
@@ -156,5 +200,6 @@ program() {
     suite = patches.run(suite)
     suite = elf.run(suite)
     suite = scale.run(suite)
+    suite = qemu.run(suite, output_path)
     out testing.test_finish(suite)
 }

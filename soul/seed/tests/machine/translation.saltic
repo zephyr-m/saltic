@@ -1,9 +1,84 @@
 use seed
+use seed.abi
 use craft.testing
 use seed.compiler.state
+use seed.compiler.codegen
+use seed.compiler.constants
 use seed.runtime.emit
+use seed.machine.instruction
 use seed.machine.codec
 use seed.machine.layout
+
+skill behavior_string_program() {
+    @compiler = state.State {}
+    compiler.machine = layout.host("_start")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "_start")
+    compiler = codegen.compile_expression(compiler, ["string", "saltic"])
+    compiler.machine = layout.emit_call(compiler.machine, "rt_string_len")
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    compiler = emit.emit_string_len(compiler)
+    out layout.resolve(compiler.machine)
+}
+
+skill behavior_arithmetic_program() {
+    @compiler = state.State {}
+    compiler.machine = layout.host("_start")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "_start")
+    compiler = codegen.compile_binary(compiler, "+", ["number", 2], ["number", 3])
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    compiler = emit.emit_add(compiler)
+    out layout.resolve(compiler.machine)
+}
+
+skill behavior_if_program() {
+    @compiler = state.State {}
+    compiler.machine = layout.host("_start")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "_start")
+    compiler = codegen.compile_statement(compiler, ["if", ["answer", "yes"], ["block", ["expr", ["number", 7]]]], no)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    out layout.resolve(compiler.machine)
+}
+
+skill behavior_group_program() {
+    @compiler = state.State {}
+    compiler.machine = layout.host("_start")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "_start")
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.S1, "behavior_group_heap", 0)
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.S2, "behavior_group_heap_end", 0)
+    compiler = codegen.compile_expression(compiler, ["group", ["number", 1], ["number", 2]])
+    compiler.machine = layout.emit_call(compiler.machine, "rt_group_count")
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    compiler = emit.emit_alloc(compiler)
+    compiler = emit.emit_group_count(compiler)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_out_of_memory")
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.BSS, "behavior_group_heap")
+    compiler.machine = layout.reserve_bss(compiler.machine, 64)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.BSS, "behavior_group_heap_end")
+    out layout.resolve(compiler.machine)
+}
+
+skill behavior_box_program() {
+    @compiler = state.State {}
+    compiler.machine = layout.host("_start")
+    compiler = state.collect_box(compiler, ["box", "Point", ["field", "x", ["number", 1]], ["field", "y", ["number", 2]]], "")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "_start")
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.S1, "behavior_box_heap", 0)
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.S2, "behavior_box_heap_end", 0)
+    compiler.machine = layout.emit_call(compiler.machine, "saltic_box_behavior")
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    compiler = codegen.compile_function(compiler, "box_behavior", [], ["block", ["var", "point", ["box-new", "Point"]], ["field-assign", ["path", "point", "x"], ["number", 7]], ["out", ["path", "point", "x"]]], "", "")
+    compiler = emit.emit_alloc(compiler)
+    compiler = emit.emit_box_get(compiler)
+    compiler = emit.emit_box_set(compiler)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_out_of_memory")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_missing_field")
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.BSS, "behavior_box_heap")
+    compiler.machine = layout.reserve_bss(compiler.machine, 64)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.BSS, "behavior_box_heap_end")
+    out layout.resolve(compiler.machine)
+}
 
 skill run(suite) {
     @compiler = state.State {}
@@ -1906,5 +1981,313 @@ skill run(suite) {
     suite = testing.test_equal(suite, "file write bytes: смещение file error", file_write_bytes_error.offset, 232)
     suite = testing.test_yes(suite, "file write bytes: byte group связан", file_write_bytes_group.present)
     suite = testing.test_equal(suite, "file write bytes: смещение byte group", file_write_bytes_group.offset, 232)
+
+    @machine_start = state.State { entry = ["entry", ["first", "second"], ["block"]] }
+    machine_start = state.header(machine_start)
+    machine_start = state.start(machine_start)
+    suite = testing.test_equal(suite, "машинный _start: размер кода", machine_start.machine.code.length, 132)
+    suite = testing.test_equal(suite, "машинный _start: число patches", machine_start.machine.patch_count, 15)
+    @start_label = layout.find_label(machine_start.machine, "_start")
+    suite = testing.test_yes(suite, "машинный _start: метка существует", start_label.present)
+    suite = testing.test_equal(suite, "машинный _start: смещение метки", start_label.offset, 0)
+    suite = testing.test_equal(suite, "машинный _start: lw opcode", codec.byte_at(machine_start.machine.code, 0), 3)
+    suite = testing.test_equal(suite, "машинный _start: lw registers", codec.byte_at(machine_start.machine.code, 1), 37)
+    suite = testing.test_equal(suite, "машинный _start: addi opcode", codec.byte_at(machine_start.machine.code, 4), 147)
+    suite = testing.test_equal(suite, "машинный _start: обязательные аргументы", codec.byte_at(machine_start.machine.code, 26), 48)
+    @start_args_ready = layout.find_label(machine_start.machine, ".L_start_args_ready")
+    suite = testing.test_yes(suite, "машинный _start: метка готовых аргументов существует", start_args_ready.present)
+    suite = testing.test_equal(suite, "машинный _start: смещение готовых аргументов", start_args_ready.offset, 44)
+    suite = testing.test_equal(suite, "машинный _start: дальний переход начинается с auipc", codec.byte_at(machine_start.machine.code, 32), 23)
+    suite = testing.test_equal(suite, "машинный _start: дальний переход заканчивается jalr", codec.byte_at(machine_start.machine.code, 40), 103)
+    machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "rt_missing_args")
+    machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "rt_cstring")
+    machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "saltic_program")
+    machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "rt_platform_exit")
+    machine_start.machine = layout.define_label(machine_start.machine, layout.Section.BSS, "saltic_heap")
+    machine_start.machine = layout.reserve_bss(machine_start.machine, 16)
+    machine_start.machine = layout.define_label(machine_start.machine, layout.Section.BSS, "saltic_heap_end")
+    machine_start.machine = layout.resolve(machine_start.machine)
+    suite = testing.test_yes(suite, "машинный _start: все ссылки разрешены", machine_start.machine.resolved)
+
+    @machine_function = state.State {}
+    machine_function.machine = layout.host("saltic_sample")
+    machine_function = codegen.compile_function(machine_function, "sample", ["first", "second"], ["block"], "", "")
+    suite = testing.test_equal(suite, "машинная функция: размер каркаса", machine_function.machine.code.length, 52)
+    suite = testing.test_equal(suite, "машинная функция: один jump patch", machine_function.machine.patch_count, 1)
+    @function_label = layout.find_label(machine_function.machine, "saltic_sample")
+    @function_return = layout.find_label(machine_function.machine, ".L_sample_return_0")
+    suite = testing.test_yes(suite, "машинная функция: метка существует", function_label.present)
+    suite = testing.test_equal(suite, "машинная функция: начало", function_label.offset, 0)
+    suite = testing.test_yes(suite, "машинная функция: return существует", function_return.present)
+    suite = testing.test_equal(suite, "машинная функция: return offset", function_return.offset, 32)
+    suite = testing.test_equal(suite, "машинная функция: addi sp opcode", codec.byte_at(machine_function.machine.code, 0), 19)
+    suite = testing.test_equal(suite, "машинная функция: frame immediate", codec.byte_at(machine_function.machine.code, 2), 1)
+    machine_function.machine = layout.resolve(machine_function.machine)
+    suite = testing.test_yes(suite, "машинная функция: все ссылки разрешены", machine_function.machine.resolved)
+
+    @machine_call = state.State {}
+    machine_call.machine = layout.host("caller")
+    machine_call.skills = [state.Symbol { name = "callee" kind = "skill" }]
+    machine_call.current_function = state.Function {}
+    machine_call = codegen.compile_call(machine_call, ["call", ["path", "callee"]])
+    suite = testing.test_equal(suite, "машинный call: размер", machine_call.machine.code.length, 8)
+    suite = testing.test_equal(suite, "машинный call: два patches", machine_call.machine.patch_count, 2)
+    machine_call.machine = layout.define_label(machine_call.machine, layout.Section.CODE, "saltic_callee")
+    machine_call.machine = layout.resolve(machine_call.machine)
+    suite = testing.test_yes(suite, "машинный call: ссылки разрешены", machine_call.machine.resolved)
+    suite = testing.test_equal(suite, "машинный call: auipc", codec.byte_at(machine_call.machine.code, 0), 151)
+    suite = testing.test_equal(suite, "машинный call: jalr", codec.byte_at(machine_call.machine.code, 4), 231)
+
+    @machine_literals = state.State {}
+    machine_literals.machine = layout.host("literal")
+    machine_literals = codegen.compile_expression(machine_literals, ["number", 300])
+    machine_literals = codegen.compile_expression(machine_literals, ["answer", "yes"])
+    machine_literals = codegen.compile_expression(machine_literals, ["none"])
+    machine_literals = codegen.compile_expression(machine_literals, ["string", "saltic"])
+    suite = testing.test_equal(suite, "машинные литералы: размер", machine_literals.machine.code.length, 28)
+    suite = testing.test_equal(suite, "машинная строка: два patches", machine_literals.machine.patch_count, 2)
+    suite = testing.test_equal(suite, "машинная строка: размер rodata", machine_literals.machine.rodata.length, 16)
+    suite = testing.test_equal(suite, "машинная строка: длина", codec.byte_at(machine_literals.machine.rodata, 0), 6)
+    suite = testing.test_equal(suite, "машинная строка: первый байт", codec.byte_at(machine_literals.machine.rodata, 4), 115)
+    suite = testing.test_equal(suite, "машинная строка: нулевой конец", codec.byte_at(machine_literals.machine.rodata, 10), 0)
+    @machine_string_label = layout.find_label(machine_literals.machine, ".L_string_0")
+    suite = testing.test_yes(suite, "машинная строка: метка существует", machine_string_label.present)
+    suite = testing.test_equal(suite, "машинная строка: секция rodata", machine_string_label.section, layout.Section.RODATA)
+    suite = testing.test_equal(suite, "машинная строка: смещение", machine_string_label.offset, 0)
+    machine_literals.machine = layout.resolve(machine_literals.machine)
+    suite = testing.test_yes(suite, "машинные литералы: ссылки разрешены", machine_literals.machine.resolved)
+
+    @machine_group = state.State {}
+    machine_group.machine = layout.host("group")
+    machine_group = codegen.compile_expression(machine_group, ["group", ["number", 1], ["answer", "yes"]])
+    suite = testing.test_equal(suite, "машинная группа: полный конструктор", machine_group.machine.code.length, 68)
+    suite = testing.test_equal(suite, "машинная группа: два call patches", machine_group.machine.patch_count, 2)
+    @machine_group_opcodes = [19, 19, 35, 19, 19, 35, 19, 151, 231, 19, 35, 131, 35, 131, 35, 19, 19]
+    @machine_group_word = 0
+    drum (17) {
+        suite = testing.test_equal(suite, seed.str.add("машинная группа: opcode ", seed.num.text(machine_group_word)), codec.byte_at(machine_group.machine.code, machine_group_word * 4), seed.group.item(machine_group_opcodes, machine_group_word))
+        machine_group_word = machine_group_word + 1
+    }
+    machine_group.machine = layout.define_label(machine_group.machine, layout.Section.CODE, "rt_alloc")
+    machine_group.machine = layout.resolve(machine_group.machine)
+    suite = testing.test_yes(suite, "машинная группа: ссылки разрешены", machine_group.machine.resolved)
+
+    @machine_box = state.State {}
+    machine_box.machine = layout.host("box")
+    machine_box = state.collect_box(machine_box, ["box", "Point", ["field", "x", ["number", 0]], ["field", "y", ["number", 0]]], "")
+    machine_box = codegen.compile_expression(machine_box, ["box-new", "Point"])
+    suite = testing.test_equal(suite, "машинный box: полный конструктор", machine_box.machine.code.length, 84)
+    suite = testing.test_equal(suite, "машинный box: два call patches", machine_box.machine.patch_count, 2)
+    @machine_box_opcodes = [19, 19, 35, 19, 19, 35, 19, 151, 231, 19, 35, 147, 35, 131, 35, 147, 35, 131, 35, 19, 19]
+    @machine_box_word = 0
+    drum (21) {
+        suite = testing.test_equal(suite, seed.str.add("машинный box: opcode ", seed.num.text(machine_box_word)), codec.byte_at(machine_box.machine.code, machine_box_word * 4), seed.group.item(machine_box_opcodes, machine_box_word))
+        machine_box_word = machine_box_word + 1
+    }
+    machine_box.machine = layout.define_label(machine_box.machine, layout.Section.CODE, "rt_alloc")
+    machine_box.machine = layout.resolve(machine_box.machine)
+    suite = testing.test_yes(suite, "машинный box: ссылки разрешены", machine_box.machine.resolved)
+
+    @machine_field = state.State {}
+    machine_field.machine = layout.host("field")
+    machine_field.fields = [state.Symbol { name = "x" kind = "field" value = 1 }]
+    machine_field.current_function = state.Function { slots = [state.Symbol { name = "point" kind = "slot" value = 0 - 12 }] }
+    machine_field = codegen.compile_expression(machine_field, ["path", "point", "x"])
+    suite = testing.test_equal(suite, "машинное поле: чтение", machine_field.machine.code.length, 32)
+    suite = testing.test_equal(suite, "машинное поле: два call patches", machine_field.machine.patch_count, 2)
+    @machine_field_opcodes = [3, 19, 35, 147, 3, 19, 151, 231]
+    @machine_field_word = 0
+    drum (8) {
+        suite = testing.test_equal(suite, seed.str.add("машинное поле: opcode ", seed.num.text(machine_field_word)), codec.byte_at(machine_field.machine.code, machine_field_word * 4), seed.group.item(machine_field_opcodes, machine_field_word))
+        machine_field_word = machine_field_word + 1
+    }
+    machine_field.machine = layout.define_label(machine_field.machine, layout.Section.CODE, "rt_box_get")
+    machine_field.machine = layout.resolve(machine_field.machine)
+    suite = testing.test_yes(suite, "машинное поле: чтение связано", machine_field.machine.resolved)
+
+    @machine_field_assign = state.State {}
+    machine_field_assign.machine = layout.host("field_assign")
+    machine_field_assign.fields = [state.Symbol { name = "x" kind = "field" value = 1 }]
+    machine_field_assign.current_function = state.Function { slots = [state.Symbol { name = "point" kind = "slot" value = 0 - 12 }] }
+    machine_field_assign = codegen.compile_statement(machine_field_assign, ["field-assign", ["path", "point", "x"], ["number", 7]], no)
+    suite = testing.test_equal(suite, "машинное поле: запись", machine_field_assign.machine.code.length, 40)
+    suite = testing.test_equal(suite, "машинное поле: запись имеет два call patches", machine_field_assign.machine.patch_count, 2)
+    @machine_field_assign_opcodes = [3, 19, 35, 19, 19, 3, 19, 147, 151, 231]
+    @machine_field_assign_word = 0
+    drum (10) {
+        suite = testing.test_equal(suite, seed.str.add("машинная запись поля: opcode ", seed.num.text(machine_field_assign_word)), codec.byte_at(machine_field_assign.machine.code, machine_field_assign_word * 4), seed.group.item(machine_field_assign_opcodes, machine_field_assign_word))
+        machine_field_assign_word = machine_field_assign_word + 1
+    }
+    machine_field_assign.machine = layout.define_label(machine_field_assign.machine, layout.Section.CODE, "rt_box_set")
+    machine_field_assign.machine = layout.resolve(machine_field_assign.machine)
+    suite = testing.test_yes(suite, "машинное поле: запись связана", machine_field_assign.machine.resolved)
+
+    @machine_local = state.State {}
+    machine_local.current_function = state.Function { slots = [state.Symbol { name = "item" kind = "slot" value = 0 - 12 }] }
+    machine_local = codegen.compile_expression(machine_local, ["number", 7])
+    machine_local = codegen.compile_statement(machine_local, ["var", "item", ["number", 8]], no)
+    machine_local = codegen.compile_path(machine_local, ["path", "item"])
+    suite = testing.test_equal(suite, "машинный local: literal, store и load", machine_local.machine.code.length, 16)
+
+    @machine_arguments = state.State {}
+    machine_arguments = codegen.compile_arguments(machine_arguments, [["number", 1], ["number", 2]])
+    suite = testing.test_equal(suite, "машинные аргументы: push, load и restore", machine_arguments.machine.code.length, 36)
+
+    @machine_arithmetic = state.State {}
+    machine_arithmetic.machine = layout.host("arithmetic")
+    machine_arithmetic = codegen.compile_binary(machine_arithmetic, "+", ["number", 2], ["number", 3])
+    suite = testing.test_equal(suite, "машинная арифметика: размер", machine_arithmetic.machine.code.length, 36)
+    suite = testing.test_equal(suite, "машинная арифметика: два call patches", machine_arithmetic.machine.patch_count, 2)
+    @machine_arithmetic_opcodes = [19, 19, 35, 19, 147, 3, 19, 151, 231]
+    @machine_arithmetic_word = 0
+    drum (9) {
+        suite = testing.test_equal(suite, seed.str.add("машинная арифметика: opcode ", seed.num.text(machine_arithmetic_word)), codec.byte_at(machine_arithmetic.machine.code, machine_arithmetic_word * 4), seed.group.item(machine_arithmetic_opcodes, machine_arithmetic_word))
+        machine_arithmetic_word = machine_arithmetic_word + 1
+    }
+    machine_arithmetic.machine = layout.define_label(machine_arithmetic.machine, layout.Section.CODE, "rt_add")
+    machine_arithmetic.machine = layout.resolve(machine_arithmetic.machine)
+    suite = testing.test_yes(suite, "машинная арифметика: runtime связан", machine_arithmetic.machine.resolved)
+
+    @machine_comparison = state.State {}
+    machine_comparison.machine = layout.host("comparison")
+    machine_comparison = codegen.compile_binary(machine_comparison, "<", ["number", 2], ["number", 3])
+    machine_comparison.machine = layout.define_label(machine_comparison.machine, layout.Section.CODE, "rt_less")
+    machine_comparison.machine = layout.resolve(machine_comparison.machine)
+    suite = testing.test_yes(suite, "машинное сравнение: runtime связан", machine_comparison.machine.resolved)
+
+    @machine_fixed_literal = state.State {}
+    machine_fixed_literal.machine = layout.host("fixed_literal")
+    machine_fixed_literal = codegen.compile_call(machine_fixed_literal, ["call", ["path", "i32"], ["binary", "-", ["number", 0], ["number", 42]]])
+    suite = testing.test_equal(suite, "машинный fixed literal: размер", machine_fixed_literal.machine.code.length, 16)
+    suite = testing.test_equal(suite, "машинный fixed literal: два call patches", machine_fixed_literal.machine.patch_count, 2)
+    machine_fixed_literal.machine = layout.define_label(machine_fixed_literal.machine, layout.Section.CODE, "rt_fixed_new")
+    machine_fixed_literal.machine = layout.resolve(machine_fixed_literal.machine)
+    suite = testing.test_yes(suite, "машинный fixed literal: runtime связан", machine_fixed_literal.machine.resolved)
+
+    @negative_immediate = state.State {}
+    negative_immediate = state.load_immediate(negative_immediate, "a0", codec.A0, 0 - 4097)
+    suite = testing.test_equal(suite, "машинный отрицательный immediate: lui/addi", negative_immediate.machine.code.length, 8)
+
+    @maximum_word = codec.word_from_decimal("4294967295")
+    suite = testing.test_equal(suite, "decimal word: max b0", maximum_word.b0, 255)
+    suite = testing.test_equal(suite, "decimal word: max b1", maximum_word.b1, 255)
+    suite = testing.test_equal(suite, "decimal word: max b2", maximum_word.b2, 255)
+    suite = testing.test_equal(suite, "decimal word: max b3", maximum_word.b3, 255)
+    @minimum_word = codec.word_from_decimal("-2147483648")
+    suite = testing.test_equal(suite, "decimal word: min b0", minimum_word.b0, 0)
+    suite = testing.test_equal(suite, "decimal word: min b1", minimum_word.b1, 0)
+    suite = testing.test_equal(suite, "decimal word: min b2", minimum_word.b2, 0)
+    suite = testing.test_equal(suite, "decimal word: min b3", minimum_word.b3, 128)
+
+    @machine_wide_literal = state.State {}
+    machine_wide_literal.machine = layout.host("wide_literal")
+    machine_wide_literal = codegen.compile_call(machine_wide_literal, ["call", ["path", "u32"], ["wide-number", "4294967295"]])
+    suite = testing.test_equal(suite, "машинный wide fixed: размер", machine_wide_literal.machine.code.length, 20)
+    suite = testing.test_equal(suite, "машинный wide fixed: два call patches", machine_wide_literal.machine.patch_count, 2)
+    machine_wide_literal.machine = layout.define_label(machine_wide_literal.machine, layout.Section.CODE, "rt_fixed_new")
+    machine_wide_literal.machine = layout.resolve(machine_wide_literal.machine)
+    suite = testing.test_yes(suite, "машинный wide fixed: runtime связан", machine_wide_literal.machine.resolved)
+    suite = testing.test_equal(suite, "машинный wide fixed: lui", codec.byte_at(machine_wide_literal.machine.code, 0), 55)
+    suite = testing.test_equal(suite, "машинный wide fixed: addi", codec.byte_at(machine_wide_literal.machine.code, 4), 19)
+
+    @machine_if = state.State {}
+    machine_if = codegen.compile_statement(machine_if, ["if", ["answer", "yes"], ["block", ["expr", ["number", 1]]]], no)
+    suite = testing.test_equal(suite, "машинный if: размер", machine_if.machine.code.length, 28)
+    suite = testing.test_equal(suite, "машинный if: три branches", machine_if.machine.patch_count, 3)
+    @machine_if_opcodes = [19, 147, 99, 147, 99, 99, 19]
+    @machine_if_word = 0
+    drum (7) {
+        suite = testing.test_equal(suite, seed.str.add("машинный if: opcode ", seed.num.text(machine_if_word)), codec.byte_at(machine_if.machine.code, machine_if_word * 4), seed.group.item(machine_if_opcodes, machine_if_word))
+        machine_if_word = machine_if_word + 1
+    }
+    machine_if.machine = layout.resolve(machine_if.machine)
+    suite = testing.test_yes(suite, "машинный if: ссылки разрешены", machine_if.machine.resolved)
+
+    @machine_switch = state.State {}
+    machine_switch.variants = [state.Symbol { name = "Ready" kind = "variant" value = 6 }]
+    machine_switch = codegen.compile_statement(machine_switch, ["switch", ["enum-value", "Ready"], ["case", "Ready", ["number", 1]]], no)
+    suite = testing.test_equal(suite, "машинный switch: размер", machine_switch.machine.code.length, 24)
+    suite = testing.test_equal(suite, "машинный switch: branch и jump", machine_switch.machine.patch_count, 2)
+    machine_switch.machine = layout.resolve(machine_switch.machine)
+    suite = testing.test_yes(suite, "машинный switch: ссылки разрешены", machine_switch.machine.resolved)
+
+    @machine_drum = state.State {}
+    machine_drum.current_function = state.Function { slots = [state.Symbol { name = "$drum:1" kind = "slot" value = 0 - 12 }] }
+    machine_drum = codegen.compile_statement(machine_drum, ["drum", ["number", 2], ["block"]], no)
+    suite = testing.test_equal(suite, "машинный drum: размер", machine_drum.machine.code.length, 32)
+    suite = testing.test_equal(suite, "машинный drum: branch и jump", machine_drum.machine.patch_count, 2)
+    @machine_drum_opcodes = [19, 19, 35, 131, 99, 147, 35, 111]
+    @machine_drum_word = 0
+    drum (8) {
+        suite = testing.test_equal(suite, seed.str.add("машинный drum: opcode ", seed.num.text(machine_drum_word)), codec.byte_at(machine_drum.machine.code, machine_drum_word * 4), seed.group.item(machine_drum_opcodes, machine_drum_word))
+        machine_drum_word = machine_drum_word + 1
+    }
+    machine_drum.machine = layout.resolve(machine_drum.machine)
+    suite = testing.test_yes(suite, "машинный drum: ссылки разрешены", machine_drum.machine.resolved)
+
+    @machine_rescue = state.State {}
+    machine_rescue.current_function = state.Function { slots = [state.Symbol { name = "failure" kind = "slot" value = 0 - 12 }] }
+    machine_rescue = codegen.compile_rescue(machine_rescue, ["rescue", ["number", 1], "failure", ["block"]])
+    suite = testing.test_equal(suite, "машинный rescue: размер", machine_rescue.machine.code.length, 24)
+    suite = testing.test_equal(suite, "машинный rescue: один branch", machine_rescue.machine.patch_count, 1)
+    machine_rescue.machine = layout.resolve(machine_rescue.machine)
+    suite = testing.test_yes(suite, "машинный rescue: ссылки разрешены", machine_rescue.machine.resolved)
+
+    @machine_constant_flow = state.State {}
+    @machine_constant = state.Symbol { name = "sample" kind = "const" node = ["number", 1] }
+    machine_constant_flow = codegen.compile_constant(machine_constant_flow, machine_constant)
+    machine_constant_flow.constants = [machine_constant]
+    machine_constant_flow = constants.emit_storage(machine_constant_flow)
+    suite = testing.test_equal(suite, "машинная константа: полный getter", machine_constant_flow.machine.code.length, 112)
+    suite = testing.test_equal(suite, "машинная константа: переходы и data patches", machine_constant_flow.machine.patch_count, 12)
+    machine_constant_flow.machine = layout.resolve(machine_constant_flow.machine)
+    suite = testing.test_yes(suite, "машинная константа: переходы разрешены", machine_constant_flow.machine.resolved)
+
+    @machine_constant_storage = state.State { constants = [state.Symbol { name = "sample" kind = "const" }] }
+    machine_constant_storage = constants.emit_storage(machine_constant_storage)
+    @machine_constant_state = layout.find_label(machine_constant_storage.machine, constants.state_label("sample"))
+    @machine_constant_value = layout.find_label(machine_constant_storage.machine, constants.value_label("sample"))
+    suite = testing.test_equal(suite, "машинная константа: размер data", machine_constant_storage.machine.data.length, constants.CONSTANT_STORAGE_BYTES)
+    suite = testing.test_yes(suite, "машинная константа: state label существует", machine_constant_state.present)
+    suite = testing.test_equal(suite, "машинная константа: state в data", machine_constant_state.section, layout.Section.DATA)
+    suite = testing.test_equal(suite, "машинная константа: state offset", machine_constant_state.offset, constants.CONSTANT_STATE_OFFSET)
+    suite = testing.test_yes(suite, "машинная константа: value label существует", machine_constant_value.present)
+    suite = testing.test_equal(suite, "машинная константа: value в data", machine_constant_value.section, layout.Section.DATA)
+    suite = testing.test_equal(suite, "машинная константа: value offset", machine_constant_value.offset, constants.CONSTANT_VALUE_OFFSET)
+    suite = testing.test_equal(suite, "машинная константа: начальное состояние", codec.byte_at(machine_constant_storage.machine.data, constants.CONSTANT_STATE_OFFSET), constants.STATE_EMPTY)
+    suite = testing.test_equal(suite, "машинная константа: начальное значение", codec.byte_at(machine_constant_storage.machine.data, constants.CONSTANT_VALUE_OFFSET), abi.NONE)
+
+    @machine_storage = state.State {}
+    machine_storage.machine = layout.reserve_bss(machine_storage.machine, 3)
+    machine_storage = state.finish_data(machine_storage)
+    @machine_heap = layout.find_label(machine_storage.machine, "saltic_heap")
+    @machine_heap_end = layout.find_label(machine_storage.machine, "saltic_heap_end")
+    suite = testing.test_equal(suite, "машинный bss: полный размер", machine_storage.machine.bss_size, abi.OBJECT_ALIGNMENT + constants.HEAP_BYTES)
+    suite = testing.test_yes(suite, "машинный bss: heap существует", machine_heap.present)
+    suite = testing.test_equal(suite, "машинный bss: heap section", machine_heap.section, layout.Section.BSS)
+    suite = testing.test_equal(suite, "машинный bss: heap выровнен", machine_heap.offset, abi.OBJECT_ALIGNMENT)
+    suite = testing.test_yes(suite, "машинный bss: heap end существует", machine_heap_end.present)
+    suite = testing.test_equal(suite, "машинный bss: heap end section", machine_heap_end.section, layout.Section.BSS)
+    suite = testing.test_equal(suite, "машинный bss: размер heap", machine_heap_end.offset - machine_heap.offset, constants.HEAP_BYTES)
+
+    @whole_runtime = state.State {}
+    whole_runtime = emit.append_runtime(whole_runtime)
+    suite = testing.test_equal(suite, "цельный runtime: число меток", whole_runtime.machine.label_count, 184)
+    suite = testing.test_equal(suite, "цельный runtime: размер rodata", whole_runtime.machine.rodata.length, 129)
+    suite = testing.test_equal(suite, "цельный runtime: длина unknown", codec.byte_at(whole_runtime.machine.rodata, 0), 7)
+    suite = testing.test_equal(suite, "цельный runtime: длина overflow", codec.byte_at(whole_runtime.machine.rodata, 16), 89)
+    suite = testing.test_equal(suite, "цельный runtime: newline", codec.byte_at(whole_runtime.machine.rodata, 128), 10)
+    @whole_unknown = layout.find_label(whole_runtime.machine, "rt_unknown_text")
+    @whole_overflow = layout.find_label(whole_runtime.machine, "rt_fixed_overflow_text")
+    @whole_yes = layout.find_label(whole_runtime.machine, "rt_yes_text")
+    @whole_no = layout.find_label(whole_runtime.machine, "rt_no_text")
+    @whole_newline = layout.find_label(whole_runtime.machine, "rt_newline_text")
+    suite = testing.test_equal(suite, "цельный runtime: unknown offset", whole_unknown.offset, 0)
+    suite = testing.test_equal(suite, "цельный runtime: overflow offset", whole_overflow.offset, 16)
+    suite = testing.test_equal(suite, "цельный runtime: yes offset", whole_yes.offset, 112)
+    suite = testing.test_equal(suite, "цельный runtime: no offset", whole_no.offset, 120)
+    suite = testing.test_equal(suite, "цельный runtime: newline offset", whole_newline.offset, 128)
+    whole_runtime.machine = layout.resolve(whole_runtime.machine)
+    suite = testing.test_yes(suite, "цельный runtime: все ссылки разрешены", whole_runtime.machine.resolved)
     out suite
 }

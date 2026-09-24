@@ -122,3 +122,33 @@
 - [x] `rt_fixed_convert`: 5054/0.
 - [x] `rt_show`: 5302/0.
 - [x] `rt_file_write_bytes`: 5548/0.
+- [x] Цельный `machine.Program` runtime: 77/77 эмиттеров, 5 RODATA-меток, все patches разрешены — 5559/0.
+- [x] Машинный `_start`: аргументы, heap, вызов программы и exit — 5568/0.
+- [x] Машинный каркас функций: метки, frame, аргументы и общий return — 5577/0.
+- [x] Машинные вызовы: 17/17 active call-sites и переходы `out` — тесты пройдены.
+- [x] Машинные литералы, local load/store и аргументы `a0…a7`.
+- [x] Обычная арифметика, сравнения, отрицательные immediate и runtime calls; wide fixed ожидает архитектурного решения.
+- [x] Wide fixed: `codec` decimal text → 32-bit `Word`, `layout` → `LUI/ADDI`; арифметический блок закрыт.
+- [x] Машинный control flow: `if`, `switch`, `drum`, `rescue`, `out`, constant-state labels/patches.
+- [x] Дальний `_start` → `rt_missing_args`: локальная ветка и переход без ограничения `JAL` в ±1 МиБ.
+- [x] Старый bootstrap-компилятор: `link.sh` нормализует его прежний короткий переход до обновления `compiler.elf`.
+- [x] Машинные значения: String RODATA, Group/Box и чтение/запись полей.
+- [x] Машинный codegen: opcode-проверки и VM-поведение String/arithmetic/if/Group/Box.
+- [x] Обычная AST-программа собирается единым compiler-проходом в `machine.Program` и исполняется Saltic VM.
+- [x] `runtime/memory.saltic`: удалён лишний `+` перед `use seed`, мешавший разбору модуля.
+- [x] Тест обычной программы перенесён из области с локальным `compiler`, устранён конфликт имени модуля.
+- [x] Один ELF обычной AST-программы проверяется на успешный exit в Saltic VM и `qemu-riscv32`.
+- [x] VM и QEMU получают один готовый ELF-буфер; запись переведена на проверенный `image.write_buffer`.
+- [x] Созданному host ELF выставляется execute-bit перед запуском в `qemu-riscv32`.
+- [x] Машинный codegen подтверждён в Saltic VM и QEMU: 5749/0.
+- [x] VM/QEMU-проверка вынесена из `machine.saltic` в существующий `machine/qemu.saltic`; ABI остаётся в `tests/abi.saltic`.
+- [x] Сверен ABI: базовый вызов совпадает; объекты, error-return и fixed ещё используют старую runtime-схему.
+- [x] Литералы находятся в RODATA, lazy storage констант перенесён в DATA `machine.Program`.
+- [x] Writable storage и выровненный heap BSS с границами перенесены в `machine.Program`.
+- [x] VM/QEMU-проверка использует heap компилятора без повторного определения тестовых меток.
+- [x] Тестовая Saltic VM вмещает канонический heap 16 МиБ и загрузочные области ELF.
+- [x] Getter констант читает и пишет DATA через существующие relative-address patches.
+- [x] Подтверждён будущий контракт `rt_alloc`: `a0` содержит payload bytes; allocator добавляет 12-байтный header и выравнивание, записывает `payload_bytes` и нулевые flags; caller записывает `kind`.
+- [ ] БЛОКИРОВКА object ABI: канон хранит fixed как raw 32-bit word и берёт тип из сигнатуры; текущий runtime хранит value и kind внутри tagged BOX.
+- [ ] Для raw fixed runtime должен получать `u8/u16/u32/i32/bits32/address/usize` без чтения BOX; предложенный скрытый register-аргумент отклонён, другой механизм пока не выбран.
+- [ ] Точка продолжения: сначала владелец определяет источник fixed kind для `rt_fixed_*`, затем переводятся `rt_alloc`, String/Group/Box headers и fixed; после 5767/0 эта подгруппа код не меняла.

@@ -201,7 +201,12 @@ test_machine() {
         soul/seed/tests/machine.saltic \
         "$work/machine/program.elf"
     qemu-riscv32 -B 0x100000000 \
-        "$work/machine/program.elf"
+        "$work/machine/program.elf" \
+        "$work/machine/ordinary.elf"
+    test -s "$work/machine/ordinary.elf"
+    chmod +x "$work/machine/ordinary.elf"
+    qemu-riscv32 -B 0x100000000 \
+        "$work/machine/ordinary.elf"
 
     build testing-failure \
         tests/fixtures/testing-failure.saltic \

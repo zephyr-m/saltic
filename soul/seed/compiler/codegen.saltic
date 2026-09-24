@@ -4,6 +4,9 @@ use seed.ast
 use seed.intrinsic.contract
 use seed.compiler.state
 use seed.compiler.constants
+use seed.machine.instruction
+use seed.machine.codec
+use seed.machine.layout
 
 skill box_field_symbol(compiler, box_name, field_name) {
     @box = state.symbol_find(compiler.boxes, box_name)
@@ -41,7 +44,7 @@ skill compile_path(compiler, node) {
     @constant_name = ""
     @constant = state.Symbol {}
     (name == "error") {
-        (count == 3) { out state.load_immediate(compiler, "a0", error_value(compiler, seed.group.item(parts, 2))) }
+        (count == 3) { out state.load_immediate(compiler, "a0", codec.A0, error_value(compiler, seed.group.item(parts, 2))) }
     }
     (count > 2) {
         @enum_text = seed.group.item(parts, 1)
@@ -54,28 +57,33 @@ skill compile_path(compiler, node) {
             @full_name = seed.str.add(enum_name, ".")
             full_name = seed.str.add(full_name, seed.group.item(parts, count - 1))
             @variant = state.symbol_find(compiler.variants, full_name)
-            out state.load_immediate(compiler, "a0", variant.value)
+            out state.load_immediate(compiler, "a0", codec.A0, variant.value)
         }
     }
     (state.symbol_has(compiler.current_function.slots, name) == yes) {
         @slot = state.slot(compiler, name)
         compiler = state.emit(compiler, seed.str.add("  lw a0, ", seed.str.add(seed.num.text(slot), "(s0)")))
+        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.S0, codec.ZERO, slot)
     }
     (state.symbol_has(compiler.current_function.slots, name) == no) {
         constant_name = resolve_symbol(compiler.constants, compiler.aliases, path_name, compiler.current_function.module)
         constant = state.symbol_find(compiler.constants, constant_name)
         (seed.str.len(constant.name) > 0) {
-            compiler = state.emit(compiler, seed.str.add("  call ", constants.getter_label(constant.name)))
+            @getter = constants.getter_label(constant.name)
+            compiler = state.emit(compiler, seed.str.add("  call ", getter))
+            compiler.machine = layout.emit_call(compiler.machine, getter)
         }
         (seed.str.len(constant.name) == 0) {
             @subject_field = box_field_symbol(compiler, compiler.current_function.subject, name)
             (seed.str.len(subject_field.name) > 0) {
                 @self_slot = state.slot(compiler, "$self")
                 compiler = state.emit(compiler, seed.str.add("  lw a0, ", seed.str.add(seed.num.text(self_slot), "(s0)")))
-                compiler = state.push(compiler, "a0")
-                compiler = state.load_immediate(compiler, "a1", state.field(compiler, name))
-                compiler = state.pop(compiler, "a0")
+                compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.S0, codec.ZERO, self_slot)
+                compiler = state.push(compiler, "a0", codec.A0)
+                compiler = state.load_immediate(compiler, "a1", codec.A1, state.field(compiler, name))
+                compiler = state.pop(compiler, "a0", codec.A0)
                 compiler = state.emit(compiler, "  call rt_box_get")
+                compiler.machine = layout.emit_call(compiler.machine, "rt_box_get")
             }
         }
     }
@@ -83,10 +91,11 @@ skill compile_path(compiler, node) {
     (seed.str.len(constant.name) > 0) { index = count }
     drum (count) {
         (index < count) {
-            compiler = state.push(compiler, "a0")
-            compiler = state.load_immediate(compiler, "a1", state.field(compiler, seed.group.item(parts, index)))
-            compiler = state.pop(compiler, "a0")
+            compiler = state.push(compiler, "a0", codec.A0)
+            compiler = state.load_immediate(compiler, "a1", codec.A1, state.field(compiler, seed.group.item(parts, index)))
+            compiler = state.pop(compiler, "a0", codec.A0)
             compiler = state.emit(compiler, "  call rt_box_get")
+            compiler.machine = layout.emit_call(compiler.machine, "rt_box_get")
             index = index + 1
         }
     }
@@ -95,10 +104,11 @@ skill compile_path(compiler, node) {
 
 skill compile_binary(compiler, operator, left, right) {
     compiler = compile_expression(compiler, left)
-    compiler = state.push(compiler, "a0")
+    compiler = state.push(compiler, "a0", codec.A0)
     compiler = compile_expression(compiler, right)
     compiler = state.emit(compiler, "  addi a1, a0, 0")
-    compiler = state.pop(compiler, "a0")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.A0, codec.ZERO, 0)
+    compiler = state.pop(compiler, "a0", codec.A0)
     @target = ""
     @fixed = contract.is_fixed_type(infer_type(compiler, left))
     (operator == "+") { target = "rt_add" }
@@ -117,7 +127,9 @@ skill compile_binary(compiler, operator, left, right) {
         (operator == ">") { target = "rt_fixed_greater" }
         (operator == "<") { target = "rt_fixed_less" }
     }
-    out state.emit(compiler, seed.str.add("  call ", target))
+    compiler = state.emit(compiler, seed.str.add("  call ", target))
+    compiler.machine = layout.emit_call(compiler.machine, target)
+    out compiler
 }
 
 skill compile_rescue(compiler, node) {
@@ -125,12 +137,18 @@ skill compile_rescue(compiler, node) {
     @done = state.label(compiler, "rescue_done")
     compiler = compile_expression(compiler, seed.group.item(plain, 1))
     compiler = state.emit(compiler, "  andi t0, a0, SALTIC_ABI_TAG_MASK")
+    compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T0, codec.A0, codec.ZERO, abi.TAG_MASK)
     compiler = state.emit(compiler, "  addi t1, zero, SALTIC_ABI_TAG_ERROR")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, abi.TAG_ERROR)
     compiler = state.emit(compiler, seed.str.add("  bne t0, t1, ", done))
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T0, codec.T1, done)
     @slot = state.slot(compiler, seed.group.item(plain, 2))
     compiler = state.emit(compiler, seed.str.add("  sw a0, ", seed.str.add(seed.num.text(slot), "(s0)")))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, slot)
     compiler = compile_block(compiler, seed.group.item(plain, 3), yes)
-    out state.emit(compiler, seed.str.add(done, ":"))
+    compiler = state.emit(compiler, seed.str.add(done, ":"))
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, done)
+    out compiler
 }
 
 skill box_has_skill(compiler, box_name, skill_name) {
@@ -228,7 +246,7 @@ skill compile_arguments(compiler, args) {
     drum (count) {
         (index < count) {
             compiler = compile_expression(compiler, seed.group.item(args, index))
-            compiler = state.push(compiler, "a0")
+            compiler = state.push(compiler, "a0", codec.A0)
             index = index + 1
         }
     }
@@ -238,10 +256,14 @@ skill compile_arguments(compiler, args) {
             @register = seed.str.add("a", seed.num.text(index))
             @offset = seed.num.text(constants.stack_source_offset(count, index))
             compiler = state.emit(compiler, seed.str.add("  lw ", seed.str.add(register, seed.str.add(", ", seed.str.add(offset, "(sp)")))))
+            compiler = state.emit_op(compiler, instruction.Kind.LW, abi.argument_register(index), codec.SP, codec.ZERO, constants.stack_source_offset(count, index))
             index = index + 1
         }
     }
-    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(constants.stack_bytes(count)))) }
+    (count > 0) {
+        compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(constants.stack_bytes(count))))
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, constants.stack_bytes(count))
+    }
     out compiler
 }
 
@@ -252,13 +274,20 @@ skill compile_show(compiler, args) {
         (index < count) {
             compiler = compile_expression(compiler, seed.group.item(args, index))
             @type = infer_type(compiler, seed.group.item(args, index))
-            (contract.is_fixed_type(type) == yes) { compiler = state.emit(compiler, "  call rt_fixed_show") }
-            (contract.is_fixed_type(type) == no) { compiler = state.emit(compiler, "  call rt_show") }
+            (contract.is_fixed_type(type) == yes) {
+                compiler = state.emit(compiler, "  call rt_fixed_show")
+                compiler.machine = layout.emit_call(compiler.machine, "rt_fixed_show")
+            }
+            (contract.is_fixed_type(type) == no) {
+                compiler = state.emit(compiler, "  call rt_show")
+                compiler.machine = layout.emit_call(compiler.machine, "rt_show")
+            }
             index = index + 1
         }
     }
     compiler = state.emit(compiler, "  call rt_newline")
-    out state.load_immediate(compiler, "a0", abi.NONE)
+    compiler.machine = layout.emit_call(compiler.machine, "rt_newline")
+    out state.load_immediate(compiler, "a0", codec.A0, abi.NONE)
 }
 
 skill intrinsic(name) {
@@ -328,6 +357,11 @@ skill string_label(compiler, text) {
     compiler = state.emit_data(compiler, seed.str.add("  .word ", seed.num.text(length)))
     compiler = emit_string_data(compiler, text)
     compiler = state.emit_data(compiler, seed.str.add("  .balign ", seed.num.text(constants.DATA_ALIGNMENT)))
+    compiler.machine = layout.align_section(compiler.machine, layout.Section.RODATA, constants.DATA_ALIGNMENT)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.RODATA, label)
+    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(length))
+    compiler.machine = layout.append_section_text(compiler.machine, layout.Section.RODATA, text, yes)
+    compiler.machine = layout.align_section(compiler.machine, layout.Section.RODATA, constants.DATA_ALIGNMENT)
     compiler.strings = seed.group.add(compiler.strings, state.Symbol { name = label kind = "string" text = text })
     out label
 }
@@ -338,26 +372,35 @@ skill compile_group(compiler, items) {
     drum (count) {
         (index < count) {
             compiler = compile_expression(compiler, seed.group.item(items, index))
-            compiler = state.push(compiler, "a0")
+            compiler = state.push(compiler, "a0", codec.A0)
             index = index + 1
         }
     }
-    compiler = state.load_immediate(compiler, "a0", state.align8(constants.group_storage_bytes(count)))
+    compiler = state.load_immediate(compiler, "a0", codec.A0, state.align8(constants.group_storage_bytes(count)))
     compiler = state.emit(compiler, "  call rt_alloc")
+    compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
     compiler = state.emit(compiler, seed.str.add("  addi t3, zero, ", seed.num.text(count)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T3, codec.ZERO, codec.ZERO, count)
     compiler = state.emit(compiler, "  sw t3, 0(a0)")
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, 0)
     index = 0
     drum (count) {
         (index < count) {
             @source_offset = seed.num.text(constants.stack_source_offset(count, index))
             @target_offset = seed.num.text(constants.group_item_offset(index))
             compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(source_offset, "(sp)")))
+            compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, constants.stack_source_offset(count, index))
             compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(target_offset, "(a0)")))
+            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, constants.group_item_offset(index))
             index = index + 1
         }
     }
-    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(constants.stack_bytes(count)))) }
-    out state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_GROUP)))
+    (count > 0) {
+        compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(constants.stack_bytes(count))))
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, constants.stack_bytes(count))
+    }
+    compiler = state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_GROUP)))
+    out state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_GROUP)
 }
 
 skill box_override(overrides, field_name) {
@@ -398,28 +441,38 @@ skill compile_box(compiler, name, overrides) {
             (default_value == yes) { compiler.current_function.module = model.text }
             compiler = compile_expression(compiler, value)
             compiler.current_function.module = caller_module
-            compiler = state.push(compiler, "a0")
+            compiler = state.push(compiler, "a0", codec.A0)
             index = index + 1
         }
     }
-    compiler = state.load_immediate(compiler, "a0", state.align8(constants.box_storage_bytes(count)))
+    compiler = state.load_immediate(compiler, "a0", codec.A0, state.align8(constants.box_storage_bytes(count)))
     compiler = state.emit(compiler, "  call rt_alloc")
+    compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
     compiler = state.emit(compiler, seed.str.add("  addi t3, zero, ", seed.num.text(count)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T3, codec.ZERO, codec.ZERO, count)
     compiler = state.emit(compiler, "  sw t3, 0(a0)")
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, 0)
     index = 0
     drum (count) {
         (index < count) {
             @field = seed.group.item(fields, index)
             @field_id = state.field(compiler, ast.part(field, 1))
-            compiler = state.load_immediate(compiler, "t0", field_id)
+            compiler = state.load_immediate(compiler, "t0", codec.T0, field_id)
             compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(constants.box_field_id_offset(index)), "(a0)")))
+            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, constants.box_field_id_offset(index))
             compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(seed.num.text(constants.stack_source_offset(count, index)), "(sp)")))
+            compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, constants.stack_source_offset(count, index))
             compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(constants.box_field_value_offset(index)), "(a0)")))
+            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, constants.box_field_value_offset(index))
             index = index + 1
         }
     }
-    (count > 0) { compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(constants.stack_bytes(count)))) }
-    out state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_BOX)))
+    (count > 0) {
+        compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(constants.stack_bytes(count))))
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, constants.stack_bytes(count))
+    }
+    compiler = state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_BOX)))
+    out state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_BOX)
 }
 
 skill compile_call(compiler, node) {
@@ -432,8 +485,12 @@ skill compile_call(compiler, node) {
     (contract.is_fixed_type(name) == yes) {
         @value = ast.plain(seed.group.item(args, 0))
         @value_tag = seed.group.item(value, 0)
-        (value_tag == "wide-number") { compiler = state.emit(compiler, seed.str.add("  li a0, ", seed.group.item(value, 1))) }
-        (value_tag == "number") { compiler = state.load_immediate(compiler, "a0", seed.group.item(value, 1)) }
+        (value_tag == "wide-number") {
+            @wide = seed.group.item(value, 1)
+            compiler = state.emit(compiler, seed.str.add("  li a0, ", wide))
+            compiler.machine = layout.emit_load_word(compiler.machine, codec.A0, codec.word_from_decimal(wide))
+        }
+        (value_tag == "number") { compiler = state.load_immediate(compiler, "a0", codec.A0, seed.group.item(value, 1)) }
         (value_tag == "binary") {
             (seed.group.item(value, 1) == "-") {
                 @left = ast.plain(seed.group.item(value, 2))
@@ -441,8 +498,13 @@ skill compile_call(compiler, node) {
                 (seed.group.item(left, 0) == "number") {
                     (seed.group.item(left, 1) == 0) {
                         @right_tag = seed.group.item(right, 0)
-                        (right_tag == "number") { compiler = state.emit(compiler, seed.str.add("  li a0, -", seed.num.text(seed.group.item(right, 1)))) value_tag = "ready" }
-                        (right_tag == "wide-number") { compiler = state.emit(compiler, seed.str.add("  li a0, -", seed.group.item(right, 1))) value_tag = "ready" }
+                        (right_tag == "number") { compiler = state.load_immediate(compiler, "a0", codec.A0, 0 - seed.group.item(right, 1)) value_tag = "ready" }
+                        (right_tag == "wide-number") {
+                            @wide = seed.str.add("-", seed.group.item(right, 1))
+                            compiler = state.emit(compiler, seed.str.add("  li a0, ", wide))
+                            compiler.machine = layout.emit_load_word(compiler.machine, codec.A0, codec.word_from_decimal(wide))
+                            value_tag = "ready"
+                        }
                     }
                 }
             }
@@ -457,24 +519,35 @@ skill compile_call(compiler, node) {
             @source_type = infer_type(compiler, seed.group.item(args, 0))
             (contract.is_fixed_type(source_type) == yes) {
                 compiler = state.emit(compiler, "  andi a0, a0, SALTIC_ABI_PAYLOAD_MASK")
+                compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.A0, codec.A0, codec.ZERO, abi.PAYLOAD_MASK)
                 compiler = state.emit(compiler, "  lw a0, 0(a0)")
+                compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.A0, codec.ZERO, 0)
             }
-            (contract.is_fixed_type(source_type) == no) { compiler = state.emit(compiler, "  srai a0, a0, SALTIC_ABI_TAG_SHIFT") }
+            (contract.is_fixed_type(source_type) == no) {
+                compiler = state.emit(compiler, "  srai a0, a0, SALTIC_ABI_TAG_SHIFT")
+                compiler = state.emit_op(compiler, instruction.Kind.SRAI, codec.A0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
+            }
         }
-        compiler = state.load_immediate(compiler, "a1", contract.fixed_kind(name))
-        out state.emit(compiler, "  call rt_fixed_new")
+        compiler = state.load_immediate(compiler, "a1", codec.A1, contract.fixed_kind(name))
+        compiler = state.emit(compiler, "  call rt_fixed_new")
+        compiler.machine = layout.emit_call(compiler.machine, "rt_fixed_new")
+        out compiler
     }
     @conversion = contract.conversion(seed_kind)
     (seed.str.len(conversion) > 0) {
         compiler = compile_arguments(compiler, args)
-        compiler = state.load_immediate(compiler, "a1", contract.fixed_kind(conversion))
-        out state.emit(compiler, "  call rt_fixed_convert")
+        compiler = state.load_immediate(compiler, "a1", codec.A1, contract.fixed_kind(conversion))
+        compiler = state.emit(compiler, "  call rt_fixed_convert")
+        compiler.machine = layout.emit_call(compiler.machine, "rt_fixed_convert")
+        out compiler
     }
     @fixed_target = ""
     (contract.is_fixed_call(seed_kind) == yes) { fixed_target = contract.target(seed_kind, "unknown") }
     (seed.str.len(fixed_target) > 0) {
         compiler = compile_arguments(compiler, args)
-        out state.emit(compiler, seed.str.add("  call ", fixed_target))
+        compiler = state.emit(compiler, seed.str.add("  call ", fixed_target))
+        compiler.machine = layout.emit_call(compiler.machine, fixed_target)
+        out compiler
     }
     @memory_target = ""
     (seed.group.count(args) > 0) {
@@ -483,7 +556,9 @@ skill compile_call(compiler, node) {
     }
     (seed.str.len(memory_target) > 0) {
         compiler = compile_arguments(compiler, args)
-        out state.emit(compiler, seed.str.add("  call ", memory_target))
+        compiler = state.emit(compiler, seed.str.add("  call ", memory_target))
+        compiler.machine = layout.emit_call(compiler.machine, memory_target)
+        out compiler
     }
     @resolved_box = resolve_symbol(compiler.boxes, compiler.aliases, name, compiler.current_function.module)
     (seed.str.len(resolved_box) > 0) { out compile_box(compiler, resolved_box, []) }
@@ -495,7 +570,10 @@ skill compile_call(compiler, node) {
                 compiler = compile_arguments(compiler, with_self)
                 @target = seed.str.add(compiler.current_function.subject, ".")
                 target = seed.str.add(target, short_name)
-                out state.emit(compiler, seed.str.add("  call saltic_", state.safe(target)))
+                @method_target = seed.str.add("saltic_", state.safe(target))
+                compiler = state.emit(compiler, seed.str.add("  call ", method_target))
+                compiler.machine = layout.emit_call(compiler.machine, method_target)
+                out compiler
             }
         }
     }
@@ -510,7 +588,10 @@ skill compile_call(compiler, node) {
                 compiler = compile_arguments(compiler, with_receiver)
                 @target = seed.str.add(box_name, ".")
                 target = seed.str.add(target, method)
-                out state.emit(compiler, seed.str.add("  call saltic_", state.safe(target)))
+                @method_target = seed.str.add("saltic_", state.safe(target))
+                compiler = state.emit(compiler, seed.str.add("  call ", method_target))
+                compiler.machine = layout.emit_call(compiler.machine, method_target)
+                out compiler
             }
         }
     }
@@ -520,23 +601,27 @@ skill compile_call(compiler, node) {
         (seed.str.len(resolved_skill) > 0) { target = seed.str.add("saltic_", state.safe(resolved_skill)) }
     }
     compiler = compile_arguments(compiler, args)
-    out state.emit(compiler, seed.str.add("  call ", target))
+    compiler = state.emit(compiler, seed.str.add("  call ", target))
+    compiler.machine = layout.emit_call(compiler.machine, target)
+    out compiler
 }
 
 skill compile_expression(compiler, node) {
     @plain = ast.plain(node)
     @tag = seed.group.item(plain, 0)
-    (tag == "number") { out state.load_immediate(compiler, "a0", abi.tagged(seed.group.item(plain, 1), abi.TAG_NUMBER)) }
+    (tag == "number") { out state.load_immediate(compiler, "a0", codec.A0, abi.tagged(seed.group.item(plain, 1), abi.TAG_NUMBER)) }
     (tag == "string") {
         @label = string_label(compiler, seed.group.item(plain, 1))
         compiler = state.emit(compiler, seed.str.add("  la a0, ", label))
-        out state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_STRING)))
+        compiler.machine = layout.emit_relative_address(compiler.machine, codec.A0, label, 0)
+        compiler = state.emit(compiler, seed.str.add("  ori a0, a0, ", seed.num.text(abi.TAG_STRING)))
+        out state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_STRING)
     }
     (tag == "answer") {
-        (seed.group.item(plain, 1) == "yes") { out state.load_immediate(compiler, "a0", abi.YES) }
-        out state.load_immediate(compiler, "a0", abi.NO)
+        (seed.group.item(plain, 1) == "yes") { out state.load_immediate(compiler, "a0", codec.A0, abi.YES) }
+        out state.load_immediate(compiler, "a0", codec.A0, abi.NO)
     }
-    (tag == "none") { out state.load_immediate(compiler, "a0", abi.NONE) }
+    (tag == "none") { out state.load_immediate(compiler, "a0", codec.A0, abi.NONE) }
     (tag == "path") { out compile_path(compiler, node) }
     (tag == "binary") { out compile_binary(compiler, seed.group.item(plain, 1), seed.group.item(plain, 2), seed.group.item(plain, 3)) }
     (tag == "call") { out compile_call(compiler, node) }
@@ -548,7 +633,7 @@ skill compile_expression(compiler, node) {
     (tag == "rescue") { out compile_rescue(compiler, node) }
     (tag == "enum-value") {
         @variant = state.symbol_find(compiler.variants, seed.group.item(plain, 1))
-        out state.load_immediate(compiler, "a0", variant.value)
+        out state.load_immediate(compiler, "a0", codec.A0, variant.value)
     }
     out compiler
 }
@@ -568,7 +653,7 @@ skill compile_block(compiler, block, keep) {
         }
     }
     (keep == yes) {
-        (count == 1) { compiler = state.load_immediate(compiler, "a0", abi.NONE) }
+        (count == 1) { compiler = state.load_immediate(compiler, "a0", codec.A0, abi.NONE) }
     }
     out compiler
 }
@@ -581,6 +666,7 @@ skill compile_statement(compiler, node, keep) {
         compiler = compile_expression(compiler, value)
         @slot = state.slot(compiler, seed.group.item(plain, 1))
         compiler = state.emit(compiler, seed.str.add("  sw a0, ", seed.str.add(seed.num.text(slot), "(s0)")))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, slot)
         @type = infer_type(compiler, value)
         @known = state.type_find(compiler.current_function.types, seed.group.item(plain, 1))
         (type == "unknown") {
@@ -595,6 +681,7 @@ skill compile_statement(compiler, node, keep) {
         compiler = compile_expression(compiler, value)
         @slot = state.slot(compiler, seed.group.item(plain, 1))
         compiler = state.emit(compiler, seed.str.add("  sw a0, ", seed.str.add(seed.num.text(slot), "(s0)")))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, slot)
         @type = infer_type(compiler, value)
         @known = state.type_find(compiler.current_function.types, seed.group.item(plain, 1))
         (type == "unknown") {
@@ -609,33 +696,46 @@ skill compile_statement(compiler, node, keep) {
         @part_count = seed.group.count(target)
         @base = state.group_slice(target, 0, part_count - 1)
         compiler = compile_expression(compiler, base)
-        compiler = state.push(compiler, "a0")
+        compiler = state.push(compiler, "a0", codec.A0)
         compiler = compile_expression(compiler, seed.group.item(plain, 2))
         compiler = state.emit(compiler, "  addi a2, a0, 0")
-        compiler = state.pop(compiler, "a0")
-        compiler = state.load_immediate(compiler, "a1", state.field(compiler, seed.group.item(target, part_count - 1)))
-        out state.emit(compiler, "  call rt_box_set")
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A2, codec.A0, codec.ZERO, 0)
+        compiler = state.pop(compiler, "a0", codec.A0)
+        compiler = state.load_immediate(compiler, "a1", codec.A1, state.field(compiler, seed.group.item(target, part_count - 1)))
+        compiler = state.emit(compiler, "  call rt_box_set")
+        compiler.machine = layout.emit_call(compiler.machine, "rt_box_set")
+        out compiler
     }
     (tag == "out") {
         compiler = compile_expression(compiler, seed.group.item(plain, 1))
-        out state.emit(compiler, seed.str.add("  j ", compiler.current_function.end))
+        compiler = state.emit(compiler, seed.str.add("  j ", compiler.current_function.end))
+        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, compiler.current_function.end)
+        out compiler
     }
     (tag == "expr") { out compile_expression(compiler, seed.group.item(plain, 1)) }
     (tag == "if") {
         @end = state.label(compiler, "if_end")
         compiler = compile_expression(compiler, seed.group.item(plain, 1))
         compiler = state.emit(compiler, seed.str.add("  addi t0, zero, ", seed.num.text(abi.NO)))
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, abi.NO)
         compiler = state.emit(compiler, seed.str.add("  beq a0, t0, ", end))
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.A0, codec.T0, end)
         compiler = state.emit(compiler, seed.str.add("  addi t0, zero, ", seed.num.text(abi.NONE)))
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, abi.NONE)
         compiler = state.emit(compiler, seed.str.add("  beq a0, t0, ", end))
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.A0, codec.T0, end)
         compiler = state.emit(compiler, seed.str.add("  beq a0, zero, ", end))
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.A0, codec.ZERO, end)
         compiler = compile_block(compiler, seed.group.item(plain, 2), keep)
-        out state.emit(compiler, seed.str.add(end, ":"))
+        compiler = state.emit(compiler, seed.str.add(end, ":"))
+        compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
+        out compiler
     }
     (tag == "switch") {
         @end = state.label(compiler, "switch_end")
         compiler = compile_expression(compiler, seed.group.item(plain, 1))
         compiler = state.emit(compiler, "  addi t2, a0, 0")
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.A0, codec.ZERO, 0)
         @index = 2
         @count = seed.group.count(plain)
         drum (count) {
@@ -643,15 +743,20 @@ skill compile_statement(compiler, node, keep) {
                 @case_node = ast.plain(seed.group.item(plain, index))
                 @next = state.label(compiler, "case_next")
                 @variant = state.symbol_find(compiler.variants, seed.group.item(case_node, 1))
-                compiler = state.load_immediate(compiler, "t0", variant.value)
+                compiler = state.load_immediate(compiler, "t0", codec.T0, variant.value)
                 compiler = state.emit(compiler, seed.str.add("  bne t2, t0, ", next))
+                compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T2, codec.T0, next)
                 compiler = compile_expression(compiler, seed.group.item(case_node, 2))
                 compiler = state.emit(compiler, seed.str.add("  j ", end))
+                compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
                 compiler = state.emit(compiler, seed.str.add(next, ":"))
+                compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, next)
                 index = index + 1
             }
         }
-        out state.emit(compiler, seed.str.add(end, ":"))
+        compiler = state.emit(compiler, seed.str.add(end, ":"))
+        compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
+        out compiler
     }
     (tag == "drum") {
         @drum_name = seed.str.add("$drum:", seed.num.text(compiler.current_function.next_drum))
@@ -661,15 +766,25 @@ skill compile_statement(compiler, node, keep) {
         @end = state.label(compiler, "drum_end")
         compiler = compile_expression(compiler, seed.group.item(plain, 1))
         compiler = state.emit(compiler, "  srai a0, a0, SALTIC_ABI_TAG_SHIFT")
+        compiler = state.emit_op(compiler, instruction.Kind.SRAI, codec.A0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
         compiler = state.emit(compiler, seed.str.add("  sw a0, ", seed.str.add(seed.num.text(counter), "(s0)")))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, counter)
         compiler = state.emit(compiler, seed.str.add(start, ":"))
+        compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, start)
         compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(seed.num.text(counter), "(s0)")))
+        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, counter)
         compiler = state.emit(compiler, seed.str.add("  beq t0, zero, ", end))
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.T0, codec.ZERO, end)
         compiler = state.emit(compiler, "  addi t0, t0, -1")
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.T0, codec.ZERO, 0 - 1)
         compiler = state.emit(compiler, seed.str.add("  sw t0, ", seed.str.add(seed.num.text(counter), "(s0)")))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T0, counter)
         compiler = compile_block(compiler, seed.group.item(plain, 2), no)
         compiler = state.emit(compiler, seed.str.add("  j ", start))
-        out state.emit(compiler, seed.str.add(end, ":"))
+        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, start)
+        compiler = state.emit(compiler, seed.str.add(end, ":"))
+        compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
+        out compiler
     }
     out compiler
 }
@@ -691,11 +806,17 @@ skill compile_function(compiler, name, params, body, subject, module) {
     }
     (seed.str.len(subject) > 0) { types = state.type_set(types, "$self", seed.str.add("box:", subject)) }
     compiler.current_function = state.Function { name = name slots = slots end = end subject = subject module = module types = types }
-    compiler = state.emit(compiler, seed.str.add("saltic_", seed.str.add(state.safe(name), ":")))
+    @function_label = seed.str.add("saltic_", state.safe(name))
+    compiler = state.emit(compiler, seed.str.add(function_label, ":"))
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, function_label)
     compiler = state.emit(compiler, seed.str.add("  addi sp, sp, -", seed.num.text(frame)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - frame)
     compiler = state.emit(compiler, seed.str.add("  sw ra, ", seed.str.add(seed.num.text(constants.return_address_save_offset(frame)), "(sp)")))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.RA, constants.return_address_save_offset(frame))
     compiler = state.emit(compiler, seed.str.add("  sw s0, ", seed.str.add(seed.num.text(constants.previous_frame_save_offset(frame)), "(sp)")))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.S0, constants.previous_frame_save_offset(frame))
     compiler = state.emit(compiler, seed.str.add("  addi s0, sp, ", seed.num.text(frame)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S0, codec.SP, codec.ZERO, frame)
     @index = 0
     @param_count = seed.group.count(params)
     drum (param_count) {
@@ -703,18 +824,27 @@ skill compile_function(compiler, name, params, body, subject, module) {
             @register = seed.str.add("a", seed.num.text(index))
             @slot = state.slot(compiler, seed.group.item(params, index))
             compiler = state.emit(compiler, seed.str.add("  sw ", seed.str.add(register, seed.str.add(", ", seed.str.add(seed.num.text(slot), "(s0)")))))
+            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, abi.argument_register(index), slot)
             index = index + 1
         }
     }
     compiler = compile_block(compiler, body, no)
     compiler = state.emit(compiler, seed.str.add("  addi a0, zero, ", seed.num.text(abi.NONE)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, abi.NONE)
     compiler = state.emit(compiler, seed.str.add("  j ", end))
+    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
     compiler = state.emit(compiler, seed.str.add(end, ":"))
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
     compiler = state.emit(compiler, seed.str.add("  lw ra, ", seed.str.add(seed.num.text(constants.return_address_load_offset()), "(s0)")))
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.RA, codec.S0, codec.ZERO, constants.return_address_load_offset())
     compiler = state.emit(compiler, seed.str.add("  lw t0, ", seed.str.add(seed.num.text(constants.previous_frame_load_offset()), "(s0)")))
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, constants.previous_frame_load_offset())
     compiler = state.emit(compiler, "  addi sp, s0, 0")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.S0, codec.ZERO, 0)
     compiler = state.emit(compiler, "  addi s0, t0, 0")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S0, codec.T0, codec.ZERO, 0)
     compiler = state.emit(compiler, "  jalr zero, 0(ra)")
+    compiler = state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
     compiler = state.emit_blank(compiler)
     compiler.current_function = state.Function {}
     out compiler
@@ -727,40 +857,67 @@ skill compile_constant(compiler, constant) {
     @before = compiler.current_function
     compiler.current_function = state.Function { name = constant.name module = constant.text }
 
-    compiler = state.emit(compiler, seed.str.add(constants.getter_label(constant.name), ":"))
+    @getter = constants.getter_label(constant.name)
+    compiler = state.emit(compiler, seed.str.add(getter, ":"))
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, getter)
     @frame = constants.constant_frame_bytes()
     @return_address_offset = constants.constant_return_address_offset()
     compiler = state.emit(compiler, seed.str.add("  addi sp, sp, -", seed.num.text(frame)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - frame)
     compiler = state.emit(compiler, seed.str.add("  sw ra, ", seed.str.add(seed.num.text(return_address_offset), "(sp)")))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.RA, return_address_offset)
     compiler = state.emit(compiler, seed.str.add("  la t0, ", constants.state_label(constant.name)))
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.state_label(constant.name), 0)
     compiler = state.emit(compiler, "  lw t1, 0(t0)")
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T1, codec.T0, codec.ZERO, 0)
     compiler = state.emit(compiler, seed.str.add("  addi t2, zero, ", seed.num.text(constants.STATE_READY)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, constants.STATE_READY)
     compiler = state.emit(compiler, seed.str.add("  beq t1, t2, ", ready))
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.T1, codec.T2, ready)
     compiler = state.emit(compiler, seed.str.add("  addi t2, zero, ", seed.num.text(constants.STATE_INITIALIZING)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, constants.STATE_INITIALIZING)
     compiler = state.emit(compiler, seed.str.add("  beq t1, t2, ", cycle))
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.T1, codec.T2, cycle)
     compiler = state.emit(compiler, seed.str.add("  addi t1, zero, ", seed.num.text(constants.STATE_INITIALIZING)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, constants.STATE_INITIALIZING)
     compiler = state.emit(compiler, "  sw t1, 0(t0)")
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.T0, codec.T1, 0)
 
     compiler = compile_expression(compiler, constant.node)
     compiler = state.emit(compiler, seed.str.add("  la t0, ", constants.value_label(constant.name)))
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.value_label(constant.name), 0)
     compiler = state.emit(compiler, "  sw a0, 0(t0)")
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.T0, codec.A0, 0)
     compiler = state.emit(compiler, seed.str.add("  la t0, ", constants.state_label(constant.name)))
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.state_label(constant.name), 0)
     compiler = state.emit(compiler, seed.str.add("  addi t1, zero, ", seed.num.text(constants.STATE_READY)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, constants.STATE_READY)
     compiler = state.emit(compiler, "  sw t1, 0(t0)")
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.T0, codec.T1, 0)
     compiler = state.emit(compiler, seed.str.add("  j ", finish))
+    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, finish)
 
     compiler = state.emit(compiler, seed.str.add(ready, ":"))
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ready)
     compiler = state.emit(compiler, seed.str.add("  la t0, ", constants.value_label(constant.name)))
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.value_label(constant.name), 0)
     compiler = state.emit(compiler, "  lw a0, 0(t0)")
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.T0, codec.ZERO, 0)
     compiler = state.emit(compiler, seed.str.add("  j ", finish))
+    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, finish)
 
     compiler = state.emit(compiler, seed.str.add(cycle, ":"))
-    compiler = state.load_immediate(compiler, "a0", abi.error_value(abi.ERROR_CONSTANT_CYCLE))
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, cycle)
+    compiler = state.load_immediate(compiler, "a0", codec.A0, abi.error_value(abi.ERROR_CONSTANT_CYCLE))
 
     compiler = state.emit(compiler, seed.str.add(finish, ":"))
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, finish)
     compiler = state.emit(compiler, seed.str.add("  lw ra, ", seed.str.add(seed.num.text(return_address_offset), "(sp)")))
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.RA, codec.SP, codec.ZERO, return_address_offset)
     compiler = state.emit(compiler, seed.str.add("  addi sp, sp, ", seed.num.text(frame)))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, frame)
     compiler = state.emit(compiler, "  jalr zero, 0(ra)")
+    compiler = state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
     compiler = state.emit_blank(compiler)
     compiler.current_function = before
     out compiler
