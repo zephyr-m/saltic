@@ -202,6 +202,17 @@ test_machine() {
         "$work/machine/program.elf"
     qemu-riscv32 -B 0x100000000 \
         "$work/machine/program.elf"
+
+    build testing-failure \
+        tests/fixtures/testing-failure.saltic \
+        "$work/machine/testing-failure.elf"
+    if qemu-riscv32 -B 0x100000000 \
+        "$work/machine/testing-failure.elf" \
+        >"$work/machine/testing-failure.txt"; then
+        echo "проверка: намеренно проваленный тест завершился успешно" >&2
+        return 1
+    fi
+    grep -Fq 'контроль провала -> 1  [FAIL]' "$work/machine/testing-failure.txt"
     echo "машина: кодирование и образ подтверждены"
 }
 
