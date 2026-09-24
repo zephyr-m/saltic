@@ -110,10 +110,10 @@ runtime и VM используют один ABI.
   — 2026-09-24: после успешного fixed point legacy-ветка удалена из `os/bootstrap/link.sh`.
 - [x] Подтвердить ABI, data-layout и memory тестами (≈70–140 строк).
   — 2026-09-24: quota overflow, custom heap, BSS/labels и exhaustion exit подтверждены — 5481/0.
-- [ ] Перевести runtime error-return с tagged `Error` в `a0` на raw error id в `a1` по существующему call ABI (≈80–160 строк).
-  — Ревизия 2026-09-24: несоответствие уже было зафиксировано при сверке ABI, но не входило в выполненную object/memory-группу.
+- [x] Перевести runtime error-return с tagged `Error` в `a0` на raw error id в `a1` по существующему call ABI (≈80–160 строк).
+  — Runtime возвращает raw id в `a1`, успешные пути обнуляют `a1`, `rescue` восстанавливает tagged `Error` для языка; `_start` сохраняет `argv` вне `a1`; подтверждено 5785/0 и bootstrap fixed point.
 - [x] Получить подтверждение владельца о прохождении тестовой группы (≈0 строк).
-  — 2026-09-24: 5503/0; повторный bootstrap refresh после удаления legacy `sed` также прошёл.
+  — 2026-09-24: 5785/0; stage-2 и stage-3 совпали побайтно, `compiler.elf` обновлён.
 
 ## 4. Платформенный код
 

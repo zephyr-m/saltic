@@ -30,6 +30,54 @@ skill behavior_arithmetic_program() {
     out layout.resolve(compiler.machine)
 }
 
+skill behavior_division_error_program() {
+    @compiler = state.State {}
+    compiler.machine = layout.host("_start")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "_start")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, abi.TAG_SCALE)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, 0)
+    compiler.machine = layout.emit_call(compiler.machine, "rt_div")
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    compiler = emit.emit_div(compiler)
+    compiler = emit.emit_division_by_zero(compiler)
+    out layout.resolve(compiler.machine)
+}
+
+skill behavior_rescue_error_program() {
+    @compiler = state.State {}
+    compiler.machine = layout.host("_start")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "_start")
+    compiler = state.emit_op(compiler, instruction.Kind.ADD, codec.S0, codec.SP, codec.ZERO, 0)
+    compiler.current_function = state.Function { slots = [state.Symbol { name = "failure" kind = "slot" value = 0 - 12 }] }
+    compiler = codegen.compile_rescue(compiler, ["rescue", ["path", "error", "Sample"], "failure", ["block"]])
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.S0, codec.ZERO, 0 - 12)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    out layout.resolve(compiler.machine)
+}
+
+skill behavior_start_arguments_program() {
+    @compiler = state.State { entry = ["entry", ["first", "second"], ["block"]] }
+    compiler = state.header(compiler)
+    compiler = state.start(compiler)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "saltic_program")
+    compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T0, codec.A0, codec.ZERO, abi.PAYLOAD_MASK)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.S4, codec.T0, codec.ZERO, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T0, codec.A1, codec.ZERO, abi.PAYLOAD_MASK)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.S5, codec.T0, codec.ZERO, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, abi.NONE)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
+    compiler = state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
+    compiler = emit.emit_alloc(compiler)
+    compiler = emit.emit_cstring(compiler)
+    compiler = emit.emit_platform_exit(compiler)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_out_of_memory")
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.BSS, "saltic_heap")
+    compiler.machine = layout.reserve_bss(compiler.machine, 128)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.BSS, "saltic_heap_end")
+    out layout.resolve(compiler.machine)
+}
+
 skill behavior_if_program() {
     @compiler = state.State {}
     compiler.machine = layout.host("_start")
@@ -120,10 +168,14 @@ skill run(suite) {
     @compiler = state.State {}
     compiler = emit.emit_add(compiler)
     compiler = emit.emit_sub(compiler)
-    @expected = [51, 5, 181, 0, 103, 128, 0, 0, 51, 5, 181, 64, 103, 128, 0, 0]
-    suite = testing.test_equal(suite, "перевод rt_add/sub: длина", compiler.machine.code.length, 16)
+    @expected = [
+        51, 5, 181, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 51, 5, 181, 64,
+        147, 5, 0, 0, 103, 128, 0, 0,
+    ]
+    suite = testing.test_equal(suite, "перевод rt_add/sub: длина", compiler.machine.code.length, 24)
     @index = 0
-    drum (16) {
+    drum (24) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_add/sub: байт ", seed.num.text(index)), codec.byte_at(compiler.machine.code, index), seed.group.item(expected, index))
         index = index + 1
     }
@@ -132,7 +184,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_add: метка существует", add_label.present)
     suite = testing.test_equal(suite, "перевод rt_add: смещение", add_label.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_sub: метка существует", sub_label.present)
-    suite = testing.test_equal(suite, "перевод rt_sub: смещение", sub_label.offset, 8)
+    suite = testing.test_equal(suite, "перевод rt_sub: смещение", sub_label.offset, 12)
 
     @multiply = state.State {}
     multiply = emit.emit_mul(multiply)
@@ -145,12 +197,13 @@ skill run(suite) {
         147, 115, 19, 0, 99, 132, 3, 0,
         179, 130, 162, 0, 19, 21, 21, 0,
         19, 83, 19, 0, 227, 22, 3, 254,
-        19, 149, 50, 0, 103, 128, 0, 0,
+        19, 149, 50, 0, 147, 5, 0, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод rt_mul: длина", multiply.machine.code.length, 64)
+    suite = testing.test_equal(suite, "перевод rt_mul: длина", multiply.machine.code.length, 68)
     suite = testing.test_equal(suite, "перевод rt_mul: четыре перехода", multiply.machine.patch_count, 4)
     @multiply_index = 0
-    drum (64) {
+    drum (68) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_mul: байт ", seed.num.text(multiply_index)), codec.byte_at(multiply.machine.code, multiply_index), seed.group.item(multiply_bytes, multiply_index))
         multiply_index = multiply_index + 1
     }
@@ -176,7 +229,7 @@ skill run(suite) {
     division.machine = layout.resolve(division.machine)
     @division_bytes = [
         19, 85, 53, 64, 147, 213, 53, 64,
-        99, 130, 5, 4, 147, 2, 0, 0,
+        99, 132, 5, 4, 147, 2, 0, 0,
         19, 3, 0, 0, 99, 86, 5, 0,
         51, 5, 160, 64, 19, 67, 19, 0,
         99, 214, 5, 0, 179, 5, 176, 64,
@@ -184,13 +237,14 @@ skill run(suite) {
         51, 5, 181, 64, 147, 130, 18, 0,
         227, 124, 181, 254, 99, 4, 3, 0,
         179, 2, 80, 64, 19, 149, 50, 0,
-        103, 128, 0, 0, 19, 5, 240, 1,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        19, 5, 0, 0, 147, 5, 48, 0,
         103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод rt_div: длина", division.machine.code.length, 84)
+    suite = testing.test_equal(suite, "перевод rt_div: длина", division.machine.code.length, 92)
     suite = testing.test_equal(suite, "перевод rt_div: шесть переходов", division.machine.patch_count, 6)
     @division_index = 0
-    drum (84) {
+    drum (92) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_div: байт ", seed.num.text(division_index)), codec.byte_at(division.machine.code, division_index), seed.group.item(division_bytes, division_index))
         division_index = division_index + 1
     }
@@ -214,29 +268,30 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_div: кодирование существует", division_encode.present)
     suite = testing.test_equal(suite, "перевод rt_div: смещение кодирования", division_encode.offset, 68)
     suite = testing.test_yes(suite, "перевод деления на ноль: метка существует", division_zero.present)
-    suite = testing.test_equal(suite, "перевод деления на ноль: смещение", division_zero.offset, 76)
+    suite = testing.test_equal(suite, "перевод деления на ноль: смещение", division_zero.offset, 80)
 
     @equality = state.State {}
     equality = emit.emit_equal(equality)
     equality.machine = layout.resolve(equality.machine)
     @equality_bytes = [
         99, 8, 181, 4, 147, 114, 117, 0,
-        19, 243, 117, 0, 99, 150, 98, 4,
-        147, 3, 48, 0, 99, 146, 114, 4,
+        19, 243, 117, 0, 99, 152, 98, 4,
+        147, 3, 48, 0, 99, 148, 114, 4,
         19, 117, 133, 255, 147, 245, 133, 255,
         131, 34, 197, 0, 3, 163, 197, 0,
-        99, 152, 98, 2, 147, 3, 0, 0,
+        99, 154, 98, 2, 147, 3, 0, 0,
         99, 128, 83, 2, 51, 14, 117, 0,
         179, 142, 117, 0, 3, 78, 14, 1,
-        131, 206, 14, 1, 99, 26, 222, 1,
+        131, 206, 14, 1, 99, 28, 222, 1,
         147, 131, 19, 0, 111, 240, 95, 254,
-        19, 5, 144, 0, 103, 128, 0, 0,
-        19, 5, 16, 0, 103, 128, 0, 0,
+        19, 5, 144, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 5, 16, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод rt_equal: длина", equality.machine.code.length, 96)
+    suite = testing.test_equal(suite, "перевод rt_equal: длина", equality.machine.code.length, 104)
     suite = testing.test_equal(suite, "перевод rt_equal: семь переходов", equality.machine.patch_count, 7)
     @equality_index = 0
-    drum (96) {
+    drum (104) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_equal: байт ", seed.num.text(equality_index)), codec.byte_at(equality.machine.code, equality_index), seed.group.item(equality_bytes, equality_index))
         equality_index = equality_index + 1
     }
@@ -251,7 +306,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_equal: ветка yes существует", equality_yes.present)
     suite = testing.test_equal(suite, "перевод rt_equal: смещение yes", equality_yes.offset, 80)
     suite = testing.test_yes(suite, "перевод rt_equal: ветка no существует", equality_no.present)
-    suite = testing.test_equal(suite, "перевод rt_equal: смещение no", equality_no.offset, 88)
+    suite = testing.test_equal(suite, "перевод rt_equal: смещение no", equality_no.offset, 92)
 
     @comparison = state.State {}
     comparison = emit.emit_less(comparison)
@@ -259,18 +314,19 @@ skill run(suite) {
     comparison.machine = layout.resolve(comparison.machine)
     @comparison_bytes = [
         19, 85, 53, 64, 147, 213, 53, 64,
-        99, 70, 181, 0, 19, 5, 16, 0,
+        99, 72, 181, 0, 19, 5, 16, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        19, 5, 144, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 85, 53, 64,
+        147, 213, 53, 64, 99, 200, 165, 0,
+        19, 5, 16, 0, 147, 5, 0, 0,
         103, 128, 0, 0, 19, 5, 144, 0,
-        103, 128, 0, 0,
-        19, 85, 53, 64, 147, 213, 53, 64,
-        99, 198, 165, 0, 19, 5, 16, 0,
-        103, 128, 0, 0, 19, 5, 144, 0,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод сравнений: длина", comparison.machine.code.length, 56)
+    suite = testing.test_equal(suite, "перевод сравнений: длина", comparison.machine.code.length, 72)
     suite = testing.test_equal(suite, "перевод сравнений: два перехода", comparison.machine.patch_count, 2)
     @byte_index = 0
-    drum (56) {
+    drum (72) {
         suite = testing.test_equal(suite, seed.str.add("перевод сравнений: байт ", seed.num.text(byte_index)), codec.byte_at(comparison.machine.code, byte_index), seed.group.item(comparison_bytes, byte_index))
         byte_index = byte_index + 1
     }
@@ -281,11 +337,11 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_less: метка существует", less_label.present)
     suite = testing.test_equal(suite, "перевод rt_less: смещение", less_label.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_less: ветка yes существует", less_yes.present)
-    suite = testing.test_equal(suite, "перевод rt_less: смещение yes", less_yes.offset, 20)
+    suite = testing.test_equal(suite, "перевод rt_less: смещение yes", less_yes.offset, 24)
     suite = testing.test_yes(suite, "перевод rt_greater: метка существует", greater_label.present)
-    suite = testing.test_equal(suite, "перевод rt_greater: смещение", greater_label.offset, 28)
+    suite = testing.test_equal(suite, "перевод rt_greater: смещение", greater_label.offset, 36)
     suite = testing.test_yes(suite, "перевод rt_greater: ветка yes существует", greater_yes.present)
-    suite = testing.test_equal(suite, "перевод rt_greater: смещение yes", greater_yes.offset, 48)
+    suite = testing.test_equal(suite, "перевод rt_greater: смещение yes", greater_yes.offset, 60)
 
     @boxes = state.State {}
     boxes = emit.emit_box_get(boxes)
@@ -294,23 +350,24 @@ skill run(suite) {
     boxes.machine = layout.resolve(boxes.machine)
     @box_bytes = [
         19, 117, 133, 255, 131, 34, 197, 0,
-        19, 5, 5, 1, 99, 136, 2, 4,
+        19, 5, 5, 1, 99, 140, 2, 4,
         3, 35, 5, 0, 99, 8, 179, 0,
         19, 5, 133, 0, 147, 130, 242, 255,
         111, 240, 223, 254, 3, 37, 69, 0,
-        103, 128, 0, 0, 19, 117, 133, 255,
-        131, 34, 197, 0, 19, 5, 5, 1,
-        99, 130, 2, 2, 3, 35, 5, 0,
-        99, 8, 179, 0, 19, 5, 133, 0,
-        147, 130, 242, 255, 111, 240, 223, 254,
-        35, 34, 197, 0, 19, 5, 32, 0,
-        103, 128, 0, 0, 19, 5, 240, 0,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        19, 117, 133, 255, 131, 34, 197, 0,
+        19, 5, 5, 1, 99, 132, 2, 2,
+        3, 35, 5, 0, 99, 8, 179, 0,
+        19, 5, 133, 0, 147, 130, 242, 255,
+        111, 240, 223, 254, 35, 34, 197, 0,
+        19, 5, 32, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 5, 0, 0,
+        147, 5, 16, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод Box: длина", boxes.machine.code.length, 100)
+    suite = testing.test_equal(suite, "перевод Box: длина", boxes.machine.code.length, 112)
     suite = testing.test_equal(suite, "перевод Box: шесть переходов", boxes.machine.patch_count, 6)
     @box_index = 0
-    drum (100) {
+    drum (112) {
         suite = testing.test_equal(suite, seed.str.add("перевод Box: байт ", seed.num.text(box_index)), codec.byte_at(boxes.machine.code, box_index), seed.group.item(box_bytes, box_index))
         box_index = box_index + 1
     }
@@ -328,13 +385,13 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_box_get: поле найдено", box_get_found.present)
     suite = testing.test_equal(suite, "перевод rt_box_get: смещение найденного поля", box_get_found.offset, 36)
     suite = testing.test_yes(suite, "перевод rt_box_set: метка существует", box_set.present)
-    suite = testing.test_equal(suite, "перевод rt_box_set: смещение", box_set.offset, 44)
+    suite = testing.test_equal(suite, "перевод rt_box_set: смещение", box_set.offset, 48)
     suite = testing.test_yes(suite, "перевод rt_box_set: цикл существует", box_set_loop.present)
-    suite = testing.test_equal(suite, "перевод rt_box_set: смещение цикла", box_set_loop.offset, 56)
+    suite = testing.test_equal(suite, "перевод rt_box_set: смещение цикла", box_set_loop.offset, 60)
     suite = testing.test_yes(suite, "перевод rt_box_set: поле найдено", box_set_found.present)
-    suite = testing.test_equal(suite, "перевод rt_box_set: смещение найденного поля", box_set_found.offset, 80)
+    suite = testing.test_equal(suite, "перевод rt_box_set: смещение найденного поля", box_set_found.offset, 84)
     suite = testing.test_yes(suite, "перевод отсутствующего поля: метка существует", missing_field.present)
-    suite = testing.test_equal(suite, "перевод отсутствующего поля: смещение", missing_field.offset, 92)
+    suite = testing.test_equal(suite, "перевод отсутствующего поля: смещение", missing_field.offset, 100)
 
     @groups = state.State {}
     groups = emit.emit_group_count(groups)
@@ -343,17 +400,19 @@ skill run(suite) {
     groups.machine = layout.resolve(groups.machine)
     @group_bytes = [
         19, 117, 133, 255, 3, 37, 197, 0,
-        19, 21, 53, 0, 103, 128, 0, 0,
-        19, 117, 133, 255, 147, 213, 53, 64,
-        131, 34, 197, 0, 99, 250, 85, 0,
-        147, 149, 37, 0, 51, 5, 181, 0,
-        3, 37, 5, 1, 103, 128, 0, 0,
-        19, 5, 112, 1, 103, 128, 0, 0,
+        19, 21, 53, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 117, 133, 255,
+        147, 213, 53, 64, 131, 34, 197, 0,
+        99, 252, 85, 0, 147, 149, 37, 0,
+        51, 5, 181, 0, 3, 37, 5, 1,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        19, 5, 0, 0, 147, 5, 32, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод чтения Group: длина", groups.machine.code.length, 56)
+    suite = testing.test_equal(suite, "перевод чтения Group: длина", groups.machine.code.length, 68)
     suite = testing.test_equal(suite, "перевод чтения Group: один переход", groups.machine.patch_count, 1)
     @group_index = 0
-    drum (56) {
+    drum (68) {
         suite = testing.test_equal(suite, seed.str.add("перевод чтения Group: байт ", seed.num.text(group_index)), codec.byte_at(groups.machine.code, group_index), seed.group.item(group_bytes, group_index))
         group_index = group_index + 1
     }
@@ -363,9 +422,9 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_group_count: метка существует", group_count.present)
     suite = testing.test_equal(suite, "перевод rt_group_count: смещение", group_count.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_group_at: метка существует", group_at.present)
-    suite = testing.test_equal(suite, "перевод rt_group_at: смещение", group_at.offset, 16)
+    suite = testing.test_equal(suite, "перевод rt_group_at: смещение", group_at.offset, 20)
     suite = testing.test_yes(suite, "перевод границ Group: метка существует", group_bounds.present)
-    suite = testing.test_equal(suite, "перевод границ Group: смещение", group_bounds.offset, 48)
+    suite = testing.test_equal(suite, "перевод границ Group: смещение", group_bounds.offset, 56)
 
     @string_read = state.State {}
     string_read = emit.emit_string_len(string_read)
@@ -374,17 +433,19 @@ skill run(suite) {
     string_read.machine = layout.resolve(string_read.machine)
     @string_read_bytes = [
         19, 117, 133, 255, 3, 37, 197, 0,
-        19, 21, 53, 0, 103, 128, 0, 0,
-        147, 114, 133, 255, 147, 213, 53, 64,
-        3, 163, 194, 0, 99, 250, 101, 0,
-        179, 130, 178, 0, 3, 197, 2, 1,
-        19, 21, 53, 0, 103, 128, 0, 0,
-        19, 5, 240, 2, 103, 128, 0, 0,
+        19, 21, 53, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 147, 114, 133, 255,
+        147, 213, 53, 64, 3, 163, 194, 0,
+        99, 252, 101, 0, 179, 130, 178, 0,
+        3, 197, 2, 1, 19, 21, 53, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        19, 5, 0, 0, 147, 5, 80, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод чтения String: длина", string_read.machine.code.length, 56)
+    suite = testing.test_equal(suite, "перевод чтения String: длина", string_read.machine.code.length, 68)
     suite = testing.test_equal(suite, "перевод чтения String: один переход", string_read.machine.patch_count, 1)
     @string_read_index = 0
-    drum (56) {
+    drum (68) {
         suite = testing.test_equal(suite, seed.str.add("перевод чтения String: байт ", seed.num.text(string_read_index)), codec.byte_at(string_read.machine.code, string_read_index), seed.group.item(string_read_bytes, string_read_index))
         string_read_index = string_read_index + 1
     }
@@ -394,9 +455,9 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_string_len: метка существует", string_len.present)
     suite = testing.test_equal(suite, "перевод rt_string_len: смещение", string_len.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_string_byte: метка существует", string_byte.present)
-    suite = testing.test_equal(suite, "перевод rt_string_byte: смещение", string_byte.offset, 16)
+    suite = testing.test_equal(suite, "перевод rt_string_byte: смещение", string_byte.offset, 20)
     suite = testing.test_yes(suite, "перевод границ String: метка существует", string_bounds.present)
-    suite = testing.test_equal(suite, "перевод границ String: смещение", string_bounds.offset, 48)
+    suite = testing.test_equal(suite, "перевод границ String: смещение", string_bounds.offset, 56)
 
     @string_match = state.State {}
     string_match = emit.emit_string_starts_with(string_match)
@@ -405,23 +466,24 @@ skill run(suite) {
     @string_match_bytes = [
         19, 117, 133, 255, 147, 245, 133, 255,
         131, 34, 197, 0, 3, 163, 197, 0,
-        99, 236, 98, 4, 147, 3, 0, 0,
+        99, 238, 98, 4, 147, 3, 0, 0,
         111, 0, 128, 2, 19, 117, 133, 255,
         147, 245, 133, 255, 131, 34, 197, 0,
-        3, 163, 197, 0, 99, 238, 98, 2,
+        3, 163, 197, 0, 99, 224, 98, 4,
         51, 5, 5, 64, 51, 142, 98, 64,
         51, 5, 197, 1, 147, 3, 0, 0,
         99, 128, 99, 2, 51, 14, 117, 0,
         179, 142, 117, 0, 3, 78, 14, 1,
-        131, 206, 14, 1, 99, 26, 222, 1,
+        131, 206, 14, 1, 99, 28, 222, 1,
         147, 131, 19, 0, 111, 240, 95, 254,
-        19, 5, 144, 0, 103, 128, 0, 0,
-        19, 5, 16, 0, 103, 128, 0, 0,
+        19, 5, 144, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 5, 16, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод начала и конца String: длина", string_match.machine.code.length, 112)
+    suite = testing.test_equal(suite, "перевод начала и конца String: длина", string_match.machine.code.length, 120)
     suite = testing.test_equal(suite, "перевод начала и конца String: шесть переходов", string_match.machine.patch_count, 6)
     @string_match_index = 0
-    drum (112) {
+    drum (120) {
         suite = testing.test_equal(suite, seed.str.add("перевод начала и конца String: байт ", seed.num.text(string_match_index)), codec.byte_at(string_match.machine.code, string_match_index), seed.group.item(string_match_bytes, string_match_index))
         string_match_index = string_match_index + 1
     }
@@ -439,7 +501,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод String: ветка yes существует", string_match_yes.present)
     suite = testing.test_equal(suite, "перевод String: смещение yes", string_match_yes.offset, 96)
     suite = testing.test_yes(suite, "перевод String: ветка no существует", string_match_no.present)
-    suite = testing.test_equal(suite, "перевод String: смещение no", string_match_no.offset, 104)
+    suite = testing.test_equal(suite, "перевод String: смещение no", string_match_no.offset, 108)
 
     @string_contains = state.State {}
     string_contains = emit.emit_string_contains(string_contains)
@@ -447,22 +509,23 @@ skill run(suite) {
     @string_contains_bytes = [
         19, 117, 133, 255, 147, 245, 133, 255,
         131, 34, 197, 0, 3, 163, 197, 0,
-        99, 4, 3, 4, 99, 230, 98, 4,
+        99, 4, 3, 4, 99, 232, 98, 4,
         179, 131, 98, 64, 147, 131, 19, 0,
-        19, 14, 0, 0, 99, 14, 126, 2,
+        19, 14, 0, 0, 99, 0, 126, 4,
         147, 14, 0, 0, 99, 134, 110, 2,
         51, 15, 222, 1, 51, 15, 229, 1,
         3, 79, 15, 1, 179, 143, 213, 1,
         131, 207, 15, 1, 99, 22, 255, 1,
         147, 142, 30, 0, 111, 240, 31, 254,
         19, 14, 30, 0, 111, 240, 31, 253,
-        19, 5, 144, 0, 103, 128, 0, 0,
-        19, 5, 16, 0, 103, 128, 0, 0,
+        19, 5, 144, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 5, 16, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод rt_string_contains: длина", string_contains.machine.code.length, 104)
+    suite = testing.test_equal(suite, "перевод rt_string_contains: длина", string_contains.machine.code.length, 112)
     suite = testing.test_equal(suite, "перевод rt_string_contains: семь переходов", string_contains.machine.patch_count, 7)
     @string_contains_index = 0
-    drum (104) {
+    drum (112) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_string_contains: байт ", seed.num.text(string_contains_index)), codec.byte_at(string_contains.machine.code, string_contains_index), seed.group.item(string_contains_bytes, string_contains_index))
         string_contains_index = string_contains_index + 1
     }
@@ -483,14 +546,14 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_string_contains: ветка yes существует", string_contains_yes.present)
     suite = testing.test_equal(suite, "перевод rt_string_contains: смещение yes", string_contains_yes.offset, 88)
     suite = testing.test_yes(suite, "перевод rt_string_contains: ветка no существует", string_contains_no.present)
-    suite = testing.test_equal(suite, "перевод rt_string_contains: смещение no", string_contains_no.offset, 96)
+    suite = testing.test_equal(suite, "перевод rt_string_contains: смещение no", string_contains_no.offset, 100)
 
     @line_count = state.State {}
     line_count = emit.emit_line_count(line_count)
     line_count.machine = layout.resolve(line_count.machine)
     @line_count_bytes = [
         19, 117, 133, 255, 131, 34, 197, 0,
-        99, 132, 2, 4, 19, 3, 0, 0,
+        99, 134, 2, 4, 19, 3, 0, 0,
         147, 3, 0, 0, 99, 128, 83, 2,
         51, 14, 117, 0, 131, 78, 14, 1,
         19, 15, 160, 0, 99, 148, 238, 1,
@@ -498,13 +561,14 @@ skill run(suite) {
         111, 240, 95, 254, 51, 14, 85, 0,
         131, 78, 254, 0, 19, 15, 160, 0,
         99, 132, 238, 1, 19, 3, 19, 0,
-        19, 21, 51, 0, 103, 128, 0, 0,
-        19, 5, 0, 0, 103, 128, 0, 0,
+        19, 21, 51, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 5, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод rt_line_count: длина", line_count.machine.code.length, 88)
+    suite = testing.test_equal(suite, "перевод rt_line_count: длина", line_count.machine.code.length, 96)
     suite = testing.test_equal(suite, "перевод rt_line_count: пять переходов", line_count.machine.patch_count, 5)
     @line_count_index = 0
-    drum (88) {
+    drum (96) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_line_count: байт ", seed.num.text(line_count_index)), codec.byte_at(line_count.machine.code, line_count_index), seed.group.item(line_count_bytes, line_count_index))
         line_count_index = line_count_index + 1
     }
@@ -525,7 +589,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_line_count: кодирование существует", line_encode.present)
     suite = testing.test_equal(suite, "перевод rt_line_count: смещение кодирования", line_encode.offset, 72)
     suite = testing.test_yes(suite, "перевод rt_line_count: пустая строка существует", line_empty.present)
-    suite = testing.test_equal(suite, "перевод rt_line_count: смещение пустой строки", line_empty.offset, 80)
+    suite = testing.test_equal(suite, "перевод rt_line_count: смещение пустой строки", line_empty.offset, 84)
 
     @platform = state.State {}
     platform = emit.emit_platform_write(platform)
@@ -535,16 +599,17 @@ skill run(suite) {
     platform.machine = layout.resolve(platform.machine)
     @platform_bytes = [
         147, 8, 0, 4, 115, 0, 0, 0,
-        103, 128, 0, 0, 147, 8, 208, 5,
-        115, 0, 0, 0, 115, 0, 80, 16,
-        19, 5, 32, 0, 103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        147, 8, 208, 5, 115, 0, 0, 0,
+        115, 0, 80, 16, 19, 5, 32, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
         15, 0, 48, 3, 19, 5, 32, 0,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод платформы и CPU: длина", platform.machine.code.length, 44)
+    suite = testing.test_equal(suite, "перевод платформы и CPU: длина", platform.machine.code.length, 56)
     suite = testing.test_equal(suite, "перевод платформы и CPU: переходов нет", platform.machine.patch_count, 0)
     @platform_index = 0
-    drum (44) {
+    drum (56) {
         suite = testing.test_equal(suite, seed.str.add("перевод платформы и CPU: байт ", seed.num.text(platform_index)), codec.byte_at(platform.machine.code, platform_index), seed.group.item(platform_bytes, platform_index))
         platform_index = platform_index + 1
     }
@@ -555,11 +620,11 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_platform_write: метка существует", platform_write.present)
     suite = testing.test_equal(suite, "перевод rt_platform_write: смещение", platform_write.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_platform_exit: метка существует", platform_exit.present)
-    suite = testing.test_equal(suite, "перевод rt_platform_exit: смещение", platform_exit.offset, 12)
+    suite = testing.test_equal(suite, "перевод rt_platform_exit: смещение", platform_exit.offset, 16)
     suite = testing.test_yes(suite, "перевод rt_cpu_wait: метка существует", cpu_wait.present)
-    suite = testing.test_equal(suite, "перевод rt_cpu_wait: смещение", cpu_wait.offset, 20)
+    suite = testing.test_equal(suite, "перевод rt_cpu_wait: смещение", cpu_wait.offset, 24)
     suite = testing.test_yes(suite, "перевод rt_cpu_fence: метка существует", cpu_fence.present)
-    suite = testing.test_equal(suite, "перевод rt_cpu_fence: смещение", cpu_fence.offset, 32)
+    suite = testing.test_equal(suite, "перевод rt_cpu_fence: смещение", cpu_fence.offset, 40)
 
     @file_write = state.State {}
     file_write = emit.emit_file_write(file_write)
@@ -571,21 +636,22 @@ skill run(suite) {
         147, 133, 2, 1, 19, 5, 192, 249,
         19, 6, 16, 36, 147, 6, 64, 26,
         147, 8, 128, 3, 115, 0, 0, 0,
-        99, 64, 5, 4, 35, 42, 161, 0,
+        99, 66, 5, 4, 35, 42, 161, 0,
         131, 34, 129, 1, 147, 242, 130, 255,
         3, 166, 194, 0, 147, 133, 2, 1,
         3, 37, 65, 1, 147, 8, 0, 4,
         115, 0, 0, 0, 3, 37, 65, 1,
         147, 8, 144, 3, 115, 0, 0, 0,
         19, 5, 32, 0, 131, 32, 193, 1,
-        19, 1, 1, 2, 103, 128, 0, 0,
-        19, 5, 112, 2, 131, 32, 193, 1,
+        19, 1, 1, 2, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 5, 0, 0,
+        147, 5, 64, 0, 131, 32, 193, 1,
         19, 1, 1, 2, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод rt_file_write и ошибки: длина", file_write.machine.code.length, 120)
+    suite = testing.test_equal(suite, "перевод rt_file_write и ошибки: длина", file_write.machine.code.length, 128)
     suite = testing.test_equal(suite, "перевод rt_file_write и ошибки: один переход", file_write.machine.patch_count, 1)
     @file_write_index = 0
-    drum (120) {
+    drum (128) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_file_write и ошибки: байт ", seed.num.text(file_write_index)), codec.byte_at(file_write.machine.code, file_write_index), seed.group.item(file_write_bytes, file_write_index))
         file_write_index = file_write_index + 1
     }
@@ -594,7 +660,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_file_write: метка существует", file_write_label.present)
     suite = testing.test_equal(suite, "перевод rt_file_write: смещение", file_write_label.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_file_error: метка существует", file_error.present)
-    suite = testing.test_equal(suite, "перевод rt_file_error: смещение", file_error.offset, 104)
+    suite = testing.test_equal(suite, "перевод rt_file_error: смещение", file_error.offset, 108)
 
     @runtime_links = state.State {}
     runtime_links = emit.emit_newline(runtime_links)
@@ -605,19 +671,20 @@ skill run(suite) {
     runtime_links.machine = layout.resolve(runtime_links.machine)
     @runtime_link_bytes = [
         19, 5, 16, 0, 151, 5, 0, 0,
-        147, 133, 69, 4, 19, 6, 16, 0,
+        147, 133, 197, 4, 19, 6, 16, 0,
         19, 1, 1, 255, 35, 38, 17, 0,
-        151, 0, 0, 0, 231, 128, 192, 1,
+        151, 0, 0, 0, 231, 128, 0, 2,
         131, 32, 193, 0, 19, 1, 1, 1,
-        103, 128, 0, 0, 19, 5, 0, 4,
-        111, 0, 0, 1, 147, 8, 0, 4,
-        115, 0, 0, 0, 103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        19, 5, 0, 4, 111, 0, 64, 1,
+        147, 8, 0, 4, 115, 0, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
         147, 8, 208, 5, 115, 0, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод newline и missing args: длина", runtime_links.machine.code.length, 72)
+    suite = testing.test_equal(suite, "перевод newline и missing args: длина", runtime_links.machine.code.length, 80)
     suite = testing.test_equal(suite, "перевод newline и missing args: пять переходов", runtime_links.machine.patch_count, 5)
     @runtime_link_index = 0
-    drum (72) {
+    drum (80) {
         suite = testing.test_equal(suite, seed.str.add("перевод newline и missing args: байт ", seed.num.text(runtime_link_index)), codec.byte_at(runtime_links.machine.code, runtime_link_index), seed.group.item(runtime_link_bytes, runtime_link_index))
         runtime_link_index = runtime_link_index + 1
     }
@@ -629,11 +696,11 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_newline: метка существует", newline.present)
     suite = testing.test_equal(suite, "перевод rt_newline: смещение", newline.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_missing_args: метка существует", missing_args.present)
-    suite = testing.test_equal(suite, "перевод rt_missing_args: смещение", missing_args.offset, 44)
+    suite = testing.test_equal(suite, "перевод rt_missing_args: смещение", missing_args.offset, 48)
     suite = testing.test_yes(suite, "связанный rt_platform_write существует", linked_platform_write.present)
-    suite = testing.test_equal(suite, "связанный rt_platform_write: смещение", linked_platform_write.offset, 52)
+    suite = testing.test_equal(suite, "связанный rt_platform_write: смещение", linked_platform_write.offset, 56)
     suite = testing.test_yes(suite, "связанный rt_platform_exit существует", linked_platform_exit.present)
-    suite = testing.test_equal(suite, "связанный rt_platform_exit: смещение", linked_platform_exit.offset, 64)
+    suite = testing.test_equal(suite, "связанный rt_platform_exit: смещение", linked_platform_exit.offset, 72)
     suite = testing.test_yes(suite, "связанный rt_newline_text существует", newline_text.present)
     suite = testing.test_equal(suite, "связанный rt_newline_text: смещение в rodata", newline_text.offset, 0)
 
@@ -642,14 +709,15 @@ skill run(suite) {
     fixed_overflow = emit.emit_fixed_overflow(fixed_overflow)
     fixed_overflow.machine = layout.resolve(fixed_overflow.machine)
     @fixed_overflow_bytes = [
-        19, 5, 112, 3, 131, 32, 193, 0,
-        19, 1, 1, 1, 103, 128, 0, 0,
-        19, 5, 112, 3, 103, 128, 0, 0,
+        19, 5, 0, 0, 147, 5, 96, 0,
+        131, 32, 193, 0, 19, 1, 1, 1,
+        103, 128, 0, 0, 19, 5, 0, 0,
+        147, 5, 96, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод ошибок fixed: длина", fixed_overflow.machine.code.length, 24)
+    suite = testing.test_equal(suite, "перевод ошибок fixed: длина", fixed_overflow.machine.code.length, 32)
     suite = testing.test_equal(suite, "перевод ошибок fixed: переходов нет", fixed_overflow.machine.patch_count, 0)
     @fixed_overflow_index = 0
-    drum (24) {
+    drum (32) {
         suite = testing.test_equal(suite, seed.str.add("перевод ошибок fixed: байт ", seed.num.text(fixed_overflow_index)), codec.byte_at(fixed_overflow.machine.code, fixed_overflow_index), seed.group.item(fixed_overflow_bytes, fixed_overflow_index))
         fixed_overflow_index = fixed_overflow_index + 1
     }
@@ -658,7 +726,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_fixed_overflow_restore: метка существует", fixed_overflow_restore.present)
     suite = testing.test_equal(suite, "перевод rt_fixed_overflow_restore: смещение", fixed_overflow_restore.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_fixed_overflow: метка существует", fixed_overflow_label.present)
-    suite = testing.test_equal(suite, "перевод rt_fixed_overflow: смещение", fixed_overflow_label.offset, 16)
+    suite = testing.test_equal(suite, "перевод rt_fixed_overflow: смещение", fixed_overflow_label.offset, 20)
 
     @fixed_comparison = state.State {}
     fixed_comparison = emit.emit_fixed_equal(fixed_comparison)
@@ -668,33 +736,35 @@ skill run(suite) {
     fixed_comparison = emit.emit_less(fixed_comparison)
     fixed_comparison.machine = layout.resolve(fixed_comparison.machine)
     @fixed_comparison_bytes = [
-        99, 0, 181, 8, 111, 0, 64, 8,
+        99, 0, 181, 8, 111, 0, 128, 8,
         19, 14, 64, 0, 99, 6, 200, 1,
-        99, 106, 181, 8, 111, 0, 64, 7,
-        99, 70, 181, 8, 111, 0, 192, 6,
+        99, 96, 181, 10, 111, 0, 128, 7,
+        99, 76, 181, 8, 111, 0, 0, 7,
         51, 6, 5, 0, 51, 133, 5, 0,
         179, 5, 6, 0, 111, 240, 223, 253,
         99, 8, 181, 4, 147, 114, 117, 0,
-        19, 243, 117, 0, 99, 150, 98, 4,
-        147, 3, 48, 0, 99, 146, 114, 4,
+        19, 243, 117, 0, 99, 152, 98, 4,
+        147, 3, 48, 0, 99, 148, 114, 4,
         19, 117, 133, 255, 147, 245, 133, 255,
         131, 34, 197, 0, 3, 163, 197, 0,
-        99, 152, 98, 2, 147, 3, 0, 0,
+        99, 154, 98, 2, 147, 3, 0, 0,
         99, 128, 83, 2, 51, 14, 117, 0,
         179, 142, 117, 0, 3, 78, 14, 1,
-        131, 206, 14, 1, 99, 26, 222, 1,
+        131, 206, 14, 1, 99, 28, 222, 1,
         147, 131, 19, 0, 111, 240, 95, 254,
-        19, 5, 144, 0, 103, 128, 0, 0,
-        19, 5, 16, 0, 103, 128, 0, 0,
+        19, 5, 144, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 5, 16, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
         19, 85, 53, 64, 147, 213, 53, 64,
-        99, 70, 181, 0, 19, 5, 16, 0,
-        103, 128, 0, 0, 19, 5, 144, 0,
+        99, 72, 181, 0, 19, 5, 16, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        19, 5, 144, 0, 147, 5, 0, 0,
         103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод сравнений fixed: длина", fixed_comparison.machine.code.length, 172)
+    suite = testing.test_equal(suite, "перевод сравнений fixed: длина", fixed_comparison.machine.code.length, 188)
     suite = testing.test_equal(suite, "перевод сравнений fixed: шестнадцать переходов", fixed_comparison.machine.patch_count, 16)
     @fixed_comparison_index = 0
-    drum (172) {
+    drum (188) {
         suite = testing.test_equal(suite, seed.str.add("перевод сравнений fixed: байт ", seed.num.text(fixed_comparison_index)), codec.byte_at(fixed_comparison.machine.code, fixed_comparison_index), seed.group.item(fixed_comparison_bytes, fixed_comparison_index))
         fixed_comparison_index = fixed_comparison_index + 1
     }
@@ -723,11 +793,11 @@ skill run(suite) {
     suite = testing.test_yes(suite, "связанная ветка equal yes существует", linked_equal_yes.present)
     suite = testing.test_equal(suite, "связанная ветка equal yes: смещение", linked_equal_yes.offset, 128)
     suite = testing.test_yes(suite, "связанная ветка equal no существует", linked_equal_no.present)
-    suite = testing.test_equal(suite, "связанная ветка equal no: смещение", linked_equal_no.offset, 136)
+    suite = testing.test_equal(suite, "связанная ветка equal no: смещение", linked_equal_no.offset, 140)
     suite = testing.test_yes(suite, "связанный rt_less существует", linked_less.present)
-    suite = testing.test_equal(suite, "связанный rt_less: смещение", linked_less.offset, 144)
+    suite = testing.test_equal(suite, "связанный rt_less: смещение", linked_less.offset, 152)
     suite = testing.test_yes(suite, "связанная ветка less yes существует", linked_less_yes.present)
-    suite = testing.test_equal(suite, "связанная ветка less yes: смещение", linked_less_yes.offset, 164)
+    suite = testing.test_equal(suite, "связанная ветка less yes: смещение", linked_less_yes.offset, 176)
 
     @allocation = state.State {}
     allocation = emit.emit_alloc(allocation)
@@ -735,19 +805,20 @@ skill run(suite) {
     allocation = emit.emit_platform_exit(allocation)
     allocation.machine = layout.resolve(allocation.machine)
     @allocation_bytes = [
-        51, 3, 5, 0, 99, 102, 153, 2,
-        147, 2, 53, 1, 99, 226, 162, 2,
+        51, 3, 5, 0, 99, 104, 153, 2,
+        147, 2, 53, 1, 99, 228, 162, 2,
         147, 242, 130, 255, 179, 3, 153, 64,
-        99, 236, 83, 0, 19, 133, 4, 0,
+        99, 238, 83, 0, 19, 133, 4, 0,
         179, 132, 84, 0, 35, 34, 101, 0,
-        35, 36, 5, 0, 103, 128, 0, 0,
-        19, 5, 16, 4, 111, 0, 64, 0,
-        147, 8, 208, 5, 115, 0, 0, 0,
+        35, 36, 5, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 19, 5, 16, 4,
+        111, 0, 64, 0, 147, 8, 208, 5,
+        115, 0, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод rt_alloc: длина", allocation.machine.code.length, 64)
+    suite = testing.test_equal(suite, "перевод rt_alloc: длина", allocation.machine.code.length, 68)
     suite = testing.test_equal(suite, "перевод rt_alloc: четыре перехода", allocation.machine.patch_count, 4)
     @allocation_index = 0
-    drum (64) {
+    drum (68) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_alloc: байт ", seed.num.text(allocation_index)), codec.byte_at(allocation.machine.code, allocation_index), seed.group.item(allocation_bytes, allocation_index))
         allocation_index = allocation_index + 1
     }
@@ -757,26 +828,27 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_alloc: метка существует", alloc.present)
     suite = testing.test_equal(suite, "перевод rt_alloc: смещение", alloc.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_out_of_memory: метка существует", out_of_memory.present)
-    suite = testing.test_equal(suite, "перевод rt_out_of_memory: смещение", out_of_memory.offset, 48)
+    suite = testing.test_equal(suite, "перевод rt_out_of_memory: смещение", out_of_memory.offset, 52)
     suite = testing.test_yes(suite, "связанный rt_platform_exit для памяти существует", allocation_platform_exit.present)
-    suite = testing.test_equal(suite, "связанный rt_platform_exit для памяти: смещение", allocation_platform_exit.offset, 56)
+    suite = testing.test_equal(suite, "связанный rt_platform_exit для памяти: смещение", allocation_platform_exit.offset, 60)
 
     @fixed_new = state.State {}
     fixed_new = emit.emit_fixed_new(fixed_new)
     fixed_new.machine = layout.define_label(fixed_new.machine, layout.Section.CODE, "rt_fixed_overflow")
     fixed_new.machine = layout.resolve(fixed_new.machine)
     @fixed_new_bytes = [
-        147, 2, 16, 0, 99, 8, 88, 0,
-        147, 2, 32, 0, 99, 10, 88, 0,
-        103, 128, 0, 0, 147, 82, 133, 0,
-        99, 154, 2, 0, 103, 128, 0, 0,
-        147, 82, 5, 1, 99, 148, 2, 0,
-        103, 128, 0, 0,
+        147, 2, 16, 0, 99, 10, 88, 0,
+        147, 2, 32, 0, 99, 14, 88, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        147, 82, 133, 0, 99, 158, 2, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        147, 82, 5, 1, 99, 150, 2, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод rt_fixed_new: длина", fixed_new.machine.code.length, 44)
+    suite = testing.test_equal(suite, "перевод rt_fixed_new: длина", fixed_new.machine.code.length, 56)
     suite = testing.test_equal(suite, "перевод rt_fixed_new: четыре перехода", fixed_new.machine.patch_count, 4)
     @fixed_new_index = 0
-    drum (44) {
+    drum (56) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_fixed_new: байт ", seed.num.text(fixed_new_index)), codec.byte_at(fixed_new.machine.code, fixed_new_index), seed.group.item(fixed_new_bytes, fixed_new_index))
         fixed_new_index = fixed_new_index + 1
     }
@@ -787,11 +859,11 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_fixed_new: метка существует", fixed_new_label.present)
     suite = testing.test_equal(suite, "перевод rt_fixed_new: смещение", fixed_new_label.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_fixed_new: проверка u8 существует", fixed_check_u8.present)
-    suite = testing.test_equal(suite, "перевод rt_fixed_new: смещение проверки u8", fixed_check_u8.offset, 20)
+    suite = testing.test_equal(suite, "перевод rt_fixed_new: смещение проверки u8", fixed_check_u8.offset, 24)
     suite = testing.test_yes(suite, "перевод rt_fixed_new: проверка u16 существует", fixed_check_u16.present)
-    suite = testing.test_equal(suite, "перевод rt_fixed_new: смещение проверки u16", fixed_check_u16.offset, 32)
+    suite = testing.test_equal(suite, "перевод rt_fixed_new: смещение проверки u16", fixed_check_u16.offset, 40)
     suite = testing.test_yes(suite, "связанный fixed overflow существует", fixed_new_overflow.present)
-    suite = testing.test_equal(suite, "связанный fixed overflow: смещение", fixed_new_overflow.offset, 44)
+    suite = testing.test_equal(suite, "связанный fixed overflow: смещение", fixed_new_overflow.offset, 56)
 
     @fixed_memory_load = state.State {}
     fixed_memory_load = emit.emit_fixed_mem_load8(fixed_memory_load)
@@ -803,16 +875,18 @@ skill run(suite) {
         19, 6, 16, 0, 111, 0, 0, 1,
         19, 6, 32, 0, 111, 0, 128, 0,
         19, 6, 48, 0, 179, 2, 181, 0,
-        19, 3, 16, 0, 99, 10, 102, 0,
-        19, 3, 32, 0, 99, 10, 102, 0,
-        3, 165, 2, 0, 103, 128, 0, 0,
-        3, 197, 2, 0, 103, 128, 0, 0,
-        3, 213, 2, 0, 103, 128, 0, 0,
+        19, 3, 16, 0, 99, 12, 102, 0,
+        19, 3, 32, 0, 99, 14, 102, 0,
+        3, 165, 2, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 3, 197, 2, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        3, 213, 2, 0, 147, 5, 0, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод загрузок fixed-памяти: длина", fixed_memory_load.machine.code.length, 64)
+    suite = testing.test_equal(suite, "перевод загрузок fixed-памяти: длина", fixed_memory_load.machine.code.length, 76)
     suite = testing.test_equal(suite, "перевод загрузок fixed-памяти: четыре перехода", fixed_memory_load.machine.patch_count, 4)
     @fixed_memory_load_index = 0
-    drum (64) {
+    drum (76) {
         suite = testing.test_equal(suite, seed.str.add("перевод загрузок fixed-памяти: байт ", seed.num.text(fixed_memory_load_index)), codec.byte_at(fixed_memory_load.machine.code, fixed_memory_load_index), seed.group.item(fixed_memory_load_bytes, fixed_memory_load_index))
         fixed_memory_load_index = fixed_memory_load_index + 1
     }
@@ -831,9 +905,9 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_fixed_mem_load: метка существует", fixed_mem_load.present)
     suite = testing.test_equal(suite, "перевод rt_fixed_mem_load: смещение", fixed_mem_load.offset, 20)
     suite = testing.test_yes(suite, "перевод fixed load8: тело существует", fixed_mem_load8_body.present)
-    suite = testing.test_equal(suite, "перевод fixed load8: смещение тела", fixed_mem_load8_body.offset, 48)
+    suite = testing.test_equal(suite, "перевод fixed load8: смещение тела", fixed_mem_load8_body.offset, 52)
     suite = testing.test_yes(suite, "перевод fixed load16: тело существует", fixed_mem_load16_body.present)
-    suite = testing.test_equal(suite, "перевод fixed load16: смещение тела", fixed_mem_load16_body.offset, 56)
+    suite = testing.test_equal(suite, "перевод fixed load16: смещение тела", fixed_mem_load16_body.offset, 64)
 
     @fixed_memory_store = state.State {}
     fixed_memory_store = emit.emit_fixed_mem_store8(fixed_memory_store)
@@ -850,12 +924,12 @@ skill run(suite) {
         35, 160, 194, 0, 111, 0, 0, 1,
         35, 128, 194, 0, 111, 0, 128, 0,
         35, 144, 194, 0, 19, 5, 32, 0,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод записей fixed-памяти: длина", fixed_memory_store.machine.code.length, 68)
+    suite = testing.test_equal(suite, "перевод записей fixed-памяти: длина", fixed_memory_store.machine.code.length, 72)
     suite = testing.test_equal(suite, "перевод записей fixed-памяти: шесть переходов", fixed_memory_store.machine.patch_count, 6)
     @fixed_memory_store_index = 0
-    drum (68) {
+    drum (72) {
         suite = testing.test_equal(suite, seed.str.add("перевод записей fixed-памяти: байт ", seed.num.text(fixed_memory_store_index)), codec.byte_at(fixed_memory_store.machine.code, fixed_memory_store_index), seed.group.item(fixed_memory_store_bytes, fixed_memory_store_index))
         fixed_memory_store_index = fixed_memory_store_index + 1
     }
@@ -893,26 +967,28 @@ skill run(suite) {
         147, 147, 3, 1, 147, 211, 3, 1,
         147, 213, 53, 64, 179, 98, 115, 0,
         179, 130, 178, 0, 3, 197, 2, 0,
-        19, 21, 53, 0, 103, 128, 0, 0,
-        147, 114, 133, 255, 3, 163, 2, 1,
-        131, 163, 66, 1, 19, 83, 51, 64,
-        147, 211, 51, 64, 19, 19, 3, 1,
-        147, 147, 3, 1, 147, 211, 3, 1,
-        147, 213, 53, 64, 179, 98, 115, 0,
-        179, 130, 178, 0, 3, 213, 2, 0,
-        19, 21, 53, 0, 103, 128, 0, 0,
+        19, 21, 53, 0, 147, 5, 0, 0,
+        103, 128, 0, 0, 147, 114, 133, 255,
+        3, 163, 2, 1, 131, 163, 66, 1,
+        19, 83, 51, 64, 147, 211, 51, 64,
+        19, 19, 3, 1, 147, 147, 3, 1,
+        147, 211, 3, 1, 147, 213, 53, 64,
+        179, 98, 115, 0, 179, 130, 178, 0,
+        3, 213, 2, 0, 19, 21, 53, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
         147, 114, 133, 255, 3, 163, 2, 1,
         131, 163, 66, 1, 19, 83, 51, 64,
         147, 211, 51, 64, 19, 19, 3, 1,
         147, 147, 3, 1, 147, 211, 3, 1,
         147, 213, 53, 64, 179, 98, 115, 0,
         179, 130, 178, 0, 3, 165, 2, 0,
-        19, 21, 53, 0, 103, 128, 0, 0,
+        19, 21, 53, 0, 147, 5, 0, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод загрузок памяти: длина", memory_load.machine.code.length, 168)
+    suite = testing.test_equal(suite, "перевод загрузок памяти: длина", memory_load.machine.code.length, 180)
     suite = testing.test_equal(suite, "перевод загрузок памяти: нет переходов", memory_load.machine.patch_count, 0)
     @memory_load_index = 0
-    drum (168) {
+    drum (180) {
         suite = testing.test_equal(suite, seed.str.add("перевод загрузок памяти: байт ", seed.num.text(memory_load_index)), codec.byte_at(memory_load.machine.code, memory_load_index), seed.group.item(memory_load_bytes, memory_load_index))
         memory_load_index = memory_load_index + 1
     }
@@ -922,9 +998,9 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_mem_load8: метка существует", mem_load8.present)
     suite = testing.test_equal(suite, "перевод rt_mem_load8: смещение", mem_load8.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_mem_load16: метка существует", mem_load16.present)
-    suite = testing.test_equal(suite, "перевод rt_mem_load16: смещение", mem_load16.offset, 56)
+    suite = testing.test_equal(suite, "перевод rt_mem_load16: смещение", mem_load16.offset, 60)
     suite = testing.test_yes(suite, "перевод rt_mem_load32: метка существует", mem_load32.present)
-    suite = testing.test_equal(suite, "перевод rt_mem_load32: смещение", mem_load32.offset, 112)
+    suite = testing.test_equal(suite, "перевод rt_mem_load32: смещение", mem_load32.offset, 120)
 
     @memory_store = state.State {}
     memory_store = emit.emit_mem_store8(memory_store)
@@ -939,14 +1015,15 @@ skill run(suite) {
         147, 213, 53, 64, 19, 86, 54, 64,
         179, 98, 115, 0, 179, 130, 178, 0,
         35, 128, 194, 0, 19, 5, 32, 0,
-        103, 128, 0, 0, 147, 114, 133, 255,
-        3, 163, 2, 1, 131, 163, 66, 1,
-        19, 83, 51, 64, 147, 211, 51, 64,
-        19, 19, 3, 1, 147, 147, 3, 1,
-        147, 211, 3, 1, 147, 213, 53, 64,
-        19, 86, 54, 64, 179, 98, 115, 0,
-        179, 130, 178, 0, 35, 144, 194, 0,
-        19, 5, 32, 0, 103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
+        147, 114, 133, 255, 3, 163, 2, 1,
+        131, 163, 66, 1, 19, 83, 51, 64,
+        147, 211, 51, 64, 19, 19, 3, 1,
+        147, 147, 3, 1, 147, 211, 3, 1,
+        147, 213, 53, 64, 19, 86, 54, 64,
+        179, 98, 115, 0, 179, 130, 178, 0,
+        35, 144, 194, 0, 19, 5, 32, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
         147, 114, 133, 255, 3, 163, 2, 1,
         131, 163, 66, 1, 19, 83, 51, 64,
         147, 211, 51, 64, 19, 19, 3, 1,
@@ -954,12 +1031,12 @@ skill run(suite) {
         147, 213, 53, 64, 19, 86, 54, 64,
         179, 98, 115, 0, 179, 130, 178, 0,
         35, 160, 194, 0, 19, 5, 32, 0,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод записей памяти: длина", memory_store.machine.code.length, 180)
+    suite = testing.test_equal(suite, "перевод записей памяти: длина", memory_store.machine.code.length, 192)
     suite = testing.test_equal(suite, "перевод записей памяти: нет переходов", memory_store.machine.patch_count, 0)
     @memory_store_index = 0
-    drum (180) {
+    drum (192) {
         suite = testing.test_equal(suite, seed.str.add("перевод записей памяти: байт ", seed.num.text(memory_store_index)), codec.byte_at(memory_store.machine.code, memory_store_index), seed.group.item(memory_store_bytes, memory_store_index))
         memory_store_index = memory_store_index + 1
     }
@@ -969,9 +1046,9 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_mem_store8: метка существует", mem_store8.present)
     suite = testing.test_equal(suite, "перевод rt_mem_store8: смещение", mem_store8.offset, 0)
     suite = testing.test_yes(suite, "перевод rt_mem_store16: метка существует", mem_store16.present)
-    suite = testing.test_equal(suite, "перевод rt_mem_store16: смещение", mem_store16.offset, 60)
+    suite = testing.test_equal(suite, "перевод rt_mem_store16: смещение", mem_store16.offset, 64)
     suite = testing.test_yes(suite, "перевод rt_mem_store32: метка существует", mem_store32.present)
-    suite = testing.test_equal(suite, "перевод rt_mem_store32: смещение", mem_store32.offset, 120)
+    suite = testing.test_equal(suite, "перевод rt_mem_store32: смещение", mem_store32.offset, 128)
 
     @memory_store_address = state.State {}
     memory_store_address = emit.emit_mem_store_address32(memory_store_address)
@@ -988,12 +1065,12 @@ skill run(suite) {
         19, 19, 3, 1, 147, 147, 3, 1,
         147, 211, 3, 1, 51, 110, 115, 0,
         35, 160, 194, 1, 19, 5, 32, 0,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод записи адреса памяти: длина", memory_store_address.machine.code.length, 92)
+    suite = testing.test_equal(suite, "перевод записи адреса памяти: длина", memory_store_address.machine.code.length, 96)
     suite = testing.test_equal(suite, "перевод записи адреса памяти: нет переходов", memory_store_address.machine.patch_count, 0)
     @memory_store_address_index = 0
-    drum (92) {
+    drum (96) {
         suite = testing.test_equal(suite, seed.str.add("перевод записи адреса памяти: байт ", seed.num.text(memory_store_address_index)), codec.byte_at(memory_store_address.machine.code, memory_store_address_index), seed.group.item(memory_store_address_bytes, memory_store_address_index))
         memory_store_address_index = memory_store_address_index + 1
     }
@@ -1025,7 +1102,7 @@ skill run(suite) {
         227, 152, 2, 250, 179, 14, 126, 0,
         35, 44, 193, 3, 35, 42, 113, 2,
         35, 40, 209, 3, 19, 133, 94, 0,
-        151, 0, 0, 0, 231, 128, 64, 7,
+        151, 0, 0, 0, 231, 128, 128, 7,
         3, 46, 129, 3, 131, 35, 65, 3,
         131, 46, 1, 3, 19, 15, 16, 0,
         35, 32, 229, 1, 35, 38, 213, 1,
@@ -1037,14 +1114,14 @@ skill run(suite) {
         35, 136, 246, 1, 19, 15, 31, 0,
         111, 240, 95, 254, 179, 6, 213, 1,
         35, 136, 6, 0, 19, 101, 53, 0,
-        151, 0, 0, 0, 231, 128, 64, 1,
+        151, 0, 0, 0, 231, 128, 128, 1,
         131, 32, 193, 3, 19, 1, 1, 4,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод fixed show: длина", fixed_show.machine.code.length, 260)
+    suite = testing.test_equal(suite, "перевод fixed show: длина", fixed_show.machine.code.length, 264)
     suite = testing.test_equal(suite, "перевод fixed show: двенадцать переходов", fixed_show.machine.patch_count, 12)
     @fixed_show_index = 0
-    drum (260) {
+    drum (264) {
         suite = testing.test_equal(suite, seed.str.add("перевод fixed show: байт ", seed.num.text(fixed_show_index)), codec.byte_at(fixed_show.machine.code, fixed_show_index), seed.group.item(fixed_show_bytes, fixed_show_index))
         fixed_show_index = fixed_show_index + 1
     }
@@ -1072,9 +1149,9 @@ skill run(suite) {
     suite = testing.test_yes(suite, "fixed show: завершение существует", fixed_text_done.present)
     suite = testing.test_equal(suite, "fixed show: смещение завершения", fixed_text_done.offset, 228)
     suite = testing.test_yes(suite, "fixed show: связанный alloc существует", fixed_show_alloc.present)
-    suite = testing.test_equal(suite, "fixed show: смещение alloc", fixed_show_alloc.offset, 260)
+    suite = testing.test_equal(suite, "fixed show: смещение alloc", fixed_show_alloc.offset, 264)
     suite = testing.test_yes(suite, "fixed show: связанный show существует", fixed_show_show.present)
-    suite = testing.test_equal(suite, "fixed show: смещение show", fixed_show_show.offset, 260)
+    suite = testing.test_equal(suite, "fixed show: смещение show", fixed_show_show.offset, 264)
 
     @group_add = state.State {}
     group_add = emit.emit_group_add(group_add)
@@ -1085,7 +1162,7 @@ skill run(suite) {
         35, 36, 161, 0, 35, 34, 177, 0,
         147, 114, 133, 255, 3, 163, 194, 0,
         19, 5, 35, 0, 19, 21, 37, 0,
-        151, 0, 0, 0, 231, 128, 128, 6,
+        151, 0, 0, 0, 231, 128, 192, 6,
         131, 34, 129, 0, 147, 242, 130, 255,
         3, 163, 194, 0, 147, 3, 19, 0,
         19, 14, 32, 0, 35, 32, 197, 1,
@@ -1097,12 +1174,13 @@ skill run(suite) {
         19, 30, 35, 0, 51, 14, 197, 1,
         131, 46, 65, 0, 35, 40, 222, 1,
         19, 101, 69, 0, 131, 32, 193, 0,
-        19, 1, 1, 1, 103, 128, 0, 0,
+        19, 1, 1, 1, 147, 5, 0, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод group add: длина", group_add.machine.code.length, 136)
+    suite = testing.test_equal(suite, "перевод group add: длина", group_add.machine.code.length, 140)
     suite = testing.test_equal(suite, "перевод group add: четыре перехода", group_add.machine.patch_count, 4)
     @group_add_index = 0
-    drum (136) {
+    drum (140) {
         suite = testing.test_equal(suite, seed.str.add("перевод group add: байт ", seed.num.text(group_add_index)), codec.byte_at(group_add.machine.code, group_add_index), seed.group.item(group_add_bytes, group_add_index))
         group_add_index = group_add_index + 1
     }
@@ -1117,7 +1195,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "group add: завершение существует", group_copy_done.present)
     suite = testing.test_equal(suite, "group add: смещение завершения", group_copy_done.offset, 104)
     suite = testing.test_yes(suite, "group add: связанный alloc существует", group_add_alloc.present)
-    suite = testing.test_equal(suite, "group add: смещение alloc", group_add_alloc.offset, 136)
+    suite = testing.test_equal(suite, "group add: смещение alloc", group_add_alloc.offset, 140)
 
     @cstring = state.State {}
     cstring = emit.emit_cstring(cstring)
@@ -1130,7 +1208,7 @@ skill run(suite) {
         99, 136, 3, 0, 147, 130, 18, 0,
         19, 3, 19, 0, 111, 240, 31, 255,
         35, 34, 97, 0, 19, 5, 83, 0,
-        151, 0, 0, 0, 231, 128, 192, 4,
+        151, 0, 0, 0, 231, 128, 0, 5,
         3, 35, 65, 0, 147, 3, 16, 0,
         35, 32, 117, 0, 35, 38, 101, 0,
         131, 34, 129, 0, 147, 3, 0, 0,
@@ -1139,12 +1217,12 @@ skill run(suite) {
         35, 8, 222, 1, 147, 131, 19, 0,
         111, 240, 159, 254, 19, 101, 53, 0,
         131, 32, 193, 0, 19, 1, 1, 1,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод cstring: длина", cstring.machine.code.length, 124)
+    suite = testing.test_equal(suite, "перевод cstring: длина", cstring.machine.code.length, 128)
     suite = testing.test_equal(suite, "перевод cstring: шесть переходов", cstring.machine.patch_count, 6)
     @cstring_index = 0
-    drum (124) {
+    drum (128) {
         suite = testing.test_equal(suite, seed.str.add("перевод cstring: байт ", seed.num.text(cstring_index)), codec.byte_at(cstring.machine.code, cstring_index), seed.group.item(cstring_bytes, cstring_index))
         cstring_index = cstring_index + 1
     }
@@ -1165,7 +1243,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "cstring: завершение существует", cstring_done.present)
     suite = testing.test_equal(suite, "cstring: смещение завершения", cstring_done.offset, 108)
     suite = testing.test_yes(suite, "cstring: связанный alloc существует", cstring_rt_alloc.present)
-    suite = testing.test_equal(suite, "cstring: смещение alloc", cstring_rt_alloc.offset, 124)
+    suite = testing.test_equal(suite, "cstring: смещение alloc", cstring_rt_alloc.offset, 128)
 
     @string_add = state.State {}
     string_add = emit.emit_string_add(string_add)
@@ -1179,7 +1257,7 @@ skill run(suite) {
         35, 40, 113, 0, 35, 38, 193, 1,
         179, 142, 195, 1, 35, 36, 209, 1,
         19, 133, 94, 0, 151, 0, 0, 0,
-        231, 128, 64, 8, 131, 46, 129, 0,
+        231, 128, 128, 8, 131, 46, 129, 0,
         19, 15, 16, 0, 35, 32, 229, 1,
         35, 38, 213, 1, 19, 15, 0, 0,
         131, 34, 129, 1, 3, 35, 65, 1,
@@ -1194,12 +1272,13 @@ skill run(suite) {
         147, 143, 31, 0, 111, 240, 95, 254,
         51, 14, 229, 1, 35, 8, 14, 0,
         19, 101, 53, 0, 131, 32, 193, 1,
-        19, 1, 1, 2, 103, 128, 0, 0,
+        19, 1, 1, 2, 147, 5, 0, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод string add: длина", string_add.machine.code.length, 184)
+    suite = testing.test_equal(suite, "перевод string add: длина", string_add.machine.code.length, 188)
     suite = testing.test_equal(suite, "перевод string add: шесть переходов", string_add.machine.patch_count, 6)
     @string_add_index = 0
-    drum (184) {
+    drum (188) {
         suite = testing.test_equal(suite, seed.str.add("перевод string add: байт ", seed.num.text(string_add_index)), codec.byte_at(string_add.machine.code, string_add_index), seed.group.item(string_add_bytes, string_add_index))
         string_add_index = string_add_index + 1
     }
@@ -1220,7 +1299,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "string add: завершение существует", string_done.present)
     suite = testing.test_equal(suite, "string add: смещение завершения", string_done.offset, 160)
     suite = testing.test_yes(suite, "string add: связанный alloc существует", string_add_alloc.present)
-    suite = testing.test_equal(suite, "string add: смещение alloc", string_add_alloc.offset, 184)
+    suite = testing.test_equal(suite, "string add: смещение alloc", string_add_alloc.offset, 188)
 
     @string_at = state.State {}
     string_at = emit.emit_string_at(string_at)
@@ -1230,21 +1309,21 @@ skill run(suite) {
     @string_at_bytes = [
         19, 1, 1, 255, 35, 38, 17, 0,
         147, 114, 133, 255, 147, 213, 53, 64,
-        3, 163, 194, 0, 99, 244, 101, 4,
+        3, 163, 194, 0, 99, 246, 101, 4,
         179, 130, 178, 0, 3, 195, 2, 1,
         35, 36, 97, 0, 19, 5, 96, 0,
-        151, 0, 0, 0, 231, 128, 64, 3,
+        151, 0, 0, 0, 231, 128, 128, 3,
         147, 2, 16, 0, 35, 32, 85, 0,
         147, 2, 16, 0, 35, 38, 85, 0,
         3, 35, 129, 0, 35, 8, 101, 0,
         163, 8, 5, 0, 19, 101, 53, 0,
         131, 32, 193, 0, 19, 1, 1, 1,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод string at: длина", string_at.machine.code.length, 92)
+    suite = testing.test_equal(suite, "перевод string at: длина", string_at.machine.code.length, 96)
     suite = testing.test_equal(suite, "перевод string at: три перехода", string_at.machine.patch_count, 3)
     @string_at_index = 0
-    drum (92) {
+    drum (96) {
         suite = testing.test_equal(suite, seed.str.add("перевод string at: байт ", seed.num.text(string_at_index)), codec.byte_at(string_at.machine.code, string_at_index), seed.group.item(string_at_bytes, string_at_index))
         string_at_index = string_at_index + 1
     }
@@ -1254,9 +1333,9 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_string_at: метка существует", string_at_label.present)
     suite = testing.test_equal(suite, "перевод rt_string_at: смещение", string_at_label.offset, 0)
     suite = testing.test_yes(suite, "string at: связанный alloc существует", string_at_alloc.present)
-    suite = testing.test_equal(suite, "string at: смещение alloc", string_at_alloc.offset, 92)
+    suite = testing.test_equal(suite, "string at: смещение alloc", string_at_alloc.offset, 96)
     suite = testing.test_yes(suite, "string at: связанные границы существуют", string_at_bounds.present)
-    suite = testing.test_equal(suite, "string at: смещение границ", string_at_bounds.offset, 92)
+    suite = testing.test_equal(suite, "string at: смещение границ", string_at_bounds.offset, 96)
 
     @string_slice = state.State {}
     string_slice = emit.emit_string_slice(string_slice)
@@ -1267,11 +1346,11 @@ skill run(suite) {
         19, 1, 1, 254, 35, 46, 17, 0,
         147, 114, 133, 255, 147, 213, 53, 64,
         19, 86, 54, 64, 3, 163, 194, 0,
-        99, 108, 182, 6, 99, 106, 195, 6,
+        99, 110, 182, 6, 99, 108, 195, 6,
         179, 3, 182, 64, 35, 44, 81, 0,
         35, 42, 177, 0, 35, 40, 113, 0,
         19, 133, 83, 0, 151, 0, 0, 0,
-        231, 128, 192, 5, 131, 34, 129, 1,
+        231, 128, 0, 6, 131, 34, 129, 1,
         3, 35, 65, 1, 131, 35, 1, 1,
         19, 14, 16, 0, 35, 32, 197, 1,
         35, 38, 117, 0, 19, 14, 0, 0,
@@ -1281,12 +1360,13 @@ skill run(suite) {
         19, 14, 30, 0, 111, 240, 95, 254,
         179, 14, 117, 0, 35, 136, 14, 0,
         19, 101, 53, 0, 131, 32, 193, 1,
-        19, 1, 1, 2, 103, 128, 0, 0,
+        19, 1, 1, 2, 147, 5, 0, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод string slice: длина", string_slice.machine.code.length, 144)
+    suite = testing.test_equal(suite, "перевод string slice: длина", string_slice.machine.code.length, 148)
     suite = testing.test_equal(suite, "перевод string slice: шесть переходов", string_slice.machine.patch_count, 6)
     @string_slice_index = 0
-    drum (144) {
+    drum (148) {
         suite = testing.test_equal(suite, seed.str.add("перевод string slice: байт ", seed.num.text(string_slice_index)), codec.byte_at(string_slice.machine.code, string_slice_index), seed.group.item(string_slice_bytes, string_slice_index))
         string_slice_index = string_slice_index + 1
     }
@@ -1302,9 +1382,9 @@ skill run(suite) {
     suite = testing.test_yes(suite, "string slice: завершение существует", slice_done.present)
     suite = testing.test_equal(suite, "string slice: смещение завершения", slice_done.offset, 120)
     suite = testing.test_yes(suite, "string slice: связанный alloc существует", string_slice_alloc.present)
-    suite = testing.test_equal(suite, "string slice: смещение alloc", string_slice_alloc.offset, 144)
+    suite = testing.test_equal(suite, "string slice: смещение alloc", string_slice_alloc.offset, 148)
     suite = testing.test_yes(suite, "string slice: связанные границы существуют", string_slice_bounds.present)
-    suite = testing.test_equal(suite, "string slice: смещение границ", string_slice_bounds.offset, 144)
+    suite = testing.test_equal(suite, "string slice: смещение границ", string_slice_bounds.offset, 148)
 
     @string_case = state.State {}
     string_case = emit.emit_string_lower(string_case)
@@ -1319,7 +1399,7 @@ skill run(suite) {
         3, 163, 194, 0, 35, 44, 81, 0,
         35, 42, 97, 0, 35, 40, 177, 0,
         19, 5, 83, 0, 151, 0, 0, 0,
-        231, 128, 128, 8, 131, 34, 129, 1,
+        231, 128, 192, 8, 131, 34, 129, 1,
         3, 35, 65, 1, 131, 35, 1, 1,
         19, 14, 16, 0, 35, 32, 197, 1,
         35, 38, 101, 0, 19, 14, 0, 0,
@@ -1335,12 +1415,12 @@ skill run(suite) {
         111, 240, 159, 251, 179, 14, 101, 0,
         35, 136, 14, 0, 19, 101, 53, 0,
         131, 32, 193, 1, 19, 1, 1, 2,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод string case: длина", string_case.machine.code.length, 180)
+    suite = testing.test_equal(suite, "перевод string case: длина", string_case.machine.code.length, 184)
     suite = testing.test_equal(suite, "перевод string case: одиннадцать переходов", string_case.machine.patch_count, 11)
     @string_case_index = 0
-    drum (180) {
+    drum (184) {
         suite = testing.test_equal(suite, seed.str.add("перевод string case: байт ", seed.num.text(string_case_index)), codec.byte_at(string_case.machine.code, string_case_index), seed.group.item(string_case_bytes, string_case_index))
         string_case_index = string_case_index + 1
     }
@@ -1367,7 +1447,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "string case: завершение существует", case_done.present)
     suite = testing.test_equal(suite, "string case: смещение завершения", case_done.offset, 156)
     suite = testing.test_yes(suite, "string case: связанный alloc существует", string_case_alloc.present)
-    suite = testing.test_equal(suite, "string case: смещение alloc", string_case_alloc.offset, 180)
+    suite = testing.test_equal(suite, "string case: смещение alloc", string_case_alloc.offset, 184)
 
     @number_text = state.State {}
     number_text = emit.emit_number_text(number_text)
@@ -1391,7 +1471,7 @@ skill run(suite) {
         19, 14, 30, 0, 35, 36, 193, 3,
         35, 34, 97, 2, 35, 32, 113, 2,
         19, 5, 94, 0, 151, 0, 0, 0,
-        231, 128, 0, 7, 3, 46, 129, 2,
+        231, 128, 64, 7, 3, 46, 129, 2,
         3, 35, 65, 2, 131, 35, 1, 2,
         147, 14, 16, 0, 35, 32, 213, 1,
         35, 38, 197, 1, 147, 14, 0, 0,
@@ -1404,12 +1484,12 @@ skill run(suite) {
         111, 240, 95, 254, 51, 15, 213, 1,
         35, 8, 15, 0, 19, 101, 53, 0,
         131, 32, 193, 2, 19, 1, 1, 3,
-        103, 128, 0, 0,
+        147, 5, 0, 0, 103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод number text: длина", number_text.machine.code.length, 244)
+    suite = testing.test_equal(suite, "перевод number text: длина", number_text.machine.code.length, 248)
     suite = testing.test_equal(suite, "перевод number text: двенадцать переходов", number_text.machine.patch_count, 12)
     @number_text_index = 0
-    drum (244) {
+    drum (248) {
         suite = testing.test_equal(suite, seed.str.add("перевод number text: байт ", seed.num.text(number_text_index)), codec.byte_at(number_text.machine.code, number_text_index), seed.group.item(number_text_bytes, number_text_index))
         number_text_index = number_text_index + 1
     }
@@ -1445,7 +1525,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "number text: завершение существует", number_done.present)
     suite = testing.test_equal(suite, "number text: смещение завершения", number_done.offset, 220)
     suite = testing.test_yes(suite, "number text: связанный alloc существует", number_text_alloc.present)
-    suite = testing.test_equal(suite, "number text: смещение alloc", number_text_alloc.offset, 244)
+    suite = testing.test_equal(suite, "number text: смещение alloc", number_text_alloc.offset, 248)
 
     @file_read = state.State {}
     file_read = emit.emit_file_read(file_read)
@@ -1457,26 +1537,27 @@ skill run(suite) {
         147, 114, 133, 255, 147, 133, 2, 1,
         19, 5, 192, 249, 19, 6, 0, 0,
         147, 6, 0, 0, 147, 8, 128, 3,
-        115, 0, 0, 0, 99, 74, 5, 6,
+        115, 0, 0, 0, 99, 76, 5, 6,
         35, 44, 161, 0, 55, 5, 16, 0,
         19, 5, 85, 0, 151, 0, 0, 0,
-        231, 128, 64, 6, 147, 2, 16, 0,
+        231, 128, 128, 6, 147, 2, 16, 0,
         35, 32, 85, 0, 35, 42, 161, 0,
         3, 37, 129, 1, 131, 37, 65, 1,
         147, 133, 5, 1, 55, 6, 16, 0,
         19, 6, 6, 0, 147, 8, 240, 3,
-        115, 0, 0, 0, 99, 74, 5, 2,
+        115, 0, 0, 0, 99, 76, 5, 2,
         131, 34, 65, 1, 35, 166, 162, 0,
         51, 131, 162, 0, 35, 8, 3, 0,
         3, 37, 129, 1, 147, 8, 144, 3,
         115, 0, 0, 0, 3, 37, 65, 1,
         19, 101, 53, 0, 131, 32, 193, 1,
-        19, 1, 1, 2, 103, 128, 0, 0,
+        19, 1, 1, 2, 147, 5, 0, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод file read: длина", file_read.machine.code.length, 152)
+    suite = testing.test_equal(suite, "перевод file read: длина", file_read.machine.code.length, 156)
     suite = testing.test_equal(suite, "перевод file read: четыре перехода", file_read.machine.patch_count, 4)
     @file_read_index = 0
-    drum (152) {
+    drum (156) {
         suite = testing.test_equal(suite, seed.str.add("перевод file read: байт ", seed.num.text(file_read_index)), codec.byte_at(file_read.machine.code, file_read_index), seed.group.item(file_read_bytes, file_read_index))
         file_read_index = file_read_index + 1
     }
@@ -1486,9 +1567,9 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_file_read: метка существует", file_read_label.present)
     suite = testing.test_equal(suite, "перевод rt_file_read: смещение", file_read_label.offset, 0)
     suite = testing.test_yes(suite, "file read: связанный alloc существует", file_read_alloc.present)
-    suite = testing.test_equal(suite, "file read: смещение alloc", file_read_alloc.offset, 152)
+    suite = testing.test_equal(suite, "file read: смещение alloc", file_read_alloc.offset, 156)
     suite = testing.test_yes(suite, "file read: связанная ошибка существует", file_read_error.present)
-    suite = testing.test_equal(suite, "file read: смещение ошибки", file_read_error.offset, 152)
+    suite = testing.test_equal(suite, "file read: смещение ошибки", file_read_error.offset, 156)
 
     @file_write_byte_group = state.State {}
     file_write_byte_group = emit.emit_file_write_byte_group(file_write_byte_group)
@@ -1499,7 +1580,7 @@ skill run(suite) {
         35, 44, 161, 0, 35, 42, 177, 0,
         35, 40, 193, 0, 35, 38, 209, 0,
         99, 8, 6, 8, 19, 5, 86, 0,
-        151, 0, 0, 0, 231, 128, 128, 9,
+        151, 0, 0, 0, 231, 128, 192, 9,
         147, 2, 16, 0, 35, 32, 85, 0,
         3, 35, 1, 1, 35, 38, 101, 0,
         35, 36, 161, 0, 131, 34, 65, 1,
@@ -1517,12 +1598,13 @@ skill run(suite) {
         3, 38, 1, 1, 147, 8, 0, 4,
         115, 0, 0, 0, 111, 0, 128, 0,
         19, 5, 0, 0, 131, 32, 193, 1,
-        19, 1, 1, 2, 103, 128, 0, 0,
+        19, 1, 1, 2, 147, 5, 0, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод file write byte group: длина", file_write_byte_group.machine.code.length, 184)
+    suite = testing.test_equal(suite, "перевод file write byte group: длина", file_write_byte_group.machine.code.length, 188)
     suite = testing.test_equal(suite, "перевод file write byte group: семь переходов", file_write_byte_group.machine.patch_count, 7)
     @file_write_byte_group_index = 0
-    drum (184) {
+    drum (188) {
         suite = testing.test_equal(suite, seed.str.add("перевод file write byte group: байт ", seed.num.text(file_write_byte_group_index)), codec.byte_at(file_write_byte_group.machine.code, file_write_byte_group_index), seed.group.item(file_write_byte_group_bytes, file_write_byte_group_index))
         file_write_byte_group_index = file_write_byte_group_index + 1
     }
@@ -1546,7 +1628,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "file write byte group: возврат существует", file_write_byte_group_return.present)
     suite = testing.test_equal(suite, "file write byte group: смещение возврата", file_write_byte_group_return.offset, 172)
     suite = testing.test_yes(suite, "file write byte group: связанный alloc существует", file_write_byte_group_alloc.present)
-    suite = testing.test_equal(suite, "file write byte group: смещение alloc", file_write_byte_group_alloc.offset, 184)
+    suite = testing.test_equal(suite, "file write byte group: смещение alloc", file_write_byte_group_alloc.offset, 188)
 
     @fixed_add_sub = state.State {}
     fixed_add_sub = emit.emit_fixed_add(fixed_add_sub)
@@ -1828,38 +1910,39 @@ skill run(suite) {
     show.machine = layout.resolve(show.machine)
     @show_bytes = [
         147, 114, 117, 0, 19, 3, 48, 0,
-        99, 130, 98, 10, 19, 3, 0, 0,
+        99, 132, 98, 10, 19, 3, 0, 0,
         99, 130, 98, 2, 19, 3, 16, 0,
-        99, 128, 98, 4, 19, 3, 112, 0,
-        99, 128, 98, 6, 23, 5, 0, 0,
-        19, 5, 197, 11, 19, 101, 53, 0,
-        111, 0, 192, 7, 19, 1, 1, 255,
+        99, 130, 98, 4, 19, 3, 112, 0,
+        99, 130, 98, 6, 23, 5, 0, 0,
+        19, 5, 69, 12, 19, 101, 53, 0,
+        111, 0, 0, 8, 19, 1, 1, 255,
         35, 38, 17, 0, 151, 0, 0, 0,
-        231, 128, 0, 10, 151, 0, 0, 0,
+        231, 128, 128, 10, 151, 0, 0, 0,
         231, 128, 192, 251, 131, 32, 193, 0,
-        19, 1, 1, 1, 103, 128, 0, 0,
-        147, 2, 16, 0, 99, 10, 85, 0,
-        23, 5, 0, 0, 19, 5, 5, 8,
-        19, 101, 53, 0, 111, 0, 0, 4,
-        23, 5, 0, 0, 19, 5, 5, 7,
-        19, 101, 53, 0, 111, 0, 0, 3,
-        147, 82, 53, 0, 19, 3, 96, 0,
-        99, 154, 98, 0, 23, 5, 0, 0,
-        19, 5, 69, 5, 19, 101, 53, 0,
-        111, 0, 64, 1, 23, 5, 0, 0,
-        19, 5, 69, 4, 19, 101, 53, 0,
-        111, 0, 64, 0, 147, 114, 133, 255,
-        3, 166, 194, 0, 147, 133, 2, 1,
-        19, 5, 16, 0, 19, 1, 1, 255,
-        35, 38, 17, 0, 151, 0, 0, 0,
-        231, 128, 128, 1, 131, 32, 193, 0,
-        19, 1, 1, 1, 19, 5, 32, 0,
+        19, 1, 1, 1, 147, 5, 0, 0,
+        103, 128, 0, 0, 147, 2, 16, 0,
+        99, 10, 85, 0, 23, 5, 0, 0,
+        19, 5, 69, 8, 19, 101, 53, 0,
+        111, 0, 0, 4, 23, 5, 0, 0,
+        19, 5, 69, 7, 19, 101, 53, 0,
+        111, 0, 0, 3, 147, 82, 53, 0,
+        19, 3, 96, 0, 99, 154, 98, 0,
+        23, 5, 0, 0, 19, 5, 133, 5,
+        19, 101, 53, 0, 111, 0, 64, 1,
+        23, 5, 0, 0, 19, 5, 133, 4,
+        19, 101, 53, 0, 111, 0, 64, 0,
+        147, 114, 133, 255, 3, 166, 194, 0,
+        147, 133, 2, 1, 19, 5, 16, 0,
+        19, 1, 1, 255, 35, 38, 17, 0,
+        151, 0, 0, 0, 231, 128, 192, 1,
+        131, 32, 193, 0, 19, 1, 1, 1,
+        19, 5, 32, 0, 147, 5, 0, 0,
         103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод show: длина", show.machine.code.length, 220)
+    suite = testing.test_equal(suite, "перевод show: длина", show.machine.code.length, 228)
     suite = testing.test_equal(suite, "перевод show: двадцать семь переходов", show.machine.patch_count, 27)
     @show_index = 0
-    drum (220) {
+    drum (228) {
         suite = testing.test_equal(suite, seed.str.add("перевод show: байт ", seed.num.text(show_index)), codec.byte_at(show.machine.code, show_index), seed.group.item(show_bytes, show_index))
         show_index = show_index + 1
     }
@@ -1881,19 +1964,19 @@ skill run(suite) {
     suite = testing.test_yes(suite, "show: число существует", show_number.present)
     suite = testing.test_equal(suite, "show: смещение числа", show_number.offset, 52)
     suite = testing.test_yes(suite, "show: answer существует", show_answer.present)
-    suite = testing.test_equal(suite, "show: смещение answer", show_answer.offset, 88)
+    suite = testing.test_equal(suite, "show: смещение answer", show_answer.offset, 92)
     suite = testing.test_yes(suite, "show: no существует", show_no.present)
-    suite = testing.test_equal(suite, "show: смещение no", show_no.offset, 112)
+    suite = testing.test_equal(suite, "show: смещение no", show_no.offset, 116)
     suite = testing.test_yes(suite, "show: error существует", show_error.present)
-    suite = testing.test_equal(suite, "show: смещение error", show_error.offset, 128)
+    suite = testing.test_equal(suite, "show: смещение error", show_error.offset, 132)
     suite = testing.test_yes(suite, "show: неизвестная ошибка существует", show_error_unknown.present)
-    suite = testing.test_equal(suite, "show: смещение неизвестной ошибки", show_error_unknown.offset, 156)
+    suite = testing.test_equal(suite, "show: смещение неизвестной ошибки", show_error_unknown.offset, 160)
     suite = testing.test_yes(suite, "show: строка существует", show_string.present)
-    suite = testing.test_equal(suite, "show: смещение строки", show_string.offset, 172)
+    suite = testing.test_equal(suite, "show: смещение строки", show_string.offset, 176)
     suite = testing.test_yes(suite, "show: number text связан", show_number_text.present)
-    suite = testing.test_equal(suite, "show: смещение number text", show_number_text.offset, 220)
+    suite = testing.test_equal(suite, "show: смещение number text", show_number_text.offset, 228)
     suite = testing.test_yes(suite, "show: platform write связан", show_platform_write.present)
-    suite = testing.test_equal(suite, "show: смещение platform write", show_platform_write.offset, 220)
+    suite = testing.test_equal(suite, "show: смещение platform write", show_platform_write.offset, 228)
     suite = testing.test_yes(suite, "show: unknown text связан", show_unknown_text.present)
     suite = testing.test_equal(suite, "show: смещение unknown text в rodata", show_unknown_text.offset, 0)
     suite = testing.test_yes(suite, "show: yes text связан", show_yes_text.present)
@@ -1914,7 +1997,7 @@ skill run(suite) {
         147, 133, 2, 1, 19, 5, 192, 249,
         19, 6, 16, 36, 147, 6, 64, 26,
         147, 8, 128, 3, 115, 0, 0, 0,
-        99, 64, 5, 12, 35, 42, 161, 0,
+        99, 66, 5, 12, 35, 42, 161, 0,
         131, 34, 129, 1, 147, 242, 130, 255,
         3, 163, 194, 0, 35, 40, 81, 0,
         35, 38, 97, 0, 99, 4, 3, 8,
@@ -1922,8 +2005,8 @@ skill run(suite) {
         147, 14, 80, 0, 99, 2, 222, 3,
         3, 37, 65, 1, 131, 37, 129, 1,
         3, 38, 193, 0, 147, 6, 0, 0,
-        151, 0, 0, 0, 231, 128, 0, 8,
-        99, 76, 5, 6, 111, 0, 128, 5,
+        151, 0, 0, 0, 231, 128, 64, 8,
+        99, 78, 5, 6, 111, 0, 128, 5,
         35, 36, 1, 0, 131, 34, 129, 0,
         3, 35, 193, 0, 99, 132, 98, 4,
         147, 147, 34, 0, 3, 46, 1, 1,
@@ -1931,18 +2014,19 @@ skill run(suite) {
         19, 126, 142, 255, 131, 37, 78, 1,
         3, 38, 206, 1, 19, 86, 54, 64,
         3, 37, 65, 1, 147, 6, 16, 0,
-        151, 0, 0, 0, 231, 128, 128, 3,
-        99, 72, 5, 2, 131, 34, 129, 0,
+        151, 0, 0, 0, 231, 128, 192, 3,
+        99, 74, 5, 2, 131, 34, 129, 0,
         147, 130, 18, 0, 35, 36, 81, 0,
         111, 240, 95, 251, 3, 37, 65, 1,
         147, 8, 144, 3, 115, 0, 0, 0,
         19, 5, 32, 0, 131, 32, 193, 1,
-        19, 1, 1, 2, 103, 128, 0, 0,
+        19, 1, 1, 2, 147, 5, 0, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод file write bytes: длина", file_write_bytes_runtime.machine.code.length, 232)
+    suite = testing.test_equal(suite, "перевод file write bytes: длина", file_write_bytes_runtime.machine.code.length, 236)
     suite = testing.test_equal(suite, "перевод file write bytes: двенадцать переходов", file_write_bytes_runtime.machine.patch_count, 12)
     @file_write_bytes_runtime_index = 0
-    drum (232) {
+    drum (236) {
         suite = testing.test_equal(suite, seed.str.add("перевод file write bytes: байт ", seed.num.text(file_write_bytes_runtime_index)), codec.byte_at(file_write_bytes_runtime.machine.code, file_write_bytes_runtime_index), seed.group.item(file_write_bytes_runtime_bytes, file_write_bytes_runtime_index))
         file_write_bytes_runtime_index = file_write_bytes_runtime_index + 1
     }
@@ -1961,14 +2045,14 @@ skill run(suite) {
     suite = testing.test_yes(suite, "file write bytes: закрытие существует", file_write_bytes_close.present)
     suite = testing.test_equal(suite, "file write bytes: смещение закрытия", file_write_bytes_close.offset, 204)
     suite = testing.test_yes(suite, "file write bytes: file error связан", file_write_bytes_error.present)
-    suite = testing.test_equal(suite, "file write bytes: смещение file error", file_write_bytes_error.offset, 232)
+    suite = testing.test_equal(suite, "file write bytes: смещение file error", file_write_bytes_error.offset, 236)
     suite = testing.test_yes(suite, "file write bytes: byte group связан", file_write_bytes_group.present)
-    suite = testing.test_equal(suite, "file write bytes: смещение byte group", file_write_bytes_group.offset, 232)
+    suite = testing.test_equal(suite, "file write bytes: смещение byte group", file_write_bytes_group.offset, 236)
 
     @machine_start = state.State { entry = ["entry", ["first", "second"], ["block"]] }
     machine_start = state.header(machine_start)
     machine_start = state.start(machine_start)
-    suite = testing.test_equal(suite, "машинный _start: размер кода", machine_start.machine.code.length, 132)
+    suite = testing.test_equal(suite, "машинный _start: размер кода", machine_start.machine.code.length, 120)
     suite = testing.test_equal(suite, "машинный _start: число patches", machine_start.machine.patch_count, 15)
     @start_label = layout.find_label(machine_start.machine, "_start")
     suite = testing.test_yes(suite, "машинный _start: метка существует", start_label.present)
@@ -1976,12 +2060,13 @@ skill run(suite) {
     suite = testing.test_equal(suite, "машинный _start: lw opcode", codec.byte_at(machine_start.machine.code, 0), 3)
     suite = testing.test_equal(suite, "машинный _start: lw registers", codec.byte_at(machine_start.machine.code, 1), 37)
     suite = testing.test_equal(suite, "машинный _start: addi opcode", codec.byte_at(machine_start.machine.code, 4), 147)
-    suite = testing.test_equal(suite, "машинный _start: обязательные аргументы", codec.byte_at(machine_start.machine.code, 26), 48)
+    suite = testing.test_equal(suite, "машинный _start: argv сохранён в s3", codec.byte_at(machine_start.machine.code, 9), 137)
+    suite = testing.test_equal(suite, "машинный _start: обязательные аргументы", codec.byte_at(machine_start.machine.code, 30), 48)
     @start_args_ready = layout.find_label(machine_start.machine, ".L_start_args_ready")
     suite = testing.test_yes(suite, "машинный _start: метка готовых аргументов существует", start_args_ready.present)
-    suite = testing.test_equal(suite, "машинный _start: смещение готовых аргументов", start_args_ready.offset, 44)
-    suite = testing.test_equal(suite, "машинный _start: дальний переход начинается с auipc", codec.byte_at(machine_start.machine.code, 32), 23)
-    suite = testing.test_equal(suite, "машинный _start: дальний переход заканчивается jalr", codec.byte_at(machine_start.machine.code, 40), 103)
+    suite = testing.test_equal(suite, "машинный _start: смещение готовых аргументов", start_args_ready.offset, 48)
+    suite = testing.test_equal(suite, "машинный _start: дальний переход начинается с auipc", codec.byte_at(machine_start.machine.code, 36), 23)
+    suite = testing.test_equal(suite, "машинный _start: дальний переход заканчивается jalr", codec.byte_at(machine_start.machine.code, 44), 103)
     machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "rt_missing_args")
     machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "rt_cstring")
     machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "saltic_program")
@@ -1995,14 +2080,14 @@ skill run(suite) {
     @machine_function = state.State {}
     machine_function.machine = layout.host("saltic_sample")
     machine_function = codegen.compile_function(machine_function, "sample", ["first", "second"], ["block"], "", "")
-    suite = testing.test_equal(suite, "машинная функция: размер каркаса", machine_function.machine.code.length, 52)
+    suite = testing.test_equal(suite, "машинная функция: размер каркаса", machine_function.machine.code.length, 60)
     suite = testing.test_equal(suite, "машинная функция: один jump patch", machine_function.machine.patch_count, 1)
     @function_label = layout.find_label(machine_function.machine, "saltic_sample")
     @function_return = layout.find_label(machine_function.machine, ".L_sample_return_0")
     suite = testing.test_yes(suite, "машинная функция: метка существует", function_label.present)
     suite = testing.test_equal(suite, "машинная функция: начало", function_label.offset, 0)
     suite = testing.test_yes(suite, "машинная функция: return существует", function_return.present)
-    suite = testing.test_equal(suite, "машинная функция: return offset", function_return.offset, 32)
+    suite = testing.test_equal(suite, "машинная функция: return offset", function_return.offset, 40)
     suite = testing.test_equal(suite, "машинная функция: addi sp opcode", codec.byte_at(machine_function.machine.code, 0), 19)
     suite = testing.test_equal(suite, "машинная функция: frame immediate", codec.byte_at(machine_function.machine.code, 2), 1)
     machine_function.machine = layout.resolve(machine_function.machine)
@@ -2215,7 +2300,7 @@ skill run(suite) {
     @machine_rescue = state.State {}
     machine_rescue.current_function = state.Function { slots = [state.Symbol { name = "failure" kind = "slot" value = 0 - 12 }] }
     machine_rescue = codegen.compile_rescue(machine_rescue, ["rescue", ["number", 1], "failure", ["block"]])
-    suite = testing.test_equal(suite, "машинный rescue: размер", machine_rescue.machine.code.length, 24)
+    suite = testing.test_equal(suite, "машинный rescue: размер", machine_rescue.machine.code.length, 28)
     suite = testing.test_equal(suite, "машинный rescue: один branch", machine_rescue.machine.patch_count, 1)
     machine_rescue.machine = layout.resolve(machine_rescue.machine)
     suite = testing.test_yes(suite, "машинный rescue: ссылки разрешены", machine_rescue.machine.resolved)
@@ -2225,8 +2310,8 @@ skill run(suite) {
     machine_constant_flow = codegen.compile_constant(machine_constant_flow, machine_constant)
     machine_constant_flow.constants = [machine_constant]
     machine_constant_flow = constants.emit_storage(machine_constant_flow)
-    suite = testing.test_equal(suite, "машинная константа: полный getter", machine_constant_flow.machine.code.length, 112)
-    suite = testing.test_equal(suite, "машинная константа: переходы и data patches", machine_constant_flow.machine.patch_count, 12)
+    suite = testing.test_equal(suite, "машинная константа: полный getter", machine_constant_flow.machine.code.length, 144)
+    suite = testing.test_equal(suite, "машинная константа: переходы и data patches", machine_constant_flow.machine.patch_count, 15)
     machine_constant_flow.machine = layout.resolve(machine_constant_flow.machine)
     suite = testing.test_yes(suite, "машинная константа: переходы разрешены", machine_constant_flow.machine.resolved)
 

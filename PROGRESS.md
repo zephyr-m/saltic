@@ -167,4 +167,6 @@
 - [x] Memory ABI/data-layout/quota подтверждены полным прогоном: 5481 пройдено, 0 провалено.
 - [x] Bootstrap refresh: исправлено затирание знака и буфера цифр в `rt_number_text` при вызове `rt_alloc`; добавлена VM-проверка строки `-42`.
 - [x] Новый runtime подтверждён: 5503 пройдено, 0 провалено; bootstrap достиг fixed point и обновил `os/bootstrap/compiler.elf`.
-- [ ] Остаток контрольной точки 3: runtime ещё возвращает tagged `Error` в `a0`, хотя call ABI задаёт raw error id в `a1`.
+- [x] Остаток контрольной точки 3: runtime переведён на raw error id в `a1`; успешные возвраты обнуляют `a1`.
+- [x] `rescue` превращает raw id обратно в tagged `Error`; VM-проверки ABI подтверждены — 5780/0.
+- [x] `_start` сохраняет `argv` в `s3`; подтверждено 5785/0 и bootstrap fixed point, compiler hash `d326dc05485ca5514447c64408d4615b7ac46f0dc1fe2746f30aa2821351859c`.
