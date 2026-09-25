@@ -15,7 +15,6 @@ work="${SALTIC_BUILD_DIR:-.cache/build/bootstrap}"
 assembly_path="${3:-$work/program.s}"
 compiler="${SALTIC_BOOTSTRAP_COMPILER:-os/bootstrap/compiler.elf}"
 heap_bytes="${SALTIC_HEAP_BYTES:-536870912}"
-direct_only="${SALTIC_DIRECT_ONLY:-0}"
 compiler_output="$work/compiler-output"
 
 if [[ ! -f "$compiler" ]]; then
@@ -34,16 +33,10 @@ qemu-riscv32 -B 0x100000000 \
     "$compiler" "$source_path" "$compiler_output" "$heap_bytes"
 
 magic="$(od -An -tx1 -N4 "$compiler_output" | tr -d '[:space:]')"
-if [[ "$magic" == "7f454c46" ]]; then
-    mv "$compiler_output" "$output_path"
-    chmod +x "$output_path"
-    exit 0
-fi
-
-if [[ "$direct_only" == "1" ]]; then
+if [[ "$magic" != "7f454c46" ]]; then
     echo "bootstrap build: компилятор не создал прямой ELF" >&2
     exit 1
 fi
 
-mv "$compiler_output" "$assembly_path"
-bash os/bootstrap/link.sh "$assembly_path" "$output_path" "$work" "$heap_bytes"
+mv "$compiler_output" "$output_path"
+chmod +x "$output_path"

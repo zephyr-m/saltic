@@ -58,23 +58,15 @@ test_checker() {
 
 test_vm() {
     mkdir -p "$work/vm"
-    riscv32-none-elf-gcc \
-        -march=rv32i -mabi=ilp32 -mno-relax -nostdlib \
-        -Wl,--no-relax,-Ttext=0x10000,-e,_start \
-        tests/fixtures/vm-canonical.S \
-        -o "$work/vm/canonical.elf"
-    riscv32-none-elf-objcopy \
-        -O binary \
-        "$work/vm/canonical.elf" \
-        "$work/vm/canonical.bin"
-
+    SALTIC_HEAP_BYTES=65536 \
+    SALTIC_BUILD_DIR="$work/build/vm-guest" \
+    bash os/bootstrap/build.sh \
+        tests/vm-guest.saltic \
+        "$work/vm/guest.elf"
     build vm tests/vm.saltic "$work/vm/vm.elf" 536870912
     qemu-riscv32 -B 0x100000000 "$work/vm/vm.elf" \
-        "$work/vm/canonical.elf" \
-        "$work/vm/canonical.bin" \
-        tests/fixtures/input.txt \
+        "$work/vm/guest.elf" \
         "$work/vm/actual.txt"
-
     diff -u tests/expected/vm.txt "$work/vm/actual.txt"
     echo "VM: нативная проверка пройдена"
 }
@@ -146,6 +138,7 @@ test_json_rpc() {
 
 test_tracer() {
     mkdir -p "$work/tracer"
+    SALTIC_HEAP_BYTES=1048576 \
     SALTIC_BUILD_DIR="$work/build/tracer" \
     bash os/bootstrap/build.sh \
         tests/tracer.saltic \
@@ -271,13 +264,32 @@ test_bootstrap() {
         "$bootstrap_work/stage-3" \
         "$bootstrap_work/canonical"
 
-    echo "bootstrap: зафиксированный компилятор собирает toolchain"
+    local gnu_bin="$bootstrap_work/gnu-bin"
+    local gnu_log="$bootstrap_work/gnu.log"
+    local tool
+    local saved_path="$PATH"
+    mkdir -p "$gnu_bin"
+    : >"$gnu_log"
+    for tool in riscv32-none-elf-as riscv32-none-elf-gcc; do
+        printf '%s\n' \
+            '#!/bin/sh' \
+            "printf '%s\\n' '$tool' \"\$*\" >>'$gnu_log'" \
+            'exit 99' \
+            >"$gnu_bin/$tool"
+        chmod +x "$gnu_bin/$tool"
+    done
+    PATH="$gnu_bin:$saved_path"
+
+    echo "bootstrap: зафиксированный компилятор собирает прямой ELF stage-1"
     SALTIC_BUILD_DIR="$bootstrap_work/stage-1" \
     SALTIC_HEAP_BYTES="$heap_bytes" \
+    SALTIC_DIRECT_ONLY=1 \
     bash os/bootstrap/build.sh \
         soul/seed/toolchain.saltic \
         "$bootstrap_work/stage-1/toolchain.elf" \
         "$bootstrap_work/stage-1/toolchain.s"
+    test -x "$bootstrap_work/stage-1/toolchain.elf"
+    test ! -e "$bootstrap_work/stage-1/toolchain.s"
 
     echo "bootstrap: stage-1 создаёт прямой ELF stage-2"
     SALTIC_BOOTSTRAP_COMPILER="$bootstrap_work/stage-1/toolchain.elf" \
@@ -302,11 +314,17 @@ test_bootstrap() {
         "$bootstrap_work/stage-3/toolchain.s"
     test -x "$bootstrap_work/stage-3/toolchain.elf"
     test ! -e "$bootstrap_work/stage-3/toolchain.s"
+    PATH="$saved_path"
+
+    echo "bootstrap: три стадии не создали .s и не вызвали GNU as/gcc"
+    test ! -s "$gnu_log"
+    test -z "$(find "$bootstrap_work/stage-1" "$bootstrap_work/stage-2" "$bootstrap_work/stage-3" -name '*.s' -print)"
 
     echo "bootstrap: сравниваю прямые stage-2 и stage-3"
     cmp \
         "$bootstrap_work/stage-2/toolchain.elf" \
         "$bootstrap_work/stage-3/toolchain.elf"
+    echo "bootstrap: fixed point $(sha256sum "$bootstrap_work/stage-3/toolchain.elf" | awk '{print $1}')"
 
     echo "bootstrap: прямой toolchain компилирует канон"
     SALTIC_BOOTSTRAP_COMPILER="$bootstrap_work/stage-2/toolchain.elf" \
@@ -331,6 +349,78 @@ test_bootstrap() {
     echo "bootstrap: ok"
 }
 
+test_closure() {
+    local closure_work="$work/closure"
+    local deny_bin="$closure_work/deny-bin"
+    local deny_log="$closure_work/deny.log"
+    local tool
+    mkdir -p "$deny_bin"
+    : >"$deny_log"
+    for tool in riscv32-none-elf-as riscv32-none-elf-gcc node; do
+        printf '%s\n' \
+            '#!/bin/sh' \
+            "printf '%s\\n' '$tool' \"\$*\" >>'$deny_log'" \
+            'exit 99' \
+            >"$deny_bin/$tool"
+        chmod +x "$deny_bin/$tool"
+    done
+    PATH="$deny_bin:$PATH"
+    echo "closure: source → прямой ELF"
+    SALTIC_BUILD_DIR="$closure_work/build" \
+    SALTIC_HEAP_BYTES=67108864 \
+    SALTIC_DIRECT_ONLY=1 \
+    bash os/bootstrap/build.sh \
+        soul/seed/canonical/main.saltic \
+        "$closure_work/canonical.elf" \
+        "$closure_work/canonical.s"
+    test -x "$closure_work/canonical.elf"
+    test ! -e "$closure_work/canonical.s"
+    echo "closure: цепочка не вызвала GNU и JavaScript"
+    test ! -s "$deny_log"
+    local magic
+    magic="$(od -An -t x1 -N 4 "$closure_work/canonical.elf" | tr -d ' \n')"
+    test "$magic" = "7f454c46"
+    cp tests/fixtures/input.txt "$closure_work/input.txt"
+    echo "closure: ELF исполняется в QEMU"
+    qemu-riscv32 -B 0x100000000 \
+        "$closure_work/canonical.elf" \
+        "$closure_work/input.txt" \
+        "$closure_work/output.txt" \
+        >"$closure_work/stdout.txt"
+    diff -u \
+        soul/seed/canonical/expected/output.txt \
+        "$closure_work/stdout.txt"
+    test "$(<"$closure_work/output.txt")" = "pip:0"
+    echo "closure: тот же ELF в Saltic VM, 100000 инструкций"
+    build vm-elf tests/vm-elf.saltic "$closure_work/vm.elf" 4026531840
+    qemu-riscv32 -B 0x100000000 \
+        "$closure_work/vm.elf" \
+        "$closure_work/canonical.elf" \
+        "$closure_work/input.txt" \
+        "$closure_work/vm-report.txt"
+    local reason steps trap
+    {
+        IFS= read -r reason
+        IFS= read -r steps
+        IFS= read -r trap || true
+    } <"$closure_work/vm-report.txt"
+    case "$trap" in
+        *"недопустимая инструкция"*|*"ошибка доступа"*|*"некорректн"*)
+            echo "closure: VM остановилась с ошибкой: $trap" >&2
+            exit 1
+            ;;
+    esac
+    if [[ "$reason" == "exit" && -z "$trap" ]]; then
+        :
+    elif [[ "$reason" == "trap" && "$steps" == "100000" && "$trap" == "исчерпан лимит инструкций"* ]]; then
+        :
+    else
+        echo "closure: VM не подтвердила ELF: $reason $steps $trap" >&2
+        exit 1
+    fi
+    echo "closure: ok"
+}
+
 run_case() {
     case "$1" in
         checker) test_checker ;;
@@ -346,6 +436,7 @@ run_case() {
         abi) test_abi ;;
         qemu-virt) test_qemu_virt ;;
         bootstrap) test_bootstrap ;;
+        closure) test_closure ;;
         *)
             echo "неизвестная проверка: $1" >&2
             exit 2
@@ -370,6 +461,7 @@ if [[ "$1" == "all" ]]; then
         machine \
         abi \
         qemu-virt \
+        closure \
         bootstrap
 fi
 

@@ -16,7 +16,6 @@ if ! command -v qemu-riscv32 >/dev/null 2>&1; then
 
     echo "bootstrap refresh: вхожу в проектный Nix shell"
     bootstrap_override="${SALTIC_BOOTSTRAP_COMPILER:-}"
-    rescue_assembly="${SALTIC_BOOTSTRAP_RESCUE_ASSEMBLY:-}"
     refresh_work="${SALTIC_BOOTSTRAP_REFRESH_DIR:-}"
     refresh_heap="${SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES:-}"
     exec nix \
@@ -25,7 +24,6 @@ if ! command -v qemu-riscv32 >/dev/null 2>&1; then
         env \
         SALTIC_BOOTSTRAP_REFRESH_IN_DEV_SHELL=1 \
         SALTIC_BOOTSTRAP_COMPILER="$bootstrap_override" \
-        SALTIC_BOOTSTRAP_RESCUE_ASSEMBLY="$rescue_assembly" \
         SALTIC_BOOTSTRAP_REFRESH_DIR="$refresh_work" \
         SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES="$refresh_heap" \
         bash "$root/os/bootstrap/refresh.sh" "$@"
@@ -38,24 +36,14 @@ source_path="${1:-soul/seed/toolchain.saltic}"
 mkdir -p "$work/stage-1" "$work/stage-2" "$work/stage-3"
 
 bootstrap_compiler="${SALTIC_BOOTSTRAP_COMPILER:-os/bootstrap/compiler.elf}"
-rescue_assembly="${SALTIC_BOOTSTRAP_RESCUE_ASSEMBLY:-}"
-
-if [[ -n "$rescue_assembly" ]]; then
-    echo "bootstrap refresh: собираю аварийный compiler с heap $heap_bytes"
-    bash os/bootstrap/link.sh \
-        "$rescue_assembly" \
-        "$work/rescue/toolchain.elf" \
-        "$work/rescue" \
-        "$heap_bytes"
-    bootstrap_compiler="$work/rescue/toolchain.elf"
-fi
 
 echo "bootstrap refresh: исходный compiler $bootstrap_compiler"
 
-echo "bootstrap refresh: текущее поколение собирает stage-1"
+echo "bootstrap refresh: текущее поколение собирает прямой ELF stage-1"
 SALTIC_BOOTSTRAP_COMPILER="$bootstrap_compiler" \
 SALTIC_BUILD_DIR="$work/stage-1" \
 SALTIC_HEAP_BYTES="$heap_bytes" \
+SALTIC_DIRECT_ONLY=1 \
 bash os/bootstrap/build.sh \
     "$source_path" \
     "$work/stage-1/toolchain.elf" \
@@ -82,6 +70,7 @@ bash os/bootstrap/build.sh \
     "$work/stage-3/toolchain.s"
 
 echo "bootstrap refresh: проверяю fixed point"
+test ! -e "$work/stage-1/toolchain.s"
 test ! -e "$work/stage-2/toolchain.s"
 test ! -e "$work/stage-3/toolchain.s"
 cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
