@@ -1,0 +1,81 @@
+use seed
+use seed.ast
+use seed.intrinsic.contract
+use seed.checker.names
+
+Signature = Box {
+    found = no
+    name = ""
+    minimum = 0
+    maximum = 0
+}
+
+skill exact(name, count) {
+    out Signature { found = yes name = name minimum = count maximum = count }
+}
+
+skill range(name, minimum, maximum) {
+    out Signature { found = yes name = name minimum = minimum maximum = maximum }
+}
+
+skill from_skill(name, node) {
+    out exact(name, seed.group.count(ast.part(node, 2)))
+}
+
+skill intrinsic(name) {
+    @kind = contract.find(name)
+    @minimum = contract.minimum_arguments(kind)
+    (minimum < 0) { out Signature {} }
+    out range(name, minimum, contract.maximum_arguments(kind))
+}
+
+skill subject(globals, box_name, skill_name) {
+    @box = names.find(globals, box_name)
+    @index = 2
+    @count = seed.group.count(ast.plain(box.node))
+    drum (count) {
+        (index < count) {
+            @member = ast.part(box.node, index)
+            (ast.tag(member) == "subject-skill") {
+                (ast.part(member, 1) == skill_name) {
+                    out from_skill(seed.str.add(box_name, seed.str.add(".", skill_name)), member)
+                }
+            }
+            index = index + 1
+        }
+    }
+    out Signature {}
+}
+
+skill resolve(callee, scope, globals, receiver_type) {
+    @plain = ast.plain(callee)
+    @count = seed.group.count(plain)
+    @name = ast.path_text(plain)
+
+    (contract.is_fixed_type(name) == yes) { out exact(name, 1) }
+
+    @builtin = intrinsic(name)
+    (builtin.found == yes) { out builtin }
+
+    (count == 2) {
+        @short_name = seed.group.item(plain, 1)
+        (seed.str.len(scope.subject) > 0) {
+            @method = subject(globals, scope.subject, short_name)
+            (method.found == yes) { out method }
+        }
+    }
+
+    (count == 3) {
+        (seed.str.starts_with(receiver_type, "box:") == yes) {
+            @box_name = seed.str.slice(receiver_type, 4, seed.str.len(receiver_type))
+            @method = subject(globals, box_name, seed.group.item(plain, 2))
+            (method.found == yes) { out method }
+        }
+    }
+
+    @resolved = names.resolve_path(callee, scope, globals)
+    @global = names.find(globals, resolved)
+    (global.kind == "skill") { out from_skill(resolved, global.node) }
+
+    out Signature {}
+}

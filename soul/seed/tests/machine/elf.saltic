@@ -1,0 +1,98 @@
+use seed
+use craft.testing
+use seed.machine.instruction
+use seed.machine.codec
+use seed.machine.layout
+use seed.machine.image
+use seed.compiler.backend.rv32i
+
+skill read_u16(buffer, offset) {
+    out codec.byte_at(buffer, offset) + codec.byte_at(buffer, offset + 1) * 256
+}
+
+skill read_u32(buffer, offset) {
+    out read_u16(buffer, offset) + read_u16(buffer, offset + 2) * 65536
+}
+
+skill bytes4(buffer, offset, b0, b1, b2, b3) {
+    (codec.byte_at(buffer, offset) == b0) {
+        (codec.byte_at(buffer, offset + 1) == b1) {
+            (codec.byte_at(buffer, offset + 2) == b2) {
+                out codec.byte_at(buffer, offset + 3) == b3
+            }
+        }
+    }
+    out no
+}
+
+skill host_fixture() {
+    @target = rv32i.host("_start")
+    target = rv32i.label(target, layout.Section.CODE, "_start")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.EBREAK, 0, 0, 0, 0))
+    target = layout.append_section_text(target, layout.Section.RODATA, "saltic", yes)
+    target = rv32i.label(target, layout.Section.RODATA, "message")
+    target = layout.append_section_word(target, layout.Section.DATA, codec.word(1, 2, 3, 4))
+    target = layout.reserve_bss(target, codec.word_from_number(17))
+    out target
+}
+
+skill host(suite) {
+    @target = host_fixture()
+    @current = layout.layout(target)
+    @output = image.executable(target)
+    @section_table = read_u32(output, 32)
+    @low_header = 52
+    @load_header = 84
+    @data_header = 116
+    @text_header = section_table + 40
+    @bss_header = section_table + 160
+    @symtab_header = section_table + 200
+
+    suite = testing.test_yes(suite, "ELF host: magic", bytes4(output, 0, 127, 69, 76, 70))
+    suite = testing.test_equal(suite, "ELF host: class ELF32", codec.byte_at(output, 4), 1)
+    suite = testing.test_equal(suite, "ELF host: little endian", codec.byte_at(output, 5), 1)
+    suite = testing.test_equal(suite, "ELF host: RISC-V", read_u16(output, 18), 243)
+    suite = testing.test_equal(suite, "ELF host: entry", read_u32(output, 24), 65536)
+    suite = testing.test_equal(suite, "ELF host: program table offset", read_u32(output, 28), 52)
+    suite = testing.test_equal(suite, "ELF host: header size", read_u16(output, 40), 52)
+    suite = testing.test_equal(suite, "ELF host: три load segments", read_u16(output, 44), 3)
+    suite = testing.test_equal(suite, "ELF host: восемь sections", read_u16(output, 48), 8)
+    suite = testing.test_equal(suite, "ELF host: shstrtab index", read_u16(output, 50), 7)
+    suite = testing.test_equal(suite, "ELF host: low memory segment загружаемый", read_u32(output, low_header), 1)
+    suite = testing.test_equal(suite, "ELF host: low memory начинается с нуля", read_u32(output, low_header + 8), 0)
+    suite = testing.test_equal(suite, "ELF host: low memory занимает 64 KiB", read_u32(output, low_header + 20), 65536)
+    suite = testing.test_equal(suite, "ELF host: low memory доступна для записи", read_u32(output, low_header + 24), 6)
+    suite = testing.test_equal(suite, "ELF host: low memory выровнена по странице", read_u32(output, low_header + 28), 4096)
+    suite = testing.test_equal(suite, "ELF host: payload offset", read_u32(output, load_header + 4), 4096)
+    suite = testing.test_equal(suite, "ELF host: virtual address", read_u32(output, load_header + 8), 65536)
+    suite = testing.test_equal(suite, "ELF host: RX заканчивается перед data", read_u32(output, load_header + 16), current.data_offset)
+    suite = testing.test_equal(suite, "ELF host: код только RX", read_u32(output, load_header + 24), 5)
+    suite = testing.test_equal(suite, "ELF host: data начинается с новой страницы", codec.mod(current.data_offset, 4096), 0)
+    suite = testing.test_equal(suite, "ELF host: data segment начинается после RX", read_u32(output, data_header + 4), 4096 + current.data_offset)
+    suite = testing.test_equal(suite, "ELF host: data segment writable", read_u32(output, data_header + 24), 6)
+    suite = testing.test_equal(suite, "ELF host: BSS увеличивает data memory size", read_u32(output, data_header + 20), current.file_size - current.data_offset + 17)
+    suite = testing.test_equal(suite, "ELF host: text section type", read_u32(output, text_header + 4), 1)
+    suite = testing.test_equal(suite, "ELF host: text section address", read_u32(output, text_header + 12), 65536)
+    suite = testing.test_equal(suite, "ELF host: BSS section type", read_u32(output, bss_header + 4), 8)
+    suite = testing.test_equal(suite, "ELF host: BSS section size", read_u32(output, bss_header + 20), 17)
+    suite = testing.test_equal(suite, "ELF host: symtab связан со strtab", read_u32(output, symtab_header + 24), 6)
+    suite = testing.test_equal(suite, "ELF host: таблица sections завершает файл", output.length, section_table + 320)
+    out suite
+}
+
+skill virt(suite) {
+    @target = rv32i.qemu_virt("_start")
+    target = rv32i.label(target, layout.Section.CODE, "_start")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.WFI, 0, 0, 0, 0))
+    @output = image.executable(target)
+    suite = testing.test_yes(suite, "ELF virt: entry 0x80000000", bytes4(output, 24, 0, 0, 0, 128))
+    suite = testing.test_equal(suite, "ELF virt: один load segment", read_u16(output, 44), 1)
+    suite = testing.test_yes(suite, "ELF virt: segment 0x80000000", bytes4(output, 60, 0, 0, 0, 128))
+    suite = testing.test_equal(suite, "ELF virt: payload offset", read_u32(output, 56), 4096)
+    out suite
+}
+
+skill run(suite) {
+    suite = host(suite)
+    out virt(suite)
+}

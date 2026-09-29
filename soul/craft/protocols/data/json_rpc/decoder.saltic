@@ -1,0 +1,143 @@
+use seed
+use craft.protocols.data.json
+use craft.protocols.data.json.value
+use craft.protocols.data.json.number
+use craft.protocols.data.json.reader
+use craft.protocols.data.json_rpc
+
+skill valid_id(item) {
+    (item.kind == json.JsonKind.NULL) { out yes }
+    (item.kind == json.JsonKind.STRING) { out yes }
+    (item.kind == json.JsonKind.NUMBER) { out yes }
+    out no
+}
+
+skill valid_params(item) {
+    (item.kind == json.JsonKind.ARRAY) { out yes }
+    (item.kind == json.JsonKind.OBJECT) { out yes }
+    out no
+}
+
+skill decode_request(document, method) {
+    (method.value.kind == json.JsonKind.STRING) {
+        @params = value.get(document, "params")
+        (params.found == yes) {
+            (valid_params(params.value) == no) { out json_rpc.invalid_request("params запроса должен быть массивом или объектом") }
+        }
+
+        @id = value.get(document, "id")
+        (id.found == yes) {
+            (valid_id(id.value) == no) { out json_rpc.invalid_request("id запроса должен быть строкой, числом или null") }
+            out json_rpc.Message {
+                kind = json_rpc.MessageKind.REQUEST
+                method = method.value.string
+                params = params.value
+                has_params = params.found
+                id = id.value
+                has_id = yes
+            }
+        }
+
+        out json_rpc.Message {
+            kind = json_rpc.MessageKind.NOTIFICATION
+            method = method.value.string
+            params = params.value
+            has_params = params.found
+        }
+    }
+    out json_rpc.invalid_request("method запроса должен быть строкой")
+}
+
+skill decode_error_object(document, id, failure) {
+    (failure.value.kind == json.JsonKind.OBJECT) {
+        @code = value.get(failure.value, "code")
+        (code.found == no) { out json_rpc.invalid_request("в ошибочном ответе отсутствует code") }
+        (code.value.kind == json.JsonKind.NUMBER) {
+            (number.integer_text_valid(code.value.number) == no) { out json_rpc.invalid_request("code ошибки должен быть целым числом") }
+            @message = value.get(failure.value, "message")
+            (message.found == no) { out json_rpc.invalid_request("в ошибочном ответе отсутствует message") }
+            (message.value.kind == json.JsonKind.STRING) {
+                @data = value.get(failure.value, "data")
+                out json_rpc.Message {
+                    kind = json_rpc.MessageKind.FAILURE
+                    id = id.value
+                    has_id = yes
+                    error_code = code.value.number
+                    error_message = message.value.string
+                    error_data = data.value
+                    has_error_data = data.found
+                }
+            }
+            out json_rpc.invalid_request("message ошибки должен быть строкой")
+        }
+        out json_rpc.invalid_request("code ошибки должен быть числом")
+    }
+    out json_rpc.invalid_request("error ответа должен быть объектом")
+}
+
+skill decode_response(document) {
+    @id = value.get(document, "id")
+    (id.found == no) { out json_rpc.invalid_request("в ответе отсутствует id") }
+    (valid_id(id.value) == no) { out json_rpc.invalid_request("id ответа должен быть строкой, числом или null") }
+
+    @result = value.get(document, "result")
+    @failure = value.get(document, "error")
+    @choices = 0
+    (result.found == yes) { choices = choices + 1 }
+    (failure.found == yes) { choices = choices + 1 }
+    ((choices == 1) == no) { out json_rpc.invalid_request("ответ должен содержать ровно одно поле: result или error") }
+
+    (result.found == yes) {
+        out json_rpc.Message {
+            kind = json_rpc.MessageKind.SUCCESS
+            id = id.value
+            has_id = yes
+            result = result.value
+        }
+    }
+    out decode_error_object(document, id, failure)
+}
+
+skill decode_message(item) {
+    (item.kind == json.JsonKind.OBJECT) {
+        @version = value.get(item, "jsonrpc")
+        (version.found == no) { out json_rpc.invalid_request("в сообщении отсутствует поле jsonrpc") }
+        (value.string_equal(version.value, "2.0") == no) { out json_rpc.invalid_request("jsonrpc должен быть строкой 2.0") }
+
+        @method = value.get(item, "method")
+        (method.found == yes) { out decode_request(item, method) }
+        out decode_response(item)
+    }
+    out json_rpc.invalid_request("сообщение JSON-RPC должно быть объектом")
+}
+
+skill decode(source) {
+    @parsed = reader.parse(source)
+    (parsed.ok == no) {
+        out json_rpc.Packet {
+            messages = [json_rpc.parse_error(parsed.message)]
+            diagnostic = parsed.message
+        }
+    }
+
+    (parsed.value.kind == json.JsonKind.ARRAY) {
+        @messages = []
+        @count = seed.group.count(parsed.value.items)
+        (count == 0) {
+            out json_rpc.Packet {
+                ok = yes
+                messages = [json_rpc.invalid_request("пакет запросов не должен быть пустым")]
+            }
+        }
+        @index = 0
+        drum (count) {
+            (index < count) {
+                messages = seed.group.add(messages, decode_message(seed.group.item(parsed.value.items, index)))
+                index = index + 1
+            }
+        }
+        out json_rpc.Packet { ok = yes batch = yes messages = messages }
+    }
+
+    out json_rpc.Packet { ok = yes messages = [decode_message(parsed.value)] }
+}

@@ -1,0 +1,312 @@
+use seed
+use seed.machine.instruction
+use seed.machine.profile
+use seed.vm.state
+use seed.vm.system
+use seed.vm.syscalls
+
+skill decode(word) {
+    @opcode = state.mod(word.b0, 128)
+    @rd = word.b0 / 128 + state.mod(word.b1, 16) * 2
+    @funct3 = state.mod(word.b1 / 16, 8)
+    @rs1 = word.b1 / 128 + state.mod(word.b2, 16) * 2
+    @rs2 = word.b2 / 16 + state.mod(word.b3, 2) * 16
+    @funct7 = word.b3 / 2
+    @system = word.b2 / 16 + word.b3 * 16
+    @definition = profile.decode(opcode, funct3, funct7, system)
+    out state.Instruction {
+        word = word kind = definition.kind opcode = opcode rd = rd
+        funct3 = funct3 rs1 = rs1 rs2 = rs2 funct7 = funct7 system = system
+    }
+}
+
+skill immediate_i(decoded) {
+    @value = decoded.word.b2 / 16 + decoded.word.b3 * 16
+    (value > 2047) { value = value - 4096 }
+    out value
+}
+
+skill immediate_s(decoded) {
+    @low = decoded.rd
+    @value = low + decoded.funct7 * 32
+    (value > 2047) { value = value - 4096 }
+    out value
+}
+
+skill immediate_b(decoded) {
+    @bit12 = decoded.word.b3 / 128
+    @bit11 = decoded.word.b0 / 128
+    @bits10_5 = state.mod(decoded.word.b3 / 2, 64)
+    @bits4_1 = state.mod(decoded.word.b1, 16)
+    @value = bit12 * 4096 + bit11 * 2048 + bits10_5 * 32 + bits4_1 * 2
+    (value > 4095) { value = value - 8192 }
+    out value
+}
+
+skill immediate_j(decoded) {
+    @bit20 = decoded.word.b3 / 128
+    @bit11 = state.mod(decoded.word.b2 / 16, 2)
+    @bits19_12 = decoded.word.b1 / 16 + state.mod(decoded.word.b2, 16) * 16
+    @bits10_1 = decoded.word.b2 / 32 + state.mod(decoded.word.b3, 128) * 8
+    @value = bit20 * 1048576 + bits19_12 * 4096 + bit11 * 2048 + bits10_1 * 2
+    (value > 1048575) { value = value - 2097152 }
+    out value
+}
+
+skill immediate_u(decoded) {
+    out state.word_bytes(0, decoded.word.b1 / 16 * 16, decoded.word.b2, decoded.word.b3)
+}
+
+skill boolean_word(value) {
+    (value == yes) { out state.word_number(1) }
+    out state.word_zero()
+}
+
+skill illegal(machine, decoded) {
+    state.trap(machine, "недопустимая инструкция", seed.str.add("0x", state.word_hex(decoded.word)))
+    out none
+}
+
+skill effective_address(machine, register_index, immediate) {
+    out state.word_add(state.register(machine, register_index), state.word_number(immediate))
+}
+
+skill execute_lui(machine, decoded, control) {
+    state.set_register(machine, decoded.rd, immediate_u(decoded))
+    control.handled = yes
+    out none
+}
+
+skill execute_auipc(machine, decoded, control) {
+    @value = state.word_add(state.pc_word(machine), immediate_u(decoded))
+    state.set_register(machine, decoded.rd, value)
+    control.handled = yes
+    out none
+}
+
+skill execute_jal(machine, decoded, control) {
+    state.set_register(machine, decoded.rd, state.word_add(state.pc_word(machine), state.word_number(4)))
+    control.next_pc = machine.pc + immediate_j(decoded)
+    control.handled = yes
+    out none
+}
+
+skill execute_jalr(machine, decoded, control) {
+    @target = effective_address(machine, decoded.rs1, immediate_i(decoded))
+    target.b0 = target.b0 - state.mod(target.b0, 2)
+    state.set_register(machine, decoded.rd, state.word_add(state.pc_word(machine), state.word_number(4)))
+    @offset = state.memory_translate(machine, target, 4, 1, "переход")
+    (offset > 0 - 1) { control.next_pc = offset }
+    control.handled = yes
+    out none
+}
+
+skill execute_branch(machine, decoded, control) {
+    @left = state.register(machine, decoded.rs1)
+    @right = state.register(machine, decoded.rs2)
+    @take = no
+    (decoded.kind == instruction.Kind.BEQ) { take = state.word_equal(left, right) }
+    (decoded.kind == instruction.Kind.BNE) {
+        (state.word_equal(left, right) == no) { take = yes }
+    }
+    (decoded.kind == instruction.Kind.BLT) { take = state.word_signed_less(left, right) }
+    (decoded.kind == instruction.Kind.BGE) {
+        (state.word_signed_less(left, right) == no) { take = yes }
+    }
+    (decoded.kind == instruction.Kind.BLTU) { take = state.word_unsigned_less(left, right) }
+    (decoded.kind == instruction.Kind.BGEU) {
+        (state.word_unsigned_less(left, right) == no) { take = yes }
+    }
+    (take == yes) { control.next_pc = machine.pc + immediate_b(decoded) }
+    control.handled = yes
+    out none
+}
+
+skill execute_load(machine, decoded, control) {
+    @size = 0
+    @signed = yes
+    (decoded.kind == instruction.Kind.LB) { size = 1 }
+    (decoded.kind == instruction.Kind.LH) { size = 2 }
+    (decoded.kind == instruction.Kind.LW) { size = 4 }
+    (decoded.kind == instruction.Kind.LBU) { size = 1 signed = no }
+    (decoded.kind == instruction.Kind.LHU) { size = 2 signed = no }
+    @target = effective_address(machine, decoded.rs1, immediate_i(decoded))
+    @device = system.memory_load(machine, target, size)
+    @value = state.word_zero()
+    @loaded = no
+    (device.handled == yes) {
+        value = device.value
+        loaded = yes
+    }
+    (device.handled == no) {
+        @address = state.memory_translate(machine, target, size, size, "чтение")
+        (address > 0 - 1) {
+            loaded = yes
+            value.b0 = state.memory_raw_load8(machine.memory, address)
+            (size > 1) { value.b1 = state.memory_raw_load8(machine.memory, address + 1) }
+            (size > 2) {
+                value.b2 = state.memory_raw_load8(machine.memory, address + 2)
+                value.b3 = state.memory_raw_load8(machine.memory, address + 3)
+            }
+        }
+    }
+    (loaded == yes) {
+        (signed == yes) {
+            (size == 1) {
+                (value.b0 > 127) { value.b1 = 255 value.b2 = 255 value.b3 = 255 }
+            }
+            (size == 2) {
+                (value.b1 > 127) { value.b2 = 255 value.b3 = 255 }
+            }
+        }
+        state.set_register(machine, decoded.rd, value)
+    }
+    control.handled = yes
+    out none
+}
+
+skill execute_store(machine, decoded, control) {
+    @size = 0
+    (decoded.kind == instruction.Kind.SB) { size = 1 }
+    (decoded.kind == instruction.Kind.SH) { size = 2 }
+    (decoded.kind == instruction.Kind.SW) { size = 4 }
+    @target = effective_address(machine, decoded.rs1, immediate_s(decoded))
+    @value = state.register(machine, decoded.rs2)
+    (system.memory_store(machine, target, value, size) == no) {
+        @address = state.memory_translate(machine, target, size, size, "запись")
+        (address > 0 - 1) {
+            state.memory_store_word(machine.memory, address, value, size)
+        }
+    }
+    control.handled = yes
+    out none
+}
+
+skill execute_immediate(machine, decoded, control) {
+    @left = state.register(machine, decoded.rs1)
+    @immediate = state.word_number(immediate_i(decoded))
+    @value = state.word_zero()
+    (decoded.kind == instruction.Kind.ADDI) { value = state.word_add(left, immediate) }
+    (decoded.kind == instruction.Kind.SLTI) { value = boolean_word(state.word_signed_less(left, immediate)) }
+    (decoded.kind == instruction.Kind.SLTIU) { value = boolean_word(state.word_unsigned_less(left, immediate)) }
+    (decoded.kind == instruction.Kind.XORI) { value = state.word_xor(left, immediate) }
+    (decoded.kind == instruction.Kind.ORI) { value = state.word_or(left, immediate) }
+    (decoded.kind == instruction.Kind.ANDI) { value = state.word_and(left, immediate) }
+    (decoded.kind == instruction.Kind.SLLI) { value = state.word_shift_left(left, decoded.rs2) }
+    (decoded.kind == instruction.Kind.SRLI) { value = state.word_shift_right(left, decoded.rs2) }
+    (decoded.kind == instruction.Kind.SRAI) { value = state.word_shift_right_arithmetic(left, decoded.rs2) }
+    state.set_register(machine, decoded.rd, value)
+    control.handled = yes
+    out none
+}
+
+skill execute_register(machine, decoded, control) {
+    @left = state.register(machine, decoded.rs1)
+    @right = state.register(machine, decoded.rs2)
+    @value = state.word_zero()
+    (decoded.kind == instruction.Kind.ADD) { value = state.word_add(left, right) }
+    (decoded.kind == instruction.Kind.SUB) { value = state.word_sub(left, right) }
+    (decoded.kind == instruction.Kind.SLL) { value = state.word_shift_left(left, state.mod(right.b0, 32)) }
+    (decoded.kind == instruction.Kind.SLT) { value = boolean_word(state.word_signed_less(left, right)) }
+    (decoded.kind == instruction.Kind.SLTU) { value = boolean_word(state.word_unsigned_less(left, right)) }
+    (decoded.kind == instruction.Kind.XOR) { value = state.word_xor(left, right) }
+    (decoded.kind == instruction.Kind.SRL) { value = state.word_shift_right(left, state.mod(right.b0, 32)) }
+    (decoded.kind == instruction.Kind.SRA) { value = state.word_shift_right_arithmetic(left, state.mod(right.b0, 32)) }
+    (decoded.kind == instruction.Kind.OR) { value = state.word_or(left, right) }
+    (decoded.kind == instruction.Kind.AND) { value = state.word_and(left, right) }
+    state.set_register(machine, decoded.rd, value)
+    control.handled = yes
+    out none
+}
+
+skill execute_fence(machine, decoded, control) {
+    control.handled = yes
+    out none
+}
+
+skill execute_environment(machine, decoded, control) {
+    (decoded.kind == instruction.Kind.ECALL) {
+        (machine.mode == state.Mode.PROCESS) { syscalls.ecall(machine) control.handled = yes out none }
+        system.enter_ecall(machine, control)
+        out none
+    }
+    (decoded.kind == instruction.Kind.EBREAK) {
+        machine.halted = yes
+        machine.halt_reason = "break"
+        control.handled = yes
+        out none
+    }
+    (system.execute(machine, decoded, control) == yes) { out none }
+    illegal(machine, decoded)
+    control.handled = yes
+    out none
+}
+
+skill execute(machine, decoded) {
+    @control = state.Control { next_pc = machine.pc + 4 }
+    (decoded.kind == instruction.Kind.UNKNOWN_INSTRUCTION) {
+        illegal(machine, decoded)
+        out control
+    }
+    (decoded.kind == instruction.Kind.LUI) { execute_lui(machine, decoded, control) }
+    (decoded.kind == instruction.Kind.AUIPC) { execute_auipc(machine, decoded, control) }
+    (decoded.kind == instruction.Kind.JAL) { execute_jal(machine, decoded, control) }
+    (decoded.kind == instruction.Kind.JALR) { execute_jalr(machine, decoded, control) }
+    (decoded.kind > instruction.Kind.JALR) {
+        (decoded.kind < instruction.Kind.LB) { execute_branch(machine, decoded, control) }
+    }
+    (decoded.kind > instruction.Kind.BGEU) {
+        (decoded.kind < instruction.Kind.SB) { execute_load(machine, decoded, control) }
+    }
+    (decoded.kind > instruction.Kind.LHU) {
+        (decoded.kind < instruction.Kind.ADDI) { execute_store(machine, decoded, control) }
+    }
+    (decoded.kind > instruction.Kind.SW) {
+        (decoded.kind < instruction.Kind.ADD) { execute_immediate(machine, decoded, control) }
+    }
+    (decoded.kind > instruction.Kind.SRAI) {
+        (decoded.kind < instruction.Kind.FENCE) { execute_register(machine, decoded, control) }
+    }
+    (decoded.kind == instruction.Kind.FENCE) { execute_fence(machine, decoded, control) }
+    (decoded.kind > instruction.Kind.FENCE) { execute_environment(machine, decoded, control) }
+    (control.handled == no) { illegal(machine, decoded) }
+    out control
+}
+
+skill step(machine) {
+    (machine.halted == yes) { out none }
+    (state.mod(machine.pc, 4) > 0) {
+        state.trap(machine, "невыровненный адрес инструкции", "")
+        out none
+    }
+    (state.memory_check(machine, machine.pc, 4, 4, "инструкция") == no) { out none }
+    @decoded = decode(state.memory_load_word(machine.memory, machine.pc))
+    @control = execute(machine, decoded)
+    (seed.str.len(machine.trap) == 0) {
+        machine.pc = control.next_pc
+        machine.steps = machine.steps + 1
+    }
+    out none
+}
+
+skill result(machine) {
+    @registers = []
+    @index = 0
+    drum (32) {
+        registers = seed.group.add(registers, state.word_hex(state.register(machine, index)))
+        index = index + 1
+    }
+    @reason = machine.halt_reason
+    (seed.str.len(machine.trap) > 0) { reason = "trap" }
+    out state.Result {
+        exit_code = machine.exit_code
+        reason = reason
+        pc = state.word_hex(state.pc_word(machine))
+        steps = machine.steps
+        registers = registers
+        stdout = machine.stdout
+        stderr = machine.stderr
+        files = machine.files
+        trap = machine.trap
+    }
+}

@@ -1,0 +1,1073 @@
+use seed
+use core.file
+
+ZERO = 0
+RA = 1
+SP = 2
+GP = 3
+TP = 4
+T0 = 5
+T1 = 6
+T2 = 7
+S0 = 8
+FP = 8
+S1 = 9
+A0 = 10
+A1 = 11
+A2 = 12
+A3 = 13
+A4 = 14
+A5 = 15
+A6 = 16
+A7 = 17
+S2 = 18
+S3 = 19
+S4 = 20
+S5 = 21
+S6 = 22
+S7 = 23
+S8 = 24
+S9 = 25
+S10 = 26
+S11 = 27
+T3 = 28
+T4 = 29
+T5 = 30
+T6 = 31
+
+Word = Box {
+    b0 = 0
+    b1 = 0
+    b2 = 0
+    b3 = 0
+}
+
+Cell = Box {
+    value = 0
+}
+
+Buffer = Box {
+    cells = []
+    length = 0
+}
+
+skill mod(value, divisor) {
+    out value - value / divisor * divisor
+}
+
+skill power2(width) {
+    @value = 1
+    drum (width) { value = value * 2 }
+    out value
+}
+
+skill bits(value, start, width) {
+    out mod(value / power2(start), power2(width))
+}
+
+skill signed_value(value, width) {
+    @result = value
+    (result < 0) { result = result + power2(width) }
+    out result
+}
+
+skill valid_register(value) {
+    (value < 0) { out no }
+    (value > 31) { out no }
+    out yes
+}
+
+skill valid_unsigned(value, width) {
+    (value < 0) { out no }
+    (value > power2(width) - 1) { out no }
+    out yes
+}
+
+skill valid_signed(value, width) {
+    @limit = power2(width - 1)
+    (value < 0 - limit) { out no }
+    (value > limit - 1) { out no }
+    out yes
+}
+
+skill valid_even_signed(value, width) {
+    (valid_signed(value, width) == no) { out no }
+    (mod(value, 2) == 0) { out yes }
+    out no
+}
+
+skill word(b0, b1, b2, b3) {
+    out Word { b0 = b0 b1 = b1 b2 = b2 b3 = b3 }
+}
+
+skill buffer() {
+    out Buffer {}
+}
+
+skill append_byte(buffer, value) {
+    (valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
+    buffer.cells = seed.group.add(buffer.cells, Cell { value = value })
+    buffer.length = buffer.length + 1
+    out buffer
+}
+
+skill append_word(buffer, value) {
+    buffer = append_byte(buffer, value.b0)
+    buffer = append_byte(buffer, value.b1)
+    buffer = append_byte(buffer, value.b2)
+    buffer = append_byte(buffer, value.b3)
+    out buffer
+}
+
+skill byte_at(buffer, offset) {
+    (offset < 0) { out error.BufferOutsideRange }
+    (offset > buffer.length - 1) { out error.BufferOutsideRange }
+    @cell = seed.group.at(buffer.cells, offset)
+    out cell.value
+}
+
+skill set_byte(buffer, offset, value) {
+    (offset < 0) { out error.BufferOutsideRange }
+    (offset > buffer.length - 1) { out error.BufferOutsideRange }
+    (valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
+    @cell = seed.group.at(buffer.cells, offset)
+    cell.value = value
+    out buffer
+}
+
+skill set_word(buffer, offset, value) {
+    buffer = set_byte(buffer, offset, value.b0)
+    buffer = set_byte(buffer, offset + 1, value.b1)
+    buffer = set_byte(buffer, offset + 2, value.b2)
+    buffer = set_byte(buffer, offset + 3, value.b3)
+    out buffer
+}
+
+skill encode_r(opcode, rd, funct3, rs1, rs2, funct7) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_register(rs2) == no) { out error.InvalidRegister }
+    (valid_unsigned(funct7, 7) == no) { out error.InvalidFunction }
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(rs2, 0, 4) * 16,
+        bits(rs2, 4, 1) + funct7 * 2
+    )
+}
+
+skill encode_i(opcode, rd, funct3, rs1, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_signed(immediate, 12) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, 12)
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(value, 0, 4) * 16,
+        bits(value, 4, 8)
+    )
+}
+
+skill encode_i_unsigned(opcode, rd, funct3, rs1, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_unsigned(immediate, 12) == no) { out error.InvalidImmediate }
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(immediate, 0, 4) * 16,
+        bits(immediate, 4, 8)
+    )
+}
+
+skill encode_s(opcode, funct3, rs1, rs2, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_register(rs2) == no) { out error.InvalidRegister }
+    (valid_signed(immediate, 12) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, 12)
+    out word(
+        opcode + bits(value, 0, 1) * 128,
+        bits(value, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(rs2, 0, 4) * 16,
+        bits(rs2, 4, 1) + bits(value, 5, 7) * 2
+    )
+}
+
+skill encode_b(opcode, funct3, rs1, rs2, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_register(rs2) == no) { out error.InvalidRegister }
+    (valid_even_signed(immediate, 13) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, 13)
+    out word(
+        opcode + bits(value, 11, 1) * 128,
+        bits(value, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(rs2, 0, 4) * 16,
+        bits(rs2, 4, 1) + bits(value, 5, 6) * 2 + bits(value, 12, 1) * 128
+    )
+}
+
+skill encode_u(opcode, rd, upper) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_unsigned(upper, 20) == no) { out error.InvalidImmediate }
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + bits(upper, 0, 4) * 16,
+        bits(upper, 4, 8),
+        bits(upper, 12, 8)
+    )
+}
+
+skill encode_j(opcode, rd, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_even_signed(immediate, 21) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, 21)
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + bits(value, 12, 4) * 16,
+        bits(value, 16, 4) + bits(value, 11, 1) * 16 + bits(value, 1, 3) * 32,
+        bits(value, 4, 7) + bits(value, 20, 1) * 128
+    )
+}
+
+skill lui(rd, upper) { out encode_u(55, rd, upper) }
+skill auipc(rd, upper) { out encode_u(23, rd, upper) }
+skill jal(rd, immediate) { out encode_j(111, rd, immediate) }
+skill jalr(rd, rs1, immediate) { out encode_i(103, rd, 0, rs1, immediate) }
+
+skill beq(rs1, rs2, immediate) { out encode_b(99, 0, rs1, rs2, immediate) }
+skill bne(rs1, rs2, immediate) { out encode_b(99, 1, rs1, rs2, immediate) }
+skill blt(rs1, rs2, immediate) { out encode_b(99, 4, rs1, rs2, immediate) }
+skill bge(rs1, rs2, immediate) { out encode_b(99, 5, rs1, rs2, immediate) }
+skill bltu(rs1, rs2, immediate) { out encode_b(99, 6, rs1, rs2, immediate) }
+skill bgeu(rs1, rs2, immediate) { out encode_b(99, 7, rs1, rs2, immediate) }
+
+skill lb(rd, rs1, immediate) { out encode_i(3, rd, 0, rs1, immediate) }
+skill lh(rd, rs1, immediate) { out encode_i(3, rd, 1, rs1, immediate) }
+skill lw(rd, rs1, immediate) { out encode_i(3, rd, 2, rs1, immediate) }
+skill lbu(rd, rs1, immediate) { out encode_i(3, rd, 4, rs1, immediate) }
+skill lhu(rd, rs1, immediate) { out encode_i(3, rd, 5, rs1, immediate) }
+
+skill sb(rs1, rs2, immediate) { out encode_s(35, 0, rs1, rs2, immediate) }
+skill sh(rs1, rs2, immediate) { out encode_s(35, 1, rs1, rs2, immediate) }
+skill sw(rs1, rs2, immediate) { out encode_s(35, 2, rs1, rs2, immediate) }
+
+skill addi(rd, rs1, immediate) { out encode_i(19, rd, 0, rs1, immediate) }
+skill slti(rd, rs1, immediate) { out encode_i(19, rd, 2, rs1, immediate) }
+skill sltiu(rd, rs1, immediate) { out encode_i(19, rd, 3, rs1, immediate) }
+skill xori(rd, rs1, immediate) { out encode_i(19, rd, 4, rs1, immediate) }
+skill ori(rd, rs1, immediate) { out encode_i(19, rd, 6, rs1, immediate) }
+skill andi(rd, rs1, immediate) { out encode_i(19, rd, 7, rs1, immediate) }
+
+skill slli(rd, rs1, amount) {
+    (valid_unsigned(amount, 5) == no) { out error.InvalidShift }
+    out encode_i_unsigned(19, rd, 1, rs1, amount)
+}
+
+skill srli(rd, rs1, amount) {
+    (valid_unsigned(amount, 5) == no) { out error.InvalidShift }
+    out encode_i_unsigned(19, rd, 5, rs1, amount)
+}
+
+skill srai(rd, rs1, amount) {
+    (valid_unsigned(amount, 5) == no) { out error.InvalidShift }
+    out encode_i_unsigned(19, rd, 5, rs1, 1024 + amount)
+}
+
+skill add(rd, rs1, rs2) { out encode_r(51, rd, 0, rs1, rs2, 0) }
+skill sub(rd, rs1, rs2) { out encode_r(51, rd, 0, rs1, rs2, 32) }
+skill sll(rd, rs1, rs2) { out encode_r(51, rd, 1, rs1, rs2, 0) }
+skill slt(rd, rs1, rs2) { out encode_r(51, rd, 2, rs1, rs2, 0) }
+skill sltu(rd, rs1, rs2) { out encode_r(51, rd, 3, rs1, rs2, 0) }
+skill xor(rd, rs1, rs2) { out encode_r(51, rd, 4, rs1, rs2, 0) }
+skill srl(rd, rs1, rs2) { out encode_r(51, rd, 5, rs1, rs2, 0) }
+skill sra(rd, rs1, rs2) { out encode_r(51, rd, 5, rs1, rs2, 32) }
+skill or(rd, rs1, rs2) { out encode_r(51, rd, 6, rs1, rs2, 0) }
+skill and(rd, rs1, rs2) { out encode_r(51, rd, 7, rs1, rs2, 0) }
+
+skill fence(predecessor, successor) {
+    (valid_unsigned(predecessor, 4) == no) { out error.InvalidFence }
+    (valid_unsigned(successor, 4) == no) { out error.InvalidFence }
+    out encode_i_unsigned(15, ZERO, 0, ZERO, predecessor * 16 + successor)
+}
+
+skill fence_i() { out encode_i_unsigned(15, ZERO, 1, ZERO, 0) }
+skill ecall() { out encode_i_unsigned(115, ZERO, 0, ZERO, 0) }
+skill ebreak() { out encode_i_unsigned(115, ZERO, 0, ZERO, 1) }
+skill wfi() { out encode_i_unsigned(115, ZERO, 0, ZERO, 261) }
+skill mret() { out encode_i_unsigned(115, ZERO, 0, ZERO, 770) }
+
+skill csrrw(rd, csr, rs1) { out encode_i_unsigned(115, rd, 1, rs1, csr) }
+skill csrrs(rd, csr, rs1) { out encode_i_unsigned(115, rd, 2, rs1, csr) }
+skill csrrc(rd, csr, rs1) { out encode_i_unsigned(115, rd, 3, rs1, csr) }
+skill csrrwi(rd, csr, value) { out encode_i_unsigned(115, rd, 5, value, csr) }
+skill csrrsi(rd, csr, value) { out encode_i_unsigned(115, rd, 6, value, csr) }
+skill csrrci(rd, csr, value) { out encode_i_unsigned(115, rd, 7, value, csr) }
+skill csrr(rd, csr) { out csrrs(rd, csr, ZERO) }
+skill csrw(csr, rs1) { out csrrw(ZERO, csr, rs1) }
+
+Section = enum {
+    CODE,
+    RODATA,
+    DATA,
+    BSS,
+}
+
+PatchKind = enum {
+    BRANCH,
+    JUMP,
+    RELATIVE_HIGH,
+    RELATIVE_LOW,
+    ABSOLUTE_HIGH,
+    ABSOLUTE_LOW,
+    ADDRESS_WORD,
+}
+
+Label = Box {
+    name = ""
+    section = Section.CODE
+    offset = 0
+    present = no
+}
+
+Patch = Box {
+    kind = PatchKind.BRANCH
+    section = Section.CODE
+    offset = 0
+    base = 0
+    label = ""
+    addend = 0
+    opcode = 0
+    rd = 0
+    funct3 = 0
+    rs1 = 0
+    rs2 = 0
+}
+
+Layout = Box {
+    code_offset = 0
+    rodata_offset = 0
+    data_offset = 0
+    bss_offset = 0
+    file_size = 0
+    memory_size = 0
+}
+
+Image = Box {
+    load_address = Word {}
+    low_memory_size = 0
+    entry = ""
+    code = Buffer {}
+    rodata = Buffer {}
+    data = Buffer {}
+    bss_size = 0
+    labels = []
+    patches = []
+    resolved = no
+}
+
+skill address(b0, b1, b2, b3) {
+    (valid_unsigned(b0, 8) == no) { out error.InvalidAddress }
+    (valid_unsigned(b1, 8) == no) { out error.InvalidAddress }
+    (valid_unsigned(b2, 8) == no) { out error.InvalidAddress }
+    (valid_unsigned(b3, 8) == no) { out error.InvalidAddress }
+    out word(b0, b1, b2, b3)
+}
+
+skill address_from_number(value) {
+    (value < 0) { out error.InvalidAddress }
+    @b0 = mod(value, 256)
+    value = value / 256
+    @b1 = mod(value, 256)
+    value = value / 256
+    @b2 = mod(value, 256)
+    value = value / 256
+    @b3 = mod(value, 256)
+    out address(b0, b1, b2, b3)
+}
+
+skill address_add(value, amount) {
+    (amount < 0) { out error.InvalidAddress }
+    @v0 = value.b0 + mod(amount, 256)
+    amount = amount / 256
+    @v1 = value.b1 + mod(amount, 256) + v0 / 256
+    amount = amount / 256
+    @v2 = value.b2 + mod(amount, 256) + v1 / 256
+    amount = amount / 256
+    @v3 = value.b3 + mod(amount, 256) + v2 / 256
+    (v3 > 255) { out error.AddressOverflow }
+    out word(mod(v0, 256), mod(v1, 256), mod(v2, 256), v3)
+}
+
+skill address_upper(value) {
+    @upper = value.b1 / 16 + value.b2 * 16 + value.b3 * 4096
+    @low = value.b0 + mod(value.b1, 16) * 256
+    (low > 2047) { upper = mod(upper + 1, 1048576) }
+    out upper
+}
+
+skill address_low(value) {
+    @low = value.b0 + mod(value.b1, 16) * 256
+    (low > 2047) { low = low - 4096 }
+    out low
+}
+
+skill align(value, boundary) {
+    (boundary < 1) { out error.InvalidAlignment }
+    @remainder = mod(value, boundary)
+    (remainder == 0) { out value }
+    out value + boundary - remainder
+}
+
+skill floor_div(value, divisor) {
+    @quotient = value / divisor
+    @remainder = value - quotient * divisor
+    (value < 0) {
+        ((remainder == 0) == no) { quotient = quotient - 1 }
+    }
+    out quotient
+}
+
+skill relative_high(value) {
+    out floor_div(value + 2048, 4096)
+}
+
+skill relative_low(value) {
+    @high = relative_high(value)
+    out value - high * 4096
+}
+
+skill image(load_address, entry) {
+    out Image { load_address = load_address entry = entry }
+}
+
+skill host_image(entry) {
+    out Image {
+        load_address = address_from_number(65536)
+        low_memory_size = 65536
+        entry = entry
+    }
+}
+
+skill qemu_virt_image(entry) {
+    out Image {
+        load_address = address(0, 0, 0, 128)
+        entry = entry
+    }
+}
+
+skill section_buffer(image, section) {
+    (section == Section.CODE) { out image.code }
+    (section == Section.RODATA) { out image.rodata }
+    (section == Section.DATA) { out image.data }
+    out error.SectionHasNoFileData
+}
+
+skill section_length(image, section) {
+    (section == Section.CODE) { out image.code.length }
+    (section == Section.RODATA) { out image.rodata.length }
+    (section == Section.DATA) { out image.data.length }
+    out image.bss_size
+}
+
+skill append_zeroes(buffer, count) {
+    @index = 0
+    drum (count) {
+        buffer = append_byte(buffer, 0)
+        index = index + 1
+    }
+    out buffer
+}
+
+skill align_buffer(buffer, boundary) {
+    @target = align(buffer.length, boundary)
+    out append_zeroes(buffer, target - buffer.length)
+}
+
+skill append_u16(buffer, value) {
+    (valid_unsigned(value, 16) == no) { out error.ValueOutsideRange }
+    buffer = append_byte(buffer, mod(value, 256))
+    buffer = append_byte(buffer, value / 256)
+    out buffer
+}
+
+skill append_u32(buffer, value) {
+    out append_word(buffer, value)
+}
+
+skill append_number32(buffer, value) {
+    (value < 0) { out error.ValueOutsideRange }
+    out append_u32(buffer, address_from_number(value))
+}
+
+skill append_text(buffer, text) {
+    @index = 0
+    @length = seed.str.len(text)
+    drum (length) {
+        buffer = append_byte(buffer, seed.str.byte(text, index))
+        index = index + 1
+    }
+    out buffer
+}
+
+skill append_cstring(buffer, text) {
+    buffer = append_text(buffer, text)
+    out append_byte(buffer, 0)
+}
+
+skill emit(image, instruction) {
+    image.code = append_word(image.code, instruction)
+    image.resolved = no
+    out image
+}
+
+skill emit_patch(image, patch, placeholder) {
+    patch.offset = image.code.length
+    image.patches = seed.group.add(image.patches, patch)
+    image = emit(image, placeholder)
+    out image
+}
+
+skill find_label(image, name) {
+    @index = 0
+    @count = seed.group.count(image.labels)
+    drum (count) {
+        @label = seed.group.at(image.labels, index)
+        (label.name == name) { out label }
+        index = index + 1
+    }
+    out Label {}
+}
+
+skill define_label(image, section, name) {
+    @old = find_label(image, name)
+    (old.present == yes) { out error.DuplicateLabel }
+    image.labels = seed.group.add(image.labels, Label {
+        name = name
+        section = section
+        offset = section_length(image, section)
+        present = yes
+    })
+    image.resolved = no
+    out image
+}
+
+skill reserve_bss(image, count) {
+    (count < 0) { out error.ValueOutsideRange }
+    image.bss_size = image.bss_size + count
+    image.resolved = no
+    out image
+}
+
+skill append_section_byte(image, section, value) {
+    @target = section_buffer(image, section)
+    target = append_byte(target, value)
+    (section == Section.CODE) { image.code = target }
+    (section == Section.RODATA) { image.rodata = target }
+    (section == Section.DATA) { image.data = target }
+    image.resolved = no
+    out image
+}
+
+skill append_section_word(image, section, value) {
+    @target = section_buffer(image, section)
+    target = append_word(target, value)
+    (section == Section.CODE) { image.code = target }
+    (section == Section.RODATA) { image.rodata = target }
+    (section == Section.DATA) { image.data = target }
+    image.resolved = no
+    out image
+}
+
+skill append_section_text(image, section, text, terminated) {
+    @target = section_buffer(image, section)
+    target = append_text(target, text)
+    (terminated == yes) { target = append_byte(target, 0) }
+    (section == Section.CODE) { image.code = target }
+    (section == Section.RODATA) { image.rodata = target }
+    (section == Section.DATA) { image.data = target }
+    image.resolved = no
+    out image
+}
+
+skill align_section(image, section, boundary) {
+    (section == Section.BSS) {
+        image.bss_size = align(image.bss_size, boundary)
+        out image
+    }
+    @target = section_buffer(image, section)
+    target = align_buffer(target, boundary)
+    (section == Section.CODE) { image.code = target }
+    (section == Section.RODATA) { image.rodata = target }
+    (section == Section.DATA) { image.data = target }
+    image.resolved = no
+    out image
+}
+
+skill emit_branch(image, funct3, rs1, rs2, label) {
+    out emit_patch(image, Patch {
+        kind = PatchKind.BRANCH
+        label = label
+        funct3 = funct3
+        rs1 = rs1
+        rs2 = rs2
+    }, beq(ZERO, ZERO, 0))
+}
+
+skill emit_jump(image, rd, label) {
+    out emit_patch(image, Patch {
+        kind = PatchKind.JUMP
+        label = label
+        rd = rd
+    }, jal(ZERO, 0))
+}
+
+skill emit_relative_address(image, rd, label, addend) {
+    @base = image.code.length
+    image = emit_patch(image, Patch {
+        kind = PatchKind.RELATIVE_HIGH
+        base = base
+        label = label
+        addend = addend
+        rd = rd
+    }, auipc(rd, 0))
+    image = emit_patch(image, Patch {
+        kind = PatchKind.RELATIVE_LOW
+        base = base
+        label = label
+        addend = addend
+        opcode = 19
+        rd = rd
+        funct3 = 0
+        rs1 = rd
+    }, addi(rd, rd, 0))
+    out image
+}
+
+skill emit_call(image, label) {
+    @base = image.code.length
+    image = emit_patch(image, Patch {
+        kind = PatchKind.RELATIVE_HIGH
+        base = base
+        label = label
+        rd = RA
+    }, auipc(RA, 0))
+    image = emit_patch(image, Patch {
+        kind = PatchKind.RELATIVE_LOW
+        base = base
+        label = label
+        opcode = 103
+        rd = RA
+        funct3 = 0
+        rs1 = RA
+    }, jalr(RA, RA, 0))
+    out image
+}
+
+skill emit_absolute_address(image, rd, label, addend) {
+    image = emit_patch(image, Patch {
+        kind = PatchKind.ABSOLUTE_HIGH
+        label = label
+        addend = addend
+        rd = rd
+    }, lui(rd, 0))
+    image = emit_patch(image, Patch {
+        kind = PatchKind.ABSOLUTE_LOW
+        label = label
+        addend = addend
+        opcode = 19
+        rd = rd
+        funct3 = 0
+        rs1 = rd
+    }, addi(rd, rd, 0))
+    out image
+}
+
+skill append_label_address(image, section, label, addend) {
+    @target = section_buffer(image, section)
+    @offset = target.length
+    target = append_word(target, word(0, 0, 0, 0))
+    (section == Section.CODE) { image.code = target }
+    (section == Section.RODATA) { image.rodata = target }
+    (section == Section.DATA) { image.data = target }
+    image.patches = seed.group.add(image.patches, Patch {
+        kind = PatchKind.ADDRESS_WORD
+        section = section
+        offset = offset
+        label = label
+        addend = addend
+    })
+    image.resolved = no
+    out image
+}
+
+skill layout(image) {
+    @rodata_offset = align(image.code.length, 8)
+    @data_offset = align(rodata_offset + image.rodata.length, 8)
+    @bss_offset = align(data_offset + image.data.length, 8)
+    out Layout {
+        code_offset = 0
+        rodata_offset = rodata_offset
+        data_offset = data_offset
+        bss_offset = bss_offset
+        file_size = bss_offset
+        memory_size = bss_offset + image.bss_size
+    }
+}
+
+skill section_offset(layout, section) {
+    (section == Section.CODE) { out layout.code_offset }
+    (section == Section.RODATA) { out layout.rodata_offset }
+    (section == Section.DATA) { out layout.data_offset }
+    out layout.bss_offset
+}
+
+skill label_offset(image, layout, name) {
+    @label = find_label(image, name)
+    (label.present == no) { out error.UnknownLabel }
+    out section_offset(layout, label.section) + label.offset
+}
+
+skill label_address(image, layout, name, addend) {
+    @offset = label_offset(image, layout, name) + addend
+    (offset < 0) { out error.InvalidAddress }
+    out address_add(image.load_address, offset)
+}
+
+skill set_section_word(image, section, offset, value) {
+    @target = section_buffer(image, section)
+    target = set_word(target, offset, value)
+    (section == Section.CODE) { image.code = target }
+    (section == Section.RODATA) { image.rodata = target }
+    (section == Section.DATA) { image.data = target }
+    out image
+}
+
+skill resolve_patch(image, layout, patch) {
+    @target_offset = label_offset(image, layout, patch.label) + patch.addend
+    (patch.kind == PatchKind.BRANCH) {
+        @distance = target_offset - patch.offset
+        out set_section_word(image, Section.CODE, patch.offset, encode_b(99, patch.funct3, patch.rs1, patch.rs2, distance))
+    }
+    (patch.kind == PatchKind.JUMP) {
+        @distance = target_offset - patch.offset
+        out set_section_word(image, Section.CODE, patch.offset, jal(patch.rd, distance))
+    }
+    (patch.kind == PatchKind.RELATIVE_HIGH) {
+        @distance = target_offset - patch.base
+        @upper = signed_value(relative_high(distance), 20)
+        out set_section_word(image, Section.CODE, patch.offset, auipc(patch.rd, upper))
+    }
+    (patch.kind == PatchKind.RELATIVE_LOW) {
+        @distance = target_offset - patch.base
+        @low = relative_low(distance)
+        out set_section_word(image, Section.CODE, patch.offset, encode_i(patch.opcode, patch.rd, patch.funct3, patch.rs1, low))
+    }
+    (patch.kind == PatchKind.ABSOLUTE_HIGH) {
+        @target = label_address(image, layout, patch.label, patch.addend)
+        out set_section_word(image, Section.CODE, patch.offset, lui(patch.rd, address_upper(target)))
+    }
+    (patch.kind == PatchKind.ABSOLUTE_LOW) {
+        @target = label_address(image, layout, patch.label, patch.addend)
+        out set_section_word(image, Section.CODE, patch.offset, encode_i(patch.opcode, patch.rd, patch.funct3, patch.rs1, address_low(target)))
+    }
+    (patch.kind == PatchKind.ADDRESS_WORD) {
+        @target = label_address(image, layout, patch.label, patch.addend)
+        out set_section_word(image, patch.section, patch.offset, target)
+    }
+    out error.UnknownPatch
+}
+
+skill resolve(image) {
+    @current_layout = layout(image)
+    @index = 0
+    @count = seed.group.count(image.patches)
+    drum (count) {
+        image = resolve_patch(image, current_layout, seed.group.at(image.patches, index))
+        index = index + 1
+    }
+    image.resolved = yes
+    out image
+}
+
+Tables = Box {
+    symbols = Buffer {}
+    names = Buffer {}
+}
+
+skill append_buffer(target, source) {
+    @index = 0
+    drum (source.length) {
+        target = append_byte(target, byte_at(source, index))
+        index = index + 1
+    }
+    out target
+}
+
+skill pad_to(buffer, offset) {
+    (offset < buffer.length) { out error.InvalidFileLayout }
+    out append_zeroes(buffer, offset - buffer.length)
+}
+
+skill payload(image, current_layout) {
+    @result = buffer()
+    result = append_buffer(result, image.code)
+    result = pad_to(result, current_layout.rodata_offset)
+    result = append_buffer(result, image.rodata)
+    result = pad_to(result, current_layout.data_offset)
+    result = append_buffer(result, image.data)
+    result = pad_to(result, current_layout.file_size)
+    out result
+}
+
+skill section_index(section) {
+    (section == Section.CODE) { out 1 }
+    (section == Section.RODATA) { out 2 }
+    (section == Section.DATA) { out 3 }
+    out 4
+}
+
+skill symbol_tables(image, current_layout) {
+    @symbols = buffer()
+    symbols = append_zeroes(symbols, 16)
+    @names = buffer()
+    names = append_byte(names, 0)
+    @index = 0
+    @count = seed.group.count(image.labels)
+    drum (count) {
+        @label = seed.group.at(image.labels, index)
+        @name_offset = names.length
+        names = append_cstring(names, label.name)
+        @value = address_add(image.load_address, section_offset(current_layout, label.section) + label.offset)
+        @info = 17
+        (label.section == Section.CODE) { info = 18 }
+        symbols = append_number32(symbols, name_offset)
+        symbols = append_u32(symbols, value)
+        symbols = append_number32(symbols, 0)
+        symbols = append_byte(symbols, info)
+        symbols = append_byte(symbols, 0)
+        symbols = append_u16(symbols, section_index(label.section))
+        index = index + 1
+    }
+    out Tables { symbols = symbols names = names }
+}
+
+skill section_names() {
+    @names = buffer()
+    names = append_byte(names, 0)
+    names = append_cstring(names, ".text")
+    names = append_cstring(names, ".rodata")
+    names = append_cstring(names, ".data")
+    names = append_cstring(names, ".bss")
+    names = append_cstring(names, ".symtab")
+    names = append_cstring(names, ".strtab")
+    names = append_cstring(names, ".shstrtab")
+    out names
+}
+
+skill append_program_header(target, type, offset, virtual_address, physical_address, file_size, memory_size, flags, alignment) {
+    target = append_number32(target, type)
+    target = append_number32(target, offset)
+    target = append_u32(target, virtual_address)
+    target = append_u32(target, physical_address)
+    target = append_number32(target, file_size)
+    target = append_number32(target, memory_size)
+    target = append_number32(target, flags)
+    target = append_number32(target, alignment)
+    out target
+}
+
+skill append_section_header(target, name, type, flags, address, offset, size, link, info, alignment, entry_size) {
+    target = append_number32(target, name)
+    target = append_number32(target, type)
+    target = append_number32(target, flags)
+    target = append_u32(target, address)
+    target = append_number32(target, offset)
+    target = append_number32(target, size)
+    target = append_number32(target, link)
+    target = append_number32(target, info)
+    target = append_number32(target, alignment)
+    target = append_number32(target, entry_size)
+    out target
+}
+
+skill append_elf_header(target, entry, program_count, section_table_offset) {
+    target = append_byte(target, 127)
+    target = append_byte(target, 69)
+    target = append_byte(target, 76)
+    target = append_byte(target, 70)
+    target = append_byte(target, 1)
+    target = append_byte(target, 1)
+    target = append_byte(target, 1)
+    target = append_zeroes(target, 9)
+    target = append_u16(target, 2)
+    target = append_u16(target, 243)
+    target = append_number32(target, 1)
+    target = append_u32(target, entry)
+    target = append_number32(target, 52)
+    target = append_number32(target, section_table_offset)
+    target = append_number32(target, 0)
+    target = append_u16(target, 52)
+    target = append_u16(target, 32)
+    target = append_u16(target, program_count)
+    target = append_u16(target, 40)
+    target = append_u16(target, 8)
+    target = append_u16(target, 7)
+    out target
+}
+
+skill executable(image) {
+    (image.resolved == no) { image = resolve(image) }
+    @current_layout = layout(image)
+    @entry = label_address(image, current_layout, image.entry, 0)
+    @page_offset = image.load_address.b0 + mod(image.load_address.b1, 16) * 256
+    (page_offset > 0) { out error.LoadAddressNotAligned }
+
+    @body = payload(image, current_layout)
+    @tables = symbol_tables(image, current_layout)
+    @names = section_names()
+    @segment_offset = 4096
+    @symbols_offset = align(segment_offset + body.length, 4)
+    @strings_offset = symbols_offset + tables.symbols.length
+    @section_names_offset = strings_offset + tables.names.length
+    @section_table_offset = align(section_names_offset + names.length, 4)
+    @program_count = 1
+    (image.low_memory_size > 0) { program_count = 2 }
+
+    @result = buffer()
+    result = append_elf_header(result, entry, program_count, section_table_offset)
+    (image.low_memory_size > 0) {
+        result = append_program_header(
+            result,
+            1,
+            0,
+            word(0, 0, 0, 0),
+            word(0, 0, 0, 0),
+            52 + program_count * 32,
+            image.low_memory_size,
+            6,
+            4096
+        )
+    }
+    result = append_program_header(
+        result,
+        1,
+        segment_offset,
+        image.load_address,
+        image.load_address,
+        current_layout.file_size,
+        current_layout.memory_size,
+        7,
+        4096
+    )
+    result = pad_to(result, segment_offset)
+    result = append_buffer(result, body)
+    result = pad_to(result, symbols_offset)
+    result = append_buffer(result, tables.symbols)
+    result = append_buffer(result, tables.names)
+    result = append_buffer(result, names)
+    result = pad_to(result, section_table_offset)
+
+    result = append_zeroes(result, 40)
+    result = append_section_header(
+        result, 1, 1, 6,
+        address_add(image.load_address, current_layout.code_offset),
+        segment_offset + current_layout.code_offset,
+        image.code.length, 0, 0, 4, 0
+    )
+    result = append_section_header(
+        result, 7, 1, 2,
+        address_add(image.load_address, current_layout.rodata_offset),
+        segment_offset + current_layout.rodata_offset,
+        image.rodata.length, 0, 0, 8, 0
+    )
+    result = append_section_header(
+        result, 15, 1, 3,
+        address_add(image.load_address, current_layout.data_offset),
+        segment_offset + current_layout.data_offset,
+        image.data.length, 0, 0, 8, 0
+    )
+    result = append_section_header(
+        result, 21, 8, 3,
+        address_add(image.load_address, current_layout.bss_offset),
+        segment_offset + current_layout.bss_offset,
+        image.bss_size, 0, 0, 8, 0
+    )
+    result = append_section_header(
+        result, 26, 2, 0,
+        word(0, 0, 0, 0),
+        symbols_offset,
+        tables.symbols.length, 6, 1, 4, 16
+    )
+    result = append_section_header(
+        result, 34, 3, 0,
+        word(0, 0, 0, 0),
+        strings_offset,
+        tables.names.length, 0, 0, 1, 0
+    )
+    result = append_section_header(
+        result, 42, 3, 0,
+        word(0, 0, 0, 0),
+        section_names_offset,
+        names.length, 0, 0, 1, 0
+    )
+    out result
+}
+
+skill byte_bits(value) {
+    @text = ""
+    @weight = 128
+    drum (8) {
+        (value < weight) { text = seed.str.add(text, "0") }
+        (value > weight - 1) {
+            text = seed.str.add(text, "1")
+            value = value - weight
+        }
+        weight = weight / 2
+    }
+    out text
+}
+
+skill bits_text(buffer) {
+    @text = ""
+    @index = 0
+    drum (buffer.length) {
+        (index > 0) { text = seed.str.add(text, " ") }
+        text = seed.str.add(text, byte_bits(byte_at(buffer, index)))
+        index = index + 1
+    }
+    out text
+}
+
+skill bytes(buffer) {
+    @result = []
+    @index = 0
+    drum (buffer.length) {
+        result = seed.group.add(result, byte_at(buffer, index))
+        index = index + 1
+    }
+    out result
+}
+
+skill write_buffer(path, buffer) {
+    out file.write_bytes(path, bytes(buffer))
+}
+
+skill write_executable(path, image) {
+    @output = executable(image) rescue |failure| {
+        out failure
+    }
+    out write_buffer(path, output)
+}

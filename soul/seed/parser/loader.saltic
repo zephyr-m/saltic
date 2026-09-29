@@ -1,0 +1,139 @@
+use seed
+use seed.ast
+use seed.diagnostic
+use seed.parser.syntax
+
+Load = Box {
+    ast = []
+    included = []
+    diagnostics = []
+}
+
+skill group_contains(group, value) {
+    @found = no
+    @index = 0
+    @count = seed.group.count(group)
+    drum (count) {
+        (index < count) {
+            (seed.group.item(group, index) == value) { found = yes }
+            index = index + 1
+        }
+    }
+    out found
+}
+
+skill join_path(base, relative) {
+    (seed.str.ends_with(base, "/") == yes) { out seed.str.add(base, relative) }
+    out seed.str.add(seed.str.add(base, "/"), relative)
+}
+
+skill module_relative(parts) {
+    @relative = ""
+    @index = 0
+    @count = seed.group.count(parts)
+    drum (count) {
+        (index < count) {
+            (index > 0) { relative = seed.str.add(relative, "/") }
+            relative = seed.str.add(relative, seed.group.item(parts, index))
+            index = index + 1
+        }
+    }
+    out seed.str.add(relative, ".saltic")
+}
+
+skill module_text(parts) {
+    @text = ""
+    @index = 0
+    @count = seed.group.count(parts)
+    drum (count) {
+        (index < count) {
+            (index > 0) { text = seed.str.add(text, ".") }
+            text = seed.str.add(text, seed.group.item(parts, index))
+            index = index + 1
+        }
+    }
+    out text
+}
+
+skill resolve_module(source_path, parts, root) {
+    @base = root
+    @first = seed.group.item(parts, 0)
+    (first == "seed") { base = join_path(root, "soul") }
+    (first == "core") { base = join_path(root, "soul") }
+    (first == "craft") { base = join_path(root, "soul") }
+    out join_path(base, module_relative(parts))
+}
+
+skill load_error(path, message, included) {
+    @text = seed.str.add("модули: ", message)
+    out Load { ast = syntax.group1("program") included = included diagnostics = syntax.group1(diagnostic.make_at("module_error", path, 0, 0, text)) }
+}
+
+skill expand_file(path, root, locations, included, stack, module_name) {
+    (group_contains(stack, path) == yes) { out load_error(path, "циклический импорт: ", included) }
+    (group_contains(included, path) == yes) { out Load { ast = syntax.group1("program") included = included diagnostics = [] } }
+    @next_included = seed.group.add(included, path)
+    @source = seed.file.read(path) rescue |error| {
+        out load_error(path, "модуль не найден: ", next_included)
+    }
+    @parsed = syntax.parse_string(source, path)
+    (locations == yes) { parsed = syntax.parse_string_loc(source, path) }
+    (syntax.has_diagnostics(parsed.diagnostics) == yes) { out Load { ast = syntax.group1("program") included = next_included diagnostics = parsed.diagnostics } }
+    @output = syntax.group1("program")
+    @next_stack = seed.group.add(stack, path)
+    @index = 1
+    @count = seed.group.count(parsed.ast)
+    @diagnostics = []
+    @active = yes
+    drum (count) {
+        (active == yes) {
+            (index < count) {
+                @item = seed.group.item(parsed.ast, index)
+                @plain = ast.plain(item)
+                @include_item = yes
+                (seed.group.item(plain, 0) == "entry") {
+                    (seed.group.count(stack) > 0) { include_item = no }
+                }
+                (include_item == yes) {
+                    @output_item = item
+                    (seed.str.len(module_name) > 0) { output_item = ast.in_module(module_name, item) }
+                    output = seed.group.add(output, output_item)
+                }
+                (seed.group.item(plain, 0) == "use") {
+                    @parts = []
+                    @part_index = 1
+                    @part_count = seed.group.count(plain)
+                    drum (part_count) {
+                        (part_index < part_count) { parts = seed.group.add(parts, seed.group.item(plain, part_index)) part_index = part_index + 1 }
+                    }
+                    @is_seed = no
+                    (seed.group.count(parts) == 1) {
+                        (seed.group.item(parts, 0) == "seed") { is_seed = yes }
+                    }
+                    (is_seed == no) {
+                        @module_path = resolve_module(path, parts, root)
+                        @loaded = expand_file(module_path, root, locations, next_included, next_stack, module_text(parts))
+                        next_included = loaded.included
+                        (syntax.has_diagnostics(loaded.diagnostics) == yes) { diagnostics = loaded.diagnostics active = no }
+                        (active == yes) { output = syntax.append_tail(output, loaded.ast, 1) }
+                    }
+                }
+                index = index + 1
+            }
+            (index == count) { active = no }
+        }
+    }
+    out Load { ast = output included = next_included diagnostics = diagnostics }
+}
+
+skill load_file(path, root) {
+    out expand_file(path, root, no, [], [], "")
+}
+
+skill load_file_loc(path, root) {
+    out expand_file(path, root, yes, [], [], "")
+}
+
+skill load_modules(path, root) {
+    out load_file(path, root)
+}

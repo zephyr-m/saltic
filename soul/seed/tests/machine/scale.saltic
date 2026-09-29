@@ -1,0 +1,37 @@
+use seed
+use craft.testing
+use seed.machine.instruction
+use seed.machine.codec
+use seed.machine.layout
+use seed.machine.image
+use seed.compiler.backend.rv32i
+
+SCALE_BYTES = 65536
+
+skill run(suite) {
+    @buffer = codec.buffer()
+    buffer = codec.append_zeroes(buffer, SCALE_BYTES)
+    buffer = codec.set_byte(buffer, 0, 17)
+    buffer = codec.set_byte(buffer, codec.CHUNK_SIZE - 1, 34)
+    buffer = codec.set_byte(buffer, codec.CHUNK_SIZE, 51)
+    buffer = codec.set_byte(buffer, SCALE_BYTES - 1, 68)
+
+    suite = testing.test_equal(suite, "scale: длина буфера 64 KiB", buffer.length, SCALE_BYTES)
+    suite = testing.test_equal(suite, "scale: первый байт доступен", codec.byte_at(buffer, 0), 17)
+    suite = testing.test_equal(suite, "scale: конец первого chunk доступен", codec.byte_at(buffer, codec.CHUNK_SIZE - 1), 34)
+    suite = testing.test_equal(suite, "scale: начало второго chunk доступно", codec.byte_at(buffer, codec.CHUNK_SIZE), 51)
+    suite = testing.test_equal(suite, "scale: последний байт доступен", codec.byte_at(buffer, SCALE_BYTES - 1), 68)
+    suite = testing.test_equal(suite, "scale: число chunks конечно", codec.chunk_count(buffer), 256)
+    suite = testing.test_equal(suite, "scale: file boundary не расплющивает байты", seed.group.count(codec.file_chunks(buffer)), 256)
+    suite = testing.test_yes(suite, "scale: таблица команд создаётся один раз", instruction.all() == instruction.all())
+
+    @target = rv32i.host("_start")
+    target = rv32i.label(target, layout.Section.CODE, "_start")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.EBREAK, 0, 0, 0, 0))
+    target.data = buffer
+    @current = layout.layout(target)
+    @output = image.executable(target)
+    suite = testing.test_yes(suite, "scale: ELF с payload 64 KiB создан", output.length > SCALE_BYTES)
+    suite = testing.test_equal(suite, "scale: ELF сохранил последний байт payload", codec.byte_at(output, 4096 + current.data_offset + SCALE_BYTES - 1), 68)
+    out suite
+}

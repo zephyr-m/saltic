@@ -1,0 +1,564 @@
+use seed
+use seed.machine.instruction
+
+ZERO = 0
+RA = 1
+SP = 2
+GP = 3
+TP = 4
+T0 = 5
+T1 = 6
+T2 = 7
+S0 = 8
+FP = 8
+S1 = 9
+A0 = 10
+A1 = 11
+A2 = 12
+A3 = 13
+A4 = 14
+A5 = 15
+A6 = 16
+A7 = 17
+S2 = 18
+S3 = 19
+S4 = 20
+S5 = 21
+S6 = 22
+S7 = 23
+S8 = 24
+S9 = 25
+S10 = 26
+S11 = 27
+T3 = 28
+T4 = 29
+T5 = 30
+T6 = 31
+
+Word = Box {
+    b0 = 0
+    b1 = 0
+    b2 = 0
+    b3 = 0
+}
+
+Cell = Box {
+    value = 0
+}
+
+CHUNK_SIZE = 256
+
+Chunk = Box {
+    cells = []
+    used = 0
+}
+
+Buffer = Box {
+    chunks = []
+    tail = Chunk {}
+    length = 0
+}
+
+skill mod(value, divisor) {
+    out value - value / divisor * divisor
+}
+
+skill power2(width) {
+    @value = 1
+    drum (width) { value = value * 2 }
+    out value
+}
+
+skill bits(value, start, width) {
+    out mod(value / power2(start), power2(width))
+}
+
+skill signed_value(value, width) {
+    @result = value
+    (result < 0) { result = result + power2(width) }
+    out result
+}
+
+skill valid_register(value) {
+    (value < 0) { out no }
+    (value > 31) { out no }
+    out yes
+}
+
+skill valid_unsigned(value, width) {
+    (value < 0) { out no }
+    (value > power2(width) - 1) { out no }
+    out yes
+}
+
+skill valid_signed(value, width) {
+    @limit = power2(width - 1)
+    (value < 0 - limit) { out no }
+    (value > limit - 1) { out no }
+    out yes
+}
+
+skill valid_even_signed(value, width) {
+    (valid_signed(value, width) == no) { out no }
+    out mod(value, 2) == 0
+}
+
+skill word(b0, b1, b2, b3) {
+    out Word { b0 = b0 b1 = b1 b2 = b2 b3 = b3 }
+}
+
+skill word_from_number(value) {
+    (value < 0) { out error.ValueOutsideRange }
+    @b0 = mod(value, 256)
+    value = value / 256
+    @b1 = mod(value, 256)
+    value = value / 256
+    @b2 = mod(value, 256)
+    value = value / 256
+    @b3 = mod(value, 256)
+    (value / 256 > 0) { out error.WordOutsideRange }
+    out word(b0, b1, b2, b3)
+}
+
+skill word_to_number(value) {
+    (value.b3 > 15) { out error.ValueOutsideRange }
+    out value.b0 + value.b1 * 256 + value.b2 * 65536 + value.b3 * 16777216
+}
+
+skill word_is_zero(value) {
+    (value.b0 > 0) { out no }
+    (value.b1 > 0) { out no }
+    (value.b2 > 0) { out no }
+    out value.b3 == 0
+}
+
+skill word_add(left, right) {
+    @v0 = left.b0 + right.b0
+    @v1 = left.b1 + right.b1 + v0 / 256
+    @v2 = left.b2 + right.b2 + v1 / 256
+    @v3 = left.b3 + right.b3 + v2 / 256
+    (v3 > 255) { out error.WordOutsideRange }
+    out word(mod(v0, 256), mod(v1, 256), mod(v2, 256), v3)
+}
+
+skill word_add_number(value, amount) {
+    out word_add(value, word_from_number(amount))
+}
+
+skill word_align(value, boundary) {
+    (boundary < 1) { out error.InvalidAlignment }
+    (boundary > 256) { out error.InvalidAlignment }
+    (mod(256, boundary) > 0) { out error.InvalidAlignment }
+    @remainder = mod(value.b0, boundary)
+    (remainder == 0) { out value }
+    out word_add_number(value, boundary - remainder)
+}
+
+skill word_text(value) {
+    @current = value
+    @result = ""
+    @active = word_is_zero(current) == no
+    @step = 0
+    drum (10) {
+        (active == yes) {
+            @v3 = current.b3
+            @q3 = v3 / 10
+            @carry = mod(v3, 10)
+            @v2 = carry * 256 + current.b2
+            @q2 = v2 / 10
+            carry = mod(v2, 10)
+            @v1 = carry * 256 + current.b1
+            @q1 = v1 / 10
+            carry = mod(v1, 10)
+            @v0 = carry * 256 + current.b0
+            @q0 = v0 / 10
+            carry = mod(v0, 10)
+            result = seed.str.add(seed.str.at("0123456789", carry), result)
+            current = word(q0, q1, q2, q3)
+            active = word_is_zero(current) == no
+        }
+        step = step + 1
+    }
+    (seed.str.len(result) == 0) { out "0" }
+    out result
+}
+
+skill decimal_digit(ch) {
+    (ch == "0") { out 0 }
+    (ch == "1") { out 1 }
+    (ch == "2") { out 2 }
+    (ch == "3") { out 3 }
+    (ch == "4") { out 4 }
+    (ch == "5") { out 5 }
+    (ch == "6") { out 6 }
+    (ch == "7") { out 7 }
+    (ch == "8") { out 8 }
+    (ch == "9") { out 9 }
+    out 0 - 1
+}
+
+skill negate_word(value) {
+    @v0 = 256 - value.b0
+    @b0 = mod(v0, 256)
+    @v1 = 255 - value.b1 + v0 / 256
+    @b1 = mod(v1, 256)
+    @v2 = 255 - value.b2 + v1 / 256
+    @b2 = mod(v2, 256)
+    @v3 = 255 - value.b3 + v2 / 256
+    out word(b0, b1, b2, mod(v3, 256))
+}
+
+skill word_from_decimal(text) {
+    @length = seed.str.len(text)
+    (length == 0) { out error.InvalidWordText }
+    @negative = seed.str.starts_with(text, "-")
+    @index = 0
+    (negative == yes) {
+        (length == 1) { out error.InvalidWordText }
+        index = 1
+    }
+    @result = word(0, 0, 0, 0)
+    drum (length) {
+        (index < length) {
+            @digit = decimal_digit(seed.str.at(text, index))
+            (digit < 0) { out error.InvalidWordText }
+            @v0 = result.b0 * 10 + digit
+            @v1 = result.b1 * 10 + v0 / 256
+            @v2 = result.b2 * 10 + v1 / 256
+            @v3 = result.b3 * 10 + v2 / 256
+            (v3 > 255) { out error.WordOutsideRange }
+            result = word(mod(v0, 256), mod(v1, 256), mod(v2, 256), v3)
+            index = index + 1
+        }
+    }
+    (negative == yes) {
+        (result.b3 > 128) { out error.WordOutsideRange }
+        (result.b3 == 128) {
+            ((result.b2 == 0) == no) { out error.WordOutsideRange }
+            ((result.b1 == 0) == no) { out error.WordOutsideRange }
+            ((result.b0 == 0) == no) { out error.WordOutsideRange }
+        }
+        out negate_word(result)
+    }
+    out result
+}
+
+skill fresh_chunk() {
+    out Chunk { cells = [
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+    ] }
+}
+
+skill buffer() {
+    out Buffer { tail = fresh_chunk() }
+}
+
+skill prepare_tail(target) {
+    (seed.group.count(target.tail.cells) == 0) { target.tail = fresh_chunk() }
+    (target.tail.used == CHUNK_SIZE) {
+        target.chunks = seed.group.add(target.chunks, target.tail)
+        target.tail = fresh_chunk()
+    }
+    out target
+}
+
+skill chunk_count(target) {
+    @count = seed.group.count(target.chunks)
+    (target.tail.used > 0) { count = count + 1 }
+    out count
+}
+
+skill chunk_at(target, index) {
+    (index < 0) { out error.BufferOutsideRange }
+    @complete = seed.group.count(target.chunks)
+    (index < complete) { out seed.group.item(target.chunks, index) }
+    (index == complete) {
+        (target.tail.used > 0) { out target.tail }
+    }
+    out error.BufferOutsideRange
+}
+
+skill cell_at(target, offset) {
+    (offset < 0) { out error.BufferOutsideRange }
+    (offset > target.length - 1) { out error.BufferOutsideRange }
+    @chunk_index = offset / CHUNK_SIZE
+    @cell_index = mod(offset, CHUNK_SIZE)
+    @chunk = chunk_at(target, chunk_index)
+    out seed.group.item(chunk.cells, cell_index)
+}
+
+skill append_byte(target, value) {
+    (valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
+    target = prepare_tail(target)
+    @cell = seed.group.item(target.tail.cells, target.tail.used)
+    cell.value = value
+    target.tail.used = target.tail.used + 1
+    target.length = target.length + 1
+    out target
+}
+
+skill append_word(target, value) {
+    target = append_byte(target, value.b0)
+    target = append_byte(target, value.b1)
+    target = append_byte(target, value.b2)
+    target = append_byte(target, value.b3)
+    out target
+}
+
+skill byte_at(target, offset) {
+    @cell = cell_at(target, offset)
+    out cell.value
+}
+
+skill set_byte(target, offset, value) {
+    (valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
+    @cell = cell_at(target, offset)
+    cell.value = value
+    out target
+}
+
+skill set_word(target, offset, value) {
+    target = set_byte(target, offset, value.b0)
+    target = set_byte(target, offset + 1, value.b1)
+    target = set_byte(target, offset + 2, value.b2)
+    target = set_byte(target, offset + 3, value.b3)
+    out target
+}
+
+skill append_zeroes(target, count) {
+    @index = 0
+    drum (count) {
+        target = append_byte(target, 0)
+        index = index + 1
+    }
+    out target
+}
+
+skill append_buffer(target, source) {
+    @chunk_index = 0
+    @count = chunk_count(source)
+    drum (count) {
+        @source_chunk = chunk_at(source, chunk_index)
+        @cell_index = 0
+        drum (source_chunk.used) {
+            @cell = seed.group.item(source_chunk.cells, cell_index)
+            target = append_byte(target, cell.value)
+            cell_index = cell_index + 1
+        }
+        chunk_index = chunk_index + 1
+    }
+    out target
+}
+
+skill file_chunks(target) {
+    @result = target.chunks
+    (target.tail.used > 0) { result = seed.group.add(result, target.tail) }
+    out result
+}
+
+skill chunks(target, chunk_size) {
+    (chunk_size < 1) { out error.InvalidChunkSize }
+    (chunk_size > CHUNK_SIZE) { out error.InvalidChunkSize }
+    @result = []
+    @chunk = []
+    @index = 0
+    drum (target.length) {
+        chunk = seed.group.add(chunk, byte_at(target, index))
+        ((seed.group.count(chunk) == chunk_size) == yes) {
+            result = seed.group.add(result, chunk)
+            chunk = []
+        }
+        index = index + 1
+    }
+    (seed.group.count(chunk) > 0) { result = seed.group.add(result, chunk) }
+    out result
+}
+
+skill encode_r(opcode, rd, funct3, rs1, rs2, funct7) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_register(rs2) == no) { out error.InvalidRegister }
+    (valid_unsigned(funct7, 7) == no) { out error.InvalidFunction }
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(rs2, 0, 4) * 16,
+        bits(rs2, 4, 1) + funct7 * 2
+    )
+}
+
+skill encode_i(opcode, rd, funct3, rs1, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_signed(immediate, 12) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, 12)
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(value, 0, 4) * 16,
+        bits(value, 4, 8)
+    )
+}
+
+skill encode_i_unsigned(opcode, rd, funct3, rs1, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_unsigned(immediate, 12) == no) { out error.InvalidImmediate }
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(immediate, 0, 4) * 16,
+        bits(immediate, 4, 8)
+    )
+}
+
+skill encode_s(opcode, funct3, rs1, rs2, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_register(rs2) == no) { out error.InvalidRegister }
+    (valid_signed(immediate, 12) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, 12)
+    out word(
+        opcode + bits(value, 0, 1) * 128,
+        bits(value, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(rs2, 0, 4) * 16,
+        bits(rs2, 4, 1) + bits(value, 5, 7) * 2
+    )
+}
+
+skill encode_b(opcode, funct3, rs1, rs2, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_register(rs1) == no) { out error.InvalidRegister }
+    (valid_register(rs2) == no) { out error.InvalidRegister }
+    (valid_even_signed(immediate, 13) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, 13)
+    out word(
+        opcode + bits(value, 11, 1) * 128,
+        bits(value, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
+        bits(rs1, 1, 4) + bits(rs2, 0, 4) * 16,
+        bits(rs2, 4, 1) + bits(value, 5, 6) * 2 + bits(value, 12, 1) * 128
+    )
+}
+
+skill encode_u(opcode, rd, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_unsigned(immediate, 20) == no) { out error.InvalidImmediate }
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + bits(immediate, 0, 4) * 16,
+        bits(immediate, 4, 8),
+        bits(immediate, 12, 8)
+    )
+}
+
+skill encode_j(opcode, rd, immediate) {
+    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_register(rd) == no) { out error.InvalidRegister }
+    (valid_even_signed(immediate, 21) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, 21)
+    out word(
+        opcode + bits(rd, 0, 1) * 128,
+        bits(rd, 1, 4) + bits(value, 12, 4) * 16,
+        bits(value, 16, 4) + bits(value, 11, 1) * 16 + bits(value, 1, 3) * 32,
+        bits(value, 4, 7) + bits(value, 20, 1) * 128
+    )
+}
+
+skill is_shift(kind) {
+    (kind == instruction.Kind.SLLI) { out yes }
+    (kind == instruction.Kind.SRLI) { out yes }
+    (kind == instruction.Kind.SRAI) { out yes }
+    out no
+}
+
+skill encode(item, rd, rs1, rs2, immediate) {
+    (item.kind == instruction.Kind.UNKNOWN_INSTRUCTION) { out error.UnknownInstruction }
+    (item.form == instruction.Form.R) { out encode_r(item.opcode, rd, item.funct3, rs1, rs2, item.funct7) }
+    (item.form == instruction.Form.S) { out encode_s(item.opcode, item.funct3, rs1, rs2, immediate) }
+    (item.form == instruction.Form.B) { out encode_b(item.opcode, item.funct3, rs1, rs2, immediate) }
+    (item.form == instruction.Form.U) { out encode_u(item.opcode, rd, immediate) }
+    (item.form == instruction.Form.J) { out encode_j(item.opcode, rd, immediate) }
+    (item.form == instruction.Form.I) {
+        ((item.system == instruction.ANY) == no) {
+            out encode_i_unsigned(item.opcode, ZERO, item.funct3, ZERO, item.system)
+        }
+        (is_shift(item.kind) == yes) {
+            (valid_unsigned(immediate, 5) == no) { out error.InvalidShift }
+            out encode_i_unsigned(item.opcode, rd, item.funct3, rs1, item.funct7 * 32 + immediate)
+        }
+        (item.kind == instruction.Kind.CSRRW) { out encode_i_unsigned(item.opcode, rd, item.funct3, rs1, immediate) }
+        (item.kind == instruction.Kind.CSRRS) { out encode_i_unsigned(item.opcode, rd, item.funct3, rs1, immediate) }
+        (item.kind == instruction.Kind.FENCE) { out encode_i_unsigned(item.opcode, ZERO, item.funct3, ZERO, immediate) }
+        out encode_i(item.opcode, rd, item.funct3, rs1, immediate)
+    }
+    out error.UnknownInstructionForm
+}
+
+skill encode_kind(kind, rd, rs1, rs2, immediate) {
+    @item = instruction.find_kind(kind)
+    out encode(item, rd, rs1, rs2, immediate)
+}
+
+skill byte_bits(value) {
+    @text = ""
+    @weight = 128
+    drum (8) {
+        (value < weight) { text = seed.str.add(text, "0") }
+        (value > weight - 1) {
+            text = seed.str.add(text, "1")
+            value = value - weight
+        }
+        weight = weight / 2
+    }
+    out text
+}
+
+skill word_bits(value) {
+    @text = byte_bits(value.b0)
+    text = seed.str.add(text, " ")
+    text = seed.str.add(text, byte_bits(value.b1))
+    text = seed.str.add(text, " ")
+    text = seed.str.add(text, byte_bits(value.b2))
+    text = seed.str.add(text, " ")
+    out seed.str.add(text, byte_bits(value.b3))
+}

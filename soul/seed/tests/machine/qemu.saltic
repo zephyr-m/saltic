@@ -1,0 +1,105 @@
+use seed
+use craft.testing
+use seed.machine.instruction
+use seed.machine.codec
+use seed.machine.layout
+use seed.machine.image
+use seed.compiler
+use seed.compiler.backend.rv32i
+use seed.memory.model
+use seed.vm
+use seed.vm.state
+
+skill make_image() {
+    @target = rv32i.host("_start")
+    target = rv32i.label(target, layout.Section.CODE, "_start")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A7, codec.ZERO, codec.ZERO, 93))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ECALL, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+    out rv32i.executable(target)
+}
+
+skill ordinary_program(heap_bytes) {
+    @ast = ["program", ["entry", [], ["block", ["out", ["number", 7]]]]]
+    @target = compiler.compile_machine_with_heap(ast, codec.word_from_number(heap_bytes))
+    out layout.resolve(target)
+}
+
+skill exhausted_program() {
+    @ast = ["program", ["entry", [], ["block", ["out", ["group", ["number", 1]]]]]]
+    @target = compiler.compile_machine_with_heap(ast, codec.word_from_number(16))
+    out layout.resolve(target)
+}
+
+skill wide_heap_program() {
+    @ast = ["program", ["entry", [], ["block", ["out", ["number", 7]]]]]
+    @target = compiler.compile_machine_with_heap(ast, codec.word_from_decimal("4026531840"))
+    out layout.resolve(target)
+}
+
+skill execute(output, limit) {
+    @options = state.Options {
+        load_address = 4096
+        memory_size = model.DEFAULT_HEAP_BYTES + 1048576
+        step_limit = limit
+        program_name = "machine-codegen"
+        arguments = []
+        files = []
+    }
+    out vm.run(codec.chunks(output, state.PAGE_SIZE), options)
+}
+
+skill run(suite, output_path) {
+    @ordinary = ordinary_program(64)
+    @output = image.executable(ordinary)
+    @start = layout.find_label(ordinary, "_start")
+    @entry = layout.find_label(ordinary, "saltic_program")
+    @exit_label = layout.find_label(ordinary, "rt_platform_exit")
+    suite = testing.test_yes(suite, "обычная программа: машинный канал разрешён", ordinary.resolved)
+    suite = testing.test_yes(suite, "обычная программа: _start существует", start.present)
+    suite = testing.test_yes(suite, "обычная программа: program существует", entry.present)
+    suite = testing.test_yes(suite, "обычная программа: runtime существует", exit_label.present)
+    suite = testing.test_equal(suite, "обычная программа: параметр heap", codec.word_to_number(ordinary.heap_size), 64)
+    suite = testing.test_equal(suite, "обычная программа: compiler heap", codec.word_to_number(ordinary.bss_size), 64)
+    suite = testing.test_equal(suite, "обычная программа: ELF magic", codec.byte_at(output, 0), 127)
+    suite = testing.test_yes(suite, "обычная программа: ELF содержит payload", output.length > 4096)
+    @result = execute(output, 96)
+    suite = testing.test_equal(suite, "обычная программа: нет trap", result.trap, "")
+    suite = testing.test_equal(suite, "обычная программа: завершилась через runtime", result.reason, "exit")
+    suite = testing.test_equal(suite, "обычная программа: успешный exit", result.exit_code, 0)
+    @exhausted = exhausted_program()
+    @exhausted_result = execute(image.executable(exhausted), 96)
+    suite = testing.test_equal(suite, "квота: маленький heap сохранён", codec.word_to_number(exhausted.heap_size), 16)
+    suite = testing.test_equal(suite, "квота: исчерпание не повреждает VM", exhausted_result.trap, "")
+    suite = testing.test_equal(suite, "квота: исчерпание завершает программу", exhausted_result.reason, "exit")
+    suite = testing.test_equal(suite, "квота: канонический статус исчерпания", exhausted_result.exit_code, model.OUT_OF_MEMORY_EXIT_STATUS)
+    @wide = wide_heap_program()
+    @wide_output = image.executable(wide)
+    suite = testing.test_equal(suite, "широкая квота: decimal сохраняется", codec.word_text(wide.heap_size), "4026531840")
+    suite = testing.test_equal(suite, "широкая квота: heap занимает 0xf0000000", wide.heap_size.b3, 240)
+    suite = testing.test_equal(suite, "широкая квота: BSS занимает 0xf0000000", wide.bss_size.b3, 240)
+    suite = testing.test_yes(suite, "широкая квота: ELF не расплющивает BSS в файл", wide_output.length < 65536)
+    image.write_buffer(output_path, output)
+    out suite
+}
+
+program(output_path) {
+    @output = make_image()
+    @options = state.Options {
+        load_address = 4096
+        memory_size = 262144
+        step_limit = 8
+        program_name = "seed-machine-qemu"
+        arguments = []
+        files = []
+    }
+    @result = vm.run(codec.chunks(output, state.PAGE_SIZE), options)
+    @suite = testing.test_new()
+    suite = testing.test_equal(suite, "QEMU ELF: собственная VM не получила trap", result.trap, "")
+    suite = testing.test_equal(suite, "QEMU ELF: собственная VM выполнила exit", result.reason, "exit")
+    suite = testing.test_equal(suite, "QEMU ELF: код завершения равен нулю", result.exit_code, 0)
+    suite = testing.test_equal(suite, "QEMU ELF: выполнены три команды", result.steps, 3)
+    @finish = testing.test_finish(suite)
+    image.write_buffer(output_path, output)
+    out finish
+}
