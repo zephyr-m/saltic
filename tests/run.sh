@@ -265,6 +265,16 @@ test_jtml() {
     echo "JTML: дерево, раскладка и ввод подтверждены"
 }
 
+test_tasks() {
+    mkdir -p "$work/tasks"
+    build tasks \
+        tests/tasks.saltic \
+        "$work/tasks/program.elf"
+    qemu-riscv32 -B 0x100000000 \
+        "$work/tasks/program.elf"
+    echo "tasks: модель и интерфейс подтверждены"
+}
+
 test_bootstrap() {
     local bootstrap_work="$work/bootstrap"
     local heap_bytes=4026531840
@@ -446,6 +456,7 @@ run_case() {
         abi) test_abi ;;
         qemu-virt) test_qemu_virt ;;
         jtml) test_jtml ;;
+        tasks) test_tasks ;;
         bootstrap) test_bootstrap ;;
         closure) test_closure ;;
         *)
@@ -472,6 +483,7 @@ if [[ "$1" == "all" ]]; then
         machine \
         abi \
         jtml \
+        tasks \
         qemu-virt \
         closure \
         bootstrap

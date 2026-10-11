@@ -41,6 +41,9 @@ qemu-graphics-check:
 jtml:
     just test jtml
 
+tasks:
+    just test tasks
+
 selfhost source="soul/seed/canonical/main.saltic" output="/tmp/saltic-self-parser.elf" json=".cache/build/pipeline/parsed.json":
     mkdir -p "$(dirname "$3")"
     bash os/bootstrap/build.sh soul/seed/parser.saltic "$2"

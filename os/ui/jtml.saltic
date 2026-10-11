@@ -50,6 +50,19 @@ FieldLookup = Box {
     slot = FieldSlot {}
 }
 
+TargetSlot = Box {
+    id = ""
+    x = 0
+    y = 0
+    width = 0
+    height = 0
+}
+
+Hit = Box {
+    found = no
+    id = ""
+}
+
 ValueLookup = Box {
     found = no
     value = ""
@@ -66,9 +79,15 @@ Placement = Box {
 Runtime = Box {
     root = Node {}
     fields = []
+    targets = []
     focused = ""
     width = 0
     height = 0
+}
+
+LayoutState = Box {
+    fields = []
+    targets = []
 }
 
 skill frame(flow, width, height, grow, padding, gap, border, children) {
@@ -99,6 +118,10 @@ skill space(grow) {
 
 skill text(value) {
     out Node { kind = Kind.TEXT value = value }
+}
+
+skill target_text(id, value) {
+    out Node { kind = Kind.TEXT id = id value = value }
 }
 
 skill text_scaled(value, scale) {
@@ -255,7 +278,22 @@ skill children_layout(node, x, y, width, height) {
     out items
 }
 
-skill layout_node(node, x, y, width, height, fields) {
+skill layout_node(node, x, y, width, height, layout) {
+    (node.kind == Kind.TEXT) {
+        (seed.str.len(node.id) > 0) {
+            out LayoutState {
+                fields = layout.fields
+                targets = seed.group.add(layout.targets, TargetSlot {
+                    id = node.id
+                    x = x
+                    y = y - 6
+                    width = width
+                    height = height + 12
+                })
+            }
+        }
+        out layout
+    }
     (node.kind == Kind.FIELD) {
         @field_y = y + (height - text_field.TEXT_FIELD_HEIGHT) / 2
         @field_state = text_field.text_field_sync(text_field.TextField {
@@ -264,40 +302,44 @@ skill layout_node(node, x, y, width, height, fields) {
             width = width
             text = node.value
         })
-        out seed.group.add(fields, FieldSlot { id = node.id field = field_state })
+        out LayoutState {
+            fields = seed.group.add(layout.fields, FieldSlot { id = node.id field = field_state })
+            targets = layout.targets
+        }
     }
     (node.kind == Kind.FORM) {
-        @next_fields = fields
+        @next = layout
         @placements = children_layout(node, x, y, width, height)
         @index = 0
         @count = seed.group.count(placements)
         drum (count) {
             @placement = seed.group.item(placements, index)
-            next_fields = layout_node(
+            next = layout_node(
                 placement.node,
                 placement.x,
                 placement.y,
                 placement.width,
                 placement.height,
-                next_fields
+                next
             )
             index = index + 1
         }
-        out next_fields
+        out next
     }
-    out fields
+    out layout
 }
 
 skill mount(screen, root) {
-    @fields = layout_node(root, 0, 0, screen.width, screen.height, [])
+    @layout = layout_node(root, 0, 0, screen.width, screen.height, LayoutState {})
     @focused = ""
-    (seed.group.count(fields) > 0) {
-        @first_field = seed.group.item(fields, 0)
+    (seed.group.count(layout.fields) > 0) {
+        @first_field = seed.group.item(layout.fields, 0)
         focused = first_field.id
     }
     out Runtime {
         root = root
-        fields = fields
+        fields = layout.fields
+        targets = layout.targets
         focused = focused
         width = screen.width
         height = screen.height
@@ -329,6 +371,7 @@ skill focus(runtime, id) {
     out Runtime {
         root = runtime.root
         fields = runtime.fields
+        targets = runtime.targets
         focused = id
         width = runtime.width
         height = runtime.height
@@ -349,6 +392,7 @@ skill focus_at(runtime, x, y) {
             out Runtime {
                 root = runtime.root
                 fields = runtime.fields
+                targets = runtime.targets
                 focused = slot.id
                 width = runtime.width
                 height = runtime.height
@@ -357,6 +401,22 @@ skill focus_at(runtime, x, y) {
         index = index + 1
     }
     out runtime
+}
+
+skill hit(runtime, x, y) {
+    @index = 0
+    @count = seed.group.count(runtime.targets)
+    drum (count) {
+        @target = seed.group.item(runtime.targets, index)
+        @inside = yes
+        (x < target.x) { inside = no }
+        (y < target.y) { inside = no }
+        ((x < target.x + target.width) == no) { inside = no }
+        ((y < target.y + target.height) == no) { inside = no }
+        (inside == yes) { out Hit { found = yes id = target.id } }
+        index = index + 1
+    }
+    out Hit {}
 }
 
 skill key(runtime, code, shift) {
@@ -378,6 +438,7 @@ skill key(runtime, code, shift) {
     out Runtime {
         root = runtime.root
         fields = fields
+        targets = runtime.targets
         focused = runtime.focused
         width = runtime.width
         height = runtime.height
@@ -386,15 +447,8 @@ skill key(runtime, code, shift) {
 
 skill draw_form(screen, node, x, y, width, height) {
     (node.border > 0) {
-        graphics.graphics_rect(screen, x, y, width, height, graphics.Ink.FOREGROUND)
-        graphics.graphics_rect(
-            screen,
-            x + node.border,
-            y + node.border,
-            width - node.border * 2,
-            height - node.border * 2,
-            graphics.Ink.BACKGROUND
-        )
+        graphics.graphics_rect(screen, x, y, width, height, graphics.Ink.BACKGROUND)
+        graphics.graphics_frame(screen, x, y, width, height, node.border, graphics.Ink.FOREGROUND)
     }
     out none
 }
@@ -440,6 +494,44 @@ skill draw_node(screen, runtime, node, x, y, width, height) {
 skill draw(screen, runtime) {
     graphics.graphics_fill(screen, graphics.Ink.BACKGROUND)
     draw_node(screen, runtime, runtime.root, 0, 0, runtime.width, runtime.height)
+    out none
+}
+
+skill draw_root_child(screen, runtime, index) {
+    @placements = children_layout(runtime.root, 0, 0, runtime.width, runtime.height)
+    @placement = seed.group.item(placements, index)
+    draw_node(
+        screen,
+        runtime,
+        placement.node,
+        placement.x,
+        placement.y,
+        placement.width,
+        placement.height
+    )
+    out none
+}
+
+skill draw_root_grandchild(screen, runtime, parent_index, index) {
+    @root = children_layout(runtime.root, 0, 0, runtime.width, runtime.height)
+    @parent = seed.group.item(root, parent_index)
+    @placements = children_layout(
+        parent.node,
+        parent.x,
+        parent.y,
+        parent.width,
+        parent.height
+    )
+    @placement = seed.group.item(placements, index)
+    draw_node(
+        screen,
+        runtime,
+        placement.node,
+        placement.x,
+        placement.y,
+        placement.width,
+        placement.height
+    )
     out none
 }
 

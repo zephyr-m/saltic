@@ -1,0 +1,250 @@
+use seed
+use os.ui.jtml
+
+TASK_LIMIT = 8
+FILTER_ALL_ID = "filter:all"
+FILTER_ACTIVE_ID = "filter:active"
+FILTER_DONE_ID = "filter:done"
+ACTION_TOGGLE_ID = "action:toggle"
+ACTION_DELETE_ID = "action:delete"
+
+Filter = enum {
+    ALL,
+    ACTIVE,
+    DONE,
+}
+
+Task = Box {
+    id = 0
+    text = ""
+    done = no
+}
+
+Model = Box {
+    tasks = []
+    selected = 0
+    filter = Filter.ALL
+    next_id = 1
+    pulse = 0
+}
+
+skill make(tasks, selected, filter, next_id, pulse) {
+    out Model {
+        tasks = tasks
+        selected = selected
+        filter = filter
+        next_id = next_id
+        pulse = pulse
+    }
+}
+
+skill new() {
+    out Model {}
+}
+
+skill add(model, text) {
+    (seed.str.len(text) == 0) { out model }
+    (seed.group.count(model.tasks) == TASK_LIMIT) { out model }
+    @task = Task { id = model.next_id text = text }
+    out make(
+        seed.group.add(model.tasks, task),
+        task.id,
+        model.filter,
+        model.next_id + 1,
+        model.pulse + 1
+    )
+}
+
+skill select(model, id) {
+    out make(model.tasks, id, model.filter, model.next_id, model.pulse + 1)
+}
+
+skill toggle(model, id) {
+    @tasks = []
+    @changed = no
+    @index = 0
+    @count = seed.group.count(model.tasks)
+    drum (count) {
+        @task = seed.group.item(model.tasks, index)
+        @next = task
+        (task.id == id) {
+            @done = yes
+            (task.done == yes) { done = no }
+            next = Task { id = task.id text = task.text done = done }
+            changed = yes
+        }
+        tasks = seed.group.add(tasks, next)
+        index = index + 1
+    }
+    (changed == no) { out model }
+    out make(tasks, model.selected, model.filter, model.next_id, model.pulse + 1)
+}
+
+skill delete_selected(model) {
+    (model.selected == 0) { out model }
+    @tasks = []
+    @changed = no
+    @index = 0
+    @count = seed.group.count(model.tasks)
+    drum (count) {
+        @task = seed.group.item(model.tasks, index)
+        (task.id == model.selected) { changed = yes }
+        ((task.id == model.selected) == no) {
+            tasks = seed.group.add(tasks, task)
+        }
+        index = index + 1
+    }
+    (changed == no) { out model }
+    out make(tasks, 0, model.filter, model.next_id, model.pulse + 1)
+}
+
+skill set_filter(model, filter) {
+    out make(model.tasks, model.selected, filter, model.next_id, model.pulse + 1)
+}
+
+skill target_id(id) {
+    out seed.str.add("task:", seed.num.text(id))
+}
+
+skill activate(model, target) {
+    (target == FILTER_ALL_ID) { out set_filter(model, Filter.ALL) }
+    (target == FILTER_ACTIVE_ID) { out set_filter(model, Filter.ACTIVE) }
+    (target == FILTER_DONE_ID) { out set_filter(model, Filter.DONE) }
+    (target == ACTION_TOGGLE_ID) { out toggle(model, model.selected) }
+    (target == ACTION_DELETE_ID) { out delete_selected(model) }
+
+    @index = 0
+    @count = seed.group.count(model.tasks)
+    drum (count) {
+        @task = seed.group.item(model.tasks, index)
+        (target == target_id(task.id)) {
+            (model.selected == task.id) { out toggle(model, task.id) }
+            out select(model, task.id)
+        }
+        index = index + 1
+    }
+    out model
+}
+
+skill active_count(model) {
+    @result = 0
+    @index = 0
+    @count = seed.group.count(model.tasks)
+    drum (count) {
+        @task = seed.group.item(model.tasks, index)
+        (task.done == no) { result = result + 1 }
+        index = index + 1
+    }
+    out result
+}
+
+skill done_count(model) {
+    out seed.group.count(model.tasks) - active_count(model)
+}
+
+skill visible(model, task) {
+    (model.filter == Filter.ALL) { out yes }
+    (model.filter == Filter.ACTIVE) { out task.done == no }
+    out task.done
+}
+
+skill visible_count(model) {
+    @result = 0
+    @index = 0
+    @count = seed.group.count(model.tasks)
+    drum (count) {
+        @task = seed.group.item(model.tasks, index)
+        (visible(model, task) == yes) { result = result + 1 }
+        index = index + 1
+    }
+    out result
+}
+
+skill filter_line(model, filter, id, name) {
+    @prefix = "  "
+    (model.filter == filter) { prefix = "> " }
+    out jtml.target_text(id, seed.str.add(prefix, name))
+}
+
+skill task_line(model, task) {
+    @mark = "[ ] "
+    (task.done == yes) { mark = "[X] " }
+    @prefix = "  "
+    (task.id == model.selected) { prefix = "> " }
+    out jtml.target_text(target_id(task.id), seed.str.add(prefix, seed.str.add(mark, task.text)))
+}
+
+skill task_nodes(model) {
+    @items = []
+    @index = 0
+    @count = seed.group.count(model.tasks)
+    drum (count) {
+        @task = seed.group.item(model.tasks, index)
+        (visible(model, task) == yes) {
+            items = seed.group.add(items, task_line(model, task))
+        }
+        index = index + 1
+    }
+    (seed.group.count(items) == 0) {
+        items = seed.group.add(items, jtml.label("NO TASKS HERE", 1, jtml.Align.CENTER))
+    }
+    out items
+}
+
+skill summary(model) {
+    @text = seed.str.add("ALL ", seed.num.text(seed.group.count(model.tasks)))
+    text = seed.str.add(text, seed.str.add("   ACTIVE ", seed.num.text(active_count(model))))
+    out seed.str.add(text, seed.str.add("   DONE ", seed.num.text(done_count(model))))
+}
+
+skill actions(model) {
+    (model.selected > 0) {
+        out jtml.frame(jtml.Flow.ROW, 0, 40, 0, 8, 24, 1, [
+            jtml.target_text(ACTION_TOGGLE_ID, "TOGGLE DONE"),
+            jtml.target_text(ACTION_DELETE_ID, "DELETE"),
+            jtml.space(1)
+        ])
+    }
+    out jtml.frame(jtml.Flow.ROW, 0, 40, 0, 8, 0, 1, [
+        jtml.text("SELECT A TASK")
+    ])
+}
+
+skill view(model, draft) {
+    @header_status = seed.str.add("TASKS ", seed.num.text(seed.group.count(model.tasks)))
+    header_status = seed.str.add(header_status, seed.str.add("   PULSE ", seed.num.text(model.pulse)))
+    @header = jtml.frame(jtml.Flow.ROW, 0, 56, 0, 12, 16, 2, [
+        jtml.text_scaled("SALTIC", 2),
+        jtml.space(1),
+        jtml.text(header_status)
+    ])
+    @navigation = jtml.frame(jtml.Flow.COLUMN, 224, 0, 0, 16, 20, 2, [
+        jtml.text_scaled("TASKS", 2),
+        filter_line(model, Filter.ALL, FILTER_ALL_ID, "ALL"),
+        filter_line(model, Filter.ACTIVE, FILTER_ACTIVE_ID, "ACTIVE"),
+        filter_line(model, Filter.DONE, FILTER_DONE_ID, "DONE"),
+        jtml.space(1),
+        jtml.text("IN MEMORY")
+    ])
+    @list = jtml.frame(jtml.Flow.COLUMN, 0, 0, 1, 12, 16, 1, task_nodes(model))
+    @workspace = jtml.frame(jtml.Flow.COLUMN, 0, 0, 1, 24, 16, 2, [
+        jtml.text_scaled("TASK WORKSPACE", 2),
+        jtml.text(summary(model)),
+        list,
+        actions(model)
+    ])
+    @body = jtml.frame(jtml.Flow.ROW, 0, 0, 1, 0, 16, 0, [
+        navigation,
+        workspace
+    ])
+    @command = jtml.frame(jtml.Flow.ROW, 0, 87, 0, 8, 12, 2, [
+        jtml.text_scaled(">", 2),
+        jtml.field_grow("command", draft),
+        jtml.text("ENTER ADDS TASK")
+    ])
+    out jtml.frame(jtml.Flow.COLUMN, 0, 0, 0, 32, 16, 0, [
+        header,
+        body,
+        command
+    ])
+}

@@ -1,0 +1,212 @@
+use seed
+use os.apps.snake
+use os.apps.tasks
+use os.drivers.font
+use os.drivers.graphics
+use os.drivers.keyboard
+use os.drivers.keymap_us
+use os.drivers.timer
+use os.ui.jtml
+
+TASKS_X = 240
+SNAKE_X = 680
+CARD_Y = 250
+CARD_WIDTH = 360
+CARD_HEIGHT = 240
+HOME_X = 570
+HOME_Y = 12
+HOME_WIDTH = 140
+HOME_HEIGHT = 34
+
+App = enum {
+    HOME,
+    TASKS,
+    SNAKE,
+}
+
+Shell = Box {
+    active = App.HOME
+    task_model = tasks.Model {}
+    task_ui = jtml.Runtime {}
+    snake_model = snake.Model {}
+    last_tick = 0
+}
+
+skill inside(x, y, left, top, width, height) {
+    (x < left) { out no }
+    (y < top) { out no }
+    ((x < left + width) == no) { out no }
+    ((y < top + height) == no) { out no }
+    out yes
+}
+
+skill new(screen) {
+    @task_model = tasks.new()
+    out Shell {
+        task_model = task_model
+        task_ui = jtml.mount(screen, tasks.view(task_model, ""))
+        snake_model = snake.new()
+    }
+}
+
+skill draw_tasks_icon(screen) {
+    graphics.graphics_frame(screen, TASKS_X + 48, CARD_Y + 46, 82, 106, 3, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, TASKS_X + 66, CARD_Y + 72, 46, 3, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, TASKS_X + 66, CARD_Y + 94, 46, 3, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, TASKS_X + 66, CARD_Y + 116, 32, 3, graphics.Ink.FOREGROUND)
+    out none
+}
+
+skill draw_snake_icon(screen) {
+    @x = SNAKE_X + 48
+    @y = CARD_Y + 62
+    graphics.graphics_rect(screen, x, y, 24, 24, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, x + 22, y, 24, 24, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, x + 44, y, 24, 24, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, x + 44, y + 22, 24, 24, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, x + 66, y + 22, 24, 24, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, x + 84, y + 30, 7, 7, graphics.Ink.BACKGROUND)
+    out none
+}
+
+skill draw_card(screen, x, title, line) {
+    graphics.graphics_frame(screen, x, CARD_Y, CARD_WIDTH, CARD_HEIGHT, 3, graphics.Ink.FOREGROUND)
+    font.graphics_text(screen, x + 160, CARD_Y + 54, title, 2, graphics.Ink.FOREGROUND)
+    font.graphics_text(screen, x + 160, CARD_Y + 104, line, 1, graphics.Ink.FOREGROUND)
+    font.graphics_text(screen, x + 160, CARD_Y + 132, "CLICK TO OPEN", 1, graphics.Ink.FOREGROUND)
+    out none
+}
+
+skill draw_home(screen) {
+    graphics.graphics_fill(screen, graphics.Ink.BACKGROUND)
+    font.graphics_text(screen, 536, 92, "SALTIC", 3, graphics.Ink.FOREGROUND)
+    font.graphics_text(screen, 584, 146, "PROGRAMS", 1, graphics.Ink.FOREGROUND)
+    draw_card(screen, TASKS_X, "TASKS", "PLAN AND TRACK")
+    draw_tasks_icon(screen)
+    draw_card(screen, SNAKE_X, "SNAKE", "PLAY IN MEMORY")
+    draw_snake_icon(screen)
+    font.graphics_text(screen, 560, 620, "BARE METAL RV32I", 1, graphics.Ink.FOREGROUND)
+    out none
+}
+
+skill draw_home_button(screen) {
+    graphics.graphics_rect(screen, HOME_X, HOME_Y, HOME_WIDTH, HOME_HEIGHT, graphics.Ink.BACKGROUND)
+    graphics.graphics_frame(screen, HOME_X, HOME_Y, HOME_WIDTH, HOME_HEIGHT, 2, graphics.Ink.FOREGROUND)
+    font.graphics_text(screen, HOME_X + 58, HOME_Y + 13, "HOME", 1, graphics.Ink.FOREGROUND)
+    out none
+}
+
+skill draw(screen, shell) {
+    (shell.active == App.HOME) { draw_home(screen) }
+    (shell.active == App.TASKS) {
+        jtml.draw(screen, shell.task_ui)
+        draw_home_button(screen)
+    }
+    (shell.active == App.SNAKE) {
+        snake.draw(screen, shell.snake_model)
+        draw_home_button(screen)
+    }
+    out none
+}
+
+skill open_at(screen, shell, x, y) {
+    (inside(x, y, TASKS_X, CARD_Y, CARD_WIDTH, CARD_HEIGHT) == yes) {
+        shell.active = App.TASKS
+        draw(screen, shell)
+        out shell
+    }
+    (inside(x, y, SNAKE_X, CARD_Y, CARD_WIDTH, CARD_HEIGHT) == yes) {
+        shell.active = App.SNAKE
+        shell.last_tick = timer.timer_now()
+        draw(screen, shell)
+    }
+    out shell
+}
+
+skill draw_task_change(screen, shell, target) {
+    jtml.draw_root_child(screen, shell.task_ui, 0)
+    @filter_changed = target == tasks.FILTER_ALL_ID
+    (target == tasks.FILTER_ACTIVE_ID) { filter_changed = yes }
+    (target == tasks.FILTER_DONE_ID) { filter_changed = yes }
+    (filter_changed == yes) { jtml.draw_root_child(screen, shell.task_ui, 1) }
+    (filter_changed == no) { jtml.draw_root_grandchild(screen, shell.task_ui, 1, 1) }
+    draw_home_button(screen)
+    out none
+}
+
+skill task_click(screen, shell, x, y) {
+    @hit = jtml.hit(shell.task_ui, x, y)
+    (hit.found == yes) {
+        @draft = jtml.value(shell.task_ui, "command")
+        shell.task_model = tasks.activate(shell.task_model, hit.id)
+        shell.task_ui = jtml.mount(screen, tasks.view(shell.task_model, draft.value))
+        draw_task_change(screen, shell, hit.id)
+    }
+    (hit.found == no) { shell.task_ui = jtml.focus_at(shell.task_ui, x, y) }
+    out shell
+}
+
+skill click(screen, shell, x, y) {
+    (shell.active == App.HOME) { out open_at(screen, shell, x, y) }
+    (inside(x, y, HOME_X, HOME_Y, HOME_WIDTH, HOME_HEIGHT) == yes) {
+        shell.active = App.HOME
+        draw_home(screen)
+        out shell
+    }
+    (shell.active == App.TASKS) { out task_click(screen, shell, x, y) }
+    out shell
+}
+
+skill task_key(screen, shell, code, shift) {
+    (code == keymap_us.KEY_ENTER) {
+        @command = jtml.value(shell.task_ui, "command")
+        (command.found == yes) {
+            shell.task_model = tasks.add(shell.task_model, command.value)
+            shell.task_ui = jtml.mount(screen, tasks.view(shell.task_model, ""))
+            jtml.draw_root_child(screen, shell.task_ui, 0)
+            jtml.draw_root_grandchild(screen, shell.task_ui, 1, 1)
+            jtml.draw_focused(screen, shell.task_ui)
+            draw_home_button(screen)
+        }
+        out shell
+    }
+    shell.task_ui = jtml.key(shell.task_ui, code, shift)
+    jtml.draw_focused(screen, shell.task_ui)
+    out shell
+}
+
+skill key(screen, shell, code, shift) {
+    (shell.active == App.TASKS) { out task_key(screen, shell, code, shift) }
+    (shell.active == App.SNAKE) {
+        (code == keymap_us.KEY_ENTER) {
+            (shell.snake_model.alive == no) {
+                shell.snake_model = snake.new()
+                shell.last_tick = timer.timer_now()
+                snake.draw(screen, shell.snake_model)
+                draw_home_button(screen)
+            }
+        }
+        (shell.snake_model.alive == yes) {
+            shell.snake_model = snake.turn(shell.snake_model, code)
+        }
+    }
+    out shell
+}
+
+skill tick_due(shell, now) {
+    (shell.active == App.SNAKE) {
+        (shell.snake_model.alive == yes) {
+            @elapsed = timer.timer_elapsed(shell.last_tick, now)
+            ((elapsed < snake.TICK_TICKS) == no) { out yes }
+        }
+    }
+    out no
+}
+
+skill tick(screen, shell, now) {
+    @result = snake.step(shell.snake_model)
+    shell.snake_model = result.model
+    shell.last_tick = now
+    snake.draw_tick(screen, result)
+    out shell
+}

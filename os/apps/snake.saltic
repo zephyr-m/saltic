@@ -1,0 +1,236 @@
+use seed
+use os.drivers.font
+use os.drivers.graphics
+
+BOARD_COLUMNS = 32
+BOARD_ROWS = 20
+CELL_SIZE = 24
+BOARD_X = 256
+BOARD_Y = 120
+BOARD_WIDTH = BOARD_COLUMNS * CELL_SIZE
+BOARD_HEIGHT = BOARD_ROWS * CELL_SIZE
+TICK_TICKS = 1200000
+
+Direction = enum {
+    UP,
+    RIGHT,
+    DOWN,
+    LEFT,
+}
+
+Cell = Box {
+    x = 0
+    y = 0
+}
+
+Model = Box {
+    body = []
+    direction = Direction.RIGHT
+    food = Cell {}
+    alive = yes
+    score = 0
+    seed = 137
+}
+
+Tick = Box {
+    model = Model {}
+    tail = Cell {}
+    moved = no
+    grew = no
+    died = no
+}
+
+skill mod(value, divisor) {
+    out value - value / divisor * divisor
+}
+
+skill same(left, right) {
+    (left.x == right.x) { out left.y == right.y }
+    out no
+}
+
+skill contains(body, cell, limit) {
+    @index = 0
+    drum (limit) {
+        (same(seed.group.item(body, index), cell) == yes) { out yes }
+        index = index + 1
+    }
+    out no
+}
+
+skill new() {
+    out Model {
+        body = [
+            Cell { x = 8 y = 10 },
+            Cell { x = 7 y = 10 },
+            Cell { x = 6 y = 10 },
+        ]
+        food = Cell { x = 22 y = 10 }
+    }
+}
+
+skill turn(model, code) {
+    @next = model.direction
+    (code == 17) { next = Direction.UP }
+    (code == 103) { next = Direction.UP }
+    (code == 32) { next = Direction.RIGHT }
+    (code == 106) { next = Direction.RIGHT }
+    (code == 31) { next = Direction.DOWN }
+    (code == 108) { next = Direction.DOWN }
+    (code == 30) { next = Direction.LEFT }
+    (code == 105) { next = Direction.LEFT }
+
+    @opposite = no
+    (model.direction == Direction.UP) { (next == Direction.DOWN) { opposite = yes } }
+    (model.direction == Direction.RIGHT) { (next == Direction.LEFT) { opposite = yes } }
+    (model.direction == Direction.DOWN) { (next == Direction.UP) { opposite = yes } }
+    (model.direction == Direction.LEFT) { (next == Direction.RIGHT) { opposite = yes } }
+    (opposite == no) { model.direction = next }
+    out model
+}
+
+skill next_head(model) {
+    @head = seed.group.item(model.body, 0)
+    @x = head.x
+    @y = head.y
+    (model.direction == Direction.UP) { y = y - 1 }
+    (model.direction == Direction.RIGHT) { x = x + 1 }
+    (model.direction == Direction.DOWN) { y = y + 1 }
+    (model.direction == Direction.LEFT) { x = x - 1 }
+    out Cell { x = x y = y }
+}
+
+skill next_food(model, body) {
+    @total = BOARD_COLUMNS * BOARD_ROWS
+    @attempt = 0
+    drum (total) {
+        model.seed = mod(model.seed + 37, total)
+        @candidate = Cell {
+            x = mod(model.seed, BOARD_COLUMNS)
+            y = model.seed / BOARD_COLUMNS
+        }
+        (contains(body, candidate, seed.group.count(body)) == no) { out candidate }
+        attempt = attempt + 1
+    }
+    out Cell {}
+}
+
+skill step(model) {
+    (model.alive == no) { out Tick { model = model } }
+    @head = next_head(model)
+    @outside = no
+    (head.x < 0) { outside = yes }
+    (head.y < 0) { outside = yes }
+    ((head.x < BOARD_COLUMNS) == no) { outside = yes }
+    ((head.y < BOARD_ROWS) == no) { outside = yes }
+    (outside == yes) {
+        model.alive = no
+        out Tick { model = model died = yes }
+    }
+
+    @count = seed.group.count(model.body)
+    @grew = same(head, model.food)
+    @collision_limit = count - 1
+    (grew == yes) { collision_limit = count }
+    (contains(model.body, head, collision_limit) == yes) {
+        model.alive = no
+        out Tick { model = model died = yes }
+    }
+
+    @tail = seed.group.item(model.body, count - 1)
+    @copy_count = count - 1
+    (grew == yes) { copy_count = count }
+    @body = seed.group.add([], head)
+    @index = 0
+    drum (copy_count) {
+        body = seed.group.add(body, seed.group.item(model.body, index))
+        index = index + 1
+    }
+    model.body = body
+    (grew == yes) {
+        model.score = model.score + 1
+        model.food = next_food(model, body)
+    }
+    out Tick { model = model tail = tail moved = yes grew = grew }
+}
+
+skill cell_rect(screen, cell, ink) {
+    graphics.graphics_rect(
+        screen,
+        BOARD_X + cell.x * CELL_SIZE + 2,
+        BOARD_Y + cell.y * CELL_SIZE + 2,
+        CELL_SIZE - 4,
+        CELL_SIZE - 4,
+        ink
+    )
+    out none
+}
+
+skill draw_food(screen, cell) {
+    graphics.graphics_rect(
+        screen,
+        BOARD_X + cell.x * CELL_SIZE + 7,
+        BOARD_Y + cell.y * CELL_SIZE + 7,
+        CELL_SIZE - 14,
+        CELL_SIZE - 14,
+        graphics.Ink.FOREGROUND
+    )
+    out none
+}
+
+skill draw_score(screen, model) {
+    graphics.graphics_rect(screen, BOARD_X + 560, 70, 208, 24, graphics.Ink.BACKGROUND)
+    font.graphics_text(
+        screen,
+        BOARD_X + 560,
+        74,
+        seed.str.add("SCORE ", seed.num.text(model.score)),
+        1,
+        graphics.Ink.FOREGROUND
+    )
+    out none
+}
+
+skill draw_game_over(screen) {
+    font.graphics_text(screen, BOARD_X + 270, BOARD_Y + 220, "GAME OVER", 2, graphics.Ink.FOREGROUND)
+    font.graphics_text(screen, BOARD_X + 278, BOARD_Y + 260, "ENTER TO RESTART", 1, graphics.Ink.FOREGROUND)
+    out none
+}
+
+skill draw(screen, model) {
+    graphics.graphics_fill(screen, graphics.Ink.BACKGROUND)
+    font.graphics_text(screen, BOARD_X, 64, "SALTIC SNAKE", 2, graphics.Ink.FOREGROUND)
+    draw_score(screen, model)
+    graphics.graphics_frame(
+        screen,
+        BOARD_X - 2,
+        BOARD_Y - 2,
+        BOARD_WIDTH + 4,
+        BOARD_HEIGHT + 4,
+        2,
+        graphics.Ink.FOREGROUND
+    )
+    @index = 0
+    @count = seed.group.count(model.body)
+    drum (count) {
+        cell_rect(screen, seed.group.item(model.body, index), graphics.Ink.FOREGROUND)
+        index = index + 1
+    }
+    draw_food(screen, model.food)
+    font.graphics_text(screen, BOARD_X, 630, "ARROWS OR WASD", 1, graphics.Ink.FOREGROUND)
+    (model.alive == no) { draw_game_over(screen) }
+    out none
+}
+
+skill draw_tick(screen, tick) {
+    (tick.moved == yes) {
+        (tick.grew == no) { cell_rect(screen, tick.tail, graphics.Ink.BACKGROUND) }
+        cell_rect(screen, seed.group.item(tick.model.body, 0), graphics.Ink.FOREGROUND)
+        (tick.grew == yes) {
+            draw_food(screen, tick.model.food)
+            draw_score(screen, tick.model)
+        }
+    }
+    (tick.died == yes) { draw_game_over(screen) }
+    out none
+}
