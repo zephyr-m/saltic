@@ -33,6 +33,8 @@ files=(
     os
     soul
     tests
+    third_party
+    toolbox
 )
 
 for path in "${files[@]}"; do

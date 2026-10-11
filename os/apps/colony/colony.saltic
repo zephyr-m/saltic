@@ -1,0 +1,569 @@
+use seed
+use os.drivers.font
+use os.drivers.graphics
+
+BOARD_COLUMNS = 56
+BOARD_ROWS = 32
+CELL_SIZE = 20
+BOARD_X = 280
+BOARD_Y = 260
+BOARD_WIDTH = BOARD_COLUMNS * CELL_SIZE
+BOARD_HEIGHT = BOARD_ROWS * CELL_SIZE
+SIDEBAR_X = 1460
+SIDEBAR_WIDTH = 300
+NEST_X = 28
+NEST_Y = 16
+INITIAL_WORKERS = 14
+MAX_WORKERS = 64
+BIRTH_COST = 8
+FOOD_DROP = 24
+TICK_TICKS = 300000
+
+Tool = enum {
+    FOOD,
+    WALL,
+    ERASE,
+}
+
+Cell = Box {
+    x = 0
+    y = 0
+}
+
+Food = Box {
+    x = 0
+    y = 0
+    amount = 0
+}
+
+Worker = Box {
+    x = NEST_X
+    y = NEST_Y
+    carrying = no
+    pulse = 1
+    route = 0
+}
+
+Model = Box {
+    workers = []
+    foods = []
+    walls = []
+    stored = 0
+    born = 0
+    delivered = 0
+    tool = Tool.FOOD
+}
+
+skill mod(value, divisor) {
+    out value - value / divisor * divisor
+}
+
+skill magnitude(value) {
+    (value < 0) { out 0 - value }
+    out value
+}
+
+skill same(cell, x, y) {
+    (cell.x == x) { out cell.y == y }
+    out no
+}
+
+skill inside(x, y, left, top, width, height) {
+    (x < left) { out no }
+    (y < top) { out no }
+    ((x < left + width) == no) { out no }
+    ((y < top + height) == no) { out no }
+    out yes
+}
+
+skill inside_nest(x, y) {
+    (magnitude(x - NEST_X) > 1) { out no }
+    out magnitude(y - NEST_Y) < 2
+}
+
+skill wall_at(model, x, y) {
+    @index = 0
+    @count = seed.group.count(model.walls)
+    drum (count) {
+        (same(seed.group.item(model.walls, index), x, y) == yes) { out yes }
+        index = index + 1
+    }
+    out no
+}
+
+skill worker_at(model, x, y) {
+    @index = 0
+    @count = seed.group.count(model.workers)
+    drum (count) {
+        (same(seed.group.item(model.workers, index), x, y) == yes) { out yes }
+        index = index + 1
+    }
+    out no
+}
+
+skill food_at(model, x, y) {
+    @index = 0
+    @count = seed.group.count(model.foods)
+    drum (count) {
+        @food = seed.group.item(model.foods, index)
+        (same(food, x, y) == yes) {
+            (food.amount > 0) { out yes }
+        }
+        index = index + 1
+    }
+    out no
+}
+
+skill open_cell(model, x, y) {
+    (x < 0) { out no }
+    (y < 0) { out no }
+    ((x < BOARD_COLUMNS) == no) { out no }
+    ((y < BOARD_ROWS) == no) { out no }
+    out wall_at(model, x, y) == no
+}
+
+skill new_worker(x, y, pulse, route) {
+    out Worker { x = x y = y pulse = pulse route = route }
+}
+
+skill new() {
+    @workers = []
+    @index = 0
+    drum (INITIAL_WORKERS) {
+        @x = NEST_X - 1 + mod(index, 3)
+        @y = NEST_Y - 1 + mod(index / 3, 3)
+        workers = seed.group.add(workers, new_worker(x, y, 11 + index * 17, mod(index, 4)))
+        index = index + 1
+    }
+    out Model {
+        workers = workers
+        foods = [
+            Food { x = 8 y = 6 amount = 48 },
+            Food { x = 47 y = 7 amount = 48 },
+            Food { x = 9 y = 26 amount = 48 },
+            Food { x = 46 y = 25 amount = 48 },
+        ]
+    }
+}
+
+skill try_move(model, worker, dx, dy) {
+    @x = worker.x + dx
+    @y = worker.y + dy
+    (open_cell(model, x, y) == no) { out no }
+    worker.x = x
+    worker.y = y
+    out yes
+}
+
+skill random_move(model, worker) {
+    @choice = mod(worker.pulse, 4)
+    @moved = no
+    (choice == 0) { moved = try_move(model, worker, 1, 0) }
+    (choice == 1) { moved = try_move(model, worker, 0, 1) }
+    (choice == 2) { moved = try_move(model, worker, 0 - 1, 0) }
+    (choice == 3) { moved = try_move(model, worker, 0, 0 - 1) }
+    (moved == no) { moved = try_move(model, worker, 1, 0) }
+    (moved == no) { moved = try_move(model, worker, 0, 1) }
+    (moved == no) { moved = try_move(model, worker, 0 - 1, 0) }
+    (moved == no) { try_move(model, worker, 0, 0 - 1) }
+    out none
+}
+
+skill move_toward(model, worker, target_x, target_y) {
+    @dx = target_x - worker.x
+    @dy = target_y - worker.y
+    @step_x = 0
+    @step_y = 0
+    (dx > 0) { step_x = 1 }
+    (dx < 0) { step_x = 0 - 1 }
+    (dy > 0) { step_y = 1 }
+    (dy < 0) { step_y = 0 - 1 }
+
+    @x_first = magnitude(dx) > magnitude(dy)
+    (magnitude(dx) == magnitude(dy)) { x_first = mod(worker.pulse, 2) == 0 }
+    @moved = no
+    (x_first == yes) {
+        (step_x == 0) { moved = try_move(model, worker, 0, step_y) }
+        ((step_x == 0) == no) { moved = try_move(model, worker, step_x, 0) }
+        (moved == no) {
+            ((step_y == 0) == no) { moved = try_move(model, worker, 0, step_y) }
+        }
+    }
+    (x_first == no) {
+        (step_y == 0) { moved = try_move(model, worker, step_x, 0) }
+        ((step_y == 0) == no) { moved = try_move(model, worker, 0, step_y) }
+        (moved == no) {
+            ((step_x == 0) == no) { moved = try_move(model, worker, step_x, 0) }
+        }
+    }
+    (moved == no) { random_move(model, worker) }
+    out none
+}
+
+skill collect(model, worker) {
+    @index = 0
+    @count = seed.group.count(model.foods)
+    drum (count) {
+        @food = seed.group.item(model.foods, index)
+        (same(food, worker.x, worker.y) == yes) {
+            (food.amount > 0) {
+                food.amount = food.amount - 1
+                worker.carrying = yes
+                out none
+            }
+        }
+        index = index + 1
+    }
+    out none
+}
+
+skill step_worker(model, worker) {
+    worker.pulse = mod(worker.pulse + 29, 997)
+    (worker.carrying == yes) {
+        move_toward(model, worker, NEST_X, NEST_Y)
+        (inside_nest(worker.x, worker.y) == yes) {
+            worker.carrying = no
+            model.stored = model.stored + 1
+            model.delivered = model.delivered + 1
+        }
+        out none
+    }
+
+    @found = no
+    @target_x = worker.x
+    @target_y = worker.y
+    @best = BOARD_COLUMNS + BOARD_ROWS + 1
+    @index = 0
+    @count = seed.group.count(model.foods)
+    @preferred = 0
+    (count > 0) { preferred = mod(worker.route, count) }
+    drum (count) {
+        @food = seed.group.item(model.foods, index)
+        (food.amount > 0) {
+            @distance = magnitude(food.x - worker.x) + magnitude(food.y - worker.y)
+            (index == preferred) { distance = distance / 2 }
+            (distance < best) {
+                best = distance
+                target_x = food.x
+                target_y = food.y
+                found = yes
+            }
+        }
+        index = index + 1
+    }
+    (found == yes) { move_toward(model, worker, target_x, target_y) }
+    (found == no) { random_move(model, worker) }
+    collect(model, worker)
+    out none
+}
+
+skill grow(model) {
+    @count = seed.group.count(model.workers)
+    (model.stored < BIRTH_COST) { out none }
+    ((count < MAX_WORKERS) == no) { out none }
+    model.stored = model.stored - BIRTH_COST
+    model.born = model.born + 1
+    model.workers = seed.group.add(
+        model.workers,
+        new_worker(NEST_X, NEST_Y, 31 + model.born * 13, mod(model.born, 4))
+    )
+    out none
+}
+
+skill food_total(model) {
+    @result = 0
+    @index = 0
+    @count = seed.group.count(model.foods)
+    drum (count) {
+        @food = seed.group.item(model.foods, index)
+        result = result + food.amount
+        index = index + 1
+    }
+    out result
+}
+
+skill cell_left(x) {
+    out BOARD_X + x * CELL_SIZE
+}
+
+skill cell_top(y) {
+    out BOARD_Y + y * CELL_SIZE
+}
+
+skill draw_food(screen, x, y) {
+    @left = cell_left(x)
+    @top = cell_top(y)
+    graphics.graphics_rect(screen, left + 7, top + 4, 6, 12, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, left + 4, top + 7, 12, 6, graphics.Ink.FOREGROUND)
+    out none
+}
+
+skill draw_nest_cell(screen, x, y) {
+    graphics.graphics_frame(
+        screen,
+        cell_left(x) + 3,
+        cell_top(y) + 3,
+        CELL_SIZE - 6,
+        CELL_SIZE - 6,
+        2,
+        graphics.Ink.FOREGROUND
+    )
+    out none
+}
+
+skill draw_base_cell(screen, model, x, y) {
+    @left = cell_left(x)
+    @top = cell_top(y)
+    graphics.graphics_rect(screen, left, top, CELL_SIZE, CELL_SIZE, graphics.Ink.BACKGROUND)
+    (wall_at(model, x, y) == yes) {
+        graphics.graphics_rect(screen, left + 2, top + 2, CELL_SIZE - 4, CELL_SIZE - 4, graphics.Ink.FOREGROUND)
+        out none
+    }
+    (inside_nest(x, y) == yes) { draw_nest_cell(screen, x, y) }
+    (food_at(model, x, y) == yes) { draw_food(screen, x, y) }
+    out none
+}
+
+skill draw_worker(screen, worker) {
+    @left = cell_left(worker.x)
+    @top = cell_top(worker.y)
+    graphics.graphics_rect(screen, left + 3, top + 8, 4, 4, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, left + 8, top + 7, 5, 6, graphics.Ink.FOREGROUND)
+    graphics.graphics_rect(screen, left + 14, top + 8, 3, 4, graphics.Ink.FOREGROUND)
+    (worker.carrying == yes) {
+        graphics.graphics_rect(screen, left + 8, top + 2, 5, 4, graphics.Ink.FOREGROUND)
+    }
+    out none
+}
+
+skill draw_workers(screen, model) {
+    @index = 0
+    @count = seed.group.count(model.workers)
+    drum (count) {
+        draw_worker(screen, seed.group.item(model.workers, index))
+        index = index + 1
+    }
+    out none
+}
+
+skill draw_board(screen, model) {
+    graphics.graphics_rect(screen, BOARD_X, BOARD_Y, BOARD_WIDTH, BOARD_HEIGHT, graphics.Ink.BACKGROUND)
+    @row = 0
+    drum (BOARD_ROWS) {
+        @column = 0
+        drum (BOARD_COLUMNS) {
+            draw_base_cell(screen, model, column, row)
+            column = column + 1
+        }
+        row = row + 1
+    }
+    graphics.graphics_frame(
+        screen,
+        BOARD_X - 3,
+        BOARD_Y - 3,
+        BOARD_WIDTH + 6,
+        BOARD_HEIGHT + 6,
+        3,
+        graphics.Ink.FOREGROUND
+    )
+    draw_workers(screen, model)
+    out none
+}
+
+skill tool_name(tool) {
+    (tool == Tool.FOOD) { out "FOOD" }
+    (tool == Tool.WALL) { out "WALL" }
+    out "ERASE"
+}
+
+skill tool_button(screen, model, tool, y) {
+    @thickness = 1
+    (model.tool == tool) { thickness = 4 }
+    graphics.graphics_frame(screen, SIDEBAR_X, y, SIDEBAR_WIDTH, 56, thickness, graphics.Ink.FOREGROUND)
+    font.graphics_body_text(screen, SIDEBAR_X + 24, y + 20, tool_name(tool), graphics.Ink.FOREGROUND)
+    out none
+}
+
+skill draw_tools(screen, model) {
+    graphics.graphics_rect(screen, SIDEBAR_X - 4, 490, SIDEBAR_WIDTH + 8, 224, graphics.Ink.BACKGROUND)
+    font.graphics_text(screen, SIDEBAR_X, 490, "### TOOL", graphics.Ink.FOREGROUND)
+    tool_button(screen, model, Tool.FOOD, 548)
+    tool_button(screen, model, Tool.WALL, 612)
+    tool_button(screen, model, Tool.ERASE, 676)
+    out none
+}
+
+skill draw_counts(screen, model) {
+    graphics.graphics_rect(screen, SIDEBAR_X - 4, 260, SIDEBAR_WIDTH + 8, 190, graphics.Ink.BACKGROUND)
+    font.graphics_text(screen, SIDEBAR_X, 260, "### COLONY", graphics.Ink.FOREGROUND)
+    font.graphics_body_text(
+        screen,
+        SIDEBAR_X,
+        326,
+        seed.str.add("WORKERS  ", seed.num.text(seed.group.count(model.workers))),
+        graphics.Ink.FOREGROUND
+    )
+    font.graphics_body_text(
+        screen,
+        SIDEBAR_X,
+        358,
+        seed.str.add("STORED   ", seed.num.text(model.stored)),
+        graphics.Ink.FOREGROUND
+    )
+    font.graphics_body_text(
+        screen,
+        SIDEBAR_X,
+        390,
+        seed.str.add("OUTSIDE  ", seed.num.text(food_total(model))),
+        graphics.Ink.FOREGROUND
+    )
+    font.graphics_body_text(
+        screen,
+        SIDEBAR_X,
+        422,
+        seed.str.add("BORN     ", seed.num.text(model.born)),
+        graphics.Ink.FOREGROUND
+    )
+    out none
+}
+
+skill draw(screen, model) {
+    graphics.graphics_fill(screen, graphics.Ink.BACKGROUND)
+    font.graphics_text(screen, BOARD_X, 150, "## SALTIC COLONY", graphics.Ink.FOREGROUND)
+    font.graphics_body_text(screen, BOARD_X, 212, "A LIVING WORLD IN MEMORY", graphics.Ink.FOREGROUND)
+    draw_board(screen, model)
+    draw_counts(screen, model)
+    draw_tools(screen, model)
+    font.graphics_body_text(screen, SIDEBAR_X, 790, "CLICK TOOL, THEN WORLD", graphics.Ink.FOREGROUND)
+    font.graphics_body_text(screen, SIDEBAR_X, 822, "ENTER RESTARTS COLONY", graphics.Ink.FOREGROUND)
+    out none
+}
+
+skill clear_workers(screen, model) {
+    @index = 0
+    @count = seed.group.count(model.workers)
+    drum (count) {
+        @worker = seed.group.item(model.workers, index)
+        draw_base_cell(screen, model, worker.x, worker.y)
+        index = index + 1
+    }
+    out none
+}
+
+skill tick(screen, model) {
+    @old_stored = model.stored
+    @old_count = seed.group.count(model.workers)
+    @old_food = food_total(model)
+    clear_workers(screen, model)
+    @index = 0
+    drum (old_count) {
+        step_worker(model, seed.group.item(model.workers, index))
+        index = index + 1
+    }
+    grow(model)
+    draw_workers(screen, model)
+    @status_changed = model.stored == old_stored
+    (status_changed == yes) { status_changed = seed.group.count(model.workers) == old_count }
+    (status_changed == yes) { status_changed = food_total(model) == old_food }
+    (status_changed == no) { draw_counts(screen, model) }
+    out model
+}
+
+skill remove_wall(model, x, y) {
+    @walls = []
+    @index = 0
+    @count = seed.group.count(model.walls)
+    drum (count) {
+        @wall = seed.group.item(model.walls, index)
+        (same(wall, x, y) == no) { walls = seed.group.add(walls, wall) }
+        index = index + 1
+    }
+    model.walls = walls
+    out none
+}
+
+skill remove_food(model, x, y) {
+    @foods = []
+    @index = 0
+    @count = seed.group.count(model.foods)
+    drum (count) {
+        @food = seed.group.item(model.foods, index)
+        (same(food, x, y) == no) { foods = seed.group.add(foods, food) }
+        index = index + 1
+    }
+    model.foods = foods
+    out none
+}
+
+skill add_food(model, x, y) {
+    @index = 0
+    @count = seed.group.count(model.foods)
+    drum (count) {
+        @food = seed.group.item(model.foods, index)
+        (same(food, x, y) == yes) {
+            food.amount = food.amount + FOOD_DROP
+            out none
+        }
+        index = index + 1
+    }
+    model.foods = seed.group.add(model.foods, Food { x = x y = y amount = FOOD_DROP })
+    out none
+}
+
+skill edit_cell(screen, model, x, y) {
+    (inside_nest(x, y) == yes) { out model }
+    (model.tool == Tool.FOOD) {
+        (wall_at(model, x, y) == no) { add_food(model, x, y) }
+    }
+    (model.tool == Tool.WALL) {
+        @allowed = food_at(model, x, y) == no
+        (worker_at(model, x, y) == yes) { allowed = no }
+        (allowed == yes) {
+            (wall_at(model, x, y) == yes) { remove_wall(model, x, y) }
+            (wall_at(model, x, y) == no) {
+                model.walls = seed.group.add(model.walls, Cell { x = x y = y })
+            }
+        }
+    }
+    (model.tool == Tool.ERASE) {
+        remove_wall(model, x, y)
+        remove_food(model, x, y)
+    }
+    draw_base_cell(screen, model, x, y)
+    @index = 0
+    @count = seed.group.count(model.workers)
+    drum (count) {
+        @worker = seed.group.item(model.workers, index)
+        (same(worker, x, y) == yes) { draw_worker(screen, worker) }
+        index = index + 1
+    }
+    draw_counts(screen, model)
+    out model
+}
+
+skill click(screen, model, x, y) {
+    (inside(x, y, SIDEBAR_X, 548, SIDEBAR_WIDTH, 56) == yes) {
+        model.tool = Tool.FOOD
+        draw_tools(screen, model)
+        out model
+    }
+    (inside(x, y, SIDEBAR_X, 612, SIDEBAR_WIDTH, 56) == yes) {
+        model.tool = Tool.WALL
+        draw_tools(screen, model)
+        out model
+    }
+    (inside(x, y, SIDEBAR_X, 676, SIDEBAR_WIDTH, 56) == yes) {
+        model.tool = Tool.ERASE
+        draw_tools(screen, model)
+        out model
+    }
+    (inside(x, y, BOARD_X, BOARD_Y, BOARD_WIDTH, BOARD_HEIGHT) == yes) {
+        out edit_cell(
+            screen,
+            model,
+            (x - BOARD_X) / CELL_SIZE,
+            (y - BOARD_Y) / CELL_SIZE
+        )
+    }
+    out model
+}

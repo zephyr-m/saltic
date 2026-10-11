@@ -29,6 +29,6 @@ if [[ "${1:-}" == "--check" ]]; then
         echo "графика: компилятор не создал ELF" >&2
         exit 1
     fi
-    test -x "$work/program.elf"
+    test -s "$work/program.elf"
     echo "графика: прямой ELF подтверждён"
 fi
