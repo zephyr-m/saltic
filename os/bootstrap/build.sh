@@ -4,6 +4,31 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 
+if ! command -v qemu-riscv32 >/dev/null 2>&1; then
+    if [[ "${SALTIC_BUILD_IN_DEV_SHELL:-}" == "1" ]]; then
+        echo "bootstrap build: qemu-riscv32 отсутствует внутри проектного Nix shell" >&2
+        exit 1
+    fi
+    if ! command -v nix >/dev/null 2>&1; then
+        echo "bootstrap build: не найдены ни qemu-riscv32, ни nix" >&2
+        exit 1
+    fi
+
+    echo "bootstrap build: вхожу в проектный Nix shell"
+    build_dir="${SALTIC_BUILD_DIR:-}"
+    bootstrap_override="${SALTIC_BOOTSTRAP_COMPILER:-}"
+    heap_override="${SALTIC_HEAP_BYTES:-}"
+    exec nix \
+        --extra-experimental-features "nix-command flakes" \
+        develop "$root" --command \
+        env \
+        SALTIC_BUILD_IN_DEV_SHELL=1 \
+        SALTIC_BUILD_DIR="$build_dir" \
+        SALTIC_BOOTSTRAP_COMPILER="$bootstrap_override" \
+        SALTIC_HEAP_BYTES="$heap_override" \
+        bash "$root/os/bootstrap/build.sh" "$@"
+fi
+
 if (( $# < 2 || $# > 3 )); then
     echo "использование: os/bootstrap/build.sh <исходник.saltic> <результат.elf> [результат.s]" >&2
     exit 2

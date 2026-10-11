@@ -4,19 +4,22 @@ set positional-arguments
 default:
     just --list
 
+playground:
+    node playground/server.mjs
+
 compile file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf":
     SALTIC_DIRECT_ONLY=1 bash os/bootstrap/build.sh "$1" "$2"
 
 run file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf" *args:
     SALTIC_DIRECT_ONLY=1 bash os/bootstrap/build.sh "$1" "$2"
-    qemu-riscv32 -B 0x100000000 "$2" "${@:3}"
+    nix --extra-experimental-features "nix-command flakes" develop --command qemu-riscv32 -B 0x100000000 "$2" "${@:3}"
 
 qemu file="os/target/qemu_virt/smoke.saltic":
     mkdir -p .cache/build/qemu_virt
     bash os/bootstrap/build.sh "$1" .cache/build/qemu_virt/program.elf
 
 qemu-graphics:
-    bash os/target/qemu_virt/build-graphics.sh
+    nix --extra-experimental-features "nix-command flakes" develop --command bash -c 'bash os/target/qemu_virt/build-graphics.sh && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -device virtio-tablet-device -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
 
 os port="46321":
     bash os/target/qemu_virt/build-graphics.sh
@@ -34,6 +37,9 @@ os-send command port="46321":
 
 qemu-graphics-check:
     bash os/target/qemu_virt/build-graphics.sh --check
+
+jtml:
+    just test jtml
 
 selfhost source="soul/seed/canonical/main.saltic" output="/tmp/saltic-self-parser.elf" json=".cache/build/pipeline/parsed.json":
     mkdir -p "$(dirname "$3")"
@@ -99,7 +105,7 @@ vm-step:
     just vm
 
 test case="all":
-    bash tests/run.sh "$1"
+    nix --extra-experimental-features "nix-command flakes" develop --command bash tests/run.sh "$1"
 
 package:
     bash .github/package.sh

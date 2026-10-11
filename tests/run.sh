@@ -255,6 +255,16 @@ test_qemu_virt() {
         bash os/target/qemu_virt/build-graphics.sh --check
 }
 
+test_jtml() {
+    mkdir -p "$work/jtml"
+    build jtml \
+        tests/jtml.saltic \
+        "$work/jtml/program.elf"
+    qemu-riscv32 -B 0x100000000 \
+        "$work/jtml/program.elf"
+    echo "JTML: дерево, раскладка и ввод подтверждены"
+}
+
 test_bootstrap() {
     local bootstrap_work="$work/bootstrap"
     local heap_bytes=4026531840
@@ -435,6 +445,7 @@ run_case() {
         vm-machine) test_vm_machine ;;
         abi) test_abi ;;
         qemu-virt) test_qemu_virt ;;
+        jtml) test_jtml ;;
         bootstrap) test_bootstrap ;;
         closure) test_closure ;;
         *)
@@ -460,6 +471,7 @@ if [[ "$1" == "all" ]]; then
         seed-contract \
         machine \
         abi \
+        jtml \
         qemu-virt \
         closure \
         bootstrap

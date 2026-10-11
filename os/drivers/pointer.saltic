@@ -1,0 +1,158 @@
+use seed
+use os.drivers.graphics
+use os.drivers.virtio_mmio
+
+EVENT_SYNC = 0
+EVENT_KEY = 1
+EVENT_ABSOLUTE = 3
+CODE_SYNC = 0
+CODE_X = 0
+CODE_Y = 1
+BUTTON_LEFT = 272
+ABSOLUTE_MAX = 32767
+CURSOR_HEAD = 8
+CURSOR_TAIL = 5
+
+PointerEvent = Box {
+    ready = no
+    moved = no
+    pressed = no
+    released = no
+    x = 0
+    y = 0
+    left = no
+}
+
+Pointer = Box {
+    ready = no
+    status = 0
+    queue = virtio_mmio.VirtioQueue {}
+    event = PointerEvent {}
+    width = 0
+    height = 0
+    x = 0
+    y = 0
+    moved = no
+    pressed = no
+    released = no
+    left = no
+    cursor_visible = no
+    cursor_x = 0
+    cursor_y = 0
+}
+
+skill pointer_open(width, height) {
+    @device = virtio_mmio.virtio_find_input(yes)
+    (seed.group.count(device) < 2) { out Pointer { status = 1 } }
+    @queue = virtio_mmio.virtio_open_queue_at(device, 1)
+    (queue.ready == no) { out Pointer { status = queue.status } }
+    out Pointer {
+        ready = yes
+        status = 4
+        queue = queue
+        width = width
+        height = height
+        x = width / 2
+        y = height / 2
+    }
+}
+
+skill pointer_scale(value, size) {
+    (value < 0) { out 0 }
+    (value > ABSOLUTE_MAX) { out size - 1 }
+    out value * (size - 1) / ABSOLUTE_MAX
+}
+
+skill pointer_poll(pointer) {
+    pointer.event.ready = no
+    @used = virtio_mmio.virtio_next_used(pointer.queue)
+    (used == no) { out pointer.event }
+
+    @offset = pointer.queue.used_id * 8
+    @type = seed.mem.load16(pointer.queue.buffers, offset)
+    @code = seed.mem.load16(pointer.queue.buffers, offset + 2)
+    @value = seed.mem.load32(pointer.queue.buffers, offset + 4)
+    virtio_mmio.virtio_recycle(pointer.queue, pointer.queue.used_id)
+
+    (type == EVENT_ABSOLUTE) {
+        (code == CODE_X) {
+            pointer.x = pointer_scale(value, pointer.width)
+            pointer.moved = yes
+        }
+        (code == CODE_Y) {
+            pointer.y = pointer_scale(value, pointer.height)
+            pointer.moved = yes
+        }
+    }
+    (type == EVENT_KEY) {
+        (code == BUTTON_LEFT) {
+            (value > 0) {
+                pointer.left = yes
+                pointer.pressed = yes
+            }
+            (value == 0) {
+                pointer.left = no
+                pointer.released = yes
+            }
+        }
+    }
+    (type == EVENT_SYNC) {
+        (code == CODE_SYNC) {
+            pointer.event = PointerEvent {
+                ready = yes
+                moved = pointer.moved
+                pressed = pointer.pressed
+                released = pointer.released
+                x = pointer.x
+                y = pointer.y
+                left = pointer.left
+            }
+            pointer.moved = no
+            pointer.pressed = no
+            pointer.released = no
+        }
+    }
+    out pointer.event
+}
+
+skill pointer_cursor_toggle(screen, x, y) {
+    @row = 0
+    drum (CURSOR_HEAD) {
+        @column = 0
+        drum (row + 1) {
+            graphics.graphics_toggle_pixel(screen, x + column, y + row)
+            column = column + 1
+        }
+        row = row + 1
+    }
+    row = 0
+    drum (CURSOR_TAIL) {
+        graphics.graphics_toggle_pixel(screen, x + 2, y + CURSOR_HEAD + row)
+        graphics.graphics_toggle_pixel(screen, x + 3, y + CURSOR_HEAD + row)
+        row = row + 1
+    }
+    out none
+}
+
+skill pointer_cursor_hide(screen, pointer) {
+    (pointer.cursor_visible == yes) {
+        pointer_cursor_toggle(screen, pointer.cursor_x, pointer.cursor_y)
+        pointer.cursor_visible = no
+    }
+    out pointer
+}
+
+skill pointer_cursor_show(screen, pointer) {
+    (pointer.ready == yes) {
+        pointer_cursor_toggle(screen, pointer.x, pointer.y)
+        pointer.cursor_x = pointer.x
+        pointer.cursor_y = pointer.y
+        pointer.cursor_visible = yes
+    }
+    out pointer
+}
+
+skill pointer_cursor_refresh(screen, pointer) {
+    pointer = pointer_cursor_hide(screen, pointer)
+    out pointer_cursor_show(screen, pointer)
+}

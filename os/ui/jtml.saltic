@@ -1,0 +1,450 @@
+use seed
+use os.drivers.graphics
+use os.drivers.font
+use os.drivers.text_field
+
+DEFAULT_GAP = 20
+TEXT_STEP = font.FONT_WIDTH + 1
+
+Kind = enum {
+    UNKNOWN,
+    FORM,
+    TEXT,
+    FIELD,
+}
+
+Flow = enum {
+    COLUMN,
+    ROW,
+}
+
+Align = enum {
+    START,
+    CENTER,
+    END,
+}
+
+Node = Box {
+    kind = Kind.UNKNOWN
+    id = ""
+    value = ""
+    scale = 1
+    align = Align.START
+    flow = Flow.COLUMN
+    width = 0
+    height = 0
+    grow = 0
+    padding = 0
+    gap = 0
+    border = 0
+    children = []
+}
+
+FieldSlot = Box {
+    id = ""
+    field = text_field.TextField {}
+}
+
+FieldLookup = Box {
+    found = no
+    slot = FieldSlot {}
+}
+
+ValueLookup = Box {
+    found = no
+    value = ""
+}
+
+Placement = Box {
+    node = Node {}
+    x = 0
+    y = 0
+    width = 0
+    height = 0
+}
+
+Runtime = Box {
+    root = Node {}
+    fields = []
+    focused = ""
+    width = 0
+    height = 0
+}
+
+skill frame(flow, width, height, grow, padding, gap, border, children) {
+    out Node {
+        kind = Kind.FORM
+        flow = flow
+        width = width
+        height = height
+        grow = grow
+        padding = padding
+        gap = gap
+        border = border
+        children = children
+    }
+}
+
+skill form(children) {
+    out frame(Flow.COLUMN, 0, 0, 0, 0, DEFAULT_GAP, 0, children)
+}
+
+skill row(children) {
+    out frame(Flow.ROW, 0, 0, 0, 0, DEFAULT_GAP, 0, children)
+}
+
+skill space(grow) {
+    out frame(Flow.COLUMN, 0, 0, grow, 0, 0, 0, [])
+}
+
+skill text(value) {
+    out Node { kind = Kind.TEXT value = value }
+}
+
+skill text_scaled(value, scale) {
+    out Node { kind = Kind.TEXT value = value scale = scale }
+}
+
+skill label(value, scale, align) {
+    out Node { kind = Kind.TEXT value = value scale = scale align = align }
+}
+
+skill field(id, value) {
+    out Node { kind = Kind.FIELD id = id value = value }
+}
+
+skill field_grow(id, value) {
+    out Node { kind = Kind.FIELD id = id value = value grow = 1 }
+}
+
+skill node_intrinsic_width(node) {
+    (node.width > 0) { out node.width }
+    (node.kind == Kind.TEXT) {
+        out seed.str.len(node.value) * TEXT_STEP * node.scale
+    }
+    (node.kind == Kind.FIELD) { out 0 }
+    (node.kind == Kind.FORM) {
+        @width = 0
+        @index = 0
+        @count = seed.group.count(node.children)
+        (node.flow == Flow.ROW) {
+            drum (count) {
+                width = width + node_intrinsic_width(seed.group.item(node.children, index))
+                (index + 1 < count) { width = width + node.gap }
+                index = index + 1
+            }
+        }
+        (node.flow == Flow.COLUMN) {
+            drum (count) {
+                @child_width = node_intrinsic_width(seed.group.item(node.children, index))
+                (child_width > width) { width = child_width }
+                index = index + 1
+            }
+        }
+        out width + (node.padding + node.border) * 2
+    }
+    out 0
+}
+
+skill node_intrinsic_height(node) {
+    (node.height > 0) { out node.height }
+    (node.kind == Kind.TEXT) {
+        out (font.FONT_HEIGHT + 1) * node.scale
+    }
+    (node.kind == Kind.FIELD) { out text_field.TEXT_FIELD_HEIGHT }
+    (node.kind == Kind.FORM) {
+        @height = 0
+        @index = 0
+        @count = seed.group.count(node.children)
+        (node.flow == Flow.COLUMN) {
+            drum (count) {
+                height = height + node_intrinsic_height(seed.group.item(node.children, index))
+                (index + 1 < count) { height = height + node.gap }
+                index = index + 1
+            }
+        }
+        (node.flow == Flow.ROW) {
+            drum (count) {
+                @child_height = node_intrinsic_height(seed.group.item(node.children, index))
+                (child_height > height) { height = child_height }
+                index = index + 1
+            }
+        }
+        out height + (node.padding + node.border) * 2
+    }
+    out 0
+}
+
+skill node_height(node) {
+    out node_intrinsic_height(node)
+}
+
+skill child_main_size(child, flow) {
+    (flow == Flow.ROW) { out node_intrinsic_width(child) }
+    out node_intrinsic_height(child)
+}
+
+skill children_layout(node, x, y, width, height) {
+    @inset = node.padding + node.border
+    @inner_x = x + inset
+    @inner_y = y + inset
+    @inner_width = width - inset * 2
+    @inner_height = height - inset * 2
+    @count = seed.group.count(node.children)
+    @gap_space = 0
+    (count > 1) { gap_space = (count - 1) * node.gap }
+
+    @main_available = inner_height - gap_space
+    (node.flow == Flow.ROW) { main_available = inner_width - gap_space }
+    (main_available < 0) { main_available = 0 }
+
+    @fixed = 0
+    @total_grow = 0
+    @index = 0
+    drum (count) {
+        @child = seed.group.item(node.children, index)
+        (child.grow > 0) { total_grow = total_grow + child.grow }
+        (child.grow == 0) { fixed = fixed + child_main_size(child, node.flow) }
+        index = index + 1
+    }
+
+    @remaining = main_available - fixed
+    (remaining < 0) { remaining = 0 }
+    @cursor = inner_y
+    (node.flow == Flow.ROW) { cursor = inner_x }
+    @items = []
+    index = 0
+    drum (count) {
+        @child = seed.group.item(node.children, index)
+        @main_size = child_main_size(child, node.flow)
+        (child.grow > 0) {
+            main_size = remaining * child.grow / total_grow
+        }
+
+        @child_x = inner_x
+        @child_y = cursor
+        @child_width = inner_width
+        @child_height = main_size
+        (node.flow == Flow.ROW) {
+            child_x = cursor
+            child_y = inner_y
+            child_width = main_size
+            child_height = inner_height
+            (child.height > 0) {
+                child_height = child.height
+                child_y = inner_y + (inner_height - child_height) / 2
+            }
+        }
+        (node.flow == Flow.COLUMN) {
+            (child.width > 0) {
+                child_width = child.width
+                child_x = inner_x + (inner_width - child_width) / 2
+            }
+        }
+
+        items = seed.group.add(items, Placement {
+            node = child
+            x = child_x
+            y = child_y
+            width = child_width
+            height = child_height
+        })
+        cursor = cursor + main_size + node.gap
+        index = index + 1
+    }
+    out items
+}
+
+skill layout_node(node, x, y, width, height, fields) {
+    (node.kind == Kind.FIELD) {
+        @field_y = y + (height - text_field.TEXT_FIELD_HEIGHT) / 2
+        @field_state = text_field.text_field_sync(text_field.TextField {
+            x = x
+            y = field_y
+            width = width
+            text = node.value
+        })
+        out seed.group.add(fields, FieldSlot { id = node.id field = field_state })
+    }
+    (node.kind == Kind.FORM) {
+        @next_fields = fields
+        @placements = children_layout(node, x, y, width, height)
+        @index = 0
+        @count = seed.group.count(placements)
+        drum (count) {
+            @placement = seed.group.item(placements, index)
+            next_fields = layout_node(
+                placement.node,
+                placement.x,
+                placement.y,
+                placement.width,
+                placement.height,
+                next_fields
+            )
+            index = index + 1
+        }
+        out next_fields
+    }
+    out fields
+}
+
+skill mount(screen, root) {
+    @fields = layout_node(root, 0, 0, screen.width, screen.height, [])
+    @focused = ""
+    (seed.group.count(fields) > 0) {
+        @first_field = seed.group.item(fields, 0)
+        focused = first_field.id
+    }
+    out Runtime {
+        root = root
+        fields = fields
+        focused = focused
+        width = screen.width
+        height = screen.height
+    }
+}
+
+skill find_field(runtime, id) {
+    @index = 0
+    @count = seed.group.count(runtime.fields)
+    drum (count) {
+        @slot = seed.group.item(runtime.fields, index)
+        (slot.id == id) { out FieldLookup { found = yes slot = slot } }
+        index = index + 1
+    }
+    out FieldLookup {}
+}
+
+skill value(runtime, id) {
+    @lookup = find_field(runtime, id)
+    (lookup.found == yes) {
+        out ValueLookup { found = yes value = lookup.slot.field.text }
+    }
+    out ValueLookup {}
+}
+
+skill focus(runtime, id) {
+    @lookup = find_field(runtime, id)
+    (lookup.found == no) { out error.FieldNotFound }
+    out Runtime {
+        root = runtime.root
+        fields = runtime.fields
+        focused = id
+        width = runtime.width
+        height = runtime.height
+    }
+}
+
+skill focus_at(runtime, x, y) {
+    @index = 0
+    @count = seed.group.count(runtime.fields)
+    drum (count) {
+        @slot = seed.group.item(runtime.fields, index)
+        @inside = yes
+        (x < slot.field.x) { inside = no }
+        (y < slot.field.y) { inside = no }
+        ((x < slot.field.x + slot.field.width) == no) { inside = no }
+        ((y < slot.field.y + text_field.TEXT_FIELD_HEIGHT) == no) { inside = no }
+        (inside == yes) {
+            out Runtime {
+                root = runtime.root
+                fields = runtime.fields
+                focused = slot.id
+                width = runtime.width
+                height = runtime.height
+            }
+        }
+        index = index + 1
+    }
+    out runtime
+}
+
+skill key(runtime, code, shift) {
+    @fields = []
+    @index = 0
+    @count = seed.group.count(runtime.fields)
+    drum (count) {
+        @slot = seed.group.item(runtime.fields, index)
+        @next_slot = slot
+        (slot.id == runtime.focused) {
+            next_slot = FieldSlot {
+                id = slot.id
+                field = text_field.text_field_key(slot.field, code, shift)
+            }
+        }
+        fields = seed.group.add(fields, next_slot)
+        index = index + 1
+    }
+    out Runtime {
+        root = runtime.root
+        fields = fields
+        focused = runtime.focused
+        width = runtime.width
+        height = runtime.height
+    }
+}
+
+skill draw_form(screen, node, x, y, width, height) {
+    (node.border > 0) {
+        graphics.graphics_rect(screen, x, y, width, height, graphics.Ink.FOREGROUND)
+        graphics.graphics_rect(
+            screen,
+            x + node.border,
+            y + node.border,
+            width - node.border * 2,
+            height - node.border * 2,
+            graphics.Ink.BACKGROUND
+        )
+    }
+    out none
+}
+
+skill draw_node(screen, runtime, node, x, y, width, height) {
+    (node.kind == Kind.TEXT) {
+        @text_width = node_intrinsic_width(node)
+        @text_height = node_intrinsic_height(node)
+        @text_x = x
+        (node.align == Align.CENTER) { text_x = x + (width - text_width) / 2 }
+        (node.align == Align.END) { text_x = x + width - text_width }
+        @text_y = y + (height - text_height) / 2
+        font.graphics_text(screen, text_x, text_y, node.value, node.scale, graphics.Ink.FOREGROUND)
+        out none
+    }
+    (node.kind == Kind.FIELD) {
+        @lookup = find_field(runtime, node.id)
+        (lookup.found == yes) { text_field.text_field_draw(screen, lookup.slot.field) }
+        out none
+    }
+    (node.kind == Kind.FORM) {
+        draw_form(screen, node, x, y, width, height)
+        @placements = children_layout(node, x, y, width, height)
+        @index = 0
+        @count = seed.group.count(placements)
+        drum (count) {
+            @placement = seed.group.item(placements, index)
+            draw_node(
+                screen,
+                runtime,
+                placement.node,
+                placement.x,
+                placement.y,
+                placement.width,
+                placement.height
+            )
+            index = index + 1
+        }
+    }
+    out none
+}
+
+skill draw(screen, runtime) {
+    graphics.graphics_fill(screen, graphics.Ink.BACKGROUND)
+    draw_node(screen, runtime, runtime.root, 0, 0, runtime.width, runtime.height)
+    out none
+}
+
+skill draw_focused(screen, runtime) {
+    @lookup = find_field(runtime, runtime.focused)
+    (lookup.found == yes) { text_field.text_field_draw(screen, lookup.slot.field) }
+    out none
+}
