@@ -35,6 +35,7 @@ VIRTIO_STATUS_FEATURES_OK = 11
 VIRTIO_STATUS_DRIVER_OK = 15
 VIRTIO_VERSION_1 = 1
 VIRTIO_QUEUE_COUNT = 16
+VIRTIO_DESCRIPTOR_NEXT = 1
 VIRTIO_DESCRIPTOR_WRITE = 2
 VIRTIO_QUEUE_REGION_SIZE = 16384
 
@@ -43,13 +44,14 @@ VIRTIO_QUEUE_MEMORY_HIGH = 33088
 VirtioQueue = Box {
     ready = no
     status = 0
+    index = 0
     device = []
     descriptors = []
     available = []
     used = []
     buffers = []
     size = VIRTIO_QUEUE_COUNT
-    available_index = VIRTIO_QUEUE_COUNT
+    available_index = 0
     used_index = 0
     used_id = 0
     used_length = 0
@@ -122,14 +124,18 @@ skill virtio_prepare(device) {
 }
 
 skill virtio_queue_address(memory_slot, offset) {
-    out [VIRTIO_QUEUE_MEMORY_HIGH, memory_slot * VIRTIO_QUEUE_REGION_SIZE + offset]
+    @total = memory_slot * VIRTIO_QUEUE_REGION_SIZE + offset
+    @carry = total / 65536
+    out [VIRTIO_QUEUE_MEMORY_HIGH + carry, total - carry * 65536]
 }
 
 skill virtio_descriptor_address(buffers, index) {
-    out [seed.group.item(buffers, 0), seed.group.item(buffers, 1) + index * 8]
+    @total = seed.group.item(buffers, 1) + index * 8
+    @carry = total / 65536
+    out [seed.group.item(buffers, 0) + carry, total - carry * 65536]
 }
 
-skill virtio_initialize_memory(descriptors, available, used, buffers) {
+skill virtio_initialize_empty_memory(descriptors, available, used) {
     seed.mem.store16(available, 0, 0)
     seed.mem.store16(available, 2, 0)
     seed.mem.store16(used, 0, 0)
@@ -138,28 +144,22 @@ skill virtio_initialize_memory(descriptors, available, used, buffers) {
     @index = 0
     drum (VIRTIO_QUEUE_COUNT) {
         @descriptor_offset = index * 16
-        @buffer = virtio_descriptor_address(buffers, index)
-        seed.mem.store_address32(descriptors, descriptor_offset, buffer)
+        seed.mem.store32(descriptors, descriptor_offset, 0)
         seed.mem.store32(descriptors, descriptor_offset + 4, 0)
-        seed.mem.store32(descriptors, descriptor_offset + 8, 8)
-        seed.mem.store16(descriptors, descriptor_offset + 12, VIRTIO_DESCRIPTOR_WRITE)
+        seed.mem.store32(descriptors, descriptor_offset + 8, 0)
+        seed.mem.store16(descriptors, descriptor_offset + 12, 0)
         seed.mem.store16(descriptors, descriptor_offset + 14, 0)
-
-        seed.mem.store32(buffers, index * 8, 0)
-        seed.mem.store32(buffers, index * 8 + 4, 0)
-        seed.mem.store16(available, 4 + index * 2, index)
+        seed.mem.store16(available, 4 + index * 2, 0)
+        seed.mem.store32(used, 4 + index * 8, 0)
+        seed.mem.store32(used, 8 + index * 8, 0)
         index = index + 1
     }
-    seed.mem.store16(available, 2, VIRTIO_QUEUE_COUNT)
     seed.cpu.fence()
     out none
 }
 
-skill virtio_open_queue_at(device, memory_slot) {
-    @prepared = virtio_prepare(device)
-    (prepared == no) { out VirtioQueue { status = 2 } }
-
-    seed.mem.store32(device, VIRTIO_QUEUE_SELECT, 0)
+skill virtio_open_empty_queue(device, queue_index, memory_slot) {
+    seed.mem.store32(device, VIRTIO_QUEUE_SELECT, queue_index)
     @maximum = seed.mem.load32(device, VIRTIO_QUEUE_SIZE_MAX)
     (maximum < VIRTIO_QUEUE_COUNT) { out VirtioQueue { status = 3 } }
 
@@ -167,7 +167,7 @@ skill virtio_open_queue_at(device, memory_slot) {
     @available = virtio_queue_address(memory_slot, 4096)
     @used = virtio_queue_address(memory_slot, 8192)
     @buffers = virtio_queue_address(memory_slot, 12288)
-    virtio_initialize_memory(descriptors, available, used, buffers)
+    virtio_initialize_empty_memory(descriptors, available, used)
     seed.mem.store32(device, VIRTIO_QUEUE_SIZE, VIRTIO_QUEUE_COUNT)
     seed.mem.store_address32(device, VIRTIO_QUEUE_DESC_LOW, descriptors)
     seed.mem.store32(device, VIRTIO_QUEUE_DESC_HIGH, 0)
@@ -177,18 +177,69 @@ skill virtio_open_queue_at(device, memory_slot) {
     seed.mem.store32(device, VIRTIO_QUEUE_DEVICE_HIGH, 0)
     seed.cpu.fence()
     seed.mem.store32(device, VIRTIO_QUEUE_READY, 1)
-    seed.mem.store32(device, VIRTIO_STATUS, VIRTIO_STATUS_DRIVER_OK)
-    seed.mem.store32(device, VIRTIO_QUEUE_NOTIFY, 0)
 
     out VirtioQueue {
         ready = yes
         status = 4
+        index = queue_index
         device = device
         descriptors = descriptors
         available = available
         used = used
         buffers = buffers
     }
+}
+
+skill virtio_descriptor(queue, index, address, length, flags, next) {
+    @offset = index * 16
+    seed.mem.store_address32(queue.descriptors, offset, address)
+    seed.mem.store32(queue.descriptors, offset + 4, 0)
+    seed.mem.store32(queue.descriptors, offset + 8, length)
+    seed.mem.store16(queue.descriptors, offset + 12, flags)
+    seed.mem.store16(queue.descriptors, offset + 14, next)
+    out none
+}
+
+skill virtio_offer(queue, id) {
+    @slot = queue.available_index - queue.available_index / queue.size * queue.size
+    seed.mem.store16(queue.available, 4 + slot * 2, id)
+    seed.cpu.fence()
+    queue.available_index = queue.available_index + 1
+    seed.mem.store16(queue.available, 2, queue.available_index)
+    seed.cpu.fence()
+    out none
+}
+
+skill virtio_notify(queue) {
+    seed.mem.store32(queue.device, VIRTIO_QUEUE_NOTIFY, queue.index)
+    out none
+}
+
+skill virtio_activate(device) {
+    seed.cpu.fence()
+    seed.mem.store32(device, VIRTIO_STATUS, VIRTIO_STATUS_DRIVER_OK)
+    out none
+}
+
+skill virtio_open_queue_at(device, memory_slot) {
+    @prepared = virtio_prepare(device)
+    (prepared == no) { out VirtioQueue { status = 2 } }
+
+    @queue = virtio_open_empty_queue(device, 0, memory_slot)
+    (queue.ready == no) { out queue }
+
+    @index = 0
+    drum (VIRTIO_QUEUE_COUNT) {
+        @buffer = virtio_descriptor_address(queue.buffers, index)
+        seed.mem.store32(queue.buffers, index * 8, 0)
+        seed.mem.store32(queue.buffers, index * 8 + 4, 0)
+        virtio_descriptor(queue, index, buffer, 8, VIRTIO_DESCRIPTOR_WRITE, 0)
+        virtio_offer(queue, index)
+        index = index + 1
+    }
+    virtio_activate(device)
+    virtio_notify(queue)
+    out queue
 }
 
 skill virtio_open_queue(device) {
@@ -209,12 +260,7 @@ skill virtio_next_used(queue) {
 }
 
 skill virtio_recycle(queue, id) {
-    @slot = queue.available_index - queue.available_index / queue.size * queue.size
-    seed.mem.store16(queue.available, 4 + slot * 2, id)
-    seed.cpu.fence()
-    queue.available_index = queue.available_index + 1
-    seed.mem.store16(queue.available, 2, queue.available_index)
-    seed.cpu.fence()
-    seed.mem.store32(queue.device, VIRTIO_QUEUE_NOTIFY, 0)
+    virtio_offer(queue, id)
+    virtio_notify(queue)
     out none
 }

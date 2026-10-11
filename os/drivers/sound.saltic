@@ -1,0 +1,374 @@
+use seed
+use os.drivers.virtio_mmio
+
+VIRTIO_SOUND_DEVICE = 25
+VIRTIO_SOUND_CONFIG_STREAMS = 4
+
+SOUND_QUEUE_CONTROL = 0
+SOUND_QUEUE_EVENT = 1
+SOUND_QUEUE_TX = 2
+SOUND_QUEUE_RX = 3
+
+SOUND_MEMORY_CONTROL = 2
+SOUND_MEMORY_EVENT = 3
+SOUND_MEMORY_TX = 4
+SOUND_MEMORY_RX = 5
+SOUND_MEMORY_PCM = 6
+
+SOUND_REQUEST = 0
+SOUND_RESPONSE = 256
+
+SOUND_PCM_INFO = 256
+SOUND_PCM_SET_PARAMS = 257
+SOUND_PCM_PREPARE = 258
+SOUND_PCM_START = 260
+SOUND_PCM_STOP = 261
+SOUND_OK = 32768
+
+SOUND_FORMAT_S16 = 5
+SOUND_RATE_48000 = 7
+SOUND_CHANNELS = 2
+SOUND_PERIOD_BYTES = 2048
+SOUND_BUFFER_BYTES = 4096
+SOUND_PERIOD_FRAMES = 512
+SOUND_WAVE_SIZE = 64
+SOUND_PERIOD_COUNT = 2
+SOUND_PERIOD_STRIDE = 2304
+SOUND_STATUS_OFFSET = 4608
+SOUND_VOICE_COUNT = 21
+SOUND_VOICE_LEVEL = 1024
+SOUND_ATTACK_STEP = 8
+SOUND_RELEASE_STEP = 2
+SOUND_WAIT_LIMIT = 268435455
+
+SOUND_SINE = [
+    0, 803, 1598, 2378, 3135, 3861, 4551, 5196,
+    5793, 6333, 6811, 7225, 7568, 7839, 8035, 8153,
+    8192, 8153, 8035, 7839, 7568, 7225, 6811, 6333,
+    5793, 5196, 4551, 3861, 3135, 2378, 1598, 803,
+    0, 0 - 803, 0 - 1598, 0 - 2378, 0 - 3135, 0 - 3861, 0 - 4551, 0 - 5196,
+    0 - 5793, 0 - 6333, 0 - 6811, 0 - 7225, 0 - 7568, 0 - 7839, 0 - 8035, 0 - 8153,
+    0 - 8192, 0 - 8153, 0 - 8035, 0 - 7839, 0 - 7568, 0 - 7225, 0 - 6811, 0 - 6333,
+    0 - 5793, 0 - 5196, 0 - 4551, 0 - 3861, 0 - 3135, 0 - 2378, 0 - 1598, 0 - 803,
+]
+
+Voice = Box {
+    active = no
+    releasing = no
+    half_frames = 1
+    phase = 0
+    level = 0
+}
+
+Sound = Box {
+    ready = no
+    status = 0
+    device = []
+    control = virtio_mmio.VirtioQueue {}
+    event = virtio_mmio.VirtioQueue {}
+    tx = virtio_mmio.VirtioQueue {}
+    rx = virtio_mmio.VirtioQueue {}
+    stream = 0
+    voices = []
+}
+
+skill sound_new_voices() {
+    @voices = []
+    @index = 0
+    drum (SOUND_VOICE_COUNT) {
+        voices = seed.group.add(voices, Voice {})
+        index = index + 1
+    }
+    out voices
+}
+
+skill sound_address(base, offset) {
+    @total = seed.group.item(base, 1) + offset
+    @carry = total / 65536
+    out [seed.group.item(base, 0) + carry, total - carry * 65536]
+}
+
+skill sound_pcm_address(slot, offset) {
+    out virtio_mmio.virtio_queue_address(
+        SOUND_MEMORY_PCM,
+        slot * SOUND_PERIOD_STRIDE + offset
+    )
+}
+
+skill sound_status_address(slot) {
+    out virtio_mmio.virtio_queue_address(SOUND_MEMORY_PCM, SOUND_STATUS_OFFSET + slot * 8)
+}
+
+skill sound_wait(queue) {
+    @attempt = 0
+    drum (SOUND_WAIT_LIMIT) {
+        @used = virtio_mmio.virtio_next_used(queue)
+        (used == yes) { out yes }
+        attempt = attempt + 1
+    }
+    out no
+}
+
+skill sound_control(sound, request_bytes, response_bytes) {
+    @request = sound_address(sound.control.buffers, SOUND_REQUEST)
+    @response = sound_address(sound.control.buffers, SOUND_RESPONSE)
+    seed.mem.store32(response, 0, 0)
+    virtio_mmio.virtio_descriptor(sound.control, 0, request, request_bytes, virtio_mmio.VIRTIO_DESCRIPTOR_NEXT, 1)
+    virtio_mmio.virtio_descriptor(sound.control, 1, response, response_bytes, virtio_mmio.VIRTIO_DESCRIPTOR_WRITE, 0)
+    virtio_mmio.virtio_offer(sound.control, 0)
+    virtio_mmio.virtio_notify(sound.control)
+    @finished = sound_wait(sound.control)
+    (finished == no) { out 32771 }
+    out seed.mem.load32(response, 0)
+}
+
+skill sound_query_output(sound) {
+    @request = sound_address(sound.control.buffers, SOUND_REQUEST)
+    seed.mem.store32(request, 0, SOUND_PCM_INFO)
+    seed.mem.store32(request, 4, 0)
+    seed.mem.store32(request, 8, 1)
+    seed.mem.store32(request, 12, 32)
+    @result = sound_control(sound, 16, 36)
+    (result == SOUND_OK) {
+        @response = sound_address(sound.control.buffers, SOUND_RESPONSE)
+        @direction = seed.mem.load8(response, 28)
+        @channels_min = seed.mem.load8(response, 29)
+        @channels_max = seed.mem.load8(response, 30)
+        (direction == 0) {
+            (channels_min < 3) {
+                (channels_max > 1) { out yes }
+            }
+        }
+    }
+    out no
+}
+
+skill sound_set_params(sound) {
+    @request = sound_address(sound.control.buffers, SOUND_REQUEST)
+    seed.mem.store32(request, 0, SOUND_PCM_SET_PARAMS)
+    seed.mem.store32(request, 4, sound.stream)
+    seed.mem.store32(request, 8, SOUND_BUFFER_BYTES)
+    seed.mem.store32(request, 12, SOUND_PERIOD_BYTES)
+    seed.mem.store32(request, 16, 0)
+    seed.mem.store8(request, 20, SOUND_CHANNELS)
+    seed.mem.store8(request, 21, SOUND_FORMAT_S16)
+    seed.mem.store8(request, 22, SOUND_RATE_48000)
+    seed.mem.store8(request, 23, 0)
+    out sound_control(sound, 24, 4) == SOUND_OK
+}
+
+skill sound_pcm_command(sound, command) {
+    @request = sound_address(sound.control.buffers, SOUND_REQUEST)
+    seed.mem.store32(request, 0, command)
+    seed.mem.store32(request, 4, sound.stream)
+    out sound_control(sound, 8, 4) == SOUND_OK
+}
+
+skill sound_populate_events(queue) {
+    @index = 0
+    drum (virtio_mmio.VIRTIO_QUEUE_COUNT) {
+        @buffer = sound_address(queue.buffers, index * 8)
+        seed.mem.store32(buffer, 0, 0)
+        seed.mem.store32(buffer, 4, 0)
+        virtio_mmio.virtio_descriptor(queue, index, buffer, 8, virtio_mmio.VIRTIO_DESCRIPTOR_WRITE, 0)
+        virtio_mmio.virtio_offer(queue, index)
+        index = index + 1
+    }
+    out none
+}
+
+skill sound_open() {
+    @device = virtio_mmio.virtio_find(VIRTIO_SOUND_DEVICE)
+    (seed.group.count(device) < 2) { out Sound { status = 1 } }
+    @streams = seed.mem.load32(device, virtio_mmio.VIRTIO_DEVICE_CONFIG + VIRTIO_SOUND_CONFIG_STREAMS)
+    (streams < 1) { out Sound { status = 2 } }
+
+    @prepared = virtio_mmio.virtio_prepare(device)
+    (prepared == no) { out Sound { status = 3 } }
+
+    @control = virtio_mmio.virtio_open_empty_queue(device, SOUND_QUEUE_CONTROL, SOUND_MEMORY_CONTROL)
+    (control.ready == no) { out Sound { status = 4 } }
+    @event = virtio_mmio.virtio_open_empty_queue(device, SOUND_QUEUE_EVENT, SOUND_MEMORY_EVENT)
+    (event.ready == no) { out Sound { status = 5 } }
+    @tx = virtio_mmio.virtio_open_empty_queue(device, SOUND_QUEUE_TX, SOUND_MEMORY_TX)
+    (tx.ready == no) { out Sound { status = 6 } }
+    @rx = virtio_mmio.virtio_open_empty_queue(device, SOUND_QUEUE_RX, SOUND_MEMORY_RX)
+    (rx.ready == no) { out Sound { status = 7 } }
+
+    sound_populate_events(event)
+    virtio_mmio.virtio_activate(device)
+    virtio_mmio.virtio_notify(event)
+
+    @sound = Sound {
+        status = 8
+        device = device
+        control = control
+        event = event
+        tx = tx
+        rx = rx
+        voices = sound_new_voices()
+    }
+    @output = sound_query_output(sound)
+    (output == no) { sound.status = 9 out sound }
+    @params = sound_set_params(sound)
+    (params == no) { sound.status = 10 out sound }
+    @prepared_pcm = sound_pcm_command(sound, SOUND_PCM_PREPARE)
+    (prepared_pcm == no) { sound.status = 11 out sound }
+
+    @slot = 0
+    drum (SOUND_PERIOD_COUNT) {
+        sound_fill_period(sound, slot)
+        sound_submit_period(sound, slot)
+        slot = slot + 1
+    }
+    @started = sound_pcm_command(sound, SOUND_PCM_START)
+    (started == no) { sound.status = 12 out sound }
+
+    sound.ready = yes
+    sound.status = 13
+    out sound
+}
+
+skill sound_wrap(value, limit) {
+    out value - value / limit * limit
+}
+
+skill sound_wave(index) {
+    out seed.group.item(SOUND_SINE, sound_wrap(index, SOUND_WAVE_SIZE))
+}
+
+skill sound_voice_sample(voice) {
+    (voice.active == no) { out 0 }
+
+    (voice.releasing == yes) {
+        voice.level = voice.level - SOUND_RELEASE_STEP
+        (voice.level < 1) { voice.level = 0 }
+    }
+    (voice.releasing == no) {
+        (voice.level < SOUND_VOICE_LEVEL) {
+            voice.level = voice.level + SOUND_ATTACK_STEP
+            (voice.level > SOUND_VOICE_LEVEL) { voice.level = SOUND_VOICE_LEVEL }
+        }
+    }
+
+    @wave_frames = voice.half_frames * 2
+    @wave_index = voice.phase * SOUND_WAVE_SIZE / wave_frames
+    @sample = sound_wave(wave_index)
+    sample = sample + sound_wave(wave_index * 2) / 4
+    sample = sample + sound_wave(wave_index * 3) / 8
+    sample = sample * voice.level / SOUND_VOICE_LEVEL
+
+    voice.phase = voice.phase + 1
+    (voice.phase > wave_frames - 1) { voice.phase = 0 }
+    (voice.level == 0) {
+        voice.active = no
+        voice.releasing = no
+    }
+    out sample
+}
+
+skill sound_mix_frame(sound) {
+    @sample = 0
+    @active = 0
+    @index = 0
+    drum (seed.group.count(sound.voices)) {
+        @voice = seed.group.item(sound.voices, index)
+        (voice.active == yes) {
+            sample = sample + sound_voice_sample(voice)
+            active = active + 1
+        }
+        index = index + 1
+    }
+    (active > 1) { sample = sample / active }
+    (sample > 30000) { sample = 30000 }
+    (sample < 0 - 30000) { sample = 0 - 30000 }
+    out sample
+}
+
+skill sound_fill_period(sound, slot) {
+    @buffer = sound_pcm_address(slot, 0)
+    seed.mem.store32(buffer, 0, sound.stream)
+    @frame = 0
+    drum (SOUND_PERIOD_FRAMES) {
+        @sample = sound_mix_frame(sound)
+        @encoded = sample
+        (sample < 0) { encoded = 65536 + sample }
+        @offset = 4 + frame * 4
+        seed.mem.store16(buffer, offset, encoded)
+        seed.mem.store16(buffer, offset + 2, encoded)
+        frame = frame + 1
+    }
+    out none
+}
+
+skill sound_submit_period(sound, slot) {
+    @buffer = sound_pcm_address(slot, 0)
+    @status = sound_status_address(slot)
+    @descriptor = slot * 2
+    seed.mem.store32(status, 0, 0)
+    seed.mem.store32(status, 4, 0)
+    virtio_mmio.virtio_descriptor(sound.tx, descriptor, buffer, SOUND_PERIOD_BYTES + 4, virtio_mmio.VIRTIO_DESCRIPTOR_NEXT, descriptor + 1)
+    virtio_mmio.virtio_descriptor(sound.tx, descriptor + 1, status, 8, virtio_mmio.VIRTIO_DESCRIPTOR_WRITE, 0)
+    virtio_mmio.virtio_offer(sound.tx, descriptor)
+    virtio_mmio.virtio_notify(sound.tx)
+    out none
+}
+
+skill sound_note_on(sound, voice_index, half_frames) {
+    (sound.ready == no) { out no }
+    (voice_index < 0) { out no }
+    ((voice_index < seed.group.count(sound.voices)) == no) { out no }
+    (half_frames < 1) { out no }
+
+    @voice = seed.group.item(sound.voices, voice_index)
+    voice.active = yes
+    voice.releasing = no
+    voice.half_frames = half_frames
+    voice.phase = 0
+    voice.level = 0
+    out yes
+}
+
+skill sound_note_off(sound, voice_index) {
+    (sound.ready == no) { out no }
+    (voice_index < 0) { out no }
+    ((voice_index < seed.group.count(sound.voices)) == no) { out no }
+    @voice = seed.group.item(sound.voices, voice_index)
+    (voice.active == yes) { voice.releasing = yes }
+    out yes
+}
+
+skill sound_all_notes_off(sound) {
+    @index = 0
+    drum (seed.group.count(sound.voices)) {
+        @voice = seed.group.item(sound.voices, index)
+        (voice.active == yes) { voice.releasing = yes }
+        index = index + 1
+    }
+    out none
+}
+
+skill sound_update(sound) {
+    (sound.ready == no) { out none }
+    @attempt = 0
+    drum (SOUND_PERIOD_COUNT) {
+        @used = virtio_mmio.virtio_next_used(sound.tx)
+        (used == yes) {
+            @slot = sound.tx.used_id / 2
+            (slot < SOUND_PERIOD_COUNT) {
+                @status = sound_status_address(slot)
+                @result = seed.mem.load32(status, 0)
+                (result == SOUND_OK) {
+                    sound_fill_period(sound, slot)
+                    sound_submit_period(sound, slot)
+                }
+                ((result == SOUND_OK) == no) {
+                    sound.ready = no
+                    sound.status = 14
+                }
+            }
+        }
+        attempt = attempt + 1
+    }
+    out none
+}

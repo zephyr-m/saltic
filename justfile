@@ -19,7 +19,7 @@ qemu file="os/target/qemu_virt/smoke.saltic":
     bash os/bootstrap/build.sh "$1" .cache/build/qemu_virt/program.elf
 
 qemu-graphics:
-    nix --extra-experimental-features "nix-command flakes" develop --command bash -c 'bash os/target/qemu_virt/build-graphics.sh && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -device virtio-tablet-device -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
+    nix --extra-experimental-features "nix-command flakes" develop --command bash -c 'bash os/target/qemu_virt/build-graphics.sh && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -device virtio-tablet-device -audiodev pipewire,id=saltic_audio -device virtio-sound-device,audiodev=saltic_audio -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
 
 os port="46321":
     bash os/target/qemu_virt/build-graphics.sh
