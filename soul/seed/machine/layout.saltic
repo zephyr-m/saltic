@@ -19,12 +19,19 @@ PatchKind = enum {
     ADDRESS_WORD,
 }
 
+LABEL_BUCKETS = 512
+
 Label = Box {
     name = ""
     section = Section.CODE
     offset = 0
     present = no
     next = none
+    bucket_next = none
+}
+
+LabelBucket = Box {
+    first = none
 }
 
 Patch = Box {
@@ -61,6 +68,7 @@ Program = Box {
     heap_size = codec.Word {}
     labels_first = none
     labels_last = none
+    label_buckets = []
     label_count = 0
     patches_first = none
     patches_last = none
@@ -207,11 +215,40 @@ skill emit_patch(value, patch, placeholder) {
     out emit_word(value, placeholder)
 }
 
+skill label_hash(name) {
+    @hash = 0
+    @index = 0
+    @length = seed.str.len(name)
+    drum (length) {
+        hash = hash + seed.str.byte(name, index) * (index + 1)
+        index = index + 1
+    }
+    out codec.mod(hash, LABEL_BUCKETS)
+}
+
+skill label_bucket(value, name) {
+    (seed.group.count(value.label_buckets) == 0) {
+        @buckets = []
+        drum (LABEL_BUCKETS) { buckets = seed.group.add(buckets, LabelBucket {}) }
+        value.label_buckets = buckets
+    }
+    out seed.group.item(value.label_buckets, label_hash(name))
+}
+
+skill index_label(bucket, label) {
+    label.bucket_next = bucket.first
+    bucket.first = label
+    out bucket
+}
+
 skill find_label(value, name) {
-    @label = value.labels_first
+    (value.label_count == 0) { out Label {} }
+    @bucket = label_bucket(value, name)
+    @label = bucket.first
     drum (value.label_count) {
+        (label == none) { out Label {} }
         (label.name == name) { out label }
-        label = label.next
+        label = label.bucket_next
     }
     out Label {}
 }
@@ -229,6 +266,7 @@ skill define_label(value, section, name) {
     (value.label_count > 0) { value.labels_last.next = label }
     value.labels_last = label
     value.label_count = value.label_count + 1
+    index_label(label_bucket(value, name), label)
     value.resolved = no
     out value
 }
