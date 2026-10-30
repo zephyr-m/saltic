@@ -18,6 +18,7 @@ if ! command -v qemu-riscv32 >/dev/null 2>&1; then
     build_dir="${SALTIC_BUILD_DIR:-}"
     bootstrap_override="${SALTIC_BOOTSTRAP_COMPILER:-}"
     heap_override="${SALTIC_HEAP_BYTES:-}"
+    target_override="${SALTIC_TARGET:-}"
     exec nix \
         --extra-experimental-features "nix-command flakes" \
         develop "$root" --command \
@@ -26,6 +27,7 @@ if ! command -v qemu-riscv32 >/dev/null 2>&1; then
         SALTIC_BUILD_DIR="$build_dir" \
         SALTIC_BOOTSTRAP_COMPILER="$bootstrap_override" \
         SALTIC_HEAP_BYTES="$heap_override" \
+        SALTIC_TARGET="$target_override" \
         bash "$root/os/bootstrap/build.sh" "$@"
 fi
 
@@ -40,6 +42,7 @@ work="${SALTIC_BUILD_DIR:-.cache/build/bootstrap}"
 assembly_path="${3:-$work/program.s}"
 compiler="${SALTIC_BOOTSTRAP_COMPILER:-os/bootstrap/compiler.elf}"
 heap_bytes="${SALTIC_HEAP_BYTES:-536870912}"
+target="${SALTIC_TARGET:-rv32i}"
 compiler_output="$work/compiler-output"
 
 if [[ ! -f "$compiler" ]]; then
@@ -55,7 +58,7 @@ mkdir -p "$work" "$(dirname "$output_path")" "$(dirname "$assembly_path")"
 rm -f "$compiler_output" "$assembly_path"
 
 qemu-riscv32 -B 0x100000000 \
-    "$compiler" "$source_path" "$compiler_output" "$heap_bytes"
+    "$compiler" "$source_path" "$compiler_output" "$heap_bytes" "$target"
 
 magic="$(od -An -tx1 -N4 "$compiler_output" | tr -d '[:space:]')"
 if [[ "$magic" != "7f454c46" ]]; then

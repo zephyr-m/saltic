@@ -27,6 +27,7 @@ build() {
 
     SALTIC_BUILD_DIR="$work/build/$name" \
     SALTIC_HEAP_BYTES="$heap_bytes" \
+    SALTIC_TARGET="${SALTIC_TARGET:-}" \
     bash os/bootstrap/build.sh "$source" "$output"
 }
 
@@ -197,6 +198,29 @@ test_memory() {
     qemu-riscv32 -B 0x100000000 \
         "$work/memory/program.elf"
     echo "память: регионы освобождают мусор на куче 1 МБ"
+}
+
+test_native() {
+    mkdir -p "$work/native"
+    SALTIC_TARGET=x86_64 build native-canonical \
+        soul/seed/canonical/main.saltic \
+        "$work/native/canonical" \
+        67108864
+    cp tests/fixtures/input.txt "$work/native/input.txt"
+    "$work/native/canonical" \
+        "$work/native/input.txt" \
+        "$work/native/output.txt" \
+        >"$work/native/stdout.txt"
+    diff -u \
+        soul/seed/canonical/expected/output.txt \
+        "$work/native/stdout.txt"
+    test "$(<"$work/native/output.txt")" = "pip:0"
+    SALTIC_TARGET=x86_64 build native-memory \
+        soul/seed/tests/memory.saltic \
+        "$work/native/memory" \
+        1048576
+    "$work/native/memory"
+    echo "x86-64: канон и память работают на родном процессоре"
 }
 
 test_seed_contract() {
@@ -477,6 +501,7 @@ run_case() {
         vm-machine) test_vm_machine ;;
         abi) test_abi ;;
         memory) test_memory ;;
+        native) test_native ;;
         qemu-virt) test_qemu_virt ;;
         jtml) test_jtml ;;
         tasks) test_tasks ;;
@@ -508,6 +533,7 @@ if [[ "$1" == "all" || "$1" == "fast" ]]; then
         machine \
         abi \
         memory \
+        native \
         jtml \
         tasks \
         qemu-virt \

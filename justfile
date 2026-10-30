@@ -14,6 +14,10 @@ run file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf" *args:
     SALTIC_DIRECT_ONLY=1 bash os/bootstrap/build.sh "$1" "$2"
     nix --extra-experimental-features "nix-command flakes" develop --command qemu-riscv32 -B 0x100000000 "$2" "${@:3}"
 
+native file="soul/seed/canonical/main.saltic" output="/tmp/saltic-native" *args:
+    SALTIC_TARGET=x86_64 SALTIC_DIRECT_ONLY=1 bash os/bootstrap/build.sh "$1" "$2"
+    "$2" "${@:3}"
+
 qemu file="os/target/qemu_virt/smoke.saltic":
     mkdir -p .cache/build/qemu_virt
     bash os/bootstrap/build.sh "$1" .cache/build/qemu_virt/program.elf
@@ -106,6 +110,9 @@ abi:
 
 memory:
     just test memory
+
+native-test:
+    just test native
 
 trace file="soul/seed/canonical/main.saltic":
     mkdir -p .cache/build/tracer

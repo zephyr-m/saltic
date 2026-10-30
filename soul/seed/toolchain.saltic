@@ -4,6 +4,7 @@ use seed.checker
 use seed.compiler
 use seed.machine.codec
 use seed.machine.image
+use seed.compiler.backend.x86_64
 
 skill toolchain_show_diagnostics(diagnostics) {
     @index = 0
@@ -16,7 +17,19 @@ skill toolchain_show_diagnostics(diagnostics) {
     out none
 }
 
-program(source_path, output_path, heap_text) {
+skill write_native(ast, heap_size, output_path) {
+    @machine = compiler.compile_machine_with_heap(ast, heap_size)
+    seed.io.show("toolchain: перевожу в x86-64 ", output_path)
+    x86_64.write(output_path, machine) rescue |failure| {
+        seed.io.show("toolchain: код больше 1 МБ, собираю с дальними вызовами")
+        @far = compiler.compile_machine_far_with_heap(ast, heap_size, no)
+        x86_64.write(output_path, far) rescue |again| { out error.WriteFailed }
+        out none
+    }
+    out none
+}
+
+program(source_path, output_path, heap_text, target) {
     seed.io.show("toolchain: читаю ", source_path)
     @loaded = parser.load_modules(source_path, ".")
     (seed.group.count(loaded.diagnostics) > 0) {
@@ -34,6 +47,8 @@ program(source_path, output_path, heap_text) {
     (seed.str.starts_with(heap_text, "-") == yes) { out error.ValueOutsideRange }
     @heap_size = codec.word_from_decimal(heap_text)
     seed.io.show("toolchain: собираю")
+    (target == "x86_64") { out write_native(loaded.ast, heap_size, output_path) }
+    ((target == "rv32i") == no) { out error.UnknownTarget }
     @machine = compiler.compile_machine_with_heap(loaded.ast, heap_size)
     seed.io.show("toolchain: пишу ", output_path)
     image.write(output_path, machine) rescue |failure| {
