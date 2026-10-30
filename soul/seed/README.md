@@ -23,18 +23,19 @@
 - `seed.group`, `seed.str`, `seed.num` — группы, строки, числа
 - `seed.process` — завершение процесса
 
-Память программы одна. Курсор кучи едет только вперёд. Место кончилось — процесс завершается с кодом 65. Сборщика мусора нет.
+Память программы — одна квота. Каждый вызов skill открывает регион: на выходе результат `out` копируется вызывающему, остальная память региона освобождается целиком. Нехватка памяти — ошибка `MemoryExhausted`, её ловит `rescue`. Сборщика мусора нет. Подробно — `docs/MEMORY-MODEL.md`.
 
 Сборка канона одна: исходник → прямой ELF. Текст ассемблера, GNU `as`/`gcc` и JavaScript в эту цепочку не входят. Восстановление компилятора — файл `os/bootstrap/compiler.elf` из Git, не сборка из `.s`.
 
 Внутреннее ядро не является вторым языком для программ:
 
 - `parser`, `checker`, `compiler`, `runtime/emit.saltic` — перевод в машинный ELF
+- `runtime/emit/memory.saltic` — выделение памяти и регионы
 - `machine` — команды, раскладка, образ ELF
 - `vm` — исполнение ELF внутри Saltic
 - `abi` — одно машинное слово и номер ошибки в отдельном регистре
 
-Фиксированная точка текущего ядра, stage-2 и stage-3: `c4a5152efd028328273385b55553e66c379e1f84d0ffa4aa2689ebe8d4513cba`.
+Фиксированная точка текущего ядра, stage-2 и stage-3: `544d41aedd4d770066b6476d9c55ceb1c6f639a37f537cbf92e94adf49d62a8c`.
 
 ## Реальное состояние vs. план
 
@@ -47,34 +48,14 @@
 - **чекер** — `checker.saltic` + `checker/{names,signatures,rules,types,semantics}`;
 - **компилятор** — `compiler.saltic` + `compiler/{codegen,state,constants}`,
   backend `compiler/backend/rv32i`;
-- **runtime** — `runtime/emit.saltic` (машинный runtime);
+- **runtime** — `runtime/emit.saltic` (машинный runtime) и `runtime/emit/memory.saltic` (регионы памяти);
 - **машина (пункт 5 аудита)** — `machine/{instruction,codec,layout,image,profile}`:
   собственное кодирование 44 команд, раскладка, ELF32-образ. Закрыто
   независимыми тестами (golden/immediate/patches/elf/scale).
 - **VM** — `vm.saltic` + `vm/{cpu,loader,state,syscalls,system}`.
 
-### Планируется (пункты 6–8 аудита, файлов ещё нет)
+### Модель исполнения
 
-- `compiler/abi.saltic` — новый call/value ABI (сейчас ABI описан контрактом,
-  но активный compiler/runtime ему не соответствуют);
-- `runtime/{start,value,group,string,platform}.saltic` — перевод runtime с
-  assembly-строки на `machine.Program`;
-- `platform/contract.saltic`, `os/bootstrap/platform.saltic` — явная граница платформы;
-- `vm/word.saltic` — общее машинное слово для codec и VM;
-- `tests/closure.saltic` — доказательство замкнутости.
-
-## Известное расхождение (до пункта 6)
-
-Контракты ABI и модель памяти существуют в **двух несовместимых версиях**:
-
-- **новый контракт** (`abi/*`, `memory/model.saltic`) описывает raw fixed в
-  32-битном слове, отдельный error в `a1`, 16-байтовый object header,
-  конечную память с освобождением;
-- **активный runtime** (`runtime/emit.saltic`,
-  `compiler/constants.saltic`) по-прежнему выделяет fixed в куче с `TAG_BOX`,
-  возвращает ошибку в `a0`, не имеет 16-байтовых headers и bump-only heap
-  без сборки.
-
-Эти расхождения устраняются только в пункте 6 аудита (перевод compiler/runtime
-на `machine.Program` + mark-and-sweep). До этого два контракта сосуществуют
-сознательно: старый — рабочий, новый — спецификация перехода.
+- ABI действует в compiler и runtime: fixed хранится raw-словом, ошибка
+  возвращается в `a1`, у объекта 12-байтовый заголовок.
+- Память устроена регионами на границах skill (`docs/MEMORY-MODEL.md`).
