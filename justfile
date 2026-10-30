@@ -81,6 +81,9 @@ machine:
 abi:
     just test abi
 
+memory:
+    just test memory
+
 trace file="soul/seed/canonical/main.saltic":
     mkdir -p .cache/build/tracer
     SALTIC_BUILD_DIR=.cache/build/tracer/build bash os/bootstrap/build.sh "$1" .cache/build/tracer/target.elf .cache/build/tracer/target.s

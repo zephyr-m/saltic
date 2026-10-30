@@ -5,6 +5,7 @@ use seed.compiler.state
 use seed.compiler.codegen
 use seed.compiler.constants
 use seed.runtime.emit
+use seed.runtime.emit.memory
 use seed.machine.instruction
 use seed.machine.codec
 use seed.machine.layout
@@ -67,7 +68,7 @@ skill behavior_start_arguments_program() {
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, abi.NONE)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
     compiler = state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
-    compiler = emit.emit_alloc(compiler)
+    compiler = memory.emit_alloc(compiler)
     compiler = emit.emit_cstring(compiler)
     compiler = emit.emit_platform_exit(compiler)
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_out_of_memory")
@@ -96,7 +97,7 @@ skill behavior_group_program() {
     compiler = codegen.compile_expression(compiler, ["group", ["number", 1], ["number", 2]])
     compiler.machine = layout.emit_call(compiler.machine, "rt_group_count")
     compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
-    compiler = emit.emit_alloc(compiler)
+    compiler = memory.emit_alloc(compiler)
     compiler = emit.emit_group_count(compiler)
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_out_of_memory")
     compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
@@ -116,7 +117,12 @@ skill behavior_box_program() {
     compiler.machine = layout.emit_call(compiler.machine, "saltic_box_behavior")
     compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
     compiler = codegen.compile_function(compiler, "box_behavior", [], ["block", ["var", "point", ["box-new", "Point"]], ["field-assign", ["path", "point", "x"], ["number", 7]], ["out", ["path", "point", "x"]]], "", "")
-    compiler = emit.emit_alloc(compiler)
+    compiler = memory.emit_alloc(compiler)
+    compiler = memory.emit_region_exit(compiler)
+    compiler = memory.emit_region_forward(compiler)
+    compiler = memory.emit_region_relocate(compiler)
+    compiler = memory.emit_region_restore(compiler)
+    compiler = memory.emit_region_barrier(compiler)
     compiler = emit.emit_box_get(compiler)
     compiler = emit.emit_box_set(compiler)
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_out_of_memory")
@@ -152,7 +158,7 @@ skill behavior_number_text_program() {
     compiler.machine = layout.emit_call(compiler.machine, "rt_string_byte")
     compiler.machine = layout.emit(compiler.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
     compiler = emit.emit_number_text(compiler)
-    compiler = emit.emit_alloc(compiler)
+    compiler = memory.emit_alloc(compiler)
     compiler = emit.emit_string_len(compiler)
     compiler = emit.emit_string_byte(compiler)
     compiler = emit.emit_string_bounds(compiler)
@@ -347,27 +353,29 @@ skill run(suite) {
     boxes = emit.emit_box_get(boxes)
     boxes = emit.emit_box_set(boxes)
     boxes = emit.emit_missing_field(boxes)
+    boxes.machine = layout.define_label(boxes.machine, layout.Section.CODE, "rt_region_barrier")
     boxes.machine = layout.resolve(boxes.machine)
     @box_bytes = [
         19, 117, 133, 255, 131, 34, 197, 0,
-        19, 5, 5, 1, 99, 140, 2, 4,
+        19, 5, 5, 1, 99, 142, 2, 4,
         3, 35, 5, 0, 99, 8, 179, 0,
         19, 5, 133, 0, 147, 130, 242, 255,
         111, 240, 223, 254, 3, 37, 69, 0,
         147, 5, 0, 0, 103, 128, 0, 0,
-        19, 117, 133, 255, 131, 34, 197, 0,
-        19, 5, 5, 1, 99, 132, 2, 2,
-        3, 35, 5, 0, 99, 8, 179, 0,
-        19, 5, 133, 0, 147, 130, 242, 255,
-        111, 240, 223, 254, 35, 34, 197, 0,
-        19, 5, 32, 0, 147, 5, 0, 0,
-        103, 128, 0, 0, 19, 5, 0, 0,
-        147, 5, 16, 0, 103, 128, 0, 0,
+        19, 117, 133, 255, 147, 3, 5, 0,
+        131, 34, 197, 0, 19, 5, 5, 1,
+        99, 132, 2, 2, 3, 35, 5, 0,
+        99, 8, 179, 0, 19, 5, 133, 0,
+        147, 130, 242, 255, 111, 240, 223, 254,
+        35, 34, 197, 0, 19, 5, 32, 0,
+        147, 5, 0, 0, 111, 0, 0, 1,
+        19, 5, 0, 0, 147, 5, 16, 0,
+        103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод Box: длина", boxes.machine.code.length, 112)
-    suite = testing.test_equal(suite, "перевод Box: шесть переходов", boxes.machine.patch_count, 6)
+    suite = testing.test_equal(suite, "перевод Box: длина", boxes.machine.code.length, 116)
+    suite = testing.test_equal(suite, "перевод Box: семь переходов", boxes.machine.patch_count, 7)
     @box_index = 0
-    drum (112) {
+    drum (116) {
         suite = testing.test_equal(suite, seed.str.add("перевод Box: байт ", seed.num.text(box_index)), codec.byte_at(boxes.machine.code, box_index), seed.group.item(box_bytes, box_index))
         box_index = box_index + 1
     }
@@ -387,11 +395,11 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_box_set: метка существует", box_set.present)
     suite = testing.test_equal(suite, "перевод rt_box_set: смещение", box_set.offset, 48)
     suite = testing.test_yes(suite, "перевод rt_box_set: цикл существует", box_set_loop.present)
-    suite = testing.test_equal(suite, "перевод rt_box_set: смещение цикла", box_set_loop.offset, 60)
+    suite = testing.test_equal(suite, "перевод rt_box_set: смещение цикла", box_set_loop.offset, 64)
     suite = testing.test_yes(suite, "перевод rt_box_set: поле найдено", box_set_found.present)
-    suite = testing.test_equal(suite, "перевод rt_box_set: смещение найденного поля", box_set_found.offset, 84)
+    suite = testing.test_equal(suite, "перевод rt_box_set: смещение найденного поля", box_set_found.offset, 88)
     suite = testing.test_yes(suite, "перевод отсутствующего поля: метка существует", missing_field.present)
-    suite = testing.test_equal(suite, "перевод отсутствующего поля: смещение", missing_field.offset, 100)
+    suite = testing.test_equal(suite, "перевод отсутствующего поля: смещение", missing_field.offset, 104)
 
     @groups = state.State {}
     groups = emit.emit_group_count(groups)
@@ -800,8 +808,9 @@ skill run(suite) {
     suite = testing.test_equal(suite, "связанная ветка less yes: смещение", linked_less_yes.offset, 176)
 
     @allocation = state.State {}
-    allocation = emit.emit_alloc(allocation)
-    allocation = emit.emit_out_of_memory(allocation)
+    allocation = memory.emit_alloc(allocation)
+    allocation.machine = layout.define_label(allocation.machine, layout.Section.CODE, "rt_out_of_memory")
+    allocation.machine = layout.emit(allocation.machine, instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0)
     allocation = emit.emit_platform_exit(allocation)
     allocation.machine = layout.resolve(allocation.machine)
     @allocation_bytes = [
@@ -811,14 +820,13 @@ skill run(suite) {
         99, 238, 83, 0, 19, 133, 4, 0,
         179, 132, 84, 0, 35, 34, 101, 0,
         35, 36, 5, 0, 147, 5, 0, 0,
-        103, 128, 0, 0, 19, 5, 16, 4,
-        111, 0, 64, 0, 147, 8, 208, 5,
-        115, 0, 0, 0,
+        103, 128, 0, 0, 115, 0, 16, 0,
+        147, 8, 208, 5, 115, 0, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод rt_alloc: длина", allocation.machine.code.length, 68)
-    suite = testing.test_equal(suite, "перевод rt_alloc: четыре перехода", allocation.machine.patch_count, 4)
+    suite = testing.test_equal(suite, "перевод rt_alloc: длина", allocation.machine.code.length, 64)
+    suite = testing.test_equal(suite, "перевод rt_alloc: три перехода", allocation.machine.patch_count, 3)
     @allocation_index = 0
-    drum (68) {
+    drum (64) {
         suite = testing.test_equal(suite, seed.str.add("перевод rt_alloc: байт ", seed.num.text(allocation_index)), codec.byte_at(allocation.machine.code, allocation_index), seed.group.item(allocation_bytes, allocation_index))
         allocation_index = allocation_index + 1
     }
@@ -830,7 +838,7 @@ skill run(suite) {
     suite = testing.test_yes(suite, "перевод rt_out_of_memory: метка существует", out_of_memory.present)
     suite = testing.test_equal(suite, "перевод rt_out_of_memory: смещение", out_of_memory.offset, 52)
     suite = testing.test_yes(suite, "связанный rt_platform_exit для памяти существует", allocation_platform_exit.present)
-    suite = testing.test_equal(suite, "связанный rt_platform_exit для памяти: смещение", allocation_platform_exit.offset, 60)
+    suite = testing.test_equal(suite, "связанный rt_platform_exit для памяти: смещение", allocation_platform_exit.offset, 56)
 
     @fixed_new = state.State {}
     fixed_new = emit.emit_fixed_new(fixed_new)
@@ -1907,26 +1915,30 @@ skill run(suite) {
     show.machine = layout.define_label(show.machine, layout.Section.RODATA, "rt_yes_text")
     show.machine = layout.define_label(show.machine, layout.Section.RODATA, "rt_no_text")
     show.machine = layout.define_label(show.machine, layout.Section.RODATA, "rt_fixed_overflow_text")
+    show.machine = layout.define_label(show.machine, layout.Section.RODATA, "rt_memory_exhausted_text")
     show.machine = layout.resolve(show.machine)
     @show_bytes = [
         147, 114, 117, 0, 19, 3, 48, 0,
-        99, 132, 98, 10, 19, 3, 0, 0,
+        99, 128, 98, 12, 19, 3, 0, 0,
         99, 130, 98, 2, 19, 3, 16, 0,
         99, 130, 98, 4, 19, 3, 112, 0,
         99, 130, 98, 6, 23, 5, 0, 0,
-        19, 5, 69, 12, 19, 101, 53, 0,
-        111, 0, 0, 8, 19, 1, 1, 255,
+        19, 5, 197, 13, 19, 101, 53, 0,
+        111, 0, 128, 9, 19, 1, 1, 255,
         35, 38, 17, 0, 151, 0, 0, 0,
-        231, 128, 128, 10, 151, 0, 0, 0,
+        231, 128, 0, 12, 151, 0, 0, 0,
         231, 128, 192, 251, 131, 32, 193, 0,
         19, 1, 1, 1, 147, 5, 0, 0,
         103, 128, 0, 0, 147, 2, 16, 0,
         99, 10, 85, 0, 23, 5, 0, 0,
-        19, 5, 69, 8, 19, 101, 53, 0,
-        111, 0, 0, 4, 23, 5, 0, 0,
-        19, 5, 69, 7, 19, 101, 53, 0,
-        111, 0, 0, 3, 147, 82, 53, 0,
+        19, 5, 197, 9, 19, 101, 53, 0,
+        111, 0, 128, 5, 23, 5, 0, 0,
+        19, 5, 197, 8, 19, 101, 53, 0,
+        111, 0, 128, 4, 147, 82, 53, 0,
         19, 3, 96, 0, 99, 154, 98, 0,
+        23, 5, 0, 0, 19, 5, 5, 7,
+        19, 101, 53, 0, 111, 0, 192, 2,
+        19, 3, 128, 0, 99, 154, 98, 0,
         23, 5, 0, 0, 19, 5, 133, 5,
         19, 101, 53, 0, 111, 0, 64, 1,
         23, 5, 0, 0, 19, 5, 133, 4,
@@ -1939,10 +1951,10 @@ skill run(suite) {
         19, 5, 32, 0, 147, 5, 0, 0,
         103, 128, 0, 0,
     ]
-    suite = testing.test_equal(suite, "перевод show: длина", show.machine.code.length, 228)
-    suite = testing.test_equal(suite, "перевод show: двадцать семь переходов", show.machine.patch_count, 27)
+    suite = testing.test_equal(suite, "перевод show: длина", show.machine.code.length, 252)
+    suite = testing.test_equal(suite, "перевод show: тридцать один переход", show.machine.patch_count, 31)
     @show_index = 0
-    drum (228) {
+    drum (252) {
         suite = testing.test_equal(suite, seed.str.add("перевод show: байт ", seed.num.text(show_index)), codec.byte_at(show.machine.code, show_index), seed.group.item(show_bytes, show_index))
         show_index = show_index + 1
     }
@@ -1970,13 +1982,13 @@ skill run(suite) {
     suite = testing.test_yes(suite, "show: error существует", show_error.present)
     suite = testing.test_equal(suite, "show: смещение error", show_error.offset, 132)
     suite = testing.test_yes(suite, "show: неизвестная ошибка существует", show_error_unknown.present)
-    suite = testing.test_equal(suite, "show: смещение неизвестной ошибки", show_error_unknown.offset, 160)
+    suite = testing.test_equal(suite, "show: смещение неизвестной ошибки", show_error_unknown.offset, 184)
     suite = testing.test_yes(suite, "show: строка существует", show_string.present)
-    suite = testing.test_equal(suite, "show: смещение строки", show_string.offset, 176)
+    suite = testing.test_equal(suite, "show: смещение строки", show_string.offset, 200)
     suite = testing.test_yes(suite, "show: number text связан", show_number_text.present)
-    suite = testing.test_equal(suite, "show: смещение number text", show_number_text.offset, 228)
+    suite = testing.test_equal(suite, "show: смещение number text", show_number_text.offset, 252)
     suite = testing.test_yes(suite, "show: platform write связан", show_platform_write.present)
-    suite = testing.test_equal(suite, "show: смещение platform write", show_platform_write.offset, 228)
+    suite = testing.test_equal(suite, "show: смещение platform write", show_platform_write.offset, 252)
     suite = testing.test_yes(suite, "show: unknown text связан", show_unknown_text.present)
     suite = testing.test_equal(suite, "show: смещение unknown text в rodata", show_unknown_text.offset, 0)
     suite = testing.test_yes(suite, "show: yes text связан", show_yes_text.present)
@@ -2052,7 +2064,7 @@ skill run(suite) {
     @machine_start = state.State { entry = ["entry", ["first", "second"], ["block"]] }
     machine_start = state.header(machine_start)
     machine_start = state.start(machine_start)
-    suite = testing.test_equal(suite, "машинный _start: размер кода", machine_start.machine.code.length, 124)
+    suite = testing.test_equal(suite, "машинный _start: размер кода", machine_start.machine.code.length, 136)
     suite = testing.test_equal(suite, "машинный _start: число patches", machine_start.machine.patch_count, 13)
     @start_label = layout.find_label(machine_start.machine, "_start")
     suite = testing.test_yes(suite, "машинный _start: метка существует", start_label.present)
@@ -2061,12 +2073,12 @@ skill run(suite) {
     suite = testing.test_equal(suite, "машинный _start: lw registers", codec.byte_at(machine_start.machine.code, 1), 37)
     suite = testing.test_equal(suite, "машинный _start: addi opcode", codec.byte_at(machine_start.machine.code, 4), 147)
     suite = testing.test_equal(suite, "машинный _start: argv сохранён в s3", codec.byte_at(machine_start.machine.code, 9), 137)
-    suite = testing.test_equal(suite, "машинный _start: обязательные аргументы", codec.byte_at(machine_start.machine.code, 34), 48)
+    suite = testing.test_equal(suite, "машинный _start: обязательные аргументы", codec.byte_at(machine_start.machine.code, 46), 48)
     @start_args_ready = layout.find_label(machine_start.machine, ".L_start_args_ready")
     suite = testing.test_yes(suite, "машинный _start: метка готовых аргументов существует", start_args_ready.present)
-    suite = testing.test_equal(suite, "машинный _start: смещение готовых аргументов", start_args_ready.offset, 52)
-    suite = testing.test_equal(suite, "машинный _start: дальний переход начинается с auipc", codec.byte_at(machine_start.machine.code, 40), 23)
-    suite = testing.test_equal(suite, "машинный _start: дальний переход заканчивается jalr", codec.byte_at(machine_start.machine.code, 48), 103)
+    suite = testing.test_equal(suite, "машинный _start: смещение готовых аргументов", start_args_ready.offset, 64)
+    suite = testing.test_equal(suite, "машинный _start: дальний переход начинается с auipc", codec.byte_at(machine_start.machine.code, 52), 23)
+    suite = testing.test_equal(suite, "машинный _start: дальний переход заканчивается jalr", codec.byte_at(machine_start.machine.code, 60), 103)
     machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "rt_missing_args")
     machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "rt_cstring")
     machine_start.machine = layout.define_label(machine_start.machine, layout.Section.CODE, "saltic_program")
@@ -2080,16 +2092,17 @@ skill run(suite) {
     @machine_function = state.State {}
     machine_function.machine = layout.host("saltic_sample")
     machine_function = codegen.compile_function(machine_function, "sample", ["first", "second"], ["block"], "", "")
-    suite = testing.test_equal(suite, "машинная функция: размер каркаса", machine_function.machine.code.length, 60)
-    suite = testing.test_equal(suite, "машинная функция: один jump patch", machine_function.machine.patch_count, 1)
+    suite = testing.test_equal(suite, "машинная функция: размер каркаса", machine_function.machine.code.length, 96)
+    suite = testing.test_equal(suite, "машинная функция: jump, регион и вызов выхода", machine_function.machine.patch_count, 4)
     @function_label = layout.find_label(machine_function.machine, "saltic_sample")
     @function_return = layout.find_label(machine_function.machine, ".L_sample_return_0")
     suite = testing.test_yes(suite, "машинная функция: метка существует", function_label.present)
     suite = testing.test_equal(suite, "машинная функция: начало", function_label.offset, 0)
     suite = testing.test_yes(suite, "машинная функция: return существует", function_return.present)
-    suite = testing.test_equal(suite, "машинная функция: return offset", function_return.offset, 40)
+    suite = testing.test_equal(suite, "машинная функция: return offset", function_return.offset, 56)
     suite = testing.test_equal(suite, "машинная функция: addi sp opcode", codec.byte_at(machine_function.machine.code, 0), 19)
     suite = testing.test_equal(suite, "машинная функция: frame immediate", codec.byte_at(machine_function.machine.code, 2), 1)
+    machine_function.machine = layout.define_label(machine_function.machine, layout.Section.CODE, "rt_region_exit")
     machine_function.machine = layout.resolve(machine_function.machine)
     suite = testing.test_yes(suite, "машинная функция: все ссылки разрешены", machine_function.machine.resolved)
 
@@ -2310,8 +2323,9 @@ skill run(suite) {
     machine_constant_flow = codegen.compile_constant(machine_constant_flow, machine_constant)
     machine_constant_flow.constants = [machine_constant]
     machine_constant_flow = constants.emit_storage(machine_constant_flow)
-    suite = testing.test_equal(suite, "машинная константа: полный getter", machine_constant_flow.machine.code.length, 156)
-    suite = testing.test_equal(suite, "машинная константа: переходы и data patches", machine_constant_flow.machine.patch_count, 15)
+    suite = testing.test_equal(suite, "машинная константа: полный getter", machine_constant_flow.machine.code.length, 164)
+    suite = testing.test_equal(suite, "машинная константа: переходы и data patches", machine_constant_flow.machine.patch_count, 17)
+    machine_constant_flow.machine = layout.define_label(machine_constant_flow.machine, layout.Section.CODE, "rt_region_remember_slot")
     machine_constant_flow.machine = layout.resolve(machine_constant_flow.machine)
     suite = testing.test_yes(suite, "машинная константа: переходы разрешены", machine_constant_flow.machine.resolved)
 
@@ -2352,12 +2366,12 @@ skill run(suite) {
 
     @whole_runtime = state.State {}
     whole_runtime = emit.append_runtime(whole_runtime)
-    suite = testing.test_equal(suite, "цельный runtime: число меток", whole_runtime.machine.label_count, 183)
-    suite = testing.test_equal(suite, "цельный runtime: размер rodata", whole_runtime.machine.rodata.length, 185)
+    suite = testing.test_equal(suite, "цельный runtime: число меток", whole_runtime.machine.label_count, 241)
+    suite = testing.test_equal(suite, "цельный runtime: размер rodata", whole_runtime.machine.rodata.length, 233)
     suite = testing.test_equal(suite, "цельный runtime: kind unknown", codec.byte_at(whole_runtime.machine.rodata, 0), abi.OBJECT_KIND_STRING)
     suite = testing.test_equal(suite, "цельный runtime: длина unknown", codec.byte_at(whole_runtime.machine.rodata, 12), 7)
     suite = testing.test_equal(suite, "цельный runtime: длина overflow", codec.byte_at(whole_runtime.machine.rodata, 36), 89)
-    suite = testing.test_equal(suite, "цельный runtime: newline", codec.byte_at(whole_runtime.machine.rodata, 184), 10)
+    suite = testing.test_equal(suite, "цельный runtime: newline", codec.byte_at(whole_runtime.machine.rodata, 232), 10)
     @whole_unknown = layout.find_label(whole_runtime.machine, "rt_unknown_text")
     @whole_overflow = layout.find_label(whole_runtime.machine, "rt_fixed_overflow_text")
     @whole_yes = layout.find_label(whole_runtime.machine, "rt_yes_text")
@@ -2365,9 +2379,9 @@ skill run(suite) {
     @whole_newline = layout.find_label(whole_runtime.machine, "rt_newline_text")
     suite = testing.test_equal(suite, "цельный runtime: unknown offset", whole_unknown.offset, 0)
     suite = testing.test_equal(suite, "цельный runtime: overflow offset", whole_overflow.offset, 24)
-    suite = testing.test_equal(suite, "цельный runtime: yes offset", whole_yes.offset, 136)
-    suite = testing.test_equal(suite, "цельный runtime: no offset", whole_no.offset, 160)
-    suite = testing.test_equal(suite, "цельный runtime: newline offset", whole_newline.offset, 184)
+    suite = testing.test_equal(suite, "цельный runtime: yes offset", whole_yes.offset, 184)
+    suite = testing.test_equal(suite, "цельный runtime: no offset", whole_no.offset, 208)
+    suite = testing.test_equal(suite, "цельный runtime: newline offset", whole_newline.offset, 232)
     whole_runtime.machine = layout.resolve(whole_runtime.machine)
     suite = testing.test_yes(suite, "цельный runtime: все ссылки разрешены", whole_runtime.machine.resolved)
     out suite

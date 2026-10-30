@@ -178,6 +178,17 @@ test_diagnostics() {
     echo "диагностика: всё согласовано"
 }
 
+test_memory() {
+    mkdir -p "$work/memory"
+    build memory \
+        soul/seed/tests/memory.saltic \
+        "$work/memory/program.elf" \
+        1048576
+    qemu-riscv32 -B 0x100000000 \
+        "$work/memory/program.elf"
+    echo "память: регионы освобождают мусор на куче 1 МБ"
+}
+
 test_seed_contract() {
     mkdir -p "$work/seed-contract"
     build seed-contract \
@@ -454,6 +465,7 @@ run_case() {
         machine) test_machine ;;
         vm-machine) test_vm_machine ;;
         abi) test_abi ;;
+        memory) test_memory ;;
         qemu-virt) test_qemu_virt ;;
         jtml) test_jtml ;;
         tasks) test_tasks ;;
@@ -482,6 +494,7 @@ if [[ "$1" == "all" ]]; then
         seed-contract \
         machine \
         abi \
+        memory \
         jtml \
         tasks \
         qemu-virt \

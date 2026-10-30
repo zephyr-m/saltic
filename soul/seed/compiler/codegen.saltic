@@ -27,6 +27,7 @@ skill box_field_symbol(compiler, box_name, field_name) {
 
 skill error_id(compiler, name) {
     (name == "FixedIntegerOverflow") { out abi.ERROR_FIXED_INTEGER_OVERFLOW }
+    (name == "MemoryExhausted") { out abi.ERROR_MEMORY_EXHAUSTED }
     @error_item = state.symbol_find(compiler.errors, name)
     (seed.str.len(error_item.name) == 0) {
         @id = abi.user_error_id(seed.group.count(compiler.errors))
@@ -680,6 +681,9 @@ skill compile_statement(compiler, node, keep) {
     }
     (tag == "out") {
         compiler = compile_expression(compiler, seed.group.item(plain, 1))
+        @value_root = constants.REGION_VALUE_ROOT
+        (abi.is_raw_value(infer_type(compiler, seed.group.item(plain, 1))) == yes) { value_root = constants.REGION_VALUE_SKIPPED }
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A2, codec.ZERO, codec.ZERO, value_root)
         compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, compiler.current_function.end)
         out compiler
     }
@@ -749,7 +753,7 @@ skill compile_function(compiler, name, params, body, subject, module) {
     @locals = state.collect_locals(params, body)
     @local_count = seed.group.count(locals.names)
     @frame = constants.frame_bytes(local_count)
-    @slots = state.make_slots(locals.names)
+    @slots = state.make_slots(locals.names, constants.local_offset(0))
     @end = state.label(compiler, seed.str.add(name, "_return"))
     @types = []
     @type_index = 0
@@ -767,7 +771,11 @@ skill compile_function(compiler, name, params, body, subject, module) {
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - frame)
     compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.RA, constants.return_address_save_offset(frame))
     compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.S0, constants.previous_frame_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.S4, constants.region_mark_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.S5, constants.region_escape_save_offset(frame))
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S0, codec.SP, codec.ZERO, frame)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S4, codec.S1, codec.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S5, codec.S2, codec.ZERO, 0)
     @index = 0
     @param_count = seed.group.count(params)
     drum (param_count) {
@@ -784,7 +792,13 @@ skill compile_function(compiler, name, params, body, subject, module) {
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
     compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
+    @region_done = seed.str.add(end, "_region")
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.S1, codec.S4, region_done)
+    compiler.machine = layout.emit_call(compiler.machine, "rt_region_exit")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, region_done)
     compiler = state.emit_op(compiler, instruction.Kind.LW, codec.RA, codec.S0, codec.ZERO, constants.return_address_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.S4, codec.S0, codec.ZERO, constants.region_mark_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.S5, codec.S0, codec.ZERO, constants.region_escape_load_offset())
     compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, constants.previous_frame_load_offset())
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.S0, codec.ZERO, 0)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S0, codec.T0, codec.ZERO, 0)
@@ -825,6 +839,7 @@ skill compile_constant(compiler, constant) {
     compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, failure)
     compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.value_label(constant.name), 0)
     compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.T0, codec.A0, 0)
+    compiler.machine = layout.emit_call(compiler.machine, "rt_region_remember_slot")
     compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.state_label(constant.name), 0)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, constants.STATE_READY)
     compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.T0, codec.T1, 0)

@@ -1,0 +1,234 @@
+use seed
+use craft.testing
+
+Item = Box {
+    name = ""
+    tags = []
+    next = none
+}
+
+Holder = Box {
+    item = Item {}
+    count = 0
+}
+
+SHARED = [Item { name = "общий" }, "константа"]
+
+skill garbage(index) {
+    @text = ""
+    drum (20) {
+        text = seed.str.add(text, "x")
+    }
+    out seed.num.text(index)
+}
+
+skill churn(count) {
+    @index = 0
+    @last = ""
+    drum (count) {
+        last = garbage(index)
+        index = index + 1
+    }
+    out last
+}
+
+skill make_item(name, count) {
+    @tags = []
+    @index = 0
+    drum (count) {
+        tags = seed.group.add(tags, seed.str.add(name, seed.num.text(index)))
+        index = index + 1
+    }
+    @burn = churn(10)
+    @child = Item { name = seed.str.add(name, ".child") tags = tags }
+    out link(Item { name = name tags = tags }, child)
+}
+
+skill link(item, next) {
+    item.next = next
+    out item
+}
+
+skill next_name(item) {
+    @next = item.next
+    out next.name
+}
+
+skill next_tag(item, index) {
+    @next = item.next
+    out seed.group.item(next.tags, index)
+}
+
+skill make_pair() {
+    @burn = churn(10)
+    @shared = Holder { count = 1 }
+    out [shared, shared]
+}
+
+skill attach(holder, name) {
+    @burn = churn(5)
+    holder.item = make_item(name, 3)
+    holder.count = holder.count + 1
+    out none
+}
+
+skill store_into(holder, item) {
+    @burn = churn(5)
+    holder.item = item
+    out none
+}
+
+skill pass_down(holder) {
+    store_into(holder, make_item("переданный", 2))
+    @burn = churn(5)
+    out none
+}
+
+skill attach_twice(holder) {
+    attach(holder, "первый")
+    @burn = churn(5)
+    attach(holder, "второй")
+    out holder.count
+}
+
+skill read_shared() {
+    @burn = churn(10)
+    @first = seed.group.item(SHARED, 0)
+    out first.name
+}
+
+skill raw_value() {
+    @burn = churn(5)
+    out u32(4294967291)
+}
+
+skill exhaust() {
+    @text = "x"
+    drum (64) {
+        text = seed.str.add(text, text)
+    }
+    out text
+}
+
+skill long_chain(count) {
+    @head = link(Item { name = "начало" }, none)
+    @index = 0
+    drum (count) {
+        head = link(Item { name = seed.num.text(index) }, head)
+        index = index + 1
+    }
+    out head
+}
+
+skill chain_length(head) {
+    @count = 0
+    @node = head
+    @active = yes
+    drum (100000) {
+        (active == yes) {
+            (node.next == none) { active = no }
+        }
+        (active == yes) {
+            count = count + 1
+            node = node.next
+        }
+    }
+    out count
+}
+
+skill abort_case(count) {
+    @chain = long_chain(count)
+    @length = chain_length(chain)
+    (chain.name == seed.num.text(count - 1)) { out length }
+    out 0 - 1
+}
+
+skill reclaimed(suite) {
+    suite = testing.test_equal(suite, "регион: мусор вызовов освобождается", churn(10000), "9999")
+    out suite
+}
+
+skill returned_values(suite) {
+    @item = make_item("корень", 4)
+    suite = testing.test_equal(suite, "регион: имя пережило выход", item.name, "корень")
+    suite = testing.test_equal(suite, "регион: группа пережила выход", seed.group.count(item.tags), 4)
+    suite = testing.test_equal(suite, "регион: строка в группе", seed.group.item(item.tags, 2), "корень2")
+    suite = testing.test_equal(suite, "регион: вложенный объект", next_name(item), "корень.child")
+    @burn = churn(200)
+    suite = testing.test_equal(suite, "регион: копия не затёрта", next_tag(item, 3), "корень3")
+    @pair = make_pair()
+    @first = seed.group.item(pair, 0)
+    first.count = 5
+    @second = seed.group.item(pair, 1)
+    suite = testing.test_equal(suite, "регион: общий объект остался общим", second.count, 5)
+    out suite
+}
+
+skill escaped_values(suite) {
+    @holder = Holder {}
+    attach(holder, "внешний")
+    @burn = churn(200)
+    suite = testing.test_equal(suite, "побег: поле старого объекта", holder.item.name, "внешний")
+    suite = testing.test_equal(suite, "побег: группа в поле", seed.group.item(holder.item.tags, 1), "внешний1")
+    suite = testing.test_equal(suite, "побег: вложенные регионы", attach_twice(holder), 3)
+    pass_down(holder)
+    burn = churn(200)
+    suite = testing.test_equal(suite, "побег: значение старше записи", next_name(holder.item), "переданный.child")
+    attach(holder, "второй")
+    burn = churn(200)
+    suite = testing.test_equal(suite, "побег: последнее значение", next_name(holder.item), "второй.child")
+    @index = 0
+    drum (300) {
+        attach(holder, seed.num.text(index))
+        index = index + 1
+    }
+    burn = churn(200)
+    suite = testing.test_equal(suite, "побег: много записей", holder.item.name, "299")
+    suite = testing.test_equal(suite, "побег: счётчик записей", holder.count, 304)
+    out suite
+}
+
+skill constant_values(suite) {
+    suite = testing.test_equal(suite, "константа: создана внутри региона", read_shared(), "общий")
+    @burn = churn(200)
+    @first = seed.group.item(SHARED, 0)
+    suite = testing.test_equal(suite, "константа: объект жив", first.name, "общий")
+    suite = testing.test_equal(suite, "константа: строка жива", seed.group.item(SHARED, 1), "константа")
+    out suite
+}
+
+skill raw_values(suite) {
+    suite = testing.test_yes(suite, "fixed: raw-значение не трогается", raw_value() == u32(4294967291))
+    out suite
+}
+
+skill exhausted(suite) {
+    @caught = no
+    @result = exhaust() rescue |err| {
+        seed.io.show("исчерпание: ", err)
+        caught = yes
+        "пусто"
+    }
+    suite = testing.test_yes(suite, "исчерпание: ошибка поймана rescue", caught)
+    suite = testing.test_equal(suite, "исчерпание: программа продолжает работу", result, "пусто")
+    suite = testing.test_equal(suite, "исчерпание: память снова доступна", churn(2000), "1999")
+    out suite
+}
+
+skill aborted(suite) {
+    suite = testing.test_equal(suite, "откат: длинная цепочка цела", abort_case(9000), 9000)
+    suite = testing.test_equal(suite, "откат: память возвращена выше", churn(2000), "1999")
+    out suite
+}
+
+program() {
+    @suite = testing.test_new()
+    suite = reclaimed(suite)
+    suite = returned_values(suite)
+    suite = escaped_values(suite)
+    suite = constant_values(suite)
+    suite = raw_values(suite)
+    suite = exhausted(suite)
+    suite = aborted(suite)
+    out testing.test_finish(suite)
+}

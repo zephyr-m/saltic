@@ -1,10 +1,10 @@
 use seed
 use seed.abi
-use seed.memory.model
 use seed.machine.instruction
 use seed.machine.codec
 use seed.machine.layout
 use seed.compiler.state
+use seed.runtime.emit.memory
 
 skill emit_add(compiler) {
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_add")
@@ -163,6 +163,7 @@ skill emit_box_get(compiler) {
 skill emit_box_set(compiler) {
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_box_set")
     compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.A0, codec.A0, codec.ZERO, abi.PAYLOAD_MASK)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.A0, codec.ZERO, 0)
     compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.A0, codec.ZERO, abi.OBJECT_PAYLOAD_OFFSET)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.A0, codec.ZERO, abi.OBJECT_PAYLOAD_OFFSET + 4)
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_box_set_loop")
@@ -176,7 +177,8 @@ skill emit_box_set(compiler) {
     compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.A2, 4)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, abi.NONE)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
-    out state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
+    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, "rt_region_barrier")
+    out compiler
 }
 
 skill emit_missing_field(compiler) {
@@ -488,30 +490,6 @@ skill emit_fixed_greater(compiler) {
     compiler = state.emit_op(compiler, instruction.Kind.ADD, codec.A0, codec.A1, codec.ZERO, 0)
     compiler = state.emit_op(compiler, instruction.Kind.ADD, codec.A1, codec.A2, codec.ZERO, 0)
     compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, "rt_fixed_less")
-    out compiler
-}
-
-skill emit_alloc(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_alloc")
-    compiler = state.emit_op(compiler, instruction.Kind.ADD, codec.T1, codec.A0, codec.ZERO, 0)
-    compiler.machine = layout.emit_branch_unsigned_greater(compiler.machine, codec.S1, codec.S2, "rt_out_of_memory")
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.A0, codec.ZERO, abi.OBJECT_HEADER_BYTES + abi.OBJECT_ALIGNMENT - 1)
-    compiler.machine = layout.emit_branch_unsigned_greater(compiler.machine, codec.A0, codec.T0, "rt_out_of_memory")
-    compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T0, codec.T0, codec.ZERO, 0 - abi.OBJECT_ALIGNMENT)
-    compiler = state.emit_op(compiler, instruction.Kind.SUB, codec.T2, codec.S2, codec.S1, 0)
-    compiler.machine = layout.emit_branch_unsigned_greater(compiler.machine, codec.T0, codec.T2, "rt_out_of_memory")
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.S1, codec.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADD, codec.S1, codec.S1, codec.T0, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T1, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.ZERO, abi.OBJECT_HEADER_FLAGS_OFFSET)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
-    out state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
-}
-
-skill emit_out_of_memory(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_out_of_memory")
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, model.OUT_OF_MEMORY_EXIT_STATUS)
-    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, "rt_platform_exit")
     out compiler
 }
 
@@ -1561,8 +1539,14 @@ skill emit_show(compiler) {
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_show_error")
     compiler = state.emit_op(compiler, instruction.Kind.SRLI, codec.T0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, abi.ERROR_FIXED_INTEGER_OVERFLOW)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T0, codec.T1, ".L_show_error_unknown")
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T0, codec.T1, ".L_show_error_memory")
     compiler.machine = layout.emit_relative_address(compiler.machine, codec.A0, "rt_fixed_overflow_text", 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_STRING)
+    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, ".L_show_string")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_show_error_memory")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, abi.ERROR_MEMORY_EXHAUSTED)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T0, codec.T1, ".L_show_error_unknown")
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.A0, "rt_memory_exhausted_text", 0)
     compiler = state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_STRING)
     compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, ".L_show_string")
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_show_error_unknown")
@@ -1598,6 +1582,7 @@ skill append_runtime_text(compiler, label, text) {
 skill append_runtime_data(compiler) {
     compiler = append_runtime_text(compiler, "rt_unknown_text", "<value>")
     compiler = append_runtime_text(compiler, "rt_fixed_overflow_text", "значение вышло за границы фиксированного целого")
+    compiler = append_runtime_text(compiler, "rt_memory_exhausted_text", "память исчерпана")
     compiler = append_runtime_text(compiler, "rt_yes_text", "yes")
     compiler = append_runtime_text(compiler, "rt_no_text", "no")
     compiler.machine = layout.align_section(compiler.machine, layout.Section.RODATA, 8)
@@ -1643,8 +1628,6 @@ skill append_runtime_suffix(compiler) {
     compiler = emit_fixed_equal(compiler)
     compiler = emit_fixed_less(compiler)
     compiler = emit_fixed_greater(compiler)
-    compiler = emit_alloc(compiler)
-    compiler = emit_out_of_memory(compiler)
     compiler = emit_fixed_new(compiler)
     compiler = emit_fixed_mem_load8(compiler)
     compiler = emit_fixed_mem_load16(compiler)
@@ -1686,6 +1669,7 @@ skill append_runtime_suffix(compiler) {
     compiler = emit_fixed_shift_right(compiler)
     compiler = emit_fixed_convert(compiler)
     compiler = emit_show(compiler)
+    compiler = memory.append_runtime(compiler)
     out append_runtime_data(compiler)
 }
 
