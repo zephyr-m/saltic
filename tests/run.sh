@@ -223,6 +223,28 @@ test_native() {
     echo "x86-64: канон и память работают на родном процессоре"
 }
 
+test_native_bootstrap() {
+    local native_work="$work/native-bootstrap"
+    local heap_bytes=4026531840
+    mkdir -p "$native_work"
+    echo "native-bootstrap: compiler.elf переводит компилятор в x86-64"
+    SALTIC_TARGET=x86_64 build native-bootstrap \
+        soul/seed/toolchain.saltic \
+        "$native_work/compiler.native" \
+        "$heap_bytes"
+    echo "native-bootstrap: x86-компилятор собирает себя (stage A)"
+    "$native_work/compiler.native" soul/seed/toolchain.saltic \
+        "$native_work/stage-a.native" "$heap_bytes" x86_64 >/dev/null
+    chmod +x "$native_work/stage-a.native"
+    echo "native-bootstrap: stage A собирает себя (stage B)"
+    "$native_work/stage-a.native" soul/seed/toolchain.saltic \
+        "$native_work/stage-b.native" "$heap_bytes" x86_64 >/dev/null
+    cmp "$native_work/compiler.native" "$native_work/stage-a.native"
+    cmp "$native_work/stage-a.native" "$native_work/stage-b.native"
+    echo "native-bootstrap: fixed point $(sha256sum "$native_work/stage-b.native" | awk '{print $1}')"
+    echo "native-bootstrap: ok"
+}
+
 test_seed_contract() {
     mkdir -p "$work/seed-contract"
     build seed-contract \
@@ -502,6 +524,7 @@ run_case() {
         abi) test_abi ;;
         memory) test_memory ;;
         native) test_native ;;
+        native-bootstrap) test_native_bootstrap ;;
         qemu-virt) test_qemu_virt ;;
         jtml) test_jtml ;;
         tasks) test_tasks ;;
@@ -538,9 +561,10 @@ if [[ "$1" == "all" || "$1" == "fast" ]]; then
         tasks \
         qemu-virt \
         closure \
-        bootstrap
+        bootstrap \
+        native-bootstrap
     if [[ "$scope" == "fast" ]]; then
-        set -- "${@:1:$#-2}"
+        set -- "${@:1:$#-3}"
     fi
 fi
 
