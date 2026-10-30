@@ -74,6 +74,7 @@ Program = Box {
     patches_last = none
     patch_count = 0
     resolved = no
+    far_calls = no
 }
 
 skill word_address(b0, b1, b2, b3) {
@@ -388,6 +389,7 @@ skill emit_relative_address(value, rd, label, addend) {
 }
 
 skill emit_call(value, label) {
+    (value.far_calls == no) { out emit_jump(value, codec.RA, label) }
     @base = value.code.length
     @high = codec.encode_kind(instruction.Kind.AUIPC, codec.RA, codec.ZERO, codec.ZERO, 0)
     value = emit_patch(value, Patch {
@@ -498,15 +500,16 @@ skill set_section_word(value, section, offset, word) {
 }
 
 skill resolve_patch(value, current_layout, patch) {
-    @target_offset = label_offset(value, current_layout, patch.label) + patch.addend
+    @label_base = label_offset(value, current_layout, patch.label) rescue |failure| { out error.UnknownLabel }
+    @target_offset = label_base + patch.addend
     (patch.kind == PatchKind.BRANCH) {
         @distance = target_offset - patch.offset
-        @word = codec.encode_kind(patch.instruction_kind, codec.ZERO, patch.rs1, patch.rs2, distance)
+        @word = codec.encode_kind(patch.instruction_kind, codec.ZERO, patch.rs1, patch.rs2, distance) rescue |failure| { out error.PatchOutOfRange }
         out set_section_word(value, Section.CODE, patch.offset, word)
     }
     (patch.kind == PatchKind.JUMP) {
         @distance = target_offset - patch.offset
-        @word = codec.encode_kind(patch.instruction_kind, patch.rd, codec.ZERO, codec.ZERO, distance)
+        @word = codec.encode_kind(patch.instruction_kind, patch.rd, codec.ZERO, codec.ZERO, distance) rescue |failure| { out error.PatchOutOfRange }
         out set_section_word(value, Section.CODE, patch.offset, word)
     }
     (patch.kind == PatchKind.RELATIVE_HIGH) {
@@ -542,7 +545,7 @@ skill resolve(value) {
     @current_layout = layout(value)
     @patch = value.patches_first
     drum (value.patch_count) {
-        value = resolve_patch(value, current_layout, patch)
+        value = resolve_patch(value, current_layout, patch) rescue |failure| { out error.UnresolvedPatch }
         patch = patch.next
     }
     value.resolved = yes
