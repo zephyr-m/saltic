@@ -72,6 +72,29 @@ json-rpc:
 diagnostics:
     just test diagnostics
 
+minifier:
+    just test minifier
+
+minify file output="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source_path="$1"
+    output_path="$2"
+    if [[ -z "$output_path" ]]; then
+        output_path="${source_path%.saltic}.min.saltic"
+    fi
+    nix --extra-experimental-features "nix-command flakes" develop --command bash -c '
+        set -euo pipefail
+        source_path="$1"
+        output_path="$2"
+        build_root=.cache/build/minifier
+        mkdir -p "$build_root/tool"
+        SALTIC_BUILD_DIR="$build_root/tool" SALTIC_HEAP_BYTES=536870912 \
+            bash os/bootstrap/build.sh soul/craft/minifier.saltic "$build_root/minifier.elf"
+        qemu-riscv32 -B 0x100000000 "$build_root/minifier.elf" "$source_path" "$output_path"
+        echo "минификатор: синтаксис подтверждён -> $output_path"
+    ' saltic-minifier "$source_path" "$output_path"
+
 seed-contract:
     just test seed-contract
 

@@ -178,6 +178,16 @@ test_diagnostics() {
     echo "диагностика: всё согласовано"
 }
 
+test_minifier() {
+    mkdir -p "$work/minifier"
+    build minifier \
+        tests/minifier.saltic \
+        "$work/minifier/program.elf"
+    qemu-riscv32 -B 0x100000000 \
+        "$work/minifier/program.elf"
+    echo "минификатор: пробелы удалены, смысл сохранён"
+}
+
 test_memory() {
     mkdir -p "$work/memory"
     build memory \
@@ -461,6 +471,7 @@ run_case() {
         json-rpc) test_json_rpc ;;
         tracer) test_tracer ;;
         diagnostics) test_diagnostics ;;
+        minifier) test_minifier ;;
         seed-contract) test_seed_contract ;;
         machine) test_machine ;;
         vm-machine) test_vm_machine ;;
@@ -491,6 +502,7 @@ if [[ "$1" == "all" ]]; then
         json-rpc \
         tracer \
         diagnostics \
+        minifier \
         seed-contract \
         machine \
         abi \
