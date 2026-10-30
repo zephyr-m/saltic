@@ -19,8 +19,8 @@ files=(
     CristallOS.jpg
     LICENSE
     LICENSE.ru
-    OS.md
-    PRINCIPLES.md
+    docs/OS.md
+    docs/PRINCIPLES.md
     README.md
     VERSION
     flake.lock
