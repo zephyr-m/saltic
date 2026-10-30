@@ -136,6 +136,9 @@ vm-step:
 test case="all":
     nix --extra-experimental-features "nix-command flakes" develop --command bash tests/run.sh "$1"
 
+fast:
+    just test fast
+
 package:
     bash .github/package.sh
 

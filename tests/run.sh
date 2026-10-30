@@ -493,7 +493,8 @@ if (( $# == 0 )); then
     set -- all
 fi
 
-if [[ "$1" == "all" ]]; then
+if [[ "$1" == "all" || "$1" == "fast" ]]; then
+    scope="$1"
     set -- \
         checker \
         vm \
@@ -512,6 +513,9 @@ if [[ "$1" == "all" ]]; then
         qemu-virt \
         closure \
         bootstrap
+    if [[ "$scope" == "fast" ]]; then
+        set -- "${@:1:$#-2}"
+    fi
 fi
 
 for name in "$@"; do
