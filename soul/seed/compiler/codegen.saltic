@@ -141,8 +141,79 @@ skill compile_binary(compiler, operator, left, right) {
         (operator == "<") { target = "rt_fixed_less" }
         compiler = state.load_immediate(compiler, "a6", abi.CALL_FIXED_SOURCE_KIND_REGISTER, contract.fixed_kind(fixed_type))
     }
+    (fixed == no) {
+        (operator == "+") { out emit_word_result(state.emit_op(compiler, instruction.Kind.ADD, codec.A0, codec.A0, codec.A1, 0)) }
+        (operator == "-") { out emit_word_result(state.emit_op(compiler, instruction.Kind.SUB, codec.A0, codec.A0, codec.A1, 0)) }
+        (operator == "<") { out emit_number_less(compiler, codec.A0, codec.A1) }
+        (operator == ">") { out emit_number_less(compiler, codec.A1, codec.A0) }
+        (operator == "==") {
+            (immediate_operand(compiler, left) == yes) { out emit_word_equal(compiler) }
+            (immediate_operand(compiler, right) == yes) { out emit_word_equal(compiler) }
+            out emit_equal_fast_path(compiler)
+        }
+    }
     compiler.machine = layout.emit_call(compiler.machine, target)
     out compiler
+}
+
+skill emit_word_result(compiler) {
+    out state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
+}
+
+skill emit_answer_from_bit(compiler) {
+    compiler = state.emit_op(compiler, instruction.Kind.SLLI, codec.A0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.A0, codec.ZERO, abi.NO)
+    out emit_word_result(compiler)
+}
+
+skill emit_number_less(compiler, smaller, larger) {
+    compiler = state.emit_op(compiler, instruction.Kind.SRAI, codec.A0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
+    compiler = state.emit_op(compiler, instruction.Kind.SRAI, codec.A1, codec.A1, codec.ZERO, abi.TAG_SHIFT)
+    compiler = state.emit_op(compiler, instruction.Kind.SLT, codec.A0, smaller, larger, 0)
+    out emit_answer_from_bit(compiler)
+}
+
+skill emit_word_equal(compiler) {
+    compiler = state.emit_op(compiler, instruction.Kind.SUB, codec.A0, codec.A0, codec.A1, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.SLTIU, codec.A0, codec.A0, codec.ZERO, 1)
+    out emit_answer_from_bit(compiler)
+}
+
+skill emit_equal_fast_path(compiler) {
+    @slow = state.label(compiler, "equal_slow")
+    @done = state.label(compiler, "equal_done")
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.A0, codec.A1, slow)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, abi.YES)
+    compiler = emit_word_result(compiler)
+    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, done)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, slow)
+    compiler.machine = layout.emit_call(compiler.machine, "rt_equal")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, done)
+    out compiler
+}
+
+skill immediate_operand(compiler, node) {
+    @tag = ast.tag(node)
+    (constant_literal(node) == yes) { out yes }
+    (tag == "enum-value") { out yes }
+    (tag == "path") {
+        @parts = ast.plain(node)
+        @count = seed.group.count(parts)
+        (count > 2) {
+            @enum_text = seed.group.item(parts, 1)
+            @enum_index = 2
+            drum (count - 1) {
+                (enum_index < count - 1) { enum_text = seed.str.add(enum_text, seed.str.add(".", seed.group.item(parts, enum_index))) enum_index = enum_index + 1 }
+            }
+            (seed.str.len(resolve_symbol(compiler.enums, compiler.aliases, enum_text, compiler.current_function.module)) > 0) { out yes }
+        }
+        (state.symbol_has(compiler.current_function.slots, seed.group.item(parts, 1)) == no) {
+            @constant_name = resolve_symbol(compiler.constants, compiler.aliases, ast.path_text(parts), compiler.current_function.module)
+            @constant = state.symbol_find(compiler.constants, constant_name)
+            (seed.str.len(constant.name) > 0) { out constant_literal(constant.node) }
+        }
+    }
+    out no
 }
 
 skill compile_rescue(compiler, node) {
