@@ -11,7 +11,8 @@
 `use seed.io`; свой навык — просто по имени.
 
 1. Перевести файлы на `модуль.навык` пачками, каждая сверяется
-   `same-source.sh`. Готово: `compiler/codegen.saltic`.
+   `same-source.sh`. Готово: компилятор (`codegen`, `state`, `constants`), парсер, чекер, `ast`,
+   `runtime/emit`.
 2. Включить ошибку на длинный путь вызова (`seed.str.add`) с подсказкой, какой
    `use` добавить; убрать `use seed` и `soul/seed.saltic`, когда им никто не
    пользуется.
