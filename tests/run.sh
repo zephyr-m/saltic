@@ -234,7 +234,12 @@ test_native() {
         echo "x86-64: переполненный стек вернулся из рекурсии" >&2
         return 1
     fi
-    echo "x86-64: канон и память работают на родном процессоре, переполнение стека падает сразу"
+    SALTIC_TARGET=x86_64 build native-keys \
+        tests/fixtures/keys.saltic \
+        "$work/native/keys" \
+        1048576
+    test "$(printf 'a\t\177 z\nq' | "$work/native/keys")" = "[a][tab][backspace][ ][z][enter]"
+    echo "x86-64: канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются"
 }
 
 test_native_bootstrap() {
