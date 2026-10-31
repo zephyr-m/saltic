@@ -7,6 +7,8 @@ use seed.compiler.backend.x86_64.platform
 
 PAGE_BYTES = 4096
 INSTRUCTION_BYTES = 4
+TABLE_ENTRY_BYTES = 8
+LEA_BYTES = 7
 REGISTER_FILE_BYTES = 4096
 STRINGS_BYTES = 65536
 ARGUMENTS_BYTES = 65536
@@ -35,7 +37,7 @@ Work = Box {
     starts = codec.Buffer {}
     fixups = codec.Buffer {}
     load_address = codec.Word {}
-    table_displacement = codec.Word {}
+    table_displacement = 0
 }
 
 skill wrap_add(left, right) {
@@ -136,7 +138,7 @@ skill translate_control(work, index, decoded) {
             work.code = encoder.move_word(work.code, encoder.ECX, next)
             work = store_result(work, decoded.rd, encoder.ECX)
         }
-        work.code = encoder.load_word_from(work.code, work.table_displacement)
+        work.code = encoder.load_table_entry(work.code, work.table_displacement)
         work.code = encoder.jump_to_eax(work.code)
         out work
     }
@@ -273,7 +275,7 @@ skill translate(machine) {
     @stack = codec.word_add_number(strings, STRINGS_BYTES + STACK_GUARD_BYTES)
     @arguments = codec.word_add_number(stack, STACK_BYTES - ARGUMENTS_BYTES)
     @table_address = codec.word_from_number(HOST_ADDRESS)
-    @table_bytes = layout.align(count * INSTRUCTION_BYTES, PAGE_BYTES)
+    @table_bytes = layout.align(count * TABLE_ENTRY_BYTES, PAGE_BYTES)
     @register_file = codec.word_add_number(table_address, table_bytes)
     @data_bytes = table_bytes + REGISTER_FILE_BYTES
     @code_address = codec.word_add_number(table_address, data_bytes)
@@ -283,11 +285,12 @@ skill translate(machine) {
         starts = codec.buffer()
         fixups = codec.buffer()
         load_address = machine.load_address
-        table_displacement = wrap_add(table_address, codec.negate_word(machine.load_address))
+        table_displacement = 0 - table_bytes - codec.word_to_number(machine.load_address) * 2
     }
     work.code = platform.append_syscall_stub(work.code)
     @entry_offset = work.code.length
-    work.code = platform.append_entry_stub(work.code, register_file, arguments, strings)
+    @entry_end = codec.word_to_number(code_address) + entry_offset + LEA_BYTES
+    work.code = platform.append_entry_stub(work.code, codec.word_to_number(register_file) - entry_end, arguments, strings)
     @start = layout.find_label(machine, machine.entry)
     work.fixups = codec.append_word(work.fixups, codec.word_from_number(work.code.length - 4))
     work.fixups = codec.append_word(work.fixups, codec.word_from_number(start.offset / INSTRUCTION_BYTES))
@@ -304,6 +307,7 @@ skill translate(machine) {
     @table = codec.buffer()
     drum (count) {
         table = codec.append_word(table, codec.word_add_number(code_address, read_number(work.starts, beat * 4)))
+        table = codec.append_word(table, codec.word(0, 0, 0, 0))
     }
     out Native {
         rv = machine
