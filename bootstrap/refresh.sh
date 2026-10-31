@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
+source bootstrap/names.sh
 
 if ! command -v qemu-riscv32 >/dev/null 2>&1; then
     if [[ "${SALTIC_BOOTSTRAP_REFRESH_IN_DEV_SHELL:-}" == "1" ]]; then
@@ -26,7 +27,7 @@ if ! command -v qemu-riscv32 >/dev/null 2>&1; then
         SALTIC_BOOTSTRAP_COMPILER="$bootstrap_override" \
         SALTIC_BOOTSTRAP_REFRESH_DIR="$refresh_work" \
         SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES="$refresh_heap" \
-        bash "$root/os/bootstrap/refresh.sh" "$@"
+        bash "$root/bootstrap/refresh.sh" "$@"
 fi
 
 work="${SALTIC_BOOTSTRAP_REFRESH_DIR:-.cache/build/bootstrap-refresh}"
@@ -35,7 +36,11 @@ source_path="${1:-soul/seed/toolchain.saltic}"
 
 mkdir -p "$work/stage-1" "$work/stage-2" "$work/stage-3"
 
-bootstrap_compiler="${SALTIC_BOOTSTRAP_COMPILER:-os/bootstrap/compiler.elf}"
+bootstrap_compiler="${SALTIC_BOOTSTRAP_COMPILER:-$(saltic_bootstrap_compiler)}"
+mkdir -p "$work/previous"
+rm -f "$work/previous/"*
+previous="$work/previous/$(basename "$bootstrap_compiler")"
+cp "$bootstrap_compiler" "$previous"
 
 echo "bootstrap refresh: исходный compiler $bootstrap_compiler"
 
@@ -44,7 +49,7 @@ SALTIC_BOOTSTRAP_COMPILER="$bootstrap_compiler" \
 SALTIC_BUILD_DIR="$work/stage-1" \
 SALTIC_HEAP_BYTES="$heap_bytes" \
 SALTIC_DIRECT_ONLY=1 \
-bash os/bootstrap/build.sh \
+bash bootstrap/build.sh \
     "$source_path" \
     "$work/stage-1/toolchain.elf" \
     "$work/stage-1/toolchain.s"
@@ -54,7 +59,7 @@ SALTIC_BOOTSTRAP_COMPILER="$work/stage-1/toolchain.elf" \
 SALTIC_BUILD_DIR="$work/stage-2" \
 SALTIC_HEAP_BYTES="$heap_bytes" \
 SALTIC_DIRECT_ONLY=1 \
-bash os/bootstrap/build.sh \
+bash bootstrap/build.sh \
     "$source_path" \
     "$work/stage-2/toolchain.elf" \
     "$work/stage-2/toolchain.s"
@@ -64,7 +69,7 @@ SALTIC_BOOTSTRAP_COMPILER="$work/stage-2/toolchain.elf" \
 SALTIC_BUILD_DIR="$work/stage-3" \
 SALTIC_HEAP_BYTES="$heap_bytes" \
 SALTIC_DIRECT_ONLY=1 \
-bash os/bootstrap/build.sh \
+bash bootstrap/build.sh \
     "$source_path" \
     "$work/stage-3/toolchain.elf" \
     "$work/stage-3/toolchain.s"
@@ -75,7 +80,23 @@ test ! -e "$work/stage-2/toolchain.s"
 test ! -e "$work/stage-3/toolchain.s"
 cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
 
-cp "$work/stage-3/toolchain.elf" os/bootstrap/compiler.elf
+compiler="$(saltic_compiler_path rv32i linux .elf)"
+if cmp -s "$work/stage-3/toolchain.elf" "$compiler" && [[ -f "${compiler%.elf}.txt" ]]; then
+    echo "bootstrap refresh: $(basename "$compiler") не изменился"
+else
+    # Прежняя версия того же компилятора больше не нужна: новая заменяет её.
+    for old in bootstrap/saltic-*-compiler-rv32i-linux.elf; do
+        if [[ -f "$old" && "$old" != "$compiler" ]]; then rm -f "$old" "${old%.elf}.txt"; fi
+    done
+    cp "$work/stage-3/toolchain.elf" "$compiler"
+    chmod +x "$compiler"
+    saltic_write_passport "$compiler" "rv32i, linux (qemu-riscv32 -B 0x100000000)" "rv32i, x86_64" \
+        "$previous" "$heap_bytes" "сходится (stage-2 = stage-3)"
+    echo "bootstrap refresh: $(basename "$compiler") обновлён"
+fi
+sha256sum "$compiler"
 
-echo "bootstrap refresh: compiler.elf обновлён"
-sha256sum os/bootstrap/compiler.elf
+native="$(saltic_native_compiler)"
+echo "bootstrap refresh: $(basename "$native") готов"
+qemu_virt="$(saltic_qemu_virt_compiler)"
+echo "bootstrap refresh: $(basename "$qemu_virt") готов"

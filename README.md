@@ -42,7 +42,8 @@ GitHub Actions сверит тег с `VERSION`, прогонит полный `
 
 ## Bootstrap
 
-Зафиксированный [os/bootstrap/compiler.elf](os/bootstrap/compiler.elf) запускается
+Зафиксированный компилятор лежит в [bootstrap/](bootstrap/) под именем
+`saltic-<версия>-compiler-rv32i-linux.elf` с паспортом рядом; он запускается
 через QEMU и собирает актуальный тулчейн из `soul/`. Обычные `just compile` и
 `just run` не используют JavaScript. Старый JS-контур выведен из активного
 проекта и в сборке или тестах не участвует.

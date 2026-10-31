@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
+source bootstrap/names.sh
 
 if ! command -v qemu-riscv32 >/dev/null 2>&1; then
     if [[ "${SALTIC_BUILD_IN_DEV_SHELL:-}" == "1" ]]; then
@@ -28,11 +29,11 @@ if ! command -v qemu-riscv32 >/dev/null 2>&1; then
         SALTIC_BOOTSTRAP_COMPILER="$bootstrap_override" \
         SALTIC_HEAP_BYTES="$heap_override" \
         SALTIC_TARGET="$target_override" \
-        bash "$root/os/bootstrap/build.sh" "$@"
+        bash "$root/bootstrap/build.sh" "$@"
 fi
 
 if (( $# < 2 || $# > 3 )); then
-    echo "использование: os/bootstrap/build.sh <исходник.saltic> <результат.elf> [результат.s]" >&2
+    echo "использование: bootstrap/build.sh <исходник.saltic> <результат.elf> [результат.s]" >&2
     exit 2
 fi
 
@@ -40,7 +41,7 @@ source_path="$1"
 output_path="$2"
 work="${SALTIC_BUILD_DIR:-.cache/build/bootstrap}"
 assembly_path="${3:-$work/program.s}"
-compiler="${SALTIC_BOOTSTRAP_COMPILER:-os/bootstrap/compiler.elf}"
+compiler="${SALTIC_BOOTSTRAP_COMPILER:-$(saltic_bootstrap_compiler)}"
 heap_bytes="${SALTIC_HEAP_BYTES:-536870912}"
 target="${SALTIC_TARGET:-rv32i}"
 compiler_output="$work/compiler-output"

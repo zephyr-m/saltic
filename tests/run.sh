@@ -28,7 +28,7 @@ build() {
     SALTIC_BUILD_DIR="$work/build/$name" \
     SALTIC_HEAP_BYTES="$heap_bytes" \
     SALTIC_TARGET="${SALTIC_TARGET:-}" \
-    bash os/bootstrap/build.sh "$source" "$output"
+    bash bootstrap/build.sh "$source" "$output"
 }
 
 checker_elf="$work/checker/checker.elf"
@@ -61,7 +61,7 @@ test_vm() {
     mkdir -p "$work/vm"
     SALTIC_HEAP_BYTES=65536 \
     SALTIC_BUILD_DIR="$work/build/vm-guest" \
-    bash os/bootstrap/build.sh \
+    bash bootstrap/build.sh \
         tests/vm-guest.saltic \
         "$work/vm/guest.elf"
     build vm tests/vm.saltic "$work/vm/vm.elf" 536870912
@@ -141,13 +141,13 @@ test_tracer() {
     mkdir -p "$work/tracer"
     SALTIC_HEAP_BYTES=1048576 \
     SALTIC_BUILD_DIR="$work/build/tracer" \
-    bash os/bootstrap/build.sh \
+    bash bootstrap/build.sh \
         tests/tracer.saltic \
         "$work/tracer/target.elf" \
         "$work/tracer/target.s"
     SALTIC_HEAP_BYTES=536870912 \
     SALTIC_BUILD_DIR="$work/build/tracer" \
-    bash os/bootstrap/build.sh \
+    bash bootstrap/build.sh \
         soul/craft/tracer.saltic \
         "$work/tracer/tracer.elf" \
         "$work/tracer/tracer.s"
@@ -371,7 +371,7 @@ test_bootstrap() {
     SALTIC_BUILD_DIR="$bootstrap_work/stage-1" \
     SALTIC_HEAP_BYTES="$heap_bytes" \
     SALTIC_DIRECT_ONLY=1 \
-    bash os/bootstrap/build.sh \
+    bash bootstrap/build.sh \
         soul/seed/toolchain.saltic \
         "$bootstrap_work/stage-1/toolchain.elf" \
         "$bootstrap_work/stage-1/toolchain.s"
@@ -383,7 +383,7 @@ test_bootstrap() {
     SALTIC_BUILD_DIR="$bootstrap_work/stage-2" \
     SALTIC_HEAP_BYTES="$heap_bytes" \
     SALTIC_DIRECT_ONLY=1 \
-    bash os/bootstrap/build.sh \
+    bash bootstrap/build.sh \
         soul/seed/toolchain.saltic \
         "$bootstrap_work/stage-2/toolchain.elf" \
         "$bootstrap_work/stage-2/toolchain.s"
@@ -395,7 +395,7 @@ test_bootstrap() {
     SALTIC_BUILD_DIR="$bootstrap_work/stage-3" \
     SALTIC_HEAP_BYTES="$heap_bytes" \
     SALTIC_DIRECT_ONLY=1 \
-    bash os/bootstrap/build.sh \
+    bash bootstrap/build.sh \
         soul/seed/toolchain.saltic \
         "$bootstrap_work/stage-3/toolchain.elf" \
         "$bootstrap_work/stage-3/toolchain.s"
@@ -417,7 +417,7 @@ test_bootstrap() {
     SALTIC_BOOTSTRAP_COMPILER="$bootstrap_work/stage-2/toolchain.elf" \
     SALTIC_BUILD_DIR="$bootstrap_work/canonical" \
     SALTIC_DIRECT_ONLY=1 \
-    bash os/bootstrap/build.sh \
+    bash bootstrap/build.sh \
         soul/seed/canonical/main.saltic \
         "$bootstrap_work/canonical/canonical.elf" \
         "$bootstrap_work/canonical/canonical.s"
@@ -456,7 +456,7 @@ test_closure() {
     SALTIC_BUILD_DIR="$closure_work/build" \
     SALTIC_HEAP_BYTES=67108864 \
     SALTIC_DIRECT_ONLY=1 \
-    bash os/bootstrap/build.sh \
+    bash bootstrap/build.sh \
         soul/seed/canonical/main.saltic \
         "$closure_work/canonical.elf" \
         "$closure_work/canonical.s"

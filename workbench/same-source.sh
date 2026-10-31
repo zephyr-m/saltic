@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Проверка правки исходников без изменения смысла: каждая программа собирается
 # одним и тем же компилятором из HEAD и из рабочего дерева, результаты обязаны
-# совпасть побайтово. Компилятор — os/bootstrap/compiler.elf, переведённый в
-# x86-64 (вывод тот же, что под QEMU, но в разы быстрее).
+# совпасть побайтово. Компилятор — родной x86-64 из bootstrap/ (вывод тот же,
+# что у загрузочного под QEMU, но в разы быстрее).
 cd "$(dirname "$0")/.." || exit 1
 W=.cache/build/workbench/same-source
-H=4026531840
 HEAP=67108864
 # Как в build.sh: toolchain-у нужна большая куча, чтобы собрать os/main.
 TOOLCHAIN_HEAP=536870912
@@ -13,16 +12,8 @@ mkdir -p "$W"
 rm -rf "$W/head" "$W/out"
 mkdir -p "$W/out"
 
-sum="$(sha256sum os/bootstrap/compiler.elf | cut -c1-16)"
-native="$W/compiler-$sum.native"
-if [[ ! -x "$native" ]]; then
-    echo "== перевожу compiler.elf в x86-64"
-    if ! SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR="$W/native-build" SALTIC_HEAP_BYTES=$H \
-        bash os/bootstrap/build.sh soul/seed/toolchain.saltic "$native" > "$W/native.log" 2>&1; then
-        grep -v "^warning" "$W/native.log" | tail -5
-        exit 1
-    fi
-fi
+source bootstrap/names.sh
+native="$(saltic_native_compiler)" || exit 1
 native="$(realpath "$native")"
 
 git worktree remove --force "$W/head" > /dev/null 2>&1

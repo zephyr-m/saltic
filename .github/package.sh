@@ -19,10 +19,11 @@ files=(
     CristallOS.jpg
     LICENSE
     LICENSE.ru
-    docs/OS.md
+    docs/OS-core.md
     docs/PRINCIPLES.md
     README.md
     VERSION
+    bootstrap
     flake.lock
     flake.nix
     justfile
@@ -46,8 +47,8 @@ done
 
 mkdir -p "$dist"
 tar -czf "$archive" \
-    --exclude='os/bootstrap/heap-audit.gdb' \
-    --exclude='os/bootstrap/heap-audit.sh' \
+    --exclude='bootstrap/saltic-*-compiler-x86_64-*' \
+    --exclude='bootstrap/saltic-*-for-qemu_virt*' \
     --transform "s,^,saltic-$version/," \
     "${files[@]}"
 

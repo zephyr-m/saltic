@@ -8,19 +8,19 @@ playground:
     node playground/server.mjs
 
 compile file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf":
-    SALTIC_DIRECT_ONLY=1 bash os/bootstrap/build.sh "$1" "$2"
+    SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"
 
 run file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf" *args:
-    SALTIC_DIRECT_ONLY=1 bash os/bootstrap/build.sh "$1" "$2"
+    SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"
     nix --extra-experimental-features "nix-command flakes" develop --command qemu-riscv32 -B 0x100000000 "$2" "${@:3}"
 
 native file="soul/seed/canonical/main.saltic" output="/tmp/saltic-native" *args:
-    SALTIC_TARGET=x86_64 SALTIC_DIRECT_ONLY=1 bash os/bootstrap/build.sh "$1" "$2"
+    SALTIC_TARGET=x86_64 SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"
     "$2" "${@:3}"
 
 qemu file="os/target/qemu_virt/smoke.saltic":
     mkdir -p .cache/build/qemu_virt
-    bash os/bootstrap/build.sh "$1" .cache/build/qemu_virt/program.elf
+    bash bootstrap/build.sh "$1" .cache/build/qemu_virt/program.elf
 
 qemu-graphics:
     nix --extra-experimental-features "nix-command flakes" develop --command bash -c 'bash os/target/qemu_virt/build-graphics.sh && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -device virtio-tablet-device -audiodev pipewire,id=saltic_audio -device virtio-sound-device,audiodev=saltic_audio -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
@@ -50,12 +50,12 @@ tasks:
 
 selfhost source="soul/seed/canonical/main.saltic" output="/tmp/saltic-self-parser.elf" json=".cache/build/pipeline/parsed.json":
     mkdir -p "$(dirname "$3")"
-    bash os/bootstrap/build.sh soul/seed/parser.saltic "$2"
+    bash bootstrap/build.sh soul/seed/parser.saltic "$2"
     qemu-riscv32 -B 0x100000000 "$2" "$1" "$3"
 
 selfcheck input=".cache/build/pipeline/parsed.json" output="/tmp/saltic-self-checker.elf" json=".cache/build/pipeline/checked.json":
     mkdir -p "$(dirname "$3")"
-    bash os/bootstrap/build.sh soul/seed/checker.saltic "$2"
+    bash bootstrap/build.sh soul/seed/checker.saltic "$2"
     qemu-riscv32 -B 0x100000000 "$2" "$1" "$3"
 
 checker:
@@ -94,7 +94,7 @@ minify file output="":
         build_root=.cache/build/minifier
         mkdir -p "$build_root/tool"
         SALTIC_BUILD_DIR="$build_root/tool" SALTIC_HEAP_BYTES=536870912 \
-            bash os/bootstrap/build.sh soul/craft/minifier.saltic "$build_root/minifier.elf"
+            bash bootstrap/build.sh soul/craft/minifier.saltic "$build_root/minifier.elf"
         qemu-riscv32 -B 0x100000000 "$build_root/minifier.elf" "$source_path" "$output_path"
         echo "минификатор: синтаксис подтверждён -> $output_path"
     ' saltic-minifier "$source_path" "$output_path"
@@ -119,20 +119,20 @@ native-bootstrap:
 
 trace file="soul/seed/canonical/main.saltic":
     mkdir -p .cache/build/tracer
-    SALTIC_BUILD_DIR=.cache/build/tracer/build bash os/bootstrap/build.sh "$1" .cache/build/tracer/target.elf .cache/build/tracer/target.s
-    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash os/bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf .cache/build/tracer/tracer.s
+    SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh "$1" .cache/build/tracer/target.elf .cache/build/tracer/target.s
+    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf .cache/build/tracer/tracer.s
     qemu-riscv32 -B 0x100000000 .cache/build/tracer/tracer.elf .cache/build/tracer/target.elf
 
 trace-elf file:
     mkdir -p .cache/build/tracer
-    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash os/bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf .cache/build/tracer/tracer.s
+    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf .cache/build/tracer/tracer.s
     qemu-riscv32 -B 0x100000000 .cache/build/tracer/tracer.elf "$1"
 
 bootstrap-parity:
     just test bootstrap
 
 bootstrap-refresh source="soul/seed/toolchain.saltic":
-    bash os/bootstrap/refresh.sh "$1"
+    bash bootstrap/refresh.sh "$1"
 
 toolchain-step:
     just checker

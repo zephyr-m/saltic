@@ -55,7 +55,7 @@ open(probe, "w").write("use seed\nuse craft.testing\nuse seed.tests.machine.tran
 try:
     open(PATH, "w").write("\n".join(injected) + dump_skill)
     env = dict(os.environ, SALTIC_BUILD_DIR=os.path.join(BUILD, "b"), SALTIC_HEAP_BYTES="536870912")
-    subprocess.run(NIX + ["bash", "os/bootstrap/build.sh", probe, os.path.join(BUILD, "probe.elf")],
+    subprocess.run(NIX + ["bash", "bootstrap/build.sh", probe, os.path.join(BUILD, "probe.elf")],
                    cwd=ROOT, env=env, check=True, stdout=subprocess.DEVNULL)
     run = subprocess.run(NIX + ["qemu-riscv32", "-B", "0x100000000", os.path.join(BUILD, "probe.elf")],
                          cwd=ROOT, capture_output=True, text=True)

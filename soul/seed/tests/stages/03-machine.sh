@@ -14,7 +14,7 @@ mkdir -p "$machine_work/build"
     cd "$repo_root"
     SALTIC_BUILD_DIR="$machine_work/build" \
     SALTIC_HEAP_BYTES=536870912 \
-        bash os/bootstrap/build.sh \
+        bash bootstrap/build.sh \
         soul/seed/tests/machine/qemu.saltic \
         "$machine_work/generator.elf"
     qemu-riscv32 -B 0x100000000 \

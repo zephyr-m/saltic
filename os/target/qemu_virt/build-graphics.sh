@@ -8,15 +8,13 @@ work="${SALTIC_QEMU_GRAPHICS_DIR:-.cache/build/qemu-graphics}"
 mkdir -p "$work"
 target_heap_bytes="${SALTIC_QEMU_HEAP_BYTES:-67108864}"
 
-echo "графика: собираю qemu-virt toolchain"
-SALTIC_BUILD_DIR="$work/toolchain-build" \
-    bash os/bootstrap/build.sh \
-    os/target/qemu_virt/toolchain.saltic \
-    "$work/toolchain.elf"
+echo "графика: беру qemu-virt toolchain из bootstrap/"
+source bootstrap/names.sh
+toolchain="$(saltic_qemu_virt_compiler)"
 
 echo "графика: собираю bare-metal ELF $work/program.elf"
 qemu-riscv32 -B 0x100000000 \
-    "$work/toolchain.elf" \
+    "$toolchain" \
     os/main.saltic \
     "$work/program.elf" \
     "$target_heap_bytes"
