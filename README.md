@@ -4,7 +4,7 @@
 
 # Saltic
 
-**Текущая версия: 1.10.0**
+**Текущая версия: 58:12**
 
 Saltic — самохостящийся системный язык: его активные парсер, чекер и компилятор
 написаны на самом Saltic. В версии 1.0.0 достигнута стабильная самосборка —
@@ -15,7 +15,9 @@ Saltic делается одним автором для себя и своих 
 его агенты — станет доступна любому человеку.
 
 История релизов находится в [CHANGELOG.md](CHANGELOG.md), каноничный номер
-версии — в [VERSION](VERSION).
+версии — в [VERSION](VERSION). Версия — это счёт матча «фичи : баги» по
+[Football Versioning](docs/FOOTBALL.md): язык однажды замёрзнет, и semver ему
+не подходит.
 
 ## Запуск
 
@@ -30,13 +32,14 @@ nix --extra-experimental-features "nix-command flakes" develop
 
 ## Релиз
 
-1. Поднять номер в `VERSION`, `README.md` и `CHANGELOG.md`.
+1. Посчитать голы релиза по [docs/FOOTBALL.md](docs/FOOTBALL.md) и записать
+   новый счёт в `VERSION`, `README.md` и `CHANGELOG.md`.
 2. Запустить `bash bootstrap/refresh.sh`: загрузочный компилятор получит имя
    новой версии и паспорт, прежний файл уйдёт.
 3. Закоммитить готовый релиз.
 4. Создать аннотированный тег с заголовком релиза:
-   `git tag -a vX.Y.Z -m "Saltic X.Y.Z — название"`.
-5. Отправить коммит и тег: `git push origin main --follow-tags`.
+   `git tag -a vF-B -m "Saltic F:B — название"`.
+5. Отправить коммит и тег: `git push origin master --follow-tags`.
 
 GitHub Actions сверит тег с `VERSION`, прогонит полный `just test`, возьмёт
 описание из соответствующего раздела `CHANGELOG.md`, соберёт чистый SDK без
