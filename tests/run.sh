@@ -233,7 +233,7 @@ test_native() {
         tests/fixtures/imports.saltic \
         "$work/native/imports" \
         67108864
-    test "$("$work/native/imports")" = "$(printf 'длина: 6\nпусто: yes\nстрок: 3\nфайл прочитан: yes')"
+    test "$("$work/native/imports")" = "$(printf 'длина: 6\nпусто: yes\nстрок: 3\nфайл прочитан: yes\nполе переменной file: 7')"
     echo "x86-64: канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает"
 }
 
