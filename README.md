@@ -60,7 +60,7 @@ Saltic является закрытым программным обеспече
 Условия: [русский текст](LICENSE.ru) и [английский перевод](LICENSE).
 
 ```saltic
-use seed
+use seed.io
 
 AppName = "Saltic"
 
@@ -104,13 +104,13 @@ skill spend(actor, cost) {
 
 skill show(actor) {
     (actor.state) {
-        .READY => seed.io.show(actor.name, " is ready"),
-        .ACTIVE => seed.io.show(actor.name, " is active"),
-        .FAILED => seed.io.show(actor.name, " needs rescue"),
+        .READY => io.show("{actor.name} is ready"),
+        .ACTIVE => io.show("{actor.name} is active"),
+        .FAILED => io.show("{actor.name} needs rescue"),
     }
 
-    seed.io.show("energy: ", actor.energy)
-    seed.io.show("position: ", actor.position.x, ",", actor.position.y)
+    io.show("energy: {actor.energy}")
+    io.show("position: {actor.position.x},{actor.position.y}")
     out none
 }
 
@@ -121,16 +121,11 @@ program() {
         position = Point { x = 2 y = 3 }
     }
 
-    @costs = [5, 7, 11]
-    @index = 0
-
-    drum (seed.group.count(costs)) {
-        @cost = seed.group.at(costs, index)
-        actor = spend(actor, cost) rescue |err| {
-            seed.io.show("failed: ", err)
+    drum ([5, 7, 11]) {
+        actor = spend(actor, beat) rescue |err| {
+            io.show("failed: ", err)
             actor
         }
-        index = index + 1
     }
 
     show(actor)
