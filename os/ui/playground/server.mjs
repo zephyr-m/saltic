@@ -7,7 +7,7 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
 const here = dirname(fileURLToPath(import.meta.url))
-const root = resolve(here, "..")
+const root = resolve(here, "../../..")
 const host = "127.0.0.1"
 const port = Number(process.env.SALTIC_PLAYGROUND_PORT ?? 4173)
 const bodyLimit = 256 * 1024

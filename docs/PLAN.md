@@ -49,7 +49,7 @@ enum — только через короткое имя модуля (`io.show`
   - `soul/seed/compiler/state.saltic` — 537
   - `os/apps/colony/colony.saltic` — 569, `os/ui/jtml.saltic` — 535
   - не считаются: `os/fonts/spleen.saltic` (данные шрифта),
-    `tests/machine/translation.saltic` (эталоны), `checkpoints/` (архив)
+    `tests/machine/translation.saltic` (эталоны), `.archive/` (архив)
 - Ручные курсоры в лексере и парсере остаются как есть: позиция сдвигается на
   разную длину, `beat` туда не подходит.
 

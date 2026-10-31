@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="masscot.jpg" alt="Saltic — маскот Candy Engine" width="720">
+  <img src="docs/images/mascot.jpg" alt="Saltic — маскот Candy Engine" width="720">
 </p>
 
 # Saltic

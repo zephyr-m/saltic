@@ -16,26 +16,23 @@ fi
 
 files=(
     CHANGELOG.md
-    CristallOS.jpg
     LICENSE
     LICENSE.ru
     docs/OS-core.md
     docs/PRINCIPLES.md
+    docs/images
     README.md
     VERSION
     bootstrap
     flake.lock
     flake.nix
     justfile
-    masscot.jpg
     .github
     .vscode
-    editors
+    workbench/vscode
     os
     soul
     tests
-    third_party
-    toolbox
 )
 
 for path in "${files[@]}"; do

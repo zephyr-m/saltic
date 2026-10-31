@@ -5,7 +5,7 @@ default:
     just --list
 
 playground:
-    node playground/server.mjs
+    node os/ui/playground/server.mjs
 
 compile file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf":
     SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"

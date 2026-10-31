@@ -12,7 +12,7 @@
 Открой каталог расширения в VS Code:
 
 ```bash
-code editors/vscode-s
+code workbench/vscode
 ```
 
 Нажми `F5`, затем открой `os/target/qemu_virt/smoke.saltic` в окне Extension Development Host.

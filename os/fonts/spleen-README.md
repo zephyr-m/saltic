@@ -10,7 +10,7 @@ The generated table in `os/fonts/spleen.saltic` contains the 5×8, 6×12, 8×16,
 - Cyrillic work: Nikolay Nazarov (`nerfur`)
 - Source: <https://github.com/nerfur/spleen/tree/80ebf3d45cb7f79a20099fc50492fd7d9ac0a626>
 - Cyrillic contribution: <https://github.com/fcambus/spleen/pull/38>
-- License: BSD-2-Clause; see `LICENSE` in this directory.
+- License: BSD-2-Clause; see `spleen-LICENSE` in this directory.
 
 Source SHA-256 checksums:
 
@@ -29,5 +29,5 @@ Regenerate the embedded table:
 for size in 5x8 6x12 8x16 12x24 16x32 32x64; do
     curl -fsSL "https://raw.githubusercontent.com/nerfur/spleen/80ebf3d45cb7f79a20099fc50492fd7d9ac0a626/spleen-${size}.bdf" -o "/tmp/spleen-${size}.bdf"
 done
-node toolbox/generate-spleen.mjs os/fonts/spleen.saltic /tmp/spleen-{5x8,6x12,8x16,12x24,16x32,32x64}.bdf
+node .archive/toolbox/generate-spleen.mjs os/fonts/spleen.saltic /tmp/spleen-{5x8,6x12,8x16,12x24,16x32,32x64}.bdf
 ```
