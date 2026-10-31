@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+source "$(dirname "$0")/../../../bootstrap/stamp.sh"
+saltic_stamp_output "$0" "$@"
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../../.." && pwd)"

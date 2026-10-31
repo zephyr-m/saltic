@@ -2,6 +2,8 @@
 # Глобальная проверка любого изменения: самосборка с паспортами в bootstrap/,
 # замер скорости против прежнего компилятора, быстрые тесты.
 # Полный лог тестов сохраняется в .cache/build/workbench/global-check.log
+source "$(dirname "$0")/../bootstrap/stamp.sh"
+saltic_stamp_output "$0" "$@"
 cd "$(dirname "$0")/.." || exit 1
 source bootstrap/names.sh
 mkdir -p .cache/build/workbench .cache/build/bench

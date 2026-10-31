@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # usage: saltic-perf.sh compiler.elf source.saltic
+source "$(dirname "$0")/../bootstrap/stamp.sh"
+saltic_stamp_output "$0" "$@"
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .cache/build/workbench

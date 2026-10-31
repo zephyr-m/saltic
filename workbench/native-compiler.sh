@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Веха 3: компилятор Saltic, переведённый на x86-64, против компилятора под QEMU.
+source "$(dirname "$0")/../bootstrap/stamp.sh"
+saltic_stamp_output "$0" "$@"
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p .cache/build/workbench
 R=.cache/build/workbench/x86

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Остальные тесты после json-rpc. Полный лог: .cache/build/workbench/rest.log
+source "$(dirname "$0")/../bootstrap/stamp.sh"
+saltic_stamp_output "$0" "$@"
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p .cache/build/workbench
 cases="${*:-tracer diagnostics minifier seed-contract machine abi memory jtml tasks qemu-virt}"

@@ -3,6 +3,8 @@
 # одним и тем же компилятором из HEAD и из рабочего дерева, результаты обязаны
 # совпасть побайтово. Компилятор — родной x86-64 из bootstrap/ (вывод тот же,
 # что у загрузочного под QEMU, но в разы быстрее).
+source "$(dirname "$0")/../bootstrap/stamp.sh"
+saltic_stamp_output "$0" "$@"
 cd "$(dirname "$0")/.." || exit 1
 W=.cache/build/workbench/same-source
 HEAP=67108864
