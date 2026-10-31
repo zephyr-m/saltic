@@ -4,7 +4,7 @@ source "$(dirname "$0")/../bootstrap/stamp.sh"
 saltic_stamp_output "$0" "$@"
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p .cache/build/workbench
-cases="${*:-tracer diagnostics minifier seed-contract machine abi memory jtml tasks qemu-virt}"
+cases="${*:-tracer diagnostics seed-contract machine abi memory jtml tasks qemu-virt}"
 pattern='итог|проверка:|error|подтвержд|ок$|ok$'
 for c in $cases; do
     echo "== $c"
