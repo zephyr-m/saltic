@@ -1,0 +1,215 @@
+use core.str
+use core.group
+use selfhost.abi
+use selfhost.machine.instruction
+use selfhost.machine.codec
+use selfhost.machine.layout
+use selfhost.compiler.state
+use core.system
+
+STDIN = 0
+STDOUT = 1
+TERMINAL_GET = 21505
+TERMINAL_SET = 21506
+TERMIOS_WORDS = 9
+TERMIOS_LOCAL_FLAGS = 12
+TERMIOS_CONTROL = 17
+CONTROL_TIME = 5
+CONTROL_MIN = 6
+RAW_LOCAL_MASK = -12
+KEY_BUFFER_BYTES = 8
+INTERRUPT_BYTE = 3
+INTERRUPT_EXIT = 130
+
+FRAME_BYTES = 128
+SAVED_TERMIOS = 16
+RAW_TERMIOS = 56
+KEY_BUFFER = 96
+KEY_COUNT = 104
+KEY_TERMINAL = 108
+KEY_OBJECT = 112
+RETURN_ADDRESS = 124
+
+CLEAR_SEQUENCE = [27, 91, 50, 74, 27, 91, 72]
+
+SINGLE_KEYS = [27, 13, 10, 127, 8, 9]
+SINGLE_NAMES = ["escape", "enter", "enter", "backspace", "backspace", "tab"]
+ARROW_KEYS = [65, 66, 67, 68]
+ARROW_NAMES = ["up", "down", "right", "left"]
+
+skill emit_syscall(compiler, number) {
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A7, codec.ZERO, codec.ZERO, number)
+    out state.emit_op(compiler, instruction.Kind.ECALL, codec.ZERO, codec.ZERO, codec.ZERO, 0)
+}
+
+skill emit_terminal_mode(compiler, request, offset) {
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, STDIN)
+    compiler.machine = layout.emit_load_immediate(compiler.machine, codec.A1, request)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A2, codec.SP, codec.ZERO, offset)
+    out emit_syscall(compiler, system.SYSCALL_IOCTL)
+}
+
+skill key_label(name) {
+    out ".L_key_name_{name}"
+}
+
+skill text_label(name) {
+    out "rt_key_text_{name}"
+}
+
+skill emit_name_branches(compiler, bytes, names, value) {
+    drum (group.count(bytes)) {
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, group.item(bytes, beat))
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, value, codec.T2, key_label(group.item(names, beat)))
+    }
+    out compiler
+}
+
+skill emit_name_results(compiler) {
+    @names = ["escape", "enter", "backspace", "tab", "up", "down", "right", "left", "none"]
+    drum (names) {
+        compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, key_label(beat))
+        compiler.machine = layout.emit_relative_address(compiler.machine, codec.A0, text_label(beat), 0)
+        compiler = state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_STRING)
+        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, ".L_key_done")
+    }
+    out compiler
+}
+
+skill emit_key_bytes(compiler) {
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_bytes")
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.SP, codec.ZERO, KEY_COUNT)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.A0, codec.ZERO, 5)
+    compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.A0, KEY_OBJECT)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, abi.OBJECT_KIND_STRING)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T1, codec.SP, codec.ZERO, KEY_COUNT)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T1, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, 0)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_copy")
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, codec.T2, codec.T1, ".L_key_copied")
+    compiler = state.emit_op(compiler, instruction.Kind.ADD, codec.T3, codec.SP, codec.T2, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.LBU, codec.T4, codec.T3, codec.ZERO, KEY_BUFFER)
+    compiler = state.emit_op(compiler, instruction.Kind.ADD, codec.T5, codec.A0, codec.T2, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.SB, codec.ZERO, codec.T5, codec.T4, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.T2, codec.ZERO, 1)
+    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, ".L_key_copy")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_copied")
+    compiler = state.emit_op(compiler, instruction.Kind.ADD, codec.T5, codec.A0, codec.T1, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.SB, codec.ZERO, codec.T5, codec.ZERO, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    out state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_STRING)
+}
+
+skill emit_key(compiler) {
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_io_key")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - FRAME_BYTES)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.RA, RETURN_ADDRESS)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.ZERO, KEY_TERMINAL)
+
+    compiler = emit_terminal_mode(compiler, TERMINAL_GET, SAVED_TERMIOS)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, codec.A0, codec.ZERO, ".L_key_read")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, 1)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.T0, KEY_TERMINAL)
+    drum (TERMIOS_WORDS) {
+        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, SAVED_TERMIOS + beat * 4)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.T0, RAW_TERMIOS + beat * 4)
+    }
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
+    compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T0, codec.T0, codec.ZERO, RAW_LOCAL_MASK)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.T0, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, 1)
+    compiler = state.emit_op(compiler, instruction.Kind.SB, codec.ZERO, codec.SP, codec.T0, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_MIN)
+    compiler = state.emit_op(compiler, instruction.Kind.SB, codec.ZERO, codec.SP, codec.ZERO, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_TIME)
+    compiler = emit_terminal_mode(compiler, TERMINAL_SET, RAW_TERMIOS)
+
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_read")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, STDIN)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.SP, codec.ZERO, KEY_BUFFER)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A2, codec.ZERO, codec.ZERO, 1)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, KEY_TERMINAL)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.T0, codec.ZERO, ".L_key_size")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A2, codec.ZERO, codec.ZERO, KEY_BUFFER_BYTES)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_size")
+    compiler = emit_syscall(compiler, system.SYSCALL_READ)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.A0, KEY_COUNT)
+
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, KEY_TERMINAL)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.T0, codec.ZERO, ".L_key_restored")
+    compiler = emit_terminal_mode(compiler, TERMINAL_SET, SAVED_TERMIOS)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_restored")
+
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, KEY_COUNT)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, codec.ZERO, codec.T0, key_label("none"))
+    compiler = state.emit_op(compiler, instruction.Kind.LBU, codec.T1, codec.SP, codec.ZERO, KEY_BUFFER)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, INTERRUPT_BYTE)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T1, codec.T2, ".L_key_live")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, INTERRUPT_EXIT)
+    compiler = emit_syscall(compiler, system.SYSCALL_EXIT)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_live")
+
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, 1)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T0, codec.T2, ".L_key_sequence")
+    compiler = emit_name_branches(compiler, SINGLE_KEYS, SINGLE_NAMES, codec.T1)
+    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, ".L_key_bytes")
+
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_sequence")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, 3)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T0, codec.T2, ".L_key_bytes")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, 27)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T1, codec.T2, ".L_key_bytes")
+    compiler = state.emit_op(compiler, instruction.Kind.LBU, codec.T3, codec.SP, codec.ZERO, KEY_BUFFER + 1)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, 91)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T3, codec.T2, ".L_key_bytes")
+    compiler = state.emit_op(compiler, instruction.Kind.LBU, codec.T3, codec.SP, codec.ZERO, KEY_BUFFER + 2)
+    compiler = emit_name_branches(compiler, ARROW_KEYS, ARROW_NAMES, codec.T3)
+
+    compiler = emit_key_bytes(compiler)
+    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, ".L_key_done")
+    compiler = emit_name_results(compiler)
+
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_done")
+    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.RA, codec.SP, codec.ZERO, RETURN_ADDRESS)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, FRAME_BYTES)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
+    out state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
+}
+
+skill emit_clear(compiler) {
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_io_clear")
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, STDOUT)
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.A1, "rt_clear_sequence", 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A2, codec.ZERO, codec.ZERO, group.count(CLEAR_SEQUENCE))
+    compiler = emit_syscall(compiler, system.SYSCALL_WRITE)
+    compiler = state.load_immediate(compiler, "a0", codec.A0, abi.NONE)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
+    out state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
+}
+
+skill append_text(compiler, label, text) {
+    compiler.machine = layout.align_section(compiler.machine, layout.Section.RODATA, 8)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.RODATA, label)
+    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(abi.OBJECT_KIND_STRING))
+    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(str.len(text) + 5))
+    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(abi.OBJECT_FLAG_STATIC))
+    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(str.len(text)))
+    compiler.machine = layout.append_section_text(compiler.machine, layout.Section.RODATA, text, yes)
+    out compiler
+}
+
+skill append_data(compiler) {
+    drum (["escape", "enter", "backspace", "tab", "up", "down", "right", "left"]) {
+        compiler = append_text(compiler, text_label(beat), beat)
+    }
+    compiler = append_text(compiler, text_label("none"), "")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.RODATA, "rt_clear_sequence")
+    drum (CLEAR_SEQUENCE) {
+        compiler.machine = layout.append_section_byte(compiler.machine, layout.Section.RODATA, beat)
+    }
+    out compiler
+}
+
+skill append_runtime(compiler) {
+    compiler = emit_key(compiler)
+    out emit_clear(compiler)
+}

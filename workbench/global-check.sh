@@ -15,7 +15,7 @@ bash bootstrap/refresh.sh 2>&1 | grep "^bootstrap refresh: \(saltic\|прове\
 compiler="$(saltic_bootstrap_compiler)"
 for c in "$prev.native" "$(saltic_native_compiler)"; do
     echo "== время: $c"
-    { time "$c" soul/seed/toolchain.saltic .cache/build/bench/x.elf 4026531840 rv32i > /dev/null 2>&1; } 2>&1 | grep real
+    { time "$c" soul/seed/selfhost/toolchain.saltic .cache/build/bench/x.elf 4026531840 rv32i > /dev/null 2>&1; } 2>&1 | grep real
 done
 ls -l "$prev.elf" "$compiler" | awk '{print $5, $9}'
 echo "== тесты (полный лог: .cache/build/workbench/global-check.log)"

@@ -80,7 +80,7 @@ saltic_native_compiler() {
         SALTIC_HEAP_BYTES=4026531840 \
         SALTIC_TARGET=x86_64 \
         SALTIC_NATIVE=0 \
-        bash bootstrap/build.sh soul/seed/toolchain.saltic "$native" > .cache/build/bootstrap-native.log 2>&1 || {
+        bash bootstrap/build.sh soul/seed/selfhost/toolchain.saltic "$native" > .cache/build/bootstrap-native.log 2>&1 || {
             grep -v "^warning" .cache/build/bootstrap-native.log | tail -5 >&2
             return 1
         }

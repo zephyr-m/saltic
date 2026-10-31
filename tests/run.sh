@@ -248,15 +248,15 @@ test_native_bootstrap() {
     mkdir -p "$native_work"
     echo "native-bootstrap: compiler.elf переводит компилятор в x86-64"
     SALTIC_TARGET=x86_64 build native-bootstrap \
-        soul/seed/toolchain.saltic \
+        soul/seed/selfhost/toolchain.saltic \
         "$native_work/compiler.native" \
         "$heap_bytes"
     echo "native-bootstrap: x86-компилятор собирает себя (stage A)"
-    "$native_work/compiler.native" soul/seed/toolchain.saltic \
+    "$native_work/compiler.native" soul/seed/selfhost/toolchain.saltic \
         "$native_work/stage-a.native" "$heap_bytes" x86_64 >/dev/null
     chmod +x "$native_work/stage-a.native"
     echo "native-bootstrap: stage A собирает себя (stage B)"
-    "$native_work/stage-a.native" soul/seed/toolchain.saltic \
+    "$native_work/stage-a.native" soul/seed/selfhost/toolchain.saltic \
         "$native_work/stage-b.native" "$heap_bytes" x86_64 >/dev/null
     cmp "$native_work/compiler.native" "$native_work/stage-a.native"
     cmp "$native_work/stage-a.native" "$native_work/stage-b.native"
@@ -396,7 +396,7 @@ test_bootstrap() {
     SALTIC_HEAP_BYTES="$heap_bytes" \
     SALTIC_DIRECT_ONLY=1 \
     bash bootstrap/build.sh \
-        soul/seed/toolchain.saltic \
+        soul/seed/selfhost/toolchain.saltic \
         "$bootstrap_work/stage-1/toolchain.elf" \
         "$bootstrap_work/stage-1/toolchain.s"
     test -x "$bootstrap_work/stage-1/toolchain.elf"
@@ -408,7 +408,7 @@ test_bootstrap() {
     SALTIC_HEAP_BYTES="$heap_bytes" \
     SALTIC_DIRECT_ONLY=1 \
     bash bootstrap/build.sh \
-        soul/seed/toolchain.saltic \
+        soul/seed/selfhost/toolchain.saltic \
         "$bootstrap_work/stage-2/toolchain.elf" \
         "$bootstrap_work/stage-2/toolchain.s"
     test -x "$bootstrap_work/stage-2/toolchain.elf"
@@ -420,7 +420,7 @@ test_bootstrap() {
     SALTIC_HEAP_BYTES="$heap_bytes" \
     SALTIC_DIRECT_ONLY=1 \
     bash bootstrap/build.sh \
-        soul/seed/toolchain.saltic \
+        soul/seed/selfhost/toolchain.saltic \
         "$bootstrap_work/stage-3/toolchain.elf" \
         "$bootstrap_work/stage-3/toolchain.s"
     test -x "$bootstrap_work/stage-3/toolchain.elf"

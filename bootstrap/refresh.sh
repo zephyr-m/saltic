@@ -34,7 +34,7 @@ fi
 
 work="${SALTIC_BOOTSTRAP_REFRESH_DIR:-.cache/build/bootstrap-refresh}"
 heap_bytes="${SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES:-4026531840}"
-source_path="${1:-soul/seed/toolchain.saltic}"
+source_path="${1:-soul/seed/selfhost/toolchain.saltic}"
 
 mkdir -p "$work/stage-1" "$work/stage-2" "$work/stage-3"
 

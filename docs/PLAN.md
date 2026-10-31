@@ -42,14 +42,14 @@ enum — только через короткое имя модуля (`io.show`
 ## Рефакторинг
 
 - Файлы больше лимита канона в 500 строк. **Решает автор**, как делить:
-  - `soul/seed/runtime/emit.saltic` — 1728
-  - `soul/seed/compiler/codegen.saltic` — 1000
-  - `soul/seed/parser/syntax.saltic` — 796
-  - `soul/seed/checker/semantics.saltic` — 665
-  - `soul/seed/machine/layout.saltic` — 551
-  - `soul/seed/machine/codec.saltic` — 550
-  - `soul/seed/vm/state.saltic` — 540
-  - `soul/seed/compiler/state.saltic` — 537
+  - `soul/seed/selfhost/runtime/emit.saltic` — 1728
+  - `soul/seed/selfhost/compiler/codegen.saltic` — 1000
+  - `soul/seed/selfhost/parser/syntax.saltic` — 796
+  - `soul/seed/selfhost/checker/semantics.saltic` — 665
+  - `soul/seed/selfhost/machine/layout.saltic` — 551
+  - `soul/seed/selfhost/machine/codec.saltic` — 550
+  - `soul/seed/selfhost/vm/state.saltic` — 540
+  - `soul/seed/selfhost/compiler/state.saltic` — 537
   - `os/apps/colony/colony.saltic` — 569, `os/ui/jtml.saltic` — 535
   - не считаются: `os/fonts/spleen.saltic` (данные шрифта),
     `tests/machine/translation.saltic` (эталоны), `.archive/` (архив)

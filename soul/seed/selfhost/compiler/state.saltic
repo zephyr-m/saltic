@@ -1,0 +1,546 @@
+use core.str
+use core.group
+use core.num
+use selfhost.abi
+use selfhost.ast
+use selfhost.memory.model
+use selfhost.machine.instruction
+use selfhost.machine.codec
+use selfhost.machine.layout
+
+Symbol = Box {
+    name = "",
+    kind = "",
+    node = [],
+    value = 0,
+    text = "",
+    slot = 0
+}
+
+Function = Box {
+    name = "",
+    slots = [],
+    end = "",
+    subject = "",
+    module = "",
+    types = [],
+    next_drum = 1,
+    drum_exit = ""
+}
+
+Names = Box {
+    names = [],
+    next_drum = 1
+}
+
+Output = Box {
+    chunks = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+}
+
+State = Box {
+    ast = [],
+    lines = Output {},
+    data = Output {},
+    writable = Output {},
+    machine = layout.Program {},
+    heap_bytes = codec.Word {},
+    strings = [],
+    serial = 0,
+    constants = [],
+    boxes = [],
+    enums = [],
+    variants = [],
+    errors = [],
+    fields = [],
+    skills = [],
+    natives = [],
+    aliases = [],
+    entry = [],
+    current_function = Function {},
+    next_enum_id = 1,
+    next_field_id = 1
+}
+
+DRUM_BEAT = "beat"
+WIDE_OFFSET_REGISTER = codec.T6
+
+PRINTABLE = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz\{|\}~"
+
+skill symbol_find(symbols, name) {
+    @count = group.count(symbols)
+    drum (count) {
+        @item = group.item(symbols, count - 1 - beat)
+        (item.name == name) { out item }
+    }
+    out Symbol {}
+}
+
+skill symbol_has(symbols, name) {
+    @item = symbol_find(symbols, name)
+    out str.len(item.name) > 0
+}
+
+skill symbol_add(symbols, name, kind, node, value) {
+    out group.add(symbols, Symbol { name = name, kind = kind, node = node, value = value })
+}
+
+skill symbol_add_text(symbols, name, kind, node, text) {
+    out group.add(symbols, Symbol { name = name, kind = kind, node = node, text = text })
+}
+
+skill type_find(types, name) {
+    out symbol_find(types, name)
+}
+
+skill type_set(types, name, type) {
+    @item = symbol_find(types, name)
+    (str.len(item.name) == 0) { out group.add(types, Symbol { name = name, kind = "type", text = type }) }
+    item.text = type
+    out types
+}
+
+skill output_add(output, text) {
+    @carry = text
+    @chunks = []
+    @active = yes
+    drum (output.chunks) {
+        pick {
+            (active == no) { chunks = group.add(chunks, beat) }
+            (str.len(beat) == 0) {
+                chunks = group.add(chunks, carry)
+                active = no
+            }
+            {
+                chunks = group.add(chunks, "")
+                carry = str.add(beat, carry)
+            }
+        }
+    }
+    (active == yes) { chunks = group.add(chunks, carry) }
+    out Output { chunks = chunks }
+}
+
+skill output_text(output) {
+    @result = ""
+    @count = group.count(output.chunks)
+    drum (count) {
+        @chunk = group.item(output.chunks, count - 1 - beat)
+        (str.len(chunk) > 0) { result = str.add(result, chunk) }
+    }
+    out result
+}
+
+skill emit(compiler, line) {
+    out compiler
+}
+
+skill emit_data(compiler, line) {
+    out compiler
+}
+
+skill emit_writable(compiler, line) {
+    out compiler
+}
+
+skill emit_blank(compiler) {
+    out compiler
+}
+
+skill fits_immediate(value) {
+    (value < -2048) { out no }
+    (value > 2047) { out no }
+    out yes
+}
+
+skill wide_offset_kind(kind) {
+    (kind == instruction.Kind.ADDI) { out yes }
+    (kind == instruction.Kind.LW) { out yes }
+    (kind == instruction.Kind.LB) { out yes }
+    (kind == instruction.Kind.LBU) { out yes }
+    (kind == instruction.Kind.LH) { out yes }
+    (kind == instruction.Kind.LHU) { out yes }
+    (kind == instruction.Kind.SW) { out yes }
+    (kind == instruction.Kind.SB) { out yes }
+    (kind == instruction.Kind.SH) { out yes }
+    out no
+}
+
+skill emit_op(compiler, kind, rd, rs1, rs2, immediate) {
+    (fits_immediate(immediate) == no) {
+        (wide_offset_kind(kind) == yes) {
+            compiler.machine = layout.emit_load_immediate(compiler.machine, WIDE_OFFSET_REGISTER, immediate)
+            compiler.machine = layout.emit(compiler.machine, instruction.Kind.ADD, WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, rs1, 0)
+            compiler.machine = layout.emit(compiler.machine, kind, rd, WIDE_OFFSET_REGISTER, rs2, 0)
+            out compiler
+        }
+    }
+    compiler.machine = layout.emit(compiler.machine, kind, rd, rs1, rs2, immediate)
+    out compiler
+}
+
+skill safe(text) {
+    @result = ""
+    @allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    drum (str.len(text)) {
+        @ch = str.at(text, beat)
+        pick {
+            (str.contains(allowed, ch) == yes) { result = str.add(result, ch) }
+            { result = "{result}_" }
+        }
+    }
+    out result
+}
+
+skill label(compiler, prefix) {
+    @safe_prefix = safe(prefix)
+    @label = ".L_{safe_prefix}_{compiler.serial}"
+    compiler.serial = compiler.serial + 1
+    out label
+}
+
+skill align16(value) {
+    @quotient = value / abi.CALL_STACK_ALIGNMENT
+    (quotient * abi.CALL_STACK_ALIGNMENT == value) { out value }
+    out (quotient + 1) * abi.CALL_STACK_ALIGNMENT
+}
+
+skill align8(value) {
+    @quotient = value / abi.OBJECT_ALIGNMENT
+    (quotient * abi.OBJECT_ALIGNMENT == value) { out value }
+    out (quotient + 1) * abi.OBJECT_ALIGNMENT
+}
+
+skill name_add(names, name) {
+    (symbol_has(names.names, name) == no) { names.names = symbol_add(names.names, name, "local", [], 0) }
+    out names
+}
+
+skill collect_expression_names(names, node) {
+    @plain = ast.plain(node)
+    @tag = group.item(plain, 0)
+    (tag == "binary") {
+        names = collect_expression_names(names, group.item(plain, 2))
+        names = collect_expression_names(names, group.item(plain, 3))
+    }
+    (tag == "call") {
+        drum (group.count(plain) - 1) { names = collect_expression_names(names, group.item(plain, beat + 1)) }
+    }
+    (tag == "group") {
+        drum (group.count(plain) - 1) { names = collect_expression_names(names, group.item(plain, beat + 1)) }
+    }
+    (tag == "box-new") {
+        drum (group.count(plain) - 2) { names = collect_expression_names(names, ast.part(group.item(plain, beat + 2), 2)) }
+    }
+    (tag == "rescue") {
+        names = collect_expression_names(names, group.item(plain, 1))
+        names = name_add(names, group.item(plain, 2))
+        names = collect_block_names(names, group.item(plain, 3))
+    }
+    out names
+}
+
+skill collect_statement_names(names, node) {
+    @plain = ast.plain(node)
+    @tag = group.item(plain, 0)
+    (tag == "var") {
+        names = name_add(names, group.item(plain, 1))
+        names = collect_expression_names(names, group.item(plain, 2))
+    }
+    (tag == "assign") { names = collect_expression_names(names, group.item(plain, 2)) }
+    (tag == "field-assign") {
+        names = collect_expression_names(names, group.item(plain, 1))
+        names = collect_expression_names(names, group.item(plain, 2))
+    }
+    (tag == "out") { names = collect_expression_names(names, group.item(plain, 1)) }
+    (tag == "expr") { names = collect_expression_names(names, group.item(plain, 1)) }
+    (tag == "if") {
+        names = collect_expression_names(names, group.item(plain, 1))
+        names = collect_block_names(names, group.item(plain, 2))
+    }
+    (tag == "pick") {
+        drum (group.count(plain) - 1) {
+            @choice = ast.plain(group.item(plain, beat + 1))
+            (group.item(choice, 0) == "if") { names = collect_statement_names(names, choice) }
+            (group.item(choice, 0) == "otherwise") { names = collect_block_names(names, group.item(choice, 1)) }
+        }
+    }
+    (tag == "switch") {
+        names = collect_expression_names(names, group.item(plain, 1))
+        drum (group.count(plain) - 2) { names = collect_expression_names(names, ast.part(group.item(plain, beat + 2), 2)) }
+    }
+    (tag == "drum") {
+        @drum_number = num.text(names.next_drum)
+        names.next_drum = names.next_drum + 1
+        names = name_add(names, "$drum:{drum_number}")
+        names = name_add(names, "$drum_source:{drum_number}")
+        names = name_add(names, "$drum_index:{drum_number}")
+        names = name_add(names, "$drum_saved:{drum_number}")
+        names = name_add(names, DRUM_BEAT)
+        names = collect_expression_names(names, group.item(plain, 1))
+        names = collect_block_names(names, group.item(plain, 2))
+    }
+    out names
+}
+
+skill collect_block_names(names, block) {
+    @plain = ast.plain(block)
+    drum (group.count(plain) - 1) { names = collect_statement_names(names, group.item(plain, beat + 1)) }
+    out names
+}
+
+skill expression_uses_beat(node) {
+    @plain = ast.plain(node)
+    @tag = group.item(plain, 0)
+    (tag == "path") { out group.item(plain, 1) == DRUM_BEAT }
+    (tag == "binary") {
+        (expression_uses_beat(group.item(plain, 2)) == yes) { out yes }
+        out expression_uses_beat(group.item(plain, 3))
+    }
+    (tag == "call") { out items_use_beat(plain, 1) }
+    (tag == "template") {
+        drum ((group.count(plain) - 2) / 2) {
+            (expression_uses_beat(group.item(plain, beat * 2 + 2)) == yes) { out yes }
+        }
+        out no
+    }
+    (tag == "group") { out items_use_beat(plain, 1) }
+    (tag == "box-new") {
+        drum (group.count(plain) - 2) {
+            (expression_uses_beat(ast.part(group.item(plain, beat + 2), 2)) == yes) { out yes }
+        }
+        out no
+    }
+    (tag == "rescue") {
+        (expression_uses_beat(group.item(plain, 1)) == yes) { out yes }
+        out block_uses_beat(group.item(plain, 3))
+    }
+    out no
+}
+
+skill items_use_beat(plain, first) {
+    drum (group.count(plain) - first) {
+        (expression_uses_beat(group.item(plain, beat + first)) == yes) { out yes }
+    }
+    out no
+}
+
+skill statement_uses_beat(node) {
+    @plain = ast.plain(node)
+    @tag = group.item(plain, 0)
+    (tag == "var") { out expression_uses_beat(group.item(plain, 2)) }
+    (tag == "assign") { out expression_uses_beat(group.item(plain, 2)) }
+    (tag == "field-assign") {
+        (expression_uses_beat(group.item(plain, 1)) == yes) { out yes }
+        out expression_uses_beat(group.item(plain, 2))
+    }
+    (tag == "out") { out expression_uses_beat(group.item(plain, 1)) }
+    (tag == "expr") { out expression_uses_beat(group.item(plain, 1)) }
+    (tag == "if") {
+        (expression_uses_beat(group.item(plain, 1)) == yes) { out yes }
+        out block_uses_beat(group.item(plain, 2))
+    }
+    (tag == "switch") {
+        (expression_uses_beat(group.item(plain, 1)) == yes) { out yes }
+        drum (group.count(plain) - 2) {
+            (expression_uses_beat(ast.part(group.item(plain, beat + 2), 2)) == yes) { out yes }
+        }
+        out no
+    }
+    (tag == "drum") { out expression_uses_beat(group.item(plain, 1)) }
+    (tag == "pick") {
+        drum (group.count(plain) - 1) {
+            @choice = ast.plain(group.item(plain, beat + 1))
+            (group.item(choice, 0) == "if") {
+                (statement_uses_beat(choice) == yes) { out yes }
+            }
+            (group.item(choice, 0) == "otherwise") {
+                (block_uses_beat(group.item(choice, 1)) == yes) { out yes }
+            }
+        }
+        out no
+    }
+    out no
+}
+
+skill block_uses_beat(block) {
+    @plain = ast.plain(block)
+    drum (group.count(plain) - 1) {
+        (statement_uses_beat(group.item(plain, beat + 1)) == yes) { out yes }
+    }
+    out no
+}
+
+skill collect_locals(params, body) {
+    @names = Names {}
+    drum (params) { names = name_add(names, beat) }
+    out collect_block_names(names, body)
+}
+
+skill make_slots(names, first_slot) {
+    @slots = []
+    @slot = first_slot
+    drum (names) {
+        slots = symbol_add(slots, beat.name, "slot", [], slot)
+        slot = slot - abi.VALUE_WORD_BYTES
+    }
+    out slots
+}
+
+skill slot(compiler, name) {
+    @slot = symbol_find(compiler.current_function.slots, name)
+    out slot.value
+}
+
+skill group_prepend(value, items) {
+    @result = [value]
+    drum (items) { result = group.add(result, beat) }
+    out result
+}
+
+skill group_slice(items, start, end) {
+    @result = []
+    drum (end - start) { result = group.add(result, group.item(items, start + beat)) }
+    out result
+}
+
+skill push(compiler, register, machine_register) {
+    compiler = emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - abi.VALUE_WORD_BYTES)
+    compiler = emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, machine_register, 0)
+    out compiler
+}
+
+skill pop(compiler, register, machine_register) {
+    compiler = emit_op(compiler, instruction.Kind.LW, machine_register, codec.SP, codec.ZERO, 0)
+    compiler = emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, abi.VALUE_WORD_BYTES)
+    out compiler
+}
+
+skill load_immediate(compiler, register, machine_register, value) {
+    compiler.machine = layout.emit_load_immediate(compiler.machine, machine_register, value)
+    out compiler
+}
+
+skill field(compiler, name) {
+    @field = symbol_find(compiler.fields, name)
+    out field.value
+}
+
+skill render_lines(output) {
+    out output_text(output)
+}
+
+skill collect_box(compiler, item, module) {
+    @name = ast.qualified(module, ast.part(item, 1))
+    compiler.boxes = symbol_add_text(compiler.boxes, name, "box", item, module)
+    @slot = 0
+    drum (group.count(ast.plain(item)) - 2) {
+        @member = ast.part(item, beat + 2)
+        (ast.tag(member) == "field") {
+            @field_name = ast.part(member, 1)
+            (symbol_has(compiler.fields, field_name) == no) {
+                compiler.fields = group.add(compiler.fields, Symbol { name = field_name, kind = "field", node = member, value = compiler.next_field_id, slot = slot })
+                compiler.next_field_id = compiler.next_field_id + 1
+            }
+            slot = slot + 1
+        }
+    }
+    out compiler
+}
+
+skill collect_enum(compiler, item, module) {
+    @name = ast.qualified(module, ast.part(item, 1))
+    compiler.enums = symbol_add_text(compiler.enums, name, "enum", item, module)
+    drum (group.count(ast.plain(item)) - 2) {
+        @variant = ast.part(item, beat + 2)
+        @full_name = "{name}."
+        full_name = str.add(full_name, variant)
+        @value = abi.tagged(compiler.next_enum_id, abi.TAG_ENUM)
+        compiler.variants = symbol_add(compiler.variants, full_name, "variant", item, value)
+        (symbol_has(compiler.variants, variant) == no) { compiler.variants = symbol_add(compiler.variants, variant, "variant", item, value) }
+        compiler.next_enum_id = compiler.next_enum_id + 1
+    }
+    out compiler
+}
+
+skill collect_top_level(compiler) {
+    drum (group.count(compiler.ast) - 1) {
+        @item = group.item(compiler.ast, beat + 1)
+        @tag = ast.tag(item)
+        @module = ast.module_name(item)
+        (tag == "use") {
+            @plain_use = ast.plain(item)
+            @alias = group.item(plain_use, group.count(plain_use) - 1)
+            @target = ast.path_text(item)
+            compiler.aliases = symbol_add_text(compiler.aliases, ast.alias_key(module, alias), "import", item, target)
+        }
+        (tag == "const") { compiler.constants = symbol_add_text(compiler.constants, ast.qualified(module, ast.part(item, 1)), "const", ast.part(item, 2), module) }
+        (tag == "box") { compiler = collect_box(compiler, item, module) }
+        (tag == "enum") { compiler = collect_enum(compiler, item, module) }
+        (tag == "skill") { compiler.skills = symbol_add_text(compiler.skills, ast.qualified(module, ast.part(item, 1)), "skill", item, module) }
+        (tag == "native") { compiler.natives = symbol_add_text(compiler.natives, ast.qualified(module, ast.part(item, 1)), "native", item, module) }
+        (tag == "entry") { compiler.entry = item }
+    }
+    out compiler
+}
+
+skill header(compiler) {
+    (codec.word_is_zero(compiler.heap_bytes) == yes) {
+        compiler.heap_bytes = layout.address_from_number(model.DEFAULT_HEAP_BYTES)
+    }
+    compiler.machine = layout.host("_start")
+    compiler.machine.heap_size = compiler.heap_bytes
+    compiler = emit_blank(compiler)
+    out compiler
+}
+
+skill start(compiler) {
+    @params = ast.part(compiler.entry, 1)
+    @param_count = group.count(params)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "_start")
+    compiler = emit_op(compiler, instruction.Kind.LW, codec.A0, codec.SP, codec.ZERO, 0)
+    compiler = emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.SP, codec.ZERO, abi.VALUE_WORD_BYTES)
+    compiler = emit_op(compiler, instruction.Kind.ADDI, codec.S3, codec.A1, codec.ZERO, 0)
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.S1, "saltic_heap", 0)
+    compiler.machine = layout.emit_load_word(compiler.machine, codec.S2, compiler.heap_bytes)
+    compiler = emit_op(compiler, instruction.Kind.ADD, codec.S2, codec.S1, codec.S2, 0)
+    compiler = emit_op(compiler, instruction.Kind.ADDI, codec.S0, codec.ZERO, codec.ZERO, 0)
+    compiler = emit_op(compiler, instruction.Kind.ADDI, codec.S4, codec.S1, codec.ZERO, 0)
+    compiler = emit_op(compiler, instruction.Kind.ADDI, codec.S5, codec.S2, codec.ZERO, 0)
+    compiler.machine = layout.emit_load_immediate(compiler.machine, codec.T0, param_count + 1)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, codec.A0, codec.T0, ".L_start_args_ready")
+    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T1, "rt_missing_args", 0)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.JALR, codec.ZERO, codec.T1, codec.ZERO, 0)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_start_args_ready")
+    drum (param_count) {
+        compiler = emit_op(compiler, instruction.Kind.LW, codec.A0, codec.S3, codec.ZERO, (beat + 1) * abi.VALUE_WORD_BYTES)
+        compiler.machine = layout.emit_call(compiler.machine, "rt_cstring")
+        compiler = emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - abi.VALUE_WORD_BYTES)
+        compiler = emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.A0, 0)
+    }
+    drum (param_count) {
+        compiler = emit_op(compiler, instruction.Kind.LW, abi.argument_register(beat), codec.SP, codec.ZERO, (param_count - beat - 1) * abi.VALUE_WORD_BYTES)
+    }
+    (param_count > 0) {
+        compiler = emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, param_count * abi.VALUE_WORD_BYTES)
+    }
+    compiler.machine = layout.emit_call(compiler.machine, "saltic_program")
+    compiler = emit_op(compiler, instruction.Kind.SLTU, codec.A0, codec.ZERO, codec.A1, 0)
+    compiler.machine = layout.emit_call(compiler.machine, "rt_platform_exit")
+    compiler = emit_blank(compiler)
+    out compiler
+}
+
+skill finish_data(compiler) {
+    (codec.word_is_zero(compiler.heap_bytes) == yes) {
+        compiler.heap_bytes = layout.address_from_number(model.DEFAULT_HEAP_BYTES)
+    }
+    compiler.machine.heap_size = compiler.heap_bytes
+    compiler.lines = output_add(compiler.lines, output_text(compiler.writable))
+    compiler.lines = output_add(compiler.lines, output_text(compiler.data))
+    compiler.machine = layout.align_section(compiler.machine, layout.Section.DATA, abi.OBJECT_ALIGNMENT)
+    compiler.machine = layout.align_section(compiler.machine, layout.Section.RODATA, abi.OBJECT_ALIGNMENT)
+    compiler.machine = layout.align_section(compiler.machine, layout.Section.BSS, abi.OBJECT_ALIGNMENT)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.BSS, "saltic_heap")
+    compiler.machine = layout.reserve_bss(compiler.machine, compiler.heap_bytes)
+    out compiler
+}

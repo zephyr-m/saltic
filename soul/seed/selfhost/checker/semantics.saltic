@@ -1,0 +1,672 @@
+use core.str
+use core.group
+use selfhost.ast
+use selfhost.diagnostic
+use selfhost.intrinsic.contract
+use selfhost.checker.names
+use selfhost.checker.types
+use selfhost.checker.signatures
+use selfhost.checker.rules
+
+Result = Box {
+    diagnostics = [],
+    globals = []
+}
+
+DRUM_BEAT = "beat"
+DRUM_MARKER = "$drum"
+
+skill make_diagnostic(node, code, message) {
+    @place = ast.location(node)
+    out diagnostic.make(code, group.item(place, 0), group.item(place, 1), message)
+}
+
+skill add_diagnostic(diagnostics, item) {
+    out group.add(diagnostics, item)
+}
+
+skill collect(program_ast) {
+    @result = Result {}
+    @program_seen = no
+    drum (group.count(program_ast) - 1) {
+        @item = group.item(program_ast, beat + 1)
+        @tag = ast.tag(item)
+        @module = ast.module_name(item)
+        @name = ""
+        @kind = ""
+        (tag == "use") {
+            (ast.part(item, 1) == "seed") {
+                (names.has(result.globals, "__seed__") == no) { result.globals = names.put(result.globals, "__seed__", "import", "module-path") }
+            }
+            @target = ast.path_text(item)
+            @plain_use = ast.plain(item)
+            @alias = group.item(plain_use, group.count(plain_use) - 1)
+            @alias_key = ast.alias_key(module, alias)
+            @old_alias = names.find(result.globals, alias_key)
+            pick {
+                (str.len(old_alias.name) > 0) {
+                    ((old_alias.type == target) == no) { result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, "повторный псевдоним модуля '{alias}'")) }
+                }
+                { result.globals = names.put(result.globals, alias_key, "import", target) }
+            }
+        }
+        (tag == "entry") {
+            (program_seen == yes) { result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, "повторное объявление program")) }
+            program_seen = yes
+        }
+        (tag == "const") { name = ast.qualified(module, ast.part(item, 1)) kind = "const" }
+        (tag == "enum") { name = ast.qualified(module, ast.part(item, 1)) kind = "enum" }
+        (tag == "box") { name = ast.qualified(module, ast.part(item, 1)) kind = "box" }
+        (tag == "skill") { name = ast.qualified(module, ast.part(item, 1)) kind = "skill" }
+        (tag == "native") { name = ast.qualified(module, ast.part(item, 1)) kind = "native" }
+        (str.len(name) > 0) {
+            @type = "unknown"
+            (kind == "const") { type = types.type_in_module(ast.part(item, 2), module, result.globals) }
+            (kind == "enum") { type = "enum-type" }
+            (kind == "box") { type = "box-type" }
+            (kind == "skill") { type = "function" }
+            (kind == "native") { type = "function" }
+            pick {
+                (names.has(result.globals, name) == yes) {
+                    result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, "повторное имя верхнего уровня '{name}'"))
+                }
+                {
+                    result.globals = names.put_node(result.globals, name, kind, type, item)
+                    (kind == "enum") {
+                        drum (ast.enum_variant_count(item)) {
+                            @variant = ast.enum_variant(item, beat)
+                            @variant_key = names.variant_key(variant)
+                            @old_variant = names.find(result.globals, variant_key)
+                            pick {
+                                (str.len(old_variant.name) > 0) {
+                                    result.diagnostics = add_diagnostic(result.diagnostics, make_diagnostic(item, "duplicate_enum_variant", "вариант '{variant}' уже принадлежит другому enum"))
+                                }
+                                { result.globals = names.put_node(result.globals, variant_key, "enum-variant", "enum:{name}", item) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (program_seen == no) {
+        result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("missing_program", 0, 0, "объявление program обязательно"))
+    }
+    out result
+}
+
+skill box_has_skill(globals, box_name, skill_name) {
+    @box = names.find(globals, box_name)
+    drum (group.count(ast.plain(box.node)) - 2) {
+        @member = ast.part(box.node, beat + 2)
+        (ast.tag(member) == "subject-skill") {
+            (ast.part(member, 1) == skill_name) { out yes }
+        }
+    }
+    out no
+}
+
+skill enum_has(globals, enum_name, variant) {
+    @model = names.find(globals, enum_name)
+    drum (ast.enum_variant_count(model.node)) {
+        (ast.enum_variant(model.node, beat) == variant) { out yes }
+    }
+    out no
+}
+
+skill check_path(node, scope, globals, diagnostics) {
+    @parts = ast.plain(node)
+    @name = group.item(parts, 1)
+    @count = group.count(parts)
+    @long = names.long_reference(node, scope, globals)
+    (str.len(long) > 0) { out add_diagnostic(diagnostics, make_diagnostic(node, "long_path", long)) }
+    @resolved = names.resolve_path(node, scope, globals)
+    (str.len(resolved) > 0) { out diagnostics }
+    (count == 2) {
+        @known = names.has(scope.names, name)
+        (known == no) { known = names.has(globals, name) }
+        (name == "error") { known = yes }
+        (known == no) { out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_name", "неизвестное имя '{name}'")) }
+        out diagnostics
+    }
+    (name == "error") { out diagnostics }
+    (name == "seed") {
+        (names.has(globals, "__seed__") == no) { out add_diagnostic(diagnostics, make_diagnostic(node, "seed_not_imported", "модуль 'seed' не импортирован; добавь 'use seed'")) }
+        @full = ast.path_text(node)
+        (contract.is_known(full) == no) { out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_seed_operation", "неизвестная операция seed '{full}'")) }
+        out diagnostics
+    }
+    @enum_name = names.resolve_name(ast.path_prefix(node), scope.module, globals)
+    @enum_model = names.find(globals, enum_name)
+    (enum_model.kind == "enum") {
+        @variant = group.item(parts, count - 1)
+        (enum_has(globals, enum_name, variant) == no) { out add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "в enum '{enum_name}' нет варианта '{variant}'")) }
+        out diagnostics
+    }
+    @import = names.find(globals, ast.alias_key(scope.module, name))
+    (import.kind == "import") {
+        (names.has(scope.names, name) == no) {
+            @full = ast.path_text(node)
+            out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_name", "неизвестное имя '{full}'"))
+        }
+    }
+    @global = names.find(globals, name)
+    @base = names.find(scope.names, name)
+    (str.len(base.name) == 0) { base = global }
+    (str.len(base.name) == 0) { out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_namespace", "неизвестное пространство имён '{name}'")) }
+    @type = base.type
+    drum (count - 2) {
+        @field_name = group.item(parts, beat + 2)
+        (type == "unknown") { leave }
+        (str.starts_with(type, "box:") == no) {
+            @type_name = types.type_text(type)
+            diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "нельзя обратиться к полю '{field_name}' у {type_name}"))
+            leave
+        }
+        @box_name = types.tail(type, 4)
+        @field = types.box_field(globals, box_name, field_name)
+        (str.len(field.name) == 0) {
+            diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "в Box '{box_name}' нет поля '{field_name}'"))
+            leave
+        }
+        type = field.type
+    }
+    out diagnostics
+}
+
+skill long_path_message(callee) {
+    @count = group.count(callee)
+    @full = ast.path_text(callee)
+    @module = group.item(callee, 1)
+    drum (count - 3) { module = str.add(module, str.add(".", group.item(callee, beat + 2))) }
+    @short = str.add(group.item(callee, count - 2), str.add(".", group.item(callee, count - 1)))
+    out "длинный путь вызова '{full}': подключи 'use {module}' и пиши '{short}'"
+}
+
+skill check_expression(node, scope, globals, diagnostics) {
+    @plain = ast.plain(node)
+    @tag = group.item(plain, 0)
+    (tag == "fraction-number") {
+        out add_diagnostic(diagnostics, make_diagnostic(node, "fraction_not_supported", "дробные числа в языке не поддерживаются"))
+    }
+    (tag == "wide-number") {
+        out add_diagnostic(diagnostics, make_diagnostic(node, "number_out_of_range", "обычное число не помещается в непосредственное значение; используй фиксированный целый тип"))
+    }
+    (tag == "template") {
+        drum ((group.count(plain) - 2) / 2) {
+            @placeholder = group.item(plain, beat * 2 + 2)
+            diagnostics = check_expression(placeholder, scope, globals, diagnostics)
+            @type = types.value_type(placeholder, scope, globals)
+            @allowed = no
+            (type == "string") { allowed = yes }
+            (type == "number") { allowed = yes }
+            (type == "answer") { allowed = yes }
+            (type == "unknown") { allowed = yes }
+            (allowed == no) {
+                diagnostics = add_diagnostic(diagnostics, make_diagnostic(placeholder, "template_type", str.add("в строку можно подставить только текст, число или yes/no, а '", str.add(ast.path_text(placeholder), str.add("' — ", types.type_text(type))))))
+            }
+        }
+        out diagnostics
+    }
+    (tag == "enum-value") {
+        @variant = names.find(globals, names.variant_key(group.item(plain, 1)))
+        (str.len(variant.name) == 0) {
+            out add_diagnostic(diagnostics, make_diagnostic(node, "unknown_enum_variant", str.add("неизвестный вариант enum '", str.add(group.item(plain, 1), "'"))))
+        }
+        out diagnostics
+    }
+    (tag == "path") { out check_path(node, scope, globals, diagnostics) }
+    (tag == "binary") {
+        @left_node = group.item(plain, 2)
+        @right_node = group.item(plain, 3)
+        diagnostics = check_expression(left_node, scope, globals, diagnostics)
+        diagnostics = check_expression(right_node, scope, globals, diagnostics)
+        @operator = group.item(plain, 1)
+        @numeric = no
+        (operator == "+") { numeric = yes }
+        (operator == "-") { numeric = yes }
+        (operator == "*") { numeric = yes }
+        (operator == "/") { numeric = yes }
+        (operator == ">") { numeric = yes }
+        (operator == "<") { numeric = yes }
+        (numeric == yes) {
+            @left_type = types.value_type(left_node, scope, globals)
+            @right_type = types.value_type(right_node, scope, globals)
+            @known_types = yes
+            (left_type == "unknown") { known_types = no }
+            (right_type == "unknown") { known_types = no }
+            (known_types == yes) {
+                @both_numbers = no
+                (left_type == "number") {
+                    (right_type == "number") { both_numbers = yes }
+                }
+                @fixed = no
+                (contract.is_fixed_type(left_type) == yes) { fixed = yes }
+                (contract.is_fixed_type(right_type) == yes) { fixed = yes }
+                (fixed == yes) {
+                    both_numbers = yes
+                    @message = ""
+                    (left_type == "address") { message = "для арифметики адресов используй address.add(address, usize)" }
+                    (right_type == "address") { message = "для арифметики адресов используй address.add(address, usize)" }
+                    (left_type == "bits32") { message = "операция '{operator}' недоступна для bits32: используй операции seed.bits32" }
+                    (right_type == "bits32") { message = "операция '{operator}' недоступна для bits32: используй операции seed.bits32" }
+                    (str.len(message) == 0) {
+                        (left_type == right_type) { message = "" }
+                        (left_type == "number") { message = "операция '{operator}' не может смешивать {right_type} и number" }
+                        (right_type == "number") { message = "операция '{operator}' не может смешивать {left_type} и number" }
+                        (str.len(message) == 0) {
+                            (left_type == right_type) { message = "" }
+                            ((left_type == right_type) == no) { message = "операция '{operator}' требует одинаковые фиксированные целые типы: получены {left_type} и {right_type}" }
+                        }
+                    }
+                    (str.len(message) > 0) { diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "operator_type_mismatch", message)) }
+                }
+                (both_numbers == no) {
+                    @left_name = types.type_text(left_type)
+                    @right_name = types.type_text(right_type)
+                    diagnostics = add_diagnostic(diagnostics, diagnostic.make("operator_type_mismatch", 0, 0, "оператор '{operator}' ожидает числа, получено {left_name} и {right_name}"))
+                }
+            }
+        }
+        out diagnostics
+    }
+    (tag == "call") {
+        @callee = ast.plain(ast.call_callee(node))
+        (group.item(callee, 0) == "path") {
+            @part_count = group.count(callee)
+            (part_count > 3) {
+                (names.has(scope.names, group.item(callee, 1)) == no) {
+                    out add_diagnostic(diagnostics, make_diagnostic(node, "long_path", long_path_message(callee)))
+                }
+            }
+        }
+        @full = names.call_name(callee, scope, globals)
+        @fixed_call = contract.is_fixed_type(full)
+        @skip_callee = no
+        (group.item(callee, 0) == "path") {
+            @callee_count = group.count(callee)
+            (callee_count == 2) {
+                (contract.is_fixed_type(group.item(callee, 1)) == yes) { skip_callee = yes }
+                (str.len(scope.subject) > 0) {
+                    (box_has_skill(globals, scope.subject, group.item(callee, 1)) == yes) { skip_callee = yes }
+                }
+            }
+            (callee_count == 3) {
+                @receiver_path = ["path", group.item(callee, 1)]
+                @receiver_type = types.path_type(receiver_path, scope, globals)
+                (str.starts_with(receiver_type, "box:") == yes) {
+                    (box_has_skill(globals, types.tail(receiver_type, 4), group.item(callee, 2)) == yes) { skip_callee = yes }
+                }
+            }
+        }
+        (skip_callee == no) {
+            diagnostics = check_expression(ast.call_callee(node), scope, globals, diagnostics)
+        }
+        @argument_count = ast.call_argument_count(node)
+        drum (argument_count) {
+            @argument = ast.call_argument(node, beat)
+            @skip_argument = no
+            (fixed_call == yes) {
+                (beat == 0) {
+                    (rules.is_integer_literal(argument) == yes) { skip_argument = yes }
+                    (rules.is_fraction(argument) == yes) { skip_argument = yes }
+                }
+            }
+            (skip_argument == no) { diagnostics = check_expression(argument, scope, globals, diagnostics) }
+        }
+        (fixed_call == no) {
+            @callee_global = names.find(globals, full)
+            @keeps_fixed = callee_global.kind == "native"
+            (str.starts_with(full, "core.group.") == yes) { keeps_fixed = no }
+            (keeps_fixed == no) {
+                drum (argument_count) {
+                    diagnostics = check_fixed_escape(node, ast.call_argument(node, beat), "передать в '{full}'", scope, globals, diagnostics)
+                }
+            }
+        }
+        @receiver_type = "unknown"
+        (group.count(callee) == 3) {
+            @receiver_path = ["path", group.item(callee, 1)]
+            receiver_type = types.path_type(receiver_path, scope, globals)
+        }
+        @signature = signatures.resolve(callee, scope, globals, receiver_type)
+        @arity_message = rules.arity_message(signature, argument_count)
+        (str.len(arity_message) > 0) {
+            diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "call_arity", arity_message))
+        }
+        (fixed_call == yes) {
+            (argument_count > 0) {
+                @fixed_argument = ast.call_argument(node, 0)
+                @text = types.integer_text(fixed_argument)
+                (str.len(text) > 0) {
+                    (contract.fixed_in_range(full, text) == no) {
+                        @range = contract.fixed_range_text(full)
+                        diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "fixed_integer_out_of_range", "значение {text} не помещается в {full}: допустимо {range}"))
+                    }
+                }
+                @actual_type = types.value_type(fixed_argument, scope, globals)
+                @fixed_message = rules.fixed_argument_message(fixed_argument, actual_type)
+                (str.len(fixed_message) > 0) {
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "fixed_integer_argument", fixed_message))
+                }
+            }
+        }
+        @seed_kind = contract.find(full)
+        @address_type = "unknown"
+        (group.count(plain) > 2) { address_type = types.value_type(group.item(plain, 2), scope, globals) }
+        @expected = contract.store_type(seed_kind, address_type)
+        (str.len(expected) > 0) {
+            (address_type == "address") {
+                (group.count(plain) > 4) {
+                @actual = types.value_type(group.item(plain, 4), scope, globals)
+                (actual == expected) { expected = "" }
+                (str.len(expected) > 0) {
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "type_mismatch", "{full} ожидает значение {expected}, получено {actual}"))
+                }
+                }
+            }
+        }
+        @checked_argument = contract.checked_argument(seed_kind)
+        ((checked_argument < 0) == no) {
+            @expected_type = contract.checked_type(seed_kind)
+            @argument_index = checked_argument + 2
+            (argument_index < group.count(plain)) {
+                @actual = types.value_type(group.item(plain, argument_index), scope, globals)
+                (actual == expected_type) { expected_type = "" }
+                (str.len(expected_type) > 0) {
+                    @expected_text = expected_type
+                    (expected_type == "u8") { expected_text = "сдвиг {expected_type}" }
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "type_mismatch", "{full} ожидает {expected_text}, получено {actual}"))
+                }
+            }
+        }
+        out diagnostics
+    }
+    (tag == "group") {
+        drum (group.count(plain) - 1) {
+            diagnostics = check_fixed_escape(node, group.item(plain, beat + 1), "положить в группу", scope, globals, diagnostics)
+            diagnostics = check_expression(group.item(plain, beat + 1), scope, globals, diagnostics)
+        }
+        out diagnostics
+    }
+    (tag == "box-new") {
+        @name = group.item(plain, 1)
+        @long_box = names.long_reference(names.path_from_text(name), scope, globals)
+        (str.len(long_box) > 0) { out add_diagnostic(diagnostics, make_diagnostic(node, "long_path", long_box)) }
+        @resolved_box = names.resolve_name(name, scope.module, globals)
+        @model = names.find(globals, resolved_box)
+        (model.kind == "box") {
+            @seen = []
+            drum (group.count(plain) - 2) {
+                @override = group.item(plain, beat + 2)
+                @field_name = ast.part(override, 1)
+                @value = ast.part(override, 2)
+                diagnostics = check_expression(value, scope, globals, diagnostics)
+                (names.has(seen, field_name) == yes) {
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "duplicate_definition", "повторное поле '{field_name}' в литерале Box '{name}'"))
+                }
+                seen = names.put(seen, field_name, "field", "unknown")
+                @field = types.box_field(globals, resolved_box, field_name)
+                pick {
+                    (str.len(field.name) == 0) {
+                        diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "в Box '{name}' нет поля '{field_name}'"))
+                    }
+                    {
+                        @value_type = types.value_type(value, scope, globals)
+                        (types.compatible(field.type, value_type) == no) {
+                            @value_name = types.type_text(value_type)
+                            @field_type = types.type_text(field.type)
+                            diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "нельзя присвоить {value_name} полю '{field_name}' Box '{name}' типа {field_type}"))
+                        }
+                    }
+                }
+            }
+            out diagnostics
+        }
+        diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "неизвестный Box '{name}'"))
+        out diagnostics
+    }
+    (tag == "rescue") {
+        diagnostics = check_expression(group.item(plain, 1), scope, globals, diagnostics)
+        @child = names.Scope { names = scope.names, subject = scope.subject, module = scope.module }
+        diagnostics = check_module_name(node, group.item(plain, 2), scope.module, globals, diagnostics)
+        child.names = names.put(child.names, group.item(plain, 2), "variable", "error")
+        out check_block(group.item(plain, 3), child, globals, diagnostics)
+    }
+    out diagnostics
+}
+
+skill check_module_name(node, name, module, globals, diagnostics) {
+    @target = names.module_alias(globals, module, name)
+    (str.len(target) == 0) { out diagnostics }
+    out add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "имя '{name}' занято модулем '{target}': назови переменную иначе"))
+}
+
+skill check_fixed_escape(node, value, place, scope, globals, diagnostics) {
+    @message = rules.fixed_escape_message(types.value_type(value, scope, globals), place)
+    (str.len(message) == 0) { out diagnostics }
+    out add_diagnostic(diagnostics, make_diagnostic(node, "type_mismatch", message))
+}
+
+skill check_statement(node, scope, globals, diagnostics) {
+    @plain = ast.plain(node)
+    @tag = group.item(plain, 0)
+    (tag == "var") {
+        @name = group.item(plain, 1)
+        @value = group.item(plain, 2)
+        diagnostics = check_expression(value, scope, globals, diagnostics)
+        (names.has(scope.names, name) == yes) { diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "переменная '{name}' уже объявлена в этой области")) }
+        (names.has(scope.names, name) == no) {
+            (names.has(globals, name) == yes) {
+                diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "переменная '{name}' конфликтует с именем верхнего уровня"))
+            }
+            (names.has(globals, name) == no) {
+                diagnostics = check_module_name(node, name, scope.module, globals, diagnostics)
+                scope.names = names.put(scope.names, name, "variable", types.value_type(value, scope, globals))
+            }
+        }
+        out diagnostics
+    }
+    (tag == "assign") {
+        @name = group.item(plain, 1)
+        @value = group.item(plain, 2)
+        diagnostics = check_expression(value, scope, globals, diagnostics)
+        (names.has(scope.names, name) == yes) {
+            @old = names.find(scope.names, name)
+            @value_type = types.value_type(value, scope, globals)
+            (types.compatible(old.type, value_type) == yes) { scope.names = names.update(scope.names, name, types.merge(old.type, value_type)) }
+            (types.compatible(old.type, value_type) == no) {
+                @value_name = types.type_text(value_type)
+                @old_name = types.type_text(old.type)
+                diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "type_mismatch", "нельзя присвоить {value_name} переменной '{name}' типа {old_name}"))
+            }
+        }
+        (names.has(scope.names, name) == no) {
+            @global = names.find(globals, name)
+            @is_constant = no
+            (global.kind == "const") { is_constant = yes }
+            (global.kind == "const") { diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "constant_assignment", "нельзя присвоить значение константе '{name}'")) }
+            (str.len(global.name) > 0) {
+                (is_constant == no) {
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "нельзя присвоить значение имени верхнего уровня '{name}'"))
+                }
+            }
+            (str.len(global.name) == 0) { diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "variable_not_declared", "переменная '{name}' не объявлена")) }
+        }
+        out diagnostics
+    }
+    (tag == "field-assign") {
+        @target = ast.plain(group.item(plain, 1))
+        @part_count = group.count(target)
+        @base_parts = ["path"]
+        drum (part_count - 2) {
+            base_parts = group.add(base_parts, group.item(target, beat + 1))
+        }
+        diagnostics = check_path(base_parts, scope, globals, diagnostics)
+        @value = group.item(plain, 2)
+        diagnostics = check_expression(value, scope, globals, diagnostics)
+        @base_type = types.path_type(base_parts, scope, globals)
+        (str.starts_with(base_type, "box:") == yes) {
+            @box_name = types.tail(base_type, 4)
+            @field_name = group.item(target, part_count - 1)
+            @field = types.box_field(globals, box_name, field_name)
+            (str.len(field.name) == 0) {
+                diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "в Box '{box_name}' нет поля '{field_name}'"))
+            }
+            (str.len(field.name) > 0) {
+                @value_type = types.value_type(value, scope, globals)
+                (types.compatible(field.type, value_type) == no) {
+                    @value_name = types.type_text(value_type)
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "нельзя присвоить {value_name} полю '{field_name}' Box '{box_name}'"))
+                }
+            }
+        }
+        out diagnostics
+    }
+    (tag == "out") {
+        diagnostics = check_fixed_escape(node, group.item(plain, 1), "вернуть из навыка", scope, globals, diagnostics)
+        out check_expression(group.item(plain, 1), scope, globals, diagnostics)
+    }
+    (tag == "pick") {
+        @count = group.count(plain)
+        drum (count - 1) {
+            @choice = group.item(plain, beat + 1)
+            @choice_plain = ast.plain(choice)
+            @choice_tag = group.item(choice_plain, 0)
+            @child = names.Scope { names = scope.names, subject = scope.subject, module = scope.module }
+            (choice_tag == "if") {
+                diagnostics = check_expression(group.item(choice_plain, 1), scope, globals, diagnostics)
+                diagnostics = check_block(group.item(choice_plain, 2), child, globals, diagnostics)
+            }
+            (choice_tag == "switch") { diagnostics = add_diagnostic(diagnostics, make_diagnostic(choice, "checker_error", "вариант pick должен быть условием, а не выбором по enum")) }
+            (choice_tag == "otherwise") {
+                (beat + 2 < count) { diagnostics = add_diagnostic(diagnostics, make_diagnostic(choice, "checker_error", "блок без условия в pick должен быть последним")) }
+                diagnostics = check_block(group.item(choice_plain, 1), child, globals, diagnostics)
+            }
+        }
+        out diagnostics
+    }
+    (tag == "leave") {
+        (names.has(scope.names, DRUM_MARKER) == no) { out add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "leave допустим только внутри drum")) }
+        out diagnostics
+    }
+    (tag == "expr") { out check_expression(group.item(plain, 1), scope, globals, diagnostics) }
+    (tag == "if") {
+        diagnostics = check_expression(group.item(plain, 1), scope, globals, diagnostics)
+        out check_block(group.item(plain, 2), names.Scope { names = scope.names, subject = scope.subject, module = scope.module }, globals, diagnostics)
+    }
+    (tag == "drum") {
+        @count_node = group.item(plain, 1)
+        diagnostics = check_expression(count_node, scope, globals, diagnostics)
+        @count_type = types.value_type(count_node, scope, globals)
+        @drum_message = rules.drum_message(count_type)
+        (str.len(drum_message) > 0) {
+            diagnostics = add_diagnostic(diagnostics, make_diagnostic(count_node, "drum_type", drum_message))
+        }
+        @drum_scope = names.Scope { names = scope.names, subject = scope.subject, module = scope.module }
+        drum_scope.names = names.put(drum_scope.names, DRUM_BEAT, "variable", "unknown")
+        drum_scope.names = names.put(drum_scope.names, DRUM_MARKER, "variable", "unknown")
+        out check_block(group.item(plain, 2), drum_scope, globals, diagnostics)
+    }
+    (tag == "switch") {
+        @subject_node = ast.switch_subject(node)
+        diagnostics = check_expression(subject_node, scope, globals, diagnostics)
+        @subject_type = types.value_type(subject_node, scope, globals)
+        @seen = []
+        drum (ast.switch_case_count(node)) {
+            @case_node = ast.switch_case(node, beat)
+            @variant_name = ast.case_variant(case_node)
+            pick {
+                (names.has(seen, variant_name) == yes) {
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(case_node, "duplicate_switch_case", "повторная ветка enum '{variant_name}'"))
+                }
+                { seen = names.put(seen, variant_name, "case", "unknown") }
+            }
+            @variant = names.find(globals, names.variant_key(variant_name))
+            pick {
+                (str.len(variant.name) == 0) {
+                    diagnostics = add_diagnostic(diagnostics, make_diagnostic(case_node, "unknown_enum_variant", "неизвестный вариант enum '{variant_name}'"))
+                }
+                (str.starts_with(subject_type, "enum:") == yes) {
+                    ((variant.type == subject_type) == no) {
+                        @owner_name = types.type_text(variant.type)
+                        @subject_name = types.type_text(subject_type)
+                        diagnostics = add_diagnostic(diagnostics, make_diagnostic(case_node, "enum_type_mismatch", "вариант '{variant_name}' принадлежит {owner_name}, а выбирается {subject_name}"))
+                    }
+                }
+            }
+            diagnostics = check_expression(ast.case_body(case_node), scope, globals, diagnostics)
+        }
+        out diagnostics
+    }
+    out add_diagnostic(diagnostics, make_diagnostic(node, "checker_error", "неподдерживаемая инструкция {tag}"))
+}
+
+skill check_block(block, scope, globals, diagnostics) {
+    @plain = ast.plain(block)
+    drum (group.count(plain) - 1) {
+        diagnostics = check_statement(group.item(plain, beat + 1), scope, globals, diagnostics)
+    }
+    out diagnostics
+}
+
+skill check_params(params, globals, subject, module, body, diagnostics) {
+    @scope = names.Scope { subject = subject, module = module }
+    (str.len(subject) > 0) {
+        @model = names.find(globals, subject)
+        drum (group.count(ast.plain(model.node)) - 2) {
+            @member = ast.part(model.node, beat + 2)
+            (ast.tag(member) == "field") { scope.names = names.put(scope.names, ast.part(member, 1), "field", types.type_in_module(ast.part(member, 2), module, globals)) }
+        }
+    }
+    drum (params) {
+        pick {
+            (names.has(scope.names, beat) == yes) { diagnostics = add_diagnostic(diagnostics, diagnostic.make("duplicate_definition", 0, 0, "повторный параметр '{beat}'")) }
+            {
+                diagnostics = check_module_name([], beat, module, globals, diagnostics)
+                scope.names = names.put(scope.names, beat, "parameter", "unknown")
+            }
+        }
+    }
+    out check_block(body, scope, globals, diagnostics)
+}
+
+skill check(program_ast) {
+    @result = collect(program_ast)
+    drum (group.count(program_ast) - 1) {
+        @item = group.item(program_ast, beat + 1)
+        @tag = ast.tag(item)
+        @module = ast.module_name(item)
+        (tag == "const") { result.diagnostics = check_expression(ast.part(item, 2), names.Scope { module = module }, result.globals, result.diagnostics) }
+        (tag == "skill") { result.diagnostics = check_params(ast.part(item, 2), result.globals, "", module, ast.part(item, 3), result.diagnostics) }
+        (tag == "entry") { result.diagnostics = check_params(ast.part(item, 1), result.globals, "", module, ast.part(item, 2), result.diagnostics) }
+        (tag == "box") {
+            @seen_fields = []
+            @seen_skills = []
+            drum (group.count(ast.plain(item)) - 2) {
+                @member = ast.part(item, beat + 2)
+                @member_tag = ast.tag(member)
+                (member_tag == "field") {
+                    @field_name = ast.part(member, 1)
+                    (names.has(seen_fields, field_name) == yes) {
+                        @box_name = ast.part(item, 1)
+                        result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, "повторное поле '{field_name}' в Box '{box_name}'"))
+                    }
+                    seen_fields = names.put(seen_fields, field_name, "field", "unknown")
+                    result.diagnostics = check_fixed_escape(member, ast.part(member, 2), "положить в поле Box", names.Scope { module = module }, result.globals, result.diagnostics)
+                    result.diagnostics = check_expression(ast.part(member, 2), names.Scope { module = module }, result.globals, result.diagnostics)
+                }
+                (member_tag == "subject-skill") {
+                    @skill_name = ast.part(member, 1)
+                    (names.has(seen_skills, skill_name) == yes) {
+                        @box_name = ast.part(item, 1)
+                        result.diagnostics = add_diagnostic(result.diagnostics, diagnostic.make("duplicate_definition", 0, 0, "повторный skill '{skill_name}' в Box '{box_name}'"))
+                    }
+                    seen_skills = names.put(seen_skills, skill_name, "skill", "function")
+                    result.diagnostics = check_params(ast.part(member, 2), result.globals, ast.qualified(module, ast.part(item, 1)), module, ast.part(member, 3), result.diagnostics)
+                }
+            }
+        }
+    }
+    out result
+}

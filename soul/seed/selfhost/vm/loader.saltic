@@ -1,0 +1,173 @@
+use core.str
+use core.group
+use core.num
+use io
+use selfhost.vm.state
+
+skill image_u16(image, offset) {
+    out image_byte(image, offset) + image_byte(image, offset + 1) * 256
+}
+
+skill image_u32(image, offset) {
+    out state.word_address(image_word(image, offset))
+}
+
+skill image_word(image, offset) {
+    out state.word_bytes(image_byte(image, offset), image_byte(image, offset + 1), image_byte(image, offset + 2), image_byte(image, offset + 3))
+}
+
+skill image_length(image) {
+    @length = 0
+    drum (image) { length = length + group.count(beat) }
+    out length
+}
+
+skill image_byte(image, offset) {
+    @chunk = group.at(image, offset / state.PAGE_SIZE)
+    out group.at(chunk, state.mod(offset, state.PAGE_SIZE))
+}
+
+skill load_error(machine, message) {
+    machine.trap = message
+    machine.halted = yes
+    out none
+}
+
+skill copy_image(machine, image, offset, address, size) {
+    @mark = 0
+    drum (size) {
+        state.memory_raw_store8(machine.memory, address + beat, image_byte(image, offset + beat))
+        mark = mark + 1
+        (mark == 65536) {
+            (size > 65536) {
+                io.show("vm: образ ", num.text(beat + 1), " / ", num.text(size))
+            }
+            mark = 0
+        }
+    }
+    out none
+}
+
+skill fill_memory(machine, address, size) {
+    state.memory_fill_zero(machine.memory, address, size)
+    out none
+}
+
+skill load_flat(machine, image, address) {
+    @size = image_length(image)
+    (address < 0) { load_error(machine, "адрес плоского образа находится за пределами ОЗУ") out none }
+    (address > machine.memory.size - size) { load_error(machine, "плоский образ выходит за пределы ОЗУ") out none }
+    copy_image(machine, image, 0, address, size)
+    machine.pc = address
+    out none
+}
+
+skill load_elf(machine, image) {
+    @length = image_length(image)
+    (length < 52) { load_error(machine, "заголовок ELF обрезан") out none }
+    (image_byte(image, 4) == 1) {
+        (image_byte(image, 5) == 1) {
+            (image_u16(image, 18) == 243) {
+                @entry_word = image_word(image, 24)
+                @table = image_u32(image, 28)
+                @entry_size = image_u16(image, 42)
+                @count = image_u16(image, 44)
+                @segments = 0
+                drum (count) {
+                    (str.len(machine.trap) == 0) {
+                        @header = table + beat * entry_size
+                        (header > length - 32) {
+                            load_error(machine, "заголовок программы ELF обрезан")
+                        }
+                        (header < length - 31) {
+                            (image_u32(image, header) == 1) {
+                                @offset = image_u32(image, header + 4)
+                                @address_word = image_word(image, header + 8)
+                                @address = state.memory_offset(machine.memory, address_word)
+                                @file_size = image_u32(image, header + 16)
+                                @memory_size = image_u32(image, header + 20)
+                                @valid = yes
+                                (file_size > memory_size) { valid = no }
+                                (offset > length - file_size) { valid = no }
+                                (address < 0) { valid = no }
+                                (address > machine.memory.size - memory_size) { valid = no }
+                                (valid == no) { load_error(machine, "некорректный загрузочный сегмент ELF") }
+                                (valid == yes) {
+                                    copy_image(machine, image, offset, address, file_size)
+                                    (memory_size > file_size) { fill_memory(machine, address + file_size, memory_size - file_size) }
+                                    segments = segments + 1
+                                }
+                            }
+                        }
+                    }
+                }
+                (str.len(machine.trap) == 0) {
+                    (segments == 0) { load_error(machine, "ELF не содержит загрузочных сегментов") }
+                    (segments > 0) {
+                        @entry = state.memory_offset(machine.memory, entry_word)
+                        (entry < 0) { load_error(machine, "точка входа ELF находится за пределами ОЗУ") }
+                        (entry > machine.memory.size - 4) { load_error(machine, "точка входа ELF находится за пределами ОЗУ") }
+                        (str.len(machine.trap) == 0) { machine.pc = entry }
+                    }
+                }
+                out none
+            }
+            load_error(machine, "архитектура ELF отличается от RISC-V")
+            out none
+        }
+        load_error(machine, "поддерживается только little-endian ELF")
+        out none
+    }
+    load_error(machine, "поддерживается только ELF32")
+    out none
+}
+
+skill load(machine, image, address) {
+    @elf = no
+    (image_length(image) > 3) {
+        (image_byte(image, 0) == 127) {
+            (image_byte(image, 1) == 69) {
+                (image_byte(image, 2) == 76) {
+                    (image_byte(image, 3) == 70) { elf = yes }
+                }
+            }
+        }
+    }
+    (elf == yes) { load_elf(machine, image) out none }
+    load_flat(machine, image, address)
+    out none
+}
+
+skill prepare_stack(machine, options) {
+    @values = group.add([], options.program_name)
+    drum (options.arguments) { values = group.add(values, beat) }
+
+    @count = group.count(values)
+    @cursor = machine.memory.size - 16
+    cursor = cursor - state.mod(cursor, 16)
+    @addresses = []
+    drum (count) {
+        @data = state.name_add(machine, group.at(values, count - 1 - beat))
+        cursor = cursor - group.count(data) - 1
+        @byte_count = group.count(data)
+        drum (byte_count) {
+            state.memory_raw_store8(machine.memory, cursor + beat, group.at(data, beat))
+        }
+        state.memory_raw_store8(machine.memory, cursor + byte_count, 0)
+        addresses = group.add(addresses, cursor)
+    }
+
+    @stack = cursor - (count + 2) * 4
+    stack = stack - state.mod(stack, 16)
+    @argv = stack + 4
+    state.memory_store_word(machine.memory, stack, state.word_number(count), 4)
+    drum (count) {
+        @address = state.memory_address(machine.memory, group.at(addresses, beat))
+        state.memory_store_word(machine.memory, argv + (count - beat - 1) * 4, address, 4)
+    }
+    state.memory_store_word(machine.memory, argv + count * 4, state.word_zero(), 4)
+    state.set_register(machine, 2, state.memory_address(machine.memory, stack))
+    state.set_register(machine, 10, state.word_number(count))
+    state.set_register(machine, 11, state.memory_address(machine.memory, argv))
+    out none
+}

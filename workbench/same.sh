@@ -12,12 +12,12 @@ status=0
 
 echo "== stage-1 из текущих исходников"
 if ! SALTIC_BUILD_DIR="$W/stage" SALTIC_HEAP_BYTES=4026531840 SALTIC_DIRECT_ONLY=1 \
-    bash bootstrap/build.sh soul/seed/toolchain.saltic "$W/stage-1.elf" > "$W/stage.log" 2>&1; then
+    bash bootstrap/build.sh soul/seed/selfhost/toolchain.saltic "$W/stage-1.elf" > "$W/stage.log" 2>&1; then
     grep -v "^warning" "$W/stage.log" | tail -5
     exit 1
 fi
 
-for source in soul/seed/toolchain.saltic soul/seed/canonical/main.saltic soul/seed/tests/contract.saltic "$@"; do
+for source in soul/seed/selfhost/toolchain.saltic soul/seed/canonical/main.saltic soul/seed/tests/contract.saltic "$@"; do
     name="$(basename "$source" .saltic)"
     SALTIC_BUILD_DIR="$W/old-$name" SALTIC_DIRECT_ONLY=1 \
         bash bootstrap/build.sh "$source" "$W/old-$name.elf" > /dev/null 2>&1

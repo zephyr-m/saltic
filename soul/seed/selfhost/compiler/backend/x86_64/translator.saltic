@@ -1,0 +1,403 @@
+use selfhost.machine.codec
+use selfhost.machine.instruction
+use selfhost.machine.layout
+use selfhost.vm.cpu
+use selfhost.compiler.backend.x86_64.encoder
+use selfhost.compiler.backend.x86_64.platform
+use selfhost.compiler.backend.x86_64.uefi
+
+PAGE_BYTES = 4096
+INSTRUCTION_BYTES = 4
+TABLE_ENTRY_BYTES = 8
+LEA_BYTES = 7
+REGISTER_FILE_BYTES = 4096
+STRINGS_BYTES = 65536
+ARGUMENTS_BYTES = 65536
+STACK_BYTES = 8388608
+STACK_GUARD_BYTES = 1048576
+HOST_ADDRESS = 4194304
+UEFI_TABLE_RVA = 4096
+RELOCATION_BYTES = 12
+
+Native = Box {
+    rv = layout.Program {},
+    rv_layout = layout.Layout {},
+    code = codec.Buffer {},
+    table = codec.Buffer {},
+    table_address = codec.Word {},
+    register_file = codec.Word {},
+    code_address = codec.Word {},
+    entry = codec.Word {},
+    data_bytes = 0,
+    guest_address = codec.Word {},
+    guest_bytes = 0,
+    stack_address = codec.Word {},
+    stack_bytes = 0
+}
+
+Firmware = Box {
+    rv = layout.Program {},
+    rv_layout = layout.Layout {},
+    code = codec.Buffer {},
+    table = codec.Buffer {},
+    table_rva = 0,
+    code_rva = 0,
+    entry_rva = 0,
+    relocation_rva = 0,
+    guest_rva = 0,
+    guest_bytes = 0
+}
+
+Work = Box {
+    code = codec.Buffer {},
+    starts = codec.Buffer {},
+    fixups = codec.Buffer {},
+    load_address = codec.Word {},
+    table_displacement = 0
+}
+
+skill wrap_add(left, right) {
+    @v0 = left.b0 + right.b0
+    @v1 = left.b1 + right.b1 + v0 / 256
+    @v2 = left.b2 + right.b2 + v1 / 256
+    @v3 = left.b3 + right.b3 + v2 / 256
+    out codec.word(codec.mod(v0, 256), codec.mod(v1, 256), codec.mod(v2, 256), codec.mod(v3, 256))
+}
+
+skill page_align(word) {
+    @offset = word.b0 + codec.mod(word.b1, 16) * 256
+    (offset == 0) { out word }
+    out codec.word_add_number(word, PAGE_BYTES - offset)
+}
+
+skill read_number(buffer, offset) {
+    out codec.word_to_number(codec.word(codec.byte_at(buffer, offset), codec.byte_at(buffer, offset + 1), codec.byte_at(buffer, offset + 2), codec.byte_at(buffer, offset + 3)))
+}
+
+skill add_fixup(work, target_index) {
+    work.fixups = codec.append_word(work.fixups, codec.word_from_number(work.code.length - 4))
+    work.fixups = codec.append_word(work.fixups, codec.word_from_number(target_index))
+    out work
+}
+
+skill store_result(work, rd, source) {
+    (rd > 0) { work.code = encoder.store_register(work.code, rd, source) }
+    out work
+}
+
+skill branch_condition(kind) {
+    (kind == instruction.Kind.BEQ) { out encoder.EQUAL }
+    (kind == instruction.Kind.BNE) { out encoder.NOT_EQUAL }
+    (kind == instruction.Kind.BLT) { out encoder.LESS }
+    (kind == instruction.Kind.BGE) { out encoder.GREATER_OR_EQUAL }
+    (kind == instruction.Kind.BLTU) { out encoder.BELOW }
+    out encoder.ABOVE_OR_EQUAL
+}
+
+skill load_width(kind) {
+    (kind == instruction.Kind.LB) { out 1 }
+    (kind == instruction.Kind.LBU) { out 1 }
+    (kind == instruction.Kind.LH) { out 2 }
+    (kind == instruction.Kind.LHU) { out 2 }
+    out 4
+}
+
+skill store_width(kind) {
+    (kind == instruction.Kind.SB) { out 1 }
+    (kind == instruction.Kind.SH) { out 2 }
+    out 4
+}
+
+skill register_operation(kind) {
+    (kind == instruction.Kind.ADD) { out encoder.ADD }
+    (kind == instruction.Kind.SUB) { out encoder.SUB }
+    (kind == instruction.Kind.XOR) { out encoder.XOR }
+    (kind == instruction.Kind.OR) { out encoder.OR }
+    (kind == instruction.Kind.AND) { out encoder.AND }
+    out -1
+}
+
+skill immediate_operation(kind) {
+    (kind == instruction.Kind.XORI) { out encoder.XOR }
+    (kind == instruction.Kind.ORI) { out encoder.OR }
+    (kind == instruction.Kind.ANDI) { out encoder.AND }
+    out -1
+}
+
+skill shift_operation(kind) {
+    (kind == instruction.Kind.SLL) { out encoder.SHIFT_LEFT }
+    (kind == instruction.Kind.SLLI) { out encoder.SHIFT_LEFT }
+    (kind == instruction.Kind.SRL) { out encoder.SHIFT_RIGHT }
+    (kind == instruction.Kind.SRLI) { out encoder.SHIFT_RIGHT }
+    (kind == instruction.Kind.SRA) { out encoder.SHIFT_ARITHMETIC }
+    (kind == instruction.Kind.SRAI) { out encoder.SHIFT_ARITHMETIC }
+    out -1
+}
+
+skill translate_control(work, index, decoded) {
+    @kind = decoded.kind
+    @next = codec.word_add_number(work.load_address, (index + 1) * INSTRUCTION_BYTES)
+    (kind == instruction.Kind.JAL) {
+        (decoded.rd > 0) {
+            work.code = encoder.move_word(work.code, encoder.EAX, next)
+            work = store_result(work, decoded.rd, encoder.EAX)
+        }
+        work.code = encoder.jump(work.code)
+        out add_fixup(work, index + cpu.immediate_j(decoded) / INSTRUCTION_BYTES)
+    }
+    (kind == instruction.Kind.JALR) {
+        work.code = encoder.load_register(work.code, encoder.EAX, decoded.rs1)
+        @offset = cpu.immediate_i(decoded)
+        ((offset == 0) == no) { work.code = encoder.operate_immediate(work.code, encoder.ADD, encoder.EAX, offset) }
+        work.code = encoder.operate_immediate(work.code, encoder.AND, encoder.EAX, -2)
+        (decoded.rd > 0) {
+            work.code = encoder.move_word(work.code, encoder.ECX, next)
+            work = store_result(work, decoded.rd, encoder.ECX)
+        }
+        work.code = encoder.load_table_entry(work.code, work.table_displacement)
+        work.code = encoder.jump_to_eax(work.code)
+        out work
+    }
+    work.code = encoder.load_register(work.code, encoder.EAX, decoded.rs1)
+    work.code = encoder.load_register(work.code, encoder.ECX, decoded.rs2)
+    work.code = encoder.operate(work.code, encoder.CMP, encoder.EAX, encoder.ECX)
+    work.code = encoder.jump_condition(work.code, branch_condition(kind))
+    out add_fixup(work, index + cpu.immediate_b(decoded) / INSTRUCTION_BYTES)
+}
+
+skill translate_memory(work, decoded) {
+    @kind = decoded.kind
+    @offset = cpu.immediate_s(decoded)
+    (decoded.opcode == 3) { offset = cpu.immediate_i(decoded) }
+    work.code = encoder.load_register(work.code, encoder.EAX, decoded.rs1)
+    ((offset == 0) == no) { work.code = encoder.operate_immediate(work.code, encoder.ADD, encoder.EAX, offset) }
+    (decoded.opcode == 3) {
+        @signed = no
+        (kind == instruction.Kind.LB) { signed = yes }
+        (kind == instruction.Kind.LH) { signed = yes }
+        work.code = encoder.load_memory(work.code, load_width(kind), signed)
+        out store_result(work, decoded.rd, encoder.EAX)
+    }
+    work.code = encoder.load_register(work.code, encoder.ECX, decoded.rs2)
+    work.code = encoder.store_memory(work.code, store_width(kind))
+    out work
+}
+
+skill translate_immediate(work, decoded) {
+    @kind = decoded.kind
+    @value = cpu.immediate_i(decoded)
+    (decoded.rd == 0) { out work }
+    (kind == instruction.Kind.ADDI) {
+        (decoded.rs1 == 0) { work.code = encoder.move_immediate(work.code, encoder.EAX, value) }
+        (decoded.rs1 > 0) {
+            work.code = encoder.load_register(work.code, encoder.EAX, decoded.rs1)
+            ((value == 0) == no) { work.code = encoder.operate_immediate(work.code, encoder.ADD, encoder.EAX, value) }
+        }
+        out store_result(work, decoded.rd, encoder.EAX)
+    }
+    work.code = encoder.load_register(work.code, encoder.EAX, decoded.rs1)
+    (kind == instruction.Kind.SLTI) {
+        work.code = encoder.operate_immediate(work.code, encoder.CMP, encoder.EAX, value)
+        work.code = encoder.set_condition(work.code, encoder.LESS)
+    }
+    (kind == instruction.Kind.SLTIU) {
+        work.code = encoder.operate_immediate(work.code, encoder.CMP, encoder.EAX, value)
+        work.code = encoder.set_condition(work.code, encoder.BELOW)
+    }
+    @operation = immediate_operation(kind)
+    (operation > -1) { work.code = encoder.operate_immediate(work.code, operation, encoder.EAX, value) }
+    @shift = shift_operation(kind)
+    (shift > -1) { work.code = encoder.shift_immediate(work.code, shift, encoder.EAX, decoded.rs2) }
+    out store_result(work, decoded.rd, encoder.EAX)
+}
+
+skill translate_register(work, decoded) {
+    @kind = decoded.kind
+    (decoded.rd == 0) { out work }
+    work.code = encoder.load_register(work.code, encoder.EAX, decoded.rs1)
+    work.code = encoder.load_register(work.code, encoder.ECX, decoded.rs2)
+    @operation = register_operation(kind)
+    (operation > -1) { work.code = encoder.operate(work.code, operation, encoder.EAX, encoder.ECX) }
+    @shift = shift_operation(kind)
+    (shift > -1) { work.code = encoder.shift_by_count(work.code, shift, encoder.EAX) }
+    (kind == instruction.Kind.SLT) {
+        work.code = encoder.operate(work.code, encoder.CMP, encoder.EAX, encoder.ECX)
+        work.code = encoder.set_condition(work.code, encoder.LESS)
+    }
+    (kind == instruction.Kind.SLTU) {
+        work.code = encoder.operate(work.code, encoder.CMP, encoder.EAX, encoder.ECX)
+        work.code = encoder.set_condition(work.code, encoder.BELOW)
+    }
+    out store_result(work, decoded.rd, encoder.EAX)
+}
+
+skill translate_instruction(work, index, decoded) {
+    @kind = decoded.kind
+    @opcode = decoded.opcode
+    (kind == instruction.Kind.LUI) {
+        (decoded.rd == 0) { out work }
+        work.code = encoder.move_word(work.code, encoder.EAX, cpu.immediate_u(decoded))
+        out store_result(work, decoded.rd, encoder.EAX)
+    }
+    (kind == instruction.Kind.AUIPC) {
+        (decoded.rd == 0) { out work }
+        @pc = codec.word_add_number(work.load_address, index * INSTRUCTION_BYTES)
+        work.code = encoder.move_word(work.code, encoder.EAX, wrap_add(pc, cpu.immediate_u(decoded)))
+        out store_result(work, decoded.rd, encoder.EAX)
+    }
+    (opcode == 111) { out translate_control(work, index, decoded) }
+    (opcode == 103) { out translate_control(work, index, decoded) }
+    (opcode == 99) { out translate_control(work, index, decoded) }
+    (opcode == 3) { out translate_memory(work, decoded) }
+    (opcode == 35) { out translate_memory(work, decoded) }
+    (opcode == 19) { out translate_immediate(work, decoded) }
+    (opcode == 51) { out translate_register(work, decoded) }
+    (kind == instruction.Kind.FENCE) { out work }
+    (kind == instruction.Kind.ECALL) {
+        work.code = encoder.spill_registers(work.code)
+        work.code = encoder.call(work.code)
+        work = patch_call(work, work.code.length - 4)
+        work.code = encoder.reload_registers(work.code)
+        out work
+    }
+    (kind == instruction.Kind.EBREAK) {
+        work.code = encoder.breakpoint(work.code)
+        out work
+    }
+    work.code = encoder.undefined(work.code)
+    out work
+}
+
+skill patch_call(work, offset) {
+    work.code = codec.set_word(work.code, offset, encoder.signed_word(0 - (offset + 4)))
+    out work
+}
+
+skill resolve_fixups(work) {
+    drum (work.fixups.length / 8) {
+        @offset = read_number(work.fixups, beat * 8)
+        @target = read_number(work.fixups, beat * 8 + 4)
+        @destination = read_number(work.starts, target * 4)
+        work.code = codec.set_word(work.code, offset, encoder.signed_word(destination - (offset + 4)))
+    }
+    out work
+}
+
+skill translate_body(work, machine, count) {
+    drum (count) {
+        work.starts = codec.append_word(work.starts, codec.word_from_number(work.code.length))
+        @offset = beat * INSTRUCTION_BYTES
+        @word = codec.word(codec.byte_at(machine.code, offset), codec.byte_at(machine.code, offset + 1), codec.byte_at(machine.code, offset + 2), codec.byte_at(machine.code, offset + 3))
+        @decoded = cpu.decode(word)
+        work = translate_instruction(work, beat, decoded)
+    }
+    out work
+}
+
+skill jump_table(work, count, code_address) {
+    @table = codec.buffer()
+    drum (count) {
+        table = codec.append_word(table, codec.word_add_number(code_address, read_number(work.starts, beat * 4)))
+        table = codec.append_word(table, codec.word(0, 0, 0, 0))
+    }
+    out table
+}
+
+skill translate_uefi(machine) {
+    (machine.resolved == no) { machine = layout.resolve(machine) rescue |failure| { out error.UnresolvedPatch } }
+    @current = layout.layout(machine)
+    @count = machine.code.length / INSTRUCTION_BYTES
+    @table_bytes = layout.align(count * TABLE_ENTRY_BYTES, PAGE_BYTES)
+    @register_file = UEFI_TABLE_RVA + table_bytes
+    @code_rva = register_file + REGISTER_FILE_BYTES
+    @load = codec.word_to_number(machine.load_address)
+    @work = Work {
+        code = codec.buffer(),
+        starts = codec.buffer(),
+        fixups = codec.buffer(),
+        load_address = machine.load_address,
+        table_displacement = 0 - table_bytes - load * 2
+    }
+    work.code = uefi.append_syscall_stub(work.code)
+    work = translate_body(work, machine, count)
+
+    @entry_rva = code_rva + work.code.length
+    @relocation_rva = layout.align(entry_rva + uefi.entry_bytes(), INSTRUCTION_BYTES)
+    @guest_rva = layout.align(relocation_rva + RELOCATION_BYTES, PAGE_BYTES)
+    @memory_end = codec.word_to_number(codec.word_add(machine.load_address, current.memory_size))
+    @stack = layout.align(memory_end, PAGE_BYTES) + STRINGS_BYTES
+    @entry = uefi.Entry {
+        rva = entry_rva,
+        register_file = register_file,
+        table = UEFI_TABLE_RVA,
+        count = count,
+        guest = guest_rva,
+        load_address = load,
+        stack_top = stack + STACK_BYTES - ARGUMENTS_BYTES
+    }
+    work.code = uefi.append_entry_stub(work.code, entry)
+    @start = layout.find_label(machine, machine.entry)
+    work.fixups = codec.append_word(work.fixups, codec.word_from_number(work.code.length - 4))
+    work.fixups = codec.append_word(work.fixups, codec.word_from_number(start.offset / INSTRUCTION_BYTES))
+    work = resolve_fixups(work)
+    out Firmware {
+        rv = machine,
+        rv_layout = current,
+        code = work.code,
+        table = jump_table(work, count, codec.word_from_number(code_rva)),
+        table_rva = UEFI_TABLE_RVA,
+        code_rva = code_rva,
+        entry_rva = entry_rva,
+        relocation_rva = relocation_rva,
+        guest_rva = guest_rva,
+        guest_bytes = stack + STACK_BYTES - load
+    }
+}
+
+skill translate(machine) {
+    (machine.resolved == no) { machine = layout.resolve(machine) rescue |failure| { out error.UnresolvedPatch } }
+    @current = layout.layout(machine)
+    @count = machine.code.length / INSTRUCTION_BYTES
+    @strings = page_align(codec.word_add(machine.load_address, current.memory_size))
+    @stack = codec.word_add_number(strings, STRINGS_BYTES + STACK_GUARD_BYTES)
+    @arguments = codec.word_add_number(stack, STACK_BYTES - ARGUMENTS_BYTES)
+    @table_address = codec.word_from_number(HOST_ADDRESS)
+    @table_bytes = layout.align(count * TABLE_ENTRY_BYTES, PAGE_BYTES)
+    @register_file = codec.word_add_number(table_address, table_bytes)
+    @data_bytes = table_bytes + REGISTER_FILE_BYTES
+    @code_address = codec.word_add_number(table_address, data_bytes)
+
+    @work = Work {
+        code = codec.buffer(),
+        starts = codec.buffer(),
+        fixups = codec.buffer(),
+        load_address = machine.load_address,
+        table_displacement = 0 - table_bytes - codec.word_to_number(machine.load_address) * 2
+    }
+    work.code = platform.append_syscall_stub(work.code)
+    @entry_offset = work.code.length
+    @entry_end = codec.word_to_number(code_address) + entry_offset + LEA_BYTES
+    work.code = platform.append_entry_stub(work.code, codec.word_to_number(register_file) - entry_end, arguments, strings)
+    @start = layout.find_label(machine, machine.entry)
+    work.fixups = codec.append_word(work.fixups, codec.word_from_number(work.code.length - 4))
+    work.fixups = codec.append_word(work.fixups, codec.word_from_number(start.offset / INSTRUCTION_BYTES))
+
+    work = translate_body(work, machine, count)
+    work = resolve_fixups(work)
+    @table = jump_table(work, count, code_address)
+    out Native {
+        rv = machine,
+        rv_layout = current,
+        code = work.code,
+        table = table,
+        table_address = table_address,
+        register_file = register_file,
+        code_address = code_address,
+        entry = codec.word_add_number(code_address, entry_offset),
+        data_bytes = data_bytes,
+        guest_address = strings,
+        guest_bytes = STRINGS_BYTES,
+        stack_address = stack,
+        stack_bytes = STACK_BYTES
+    }
+}

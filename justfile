@@ -50,12 +50,12 @@ tasks:
 
 selfhost source="soul/seed/canonical/main.saltic" output="/tmp/saltic-self-parser.elf" json=".cache/build/pipeline/parsed.json":
     mkdir -p "$(dirname "$3")"
-    bash bootstrap/build.sh soul/seed/parser.saltic "$2"
+    bash bootstrap/build.sh soul/seed/selfhost/parser.saltic "$2"
     qemu-riscv32 -B 0x100000000 "$2" "$1" "$3"
 
 selfcheck input=".cache/build/pipeline/parsed.json" output="/tmp/saltic-self-checker.elf" json=".cache/build/pipeline/checked.json":
     mkdir -p "$(dirname "$3")"
-    bash bootstrap/build.sh soul/seed/checker.saltic "$2"
+    bash bootstrap/build.sh soul/seed/selfhost/checker.saltic "$2"
     qemu-riscv32 -B 0x100000000 "$2" "$1" "$3"
 
 checker:
@@ -108,7 +108,7 @@ trace-elf file:
 bootstrap-parity:
     just test bootstrap
 
-bootstrap-refresh source="soul/seed/toolchain.saltic":
+bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic":
     bash bootstrap/refresh.sh "$1"
 
 toolchain-step:

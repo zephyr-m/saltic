@@ -1,0 +1,147 @@
+use selfhost.machine.codec
+use selfhost.machine.layout
+use selfhost.machine.image
+
+HEADER_BYTES = 64
+PROGRAM_HEADER_BYTES = 56
+PAGE_BYTES = 4096
+MACHINE_X86_64 = 62
+TYPE_EXECUTABLE = 2
+SEGMENT_LOAD = 1
+READ = 4
+READ_WRITE = 6
+READ_EXECUTE = 5
+GUEST_HIGH = 1
+HOST_HIGH = 0
+
+Segment = Box {
+    offset = 0,
+    address = codec.Word {},
+    high = HOST_HIGH,
+    file_bytes = 0,
+    memory_bytes = codec.Word {},
+    flags = 0
+}
+
+skill append_u16(target, value) {
+    target = codec.append_byte(target, codec.mod(value, 256))
+    out codec.append_byte(target, value / 256)
+}
+
+skill append_u32(target, value) {
+    out codec.append_word(target, codec.word_from_number(value))
+}
+
+skill append_u64(target, word, high) {
+    target = codec.append_word(target, word)
+    out append_u32(target, high)
+}
+
+skill append_identity(target) {
+    @items = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    drum (items) { target = codec.append_byte(target, beat) }
+    out target
+}
+
+skill append_file_header(target, entry, segment_count) {
+    target = append_identity(target)
+    target = append_u16(target, TYPE_EXECUTABLE)
+    target = append_u16(target, MACHINE_X86_64)
+    target = append_u32(target, 1)
+    target = append_u64(target, entry, HOST_HIGH)
+    target = append_u64(target, codec.word_from_number(HEADER_BYTES), 0)
+    target = append_u64(target, codec.word(0, 0, 0, 0), 0)
+    target = append_u32(target, 0)
+    target = append_u16(target, HEADER_BYTES)
+    target = append_u16(target, PROGRAM_HEADER_BYTES)
+    target = append_u16(target, segment_count)
+    target = append_u16(target, 64)
+    target = append_u16(target, 0)
+    out append_u16(target, 0)
+}
+
+skill append_segment(target, segment) {
+    target = append_u32(target, SEGMENT_LOAD)
+    target = append_u32(target, segment.flags)
+    target = append_u64(target, codec.word_from_number(segment.offset), 0)
+    target = append_u64(target, segment.address, segment.high)
+    target = append_u64(target, segment.address, segment.high)
+    target = append_u64(target, codec.word_from_number(segment.file_bytes), 0)
+    target = append_u64(target, segment.memory_bytes, 0)
+    out append_u64(target, codec.word_from_number(PAGE_BYTES), 0)
+}
+
+skill executable(translated) {
+    @rv = translated.rv
+    @current = translated.rv_layout
+    @body = image.payload(rv, current)
+    @rv_offset = PAGE_BYTES
+    @data_file_bytes = current.file_size - current.data_offset
+    @table_offset = layout.align(rv_offset + current.file_size, PAGE_BYTES)
+    @code_offset = layout.align(table_offset + translated.table.length, PAGE_BYTES)
+    @segment_count = 6
+    (rv.low_memory_size > 0) { segment_count = 7 }
+
+    @result = codec.buffer()
+    result = append_file_header(result, translated.entry, segment_count)
+    (rv.low_memory_size > 0) {
+        result = append_segment(result, Segment {
+            address = codec.word(0, 0, 0, 0),
+            high = GUEST_HIGH,
+            memory_bytes = codec.word_from_number(rv.low_memory_size),
+            flags = READ_WRITE
+        })
+    }
+    result = append_segment(result, Segment {
+        offset = rv_offset,
+        address = rv.load_address,
+        high = GUEST_HIGH,
+        file_bytes = current.data_offset,
+        memory_bytes = codec.word_from_number(current.data_offset),
+        flags = READ
+    })
+    result = append_segment(result, Segment {
+        offset = rv_offset + current.data_offset,
+        address = layout.address_add(rv.load_address, current.data_offset),
+        high = GUEST_HIGH,
+        file_bytes = data_file_bytes,
+        memory_bytes = codec.word_add_number(rv.bss_size, data_file_bytes),
+        flags = READ_WRITE
+    })
+    result = append_segment(result, Segment {
+        address = translated.guest_address,
+        high = GUEST_HIGH,
+        memory_bytes = codec.word_from_number(translated.guest_bytes),
+        flags = READ_WRITE
+    })
+    result = append_segment(result, Segment {
+        address = translated.stack_address,
+        high = GUEST_HIGH,
+        memory_bytes = codec.word_from_number(translated.stack_bytes),
+        flags = READ_WRITE
+    })
+    result = append_segment(result, Segment {
+        offset = table_offset,
+        address = translated.table_address,
+        file_bytes = translated.table.length,
+        memory_bytes = codec.word_from_number(translated.data_bytes),
+        flags = READ_WRITE
+    })
+    result = append_segment(result, Segment {
+        offset = code_offset,
+        address = translated.code_address,
+        file_bytes = translated.code.length,
+        memory_bytes = codec.word_from_number(translated.code.length),
+        flags = READ_EXECUTE
+    })
+    result = image.pad_to(result, rv_offset)
+    result = codec.append_buffer(result, body)
+    result = image.pad_to(result, table_offset)
+    result = codec.append_buffer(result, translated.table)
+    result = image.pad_to(result, code_offset)
+    out codec.append_buffer(result, translated.code)
+}
+
+skill write(path, translated) {
+    out image.write_buffer(path, executable(translated))
+}

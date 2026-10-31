@@ -63,7 +63,7 @@ Saltic является закрытым программным обеспече
 Условия: [русский текст](LICENSE.ru) и [английский перевод](LICENSE).
 
 ```saltic
-use seed.io
+use io
 
 AppName = "Saltic"
 

@@ -1,0 +1,149 @@
+use core.str
+use core.group
+use selfhost.ast
+
+Name = Box {
+    name = "",
+    kind = "",
+    type = "unknown",
+    node = []
+}
+
+Scope = Box {
+    names = [],
+    subject = "",
+    module = ""
+}
+
+skill variant_key(name) {
+    out "__enum_variant__|{name}"
+}
+
+skill find(names, name) {
+    drum (names) {
+        (beat.name == name) { out beat }
+    }
+    out Name {}
+}
+
+skill has(names, name) {
+    @found = find(names, name)
+    out str.len(found.name) > 0
+}
+
+skill module_alias(globals, module, name) {
+    @import = find(globals, ast.alias_key(module, name))
+    (import.kind == "import") { out import.type }
+    out ""
+}
+
+skill put(names, name, kind, type) {
+    out group.add(names, Name { name = name, kind = kind, type = type })
+}
+
+skill put_node(names, name, kind, type, node) {
+    out group.add(names, Name { name = name, kind = kind, type = type, node = node })
+}
+
+skill update(names, name, type) {
+    @result = []
+    drum (names) {
+        @next_type = beat.type
+        (beat.name == name) { next_type = type }
+        result = put_node(result, beat.name, beat.kind, next_type, beat.node)
+    }
+    out result
+}
+
+skill resolve_name(name, module, globals) {
+    (has(globals, name) == yes) { out name }
+    @local = ast.qualified(module, name)
+    (has(globals, local) == yes) { out local }
+    @head = ast.name_head(name)
+    @import = find(globals, ast.alias_key(module, head))
+    (import.kind == "import") {
+        @candidate = str.add(import.type, ast.name_tail(name))
+        (has(globals, candidate) == yes) { out candidate }
+    }
+    out ""
+}
+
+skill resolve_path(node, scope, globals) {
+    @plain = ast.plain(node)
+    @count = group.count(plain)
+    @head = group.item(plain, 1)
+    (count == 2) {
+        (has(scope.names, head) == yes) { out "" }
+    }
+    @direct = ast.path_text(plain)
+    (has(globals, direct) == yes) { out direct }
+    (count == 2) {
+        @local = ast.qualified(scope.module, head)
+        (has(globals, local) == yes) { out local }
+    }
+    @import = find(globals, ast.alias_key(scope.module, head))
+    (import.kind == "import") {
+        @candidate = import.type
+        drum (count - 2) {
+            candidate = str.add(candidate, str.add(".", group.item(plain, beat + 2)))
+        }
+        (has(globals, candidate) == yes) { out candidate }
+    }
+    out ""
+}
+
+skill call_name(callee, scope, globals) {
+    @resolved = resolve_path(callee, scope, globals)
+    (str.len(resolved) > 0) {
+        @global = find(globals, resolved)
+        (global.kind == "native") { out resolved }
+    }
+    out ast.path_text(callee)
+}
+
+skill path_from_text(text) {
+    @path = ["path"]
+    @segment = ""
+    drum (str.len(text)) {
+        @ch = str.at(text, beat)
+        pick {
+            (ch == ".") {
+                path = group.add(path, segment)
+                segment = ""
+            }
+            { segment = str.add(segment, ch) }
+        }
+    }
+    out group.add(path, segment)
+}
+
+skill join_segments(path, first, last) {
+    @text = group.item(path, first)
+    drum (last - first) { text = str.add(text, str.add(".", group.item(path, first + beat + 1))) }
+    out text
+}
+
+skill long_reference(node, scope, globals) {
+    @plain = ast.plain(node)
+    @count = group.count(plain)
+    (count < 4) { out "" }
+    @head = group.item(plain, 1)
+    (has(scope.names, head) == yes) { out "" }
+    (has(globals, ast.qualified(scope.module, head)) == yes) { out "" }
+    @text = ast.path_text(plain)
+    @full = text
+    @import = find(globals, ast.alias_key(scope.module, head))
+    (import.kind == "import") { full = str.add(import.type, str.add(".", join_segments(plain, 2, count - 1))) }
+    @segments = path_from_text(full)
+    @size = group.count(segments)
+    drum (size - 2) {
+        @length = size - 1 - beat
+        (has(globals, join_segments(segments, 1, length)) == yes) {
+            @module = join_segments(segments, 1, length - 1)
+            @short = join_segments(segments, length - 1, size - 1)
+            (short == text) { out "" }
+            out "длинный путь '{text}': подключи 'use {module}' и пиши '{short}'"
+        }
+    }
+    out ""
+}
