@@ -71,20 +71,20 @@ State = enum {
 }
 
 Point = Box {
-    x = 0
+    x = 0,
     y = 0
 }
 
 Actor = Box {
-    name = "agent"
-    state = State.READY
-    energy = 100
+    name = "agent",
+    state = State.READY,
+    energy = 100,
     position = Point {}
 }
 
 skill move(point, dx, dy) {
     out Point {
-        x = point.x + dx
+        x = point.x + dx,
         y = point.y + dy
     }
 }
@@ -95,9 +95,9 @@ skill spend(actor, cost) {
     }
 
     out Actor {
-        name = actor.name
-        state = State.ACTIVE
-        energy = actor.energy - cost
+        name = actor.name,
+        state = State.ACTIVE,
+        energy = actor.energy - cost,
         position = move(actor.position, 1, 0)
     }
 }
@@ -116,9 +116,9 @@ skill show(actor) {
 
 program() {
     @actor = Actor {
-        name = "pip"
-        energy = 42
-        position = Point { x = 2 y = 3 }
+        name = "pip",
+        energy = 42,
+        position = Point { x = 2, y = 3 }
     }
 
     drum ([5, 7, 11]) {
