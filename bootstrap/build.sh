@@ -20,6 +20,7 @@ if ! command -v qemu-riscv32 >/dev/null 2>&1; then
     bootstrap_override="${SALTIC_BOOTSTRAP_COMPILER:-}"
     heap_override="${SALTIC_HEAP_BYTES:-}"
     target_override="${SALTIC_TARGET:-}"
+    native_override="${SALTIC_NATIVE:-}"
     exec nix \
         --extra-experimental-features "nix-command flakes" \
         develop "$root" --command \
@@ -29,6 +30,7 @@ if ! command -v qemu-riscv32 >/dev/null 2>&1; then
         SALTIC_BOOTSTRAP_COMPILER="$bootstrap_override" \
         SALTIC_HEAP_BYTES="$heap_override" \
         SALTIC_TARGET="$target_override" \
+        SALTIC_NATIVE="$native_override" \
         bash "$root/bootstrap/build.sh" "$@"
 fi
 
@@ -58,8 +60,13 @@ fi
 mkdir -p "$work" "$(dirname "$output_path")" "$(dirname "$assembly_path")"
 rm -f "$compiler_output" "$assembly_path"
 
-qemu-riscv32 -B 0x100000000 \
-    "$compiler" "$source_path" "$compiler_output" "$heap_bytes" "$target"
+# Загрузочный компилятор с полки работает своей родной x86-версией: те же байты,
+# в разы быстрее. Любой другой rv32i-компилятор (stage-1 и т. п.) — под QEMU.
+runner=(qemu-riscv32 -B 0x100000000 "$compiler")
+if [[ "${SALTIC_NATIVE:-1}" != "0" && "$compiler" == "$(saltic_bootstrap_compiler)" ]]; then
+    runner=("$(saltic_native_compiler)")
+fi
+"${runner[@]}" "$source_path" "$compiler_output" "$heap_bytes" "$target"
 
 magic="$(od -An -tx1 -N4 "$compiler_output" | tr -d '[:space:]')"
 if [[ "$magic" != "7f454c46" ]]; then

@@ -4,18 +4,18 @@
 # Полный лог тестов сохраняется в .cache/build/workbench/global-check.log
 cd "$(dirname "$0")/.." || exit 1
 source bootstrap/names.sh
-mkdir -p .cache/build/workbench
-cp "$(saltic_bootstrap_compiler)" .cache/build/workbench/compiler-prev.elf
+mkdir -p .cache/build/workbench .cache/build/bench
+prev=.cache/build/workbench/compiler-prev
+cp "$(saltic_bootstrap_compiler)" "$prev.elf"
+cp "$(saltic_native_compiler)" "$prev.native"
 echo "== самосборка"
 bash bootstrap/refresh.sh 2>&1 | grep "^bootstrap refresh: \(saltic\|прове\)\|^[0-9a-f]\{64\}"
 compiler="$(saltic_bootstrap_compiler)"
-for c in .cache/build/workbench/compiler-prev.elf "$compiler"; do
+for c in "$prev.native" "$(saltic_native_compiler)"; do
     echo "== время: $c"
-    { time SALTIC_BOOTSTRAP_COMPILER=$c SALTIC_BUILD_DIR=.cache/build/bench/x \
-        SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh soul/seed/toolchain.saltic \
-        .cache/build/bench/x.elf >/dev/null 2>&1; } 2>&1 | grep real
+    { time "$c" soul/seed/toolchain.saltic .cache/build/bench/x.elf 4026531840 rv32i > /dev/null 2>&1; } 2>&1 | grep real
 done
-ls -l .cache/build/workbench/compiler-prev.elf "$compiler" | awk '{print $5, $9}'
+ls -l "$prev.elf" "$compiler" | awk '{print $5, $9}'
 echo "== тесты (полный лог: .cache/build/workbench/global-check.log)"
 pattern='итог|проверка:|error|подтвержд|ок$|ok$|пройдена'
 nix --extra-experimental-features "nix-command flakes" develop \

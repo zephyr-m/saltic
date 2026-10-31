@@ -36,48 +36,39 @@ source_path="${1:-soul/seed/toolchain.saltic}"
 
 mkdir -p "$work/stage-1" "$work/stage-2" "$work/stage-3"
 
-bootstrap_compiler="${SALTIC_BOOTSTRAP_COMPILER:-$(saltic_bootstrap_compiler)}"
+bootstrap_compiler="$(saltic_bootstrap_compiler)"
 mkdir -p "$work/previous"
-rm -f "$work/previous/"*
+rm -f "$work/previous/"* "$work"/stage-*/toolchain*
 previous="$work/previous/$(basename "$bootstrap_compiler")"
 cp "$bootstrap_compiler" "$previous"
 
+# Самосборка идёт на x86-64. Компилятор, собравший исходники под x86_64, —
+# это перевод той же RV-программы, которую он выдал бы под rv32i, поэтому
+# x86-версия каждого поколения получается одной сборкой, без отдельного шага.
+# Сравниваются по-прежнему rv32i-байты stage-2 и stage-3.
+stage() {
+    local compiler="$1" target="$2" output="$3"
+    if ! "$compiler" "$source_path" "$output" "$heap_bytes" "$target" > "$output.log" 2>&1; then
+        grep -v "^warning" "$output.log" | tail -5 >&2
+        exit 1
+    fi
+    chmod +x "$output"
+}
+
 echo "bootstrap refresh: исходный compiler $bootstrap_compiler"
+native="$(saltic_native_compiler)"
 
-echo "bootstrap refresh: текущее поколение собирает прямой ELF stage-1"
-SALTIC_BOOTSTRAP_COMPILER="$bootstrap_compiler" \
-SALTIC_BUILD_DIR="$work/stage-1" \
-SALTIC_HEAP_BYTES="$heap_bytes" \
-SALTIC_DIRECT_ONLY=1 \
-bash bootstrap/build.sh \
-    "$source_path" \
-    "$work/stage-1/toolchain.elf" \
-    "$work/stage-1/toolchain.s"
+echo "bootstrap refresh: текущее поколение собирает stage-1 (x86-64)"
+stage "$native" x86_64 "$work/stage-1/toolchain"
 
-echo "bootstrap refresh: stage-1 собирает stage-2"
-SALTIC_BOOTSTRAP_COMPILER="$work/stage-1/toolchain.elf" \
-SALTIC_BUILD_DIR="$work/stage-2" \
-SALTIC_HEAP_BYTES="$heap_bytes" \
-SALTIC_DIRECT_ONLY=1 \
-bash bootstrap/build.sh \
-    "$source_path" \
-    "$work/stage-2/toolchain.elf" \
-    "$work/stage-2/toolchain.s"
+echo "bootstrap refresh: stage-1 собирает stage-2 (rv32i и x86-64)"
+stage "$work/stage-1/toolchain" rv32i "$work/stage-2/toolchain.elf"
+stage "$work/stage-1/toolchain" x86_64 "$work/stage-2/toolchain"
 
-echo "bootstrap refresh: stage-2 собирает stage-3"
-SALTIC_BOOTSTRAP_COMPILER="$work/stage-2/toolchain.elf" \
-SALTIC_BUILD_DIR="$work/stage-3" \
-SALTIC_HEAP_BYTES="$heap_bytes" \
-SALTIC_DIRECT_ONLY=1 \
-bash bootstrap/build.sh \
-    "$source_path" \
-    "$work/stage-3/toolchain.elf" \
-    "$work/stage-3/toolchain.s"
+echo "bootstrap refresh: stage-2 собирает stage-3 (rv32i)"
+stage "$work/stage-2/toolchain" rv32i "$work/stage-3/toolchain.elf"
 
 echo "bootstrap refresh: проверяю fixed point"
-test ! -e "$work/stage-1/toolchain.s"
-test ! -e "$work/stage-2/toolchain.s"
-test ! -e "$work/stage-3/toolchain.s"
 cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
 
 compiler="$(saltic_compiler_path rv32i linux .elf)"
@@ -91,7 +82,17 @@ else
     cp "$work/stage-3/toolchain.elf" "$compiler"
     chmod +x "$compiler"
     saltic_write_passport "$compiler" "rv32i, linux (qemu-riscv32 -B 0x100000000)" "rv32i, x86_64" \
-        "$previous" "$heap_bytes" "сходится (stage-2 = stage-3)"
+        "$previous" "$heap_bytes" "сходится на x86-64 (stage-2 = stage-3)"
+    # stage-2 под x86_64 — перевод stage-2 rv32i, а он побайтово равен новому
+    # компилятору: это и есть его родная версия.
+    native_path="$(saltic_compiler_path x86_64 linux)"
+    for old in bootstrap/saltic-*-compiler-x86_64-linux; do
+        if [[ -f "$old" && "$old" != "$native_path" ]]; then rm -f "$old" "$old.txt"; fi
+    done
+    cp "$work/stage-2/toolchain" "$native_path"
+    chmod +x "$native_path"
+    saltic_write_passport "$native_path" "x86_64, linux" "rv32i, x86_64" \
+        "$compiler" "$heap_bytes" "stage-2 самосборки на x86-64"
     echo "bootstrap refresh: $(basename "$compiler") обновлён"
 fi
 sha256sum "$compiler"
