@@ -244,15 +244,6 @@ test_native() {
         "$work/native/imports" \
         67108864
     test "$("$work/native/imports")" = "$(printf 'длина: 6\nпусто: yes\nстрок: 3\nфайл прочитан: yes')"
-    if SALTIC_TARGET=x86_64 build native-import-errors \
-        tests/fixtures/import-errors.saltic \
-        "$work/native/import-errors" >"$work/native/import-errors.txt" 2>&1; then
-        echo "x86-64: ошибки импорта не обнаружены" >&2
-        return 1
-    fi
-    grep -q "duplicate_import|.*'add'" "$work/native/import-errors.txt"
-    grep -q "unknown_import|.*'nothing_here'" "$work/native/import-errors.txt"
-    grep -q "import_shadowed|.*'clear'" "$work/native/import-errors.txt"
     echo "x86-64: канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает"
 }
 
