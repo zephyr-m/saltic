@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Проверка правки исходников без изменения смысла: каждая программа собирается
+# одним и тем же компилятором из HEAD и из рабочего дерева, результаты обязаны
+# совпасть побайтово. Компилятор — os/bootstrap/compiler.elf, переведённый в
+# x86-64 (вывод тот же, что под QEMU, но в разы быстрее).
+cd "$(dirname "$0")/.." || exit 1
+W=.cache/build/workbench/same-source
+H=4026531840
+HEAP=67108864
+# Как в build.sh: toolchain-у нужна большая куча, чтобы собрать os/main.
+TOOLCHAIN_HEAP=536870912
+mkdir -p "$W"
+rm -rf "$W/head" "$W/out"
+mkdir -p "$W/out"
+
+sum="$(sha256sum os/bootstrap/compiler.elf | cut -c1-16)"
+native="$W/compiler-$sum.native"
+if [[ ! -x "$native" ]]; then
+    echo "== перевожу compiler.elf в x86-64"
+    if ! SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR="$W/native-build" SALTIC_HEAP_BYTES=$H \
+        bash os/bootstrap/build.sh soul/seed/toolchain.saltic "$native" > "$W/native.log" 2>&1; then
+        grep -v "^warning" "$W/native.log" | tail -5
+        exit 1
+    fi
+fi
+native="$(realpath "$native")"
+
+git worktree remove --force "$W/head" > /dev/null 2>&1
+git worktree add --detach "$W/head" HEAD > /dev/null 2>&1 || { echo "не удалось создать worktree HEAD"; exit 1; }
+out="$(realpath "$W/out")"
+
+entries=(soul/seed/toolchain.saltic soul/seed/canonical/main.saltic os/target/qemu_virt/toolchain.saltic)
+entries+=(soul/seed/tests/*.saltic tests/*.saltic)
+status=0
+for source in "${entries[@]}"; do
+    name="$(echo "${source%.saltic}" | tr '/' '_')"
+    heap=$HEAP
+    [[ "$source" == */toolchain.saltic ]] && heap=$TOOLCHAIN_HEAP
+    (cd "$W/head" && "$native" "$source" "$out/$name.head" $heap rv32i > "$out/$name.head.log" 2>&1)
+    "$native" "$source" "$out/$name.work" $heap rv32i > "$out/$name.work.log" 2>&1
+    # Без права на запуск qemu-riscv32 молча завершается с кодом 1.
+    chmod +x "$out/$name.head" "$out/$name.work" 2>/dev/null
+    if [[ ! -s "$out/$name.head" && ! -s "$out/$name.work" ]]; then
+        echo "не программа: $source"
+    elif cmp -s "$out/$name.head" "$out/$name.work"; then
+        echo "одинаково: $source"
+    else
+        echo "РАЗЛИЧАЕТСЯ: $source"
+        status=1
+    fi
+done
+
+# Образ ОС собирает qemu-virt toolchain, поэтому он сравнивается его же сборками.
+nix --extra-experimental-features "nix-command flakes" develop --command bash -c "
+    (cd $W/head && qemu-riscv32 -B 0x100000000 $out/os_target_qemu_virt_toolchain.head os/main.saltic $out/os.head $HEAP > /dev/null 2>&1)
+    qemu-riscv32 -B 0x100000000 $out/os_target_qemu_virt_toolchain.work os/main.saltic $out/os.work $HEAP > /dev/null 2>&1
+" 2>/dev/null
+if [[ -s "$out/os.head" ]] && cmp -s "$out/os.head" "$out/os.work"; then
+    echo "одинаково: os/main.saltic"
+else
+    echo "РАЗЛИЧАЕТСЯ: os/main.saltic"
+    status=1
+fi
+
+git worktree remove --force "$W/head" > /dev/null 2>&1
+exit $status
