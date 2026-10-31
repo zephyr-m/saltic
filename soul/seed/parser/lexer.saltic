@@ -10,7 +10,7 @@ TokenKind = enum {
     AT, LBRACE, RBRACE, LBRACKET, RBRACKET, LPAREN, RPAREN,
     COMMA, DOT, PIPE, ASSIGN, EQ, ARROW,
     GT, LT, PLUS, MINUS, STAR, SLASH,
-    LEAVE, PICK, NATIVE,
+    LEAVE, PICK, NATIVE, TEMPLATE,
 }
 
 NEWLINE = "\n"
@@ -40,8 +40,15 @@ KEYWORD_KINDS = [
 Token = Box {
     kind = TokenKind.INVALID
     value = ""
+    parts = []
     line = 1
     col = 1
+}
+
+Placeholder = Box {
+    name = ""
+    next = 0
+    found = no
 }
 
 TokenBuffer = Box {
@@ -182,6 +189,7 @@ Lexer = Box {
         @next_col = col + 1
         @length = str.len(source)
         @value = ""
+        @parts = []
         @diagnostics = []
         drum (length - start) {
             (index == length) {
@@ -196,8 +204,12 @@ Lexer = Box {
             }
             @ch = str.at(source, index)
             (ch == QUOTE) {
+                @closed = token(TokenKind.STRING, value, line, col)
+                (group.count(parts) > 0) {
+                    closed = Token { kind = TokenKind.TEMPLATE value = value parts = group.add(parts, value) line = line col = col }
+                }
                 out Lexeme {
-                    token = token(TokenKind.STRING, value, line, col)
+                    token = closed
                     next = index + 1
                     line = next_line
                     col = next_col + 1
@@ -232,6 +244,33 @@ Lexer = Box {
                     next_line = next_line + 1
                     next_col = 1
                 }
+                (ch == "\{") {
+                    @found = placeholder(index)
+                    (found.found == no) {
+                        diagnostics = group.add(diagnostics, diagnostic.make_at("lexer_error", path, next_line, next_col, "в подстановке ожидалось имя: \{имя\} или \{имя.поле\}"))
+                        out Lexeme {
+                            token = none
+                            next = index
+                            line = next_line
+                            col = next_col
+                            diagnostics = diagnostics
+                        }
+                    }
+                    parts = group.add(group.add(parts, value), found.name)
+                    value = ""
+                    next_col = next_col + found.next - index
+                    index = found.next
+                }
+                (ch == "\}") {
+                    diagnostics = group.add(diagnostics, diagnostic.make_at("lexer_error", path, next_line, next_col, "одиночная \} в строке: пиши \\\}"))
+                    out Lexeme {
+                        token = none
+                        next = index
+                        line = next_line
+                        col = next_col
+                        diagnostics = diagnostics
+                    }
+                }
                 {
                     value = str.add(value, ch)
                     index = index + 1
@@ -247,6 +286,23 @@ Lexer = Box {
             col = next_col
             diagnostics = diagnostics
         }
+    }
+
+    skill placeholder(start) {
+        @index = start + 1
+        drum (str.len(source) - index) {
+            @ch = str.at(source, index)
+            pick {
+                (ch == "\}") {
+                    (index == start + 1) { out Placeholder {} }
+                    out Placeholder { name = str.slice(source, start + 1, index) next = index + 1 found = yes }
+                }
+                (ch == ".") { index = index + 1 }
+                (ident_part(ch) == yes) { index = index + 1 }
+                { out Placeholder {} }
+            }
+        }
+        out Placeholder {}
     }
 
     skill table_kind(values, kinds, value, fallback) {
