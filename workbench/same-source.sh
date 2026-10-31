@@ -22,7 +22,7 @@ git worktree remove --force "$W/head" > /dev/null 2>&1
 git worktree add --detach "$W/head" HEAD > /dev/null 2>&1 || { echo "не удалось создать worktree HEAD"; exit 1; }
 out="$(realpath "$W/out")"
 
-entries=(soul/seed/selfhost/toolchain.saltic soul/seed/canonical/main.saltic os/target/qemu_virt/toolchain.saltic)
+entries=(soul/seed/selfhost/toolchain.saltic soul/canonical/main.saltic os/target/qemu_virt/toolchain.saltic)
 entries+=(soul/seed/tests/*.saltic tests/*.saltic)
 status=0
 for source in "${entries[@]}"; do

@@ -17,7 +17,7 @@ if ! SALTIC_BUILD_DIR="$W/stage" SALTIC_HEAP_BYTES=4026531840 SALTIC_DIRECT_ONLY
     exit 1
 fi
 
-for source in soul/seed/selfhost/toolchain.saltic soul/seed/canonical/main.saltic soul/seed/tests/contract.saltic "$@"; do
+for source in soul/seed/selfhost/toolchain.saltic soul/canonical/main.saltic soul/seed/tests/contract.saltic "$@"; do
     name="$(basename "$source" .saltic)"
     SALTIC_BUILD_DIR="$W/old-$name" SALTIC_DIRECT_ONLY=1 \
         bash bootstrap/build.sh "$source" "$W/old-$name.elf" > /dev/null 2>&1
@@ -35,11 +35,11 @@ done
 nix --extra-experimental-features "nix-command flakes" develop --command bash -c "
     SALTIC_BOOTSTRAP_COMPILER=$W/stage-1.elf SALTIC_BUILD_DIR=$W/checker \
         bash bootstrap/build.sh tests/checker.saltic $W/checker.elf > /dev/null 2>&1
-    qemu-riscv32 -B 0x100000000 $W/checker.elf soul/seed/canonical/errors.saltic > $W/errors.txt
-    qemu-riscv32 -B 0x100000000 $W/checker.elf soul/seed/canonical/support.saltic >> $W/errors.txt
-    qemu-riscv32 -B 0x100000000 $W/checker.elf soul/seed/canonical/main.saltic > $W/canonical.txt
+    qemu-riscv32 -B 0x100000000 $W/checker.elf soul/canonical/errors.saltic > $W/errors.txt
+    qemu-riscv32 -B 0x100000000 $W/checker.elf soul/canonical/support.saltic >> $W/errors.txt
+    qemu-riscv32 -B 0x100000000 $W/checker.elf soul/canonical/main.saltic > $W/canonical.txt
 " 2>/dev/null
-if diff -q soul/seed/canonical/expected/errors.txt "$W/errors.txt" > /dev/null && test ! -s "$W/canonical.txt"; then
+if diff -q soul/canonical/expected/errors.txt "$W/errors.txt" > /dev/null && test ! -s "$W/canonical.txt"; then
     echo "ошибки канона: совпадают"
 else
     echo "ошибки канона: РАЗЛИЧАЮТСЯ"

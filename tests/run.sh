@@ -46,15 +46,15 @@ build_checker() {
 test_checker() {
     build_checker
     qemu-riscv32 -B 0x100000000 "$checker_elf" \
-        soul/seed/canonical/main.saltic >"$work/checker/canonical.txt"
+        soul/canonical/main.saltic >"$work/checker/canonical.txt"
     qemu-riscv32 -B 0x100000000 "$checker_elf" \
-        soul/seed/canonical/errors.saltic >"$work/checker/errors.txt"
+        soul/canonical/errors.saltic >"$work/checker/errors.txt"
     qemu-riscv32 -B 0x100000000 "$checker_elf" \
-        soul/seed/canonical/support.saltic >>"$work/checker/errors.txt"
+        soul/canonical/support.saltic >>"$work/checker/errors.txt"
 
     test ! -s "$work/checker/canonical.txt"
     diff -u \
-        soul/seed/canonical/expected/errors.txt \
+        soul/canonical/expected/errors.txt \
         "$work/checker/errors.txt"
     echo "чекер: нативная проверка пройдена"
 }
@@ -195,7 +195,7 @@ test_memory() {
 test_native() {
     mkdir -p "$work/native"
     SALTIC_TARGET=x86_64 build native-canonical \
-        soul/seed/canonical/main.saltic \
+        soul/canonical/main.saltic \
         "$work/native/canonical" \
         67108864
     cp tests/fixtures/input.txt "$work/native/input.txt"
@@ -204,7 +204,7 @@ test_native() {
         "$work/native/output.txt" \
         >"$work/native/stdout.txt"
     diff -u \
-        soul/seed/canonical/expected/output.txt \
+        soul/canonical/expected/output.txt \
         "$work/native/stdout.txt"
     test "$(<"$work/native/output.txt")" = "pip:0"
     SALTIC_TARGET=x86_64 build native-memory \
@@ -442,7 +442,7 @@ test_bootstrap() {
     SALTIC_BUILD_DIR="$bootstrap_work/canonical" \
     SALTIC_DIRECT_ONLY=1 \
     bash bootstrap/build.sh \
-        soul/seed/canonical/main.saltic \
+        soul/canonical/main.saltic \
         "$bootstrap_work/canonical/canonical.elf" \
         "$bootstrap_work/canonical/canonical.s"
     test -x "$bootstrap_work/canonical/canonical.elf"
@@ -454,7 +454,7 @@ test_bootstrap() {
         "$bootstrap_work/canonical/output.txt" \
         >"$bootstrap_work/canonical/stdout.txt"
     diff -u \
-        soul/seed/canonical/expected/output.txt \
+        soul/canonical/expected/output.txt \
         "$bootstrap_work/canonical/stdout.txt"
     test "$(<"$bootstrap_work/canonical/output.txt")" = "pip:0"
     echo "bootstrap: ok"
@@ -481,7 +481,7 @@ test_closure() {
     SALTIC_HEAP_BYTES=67108864 \
     SALTIC_DIRECT_ONLY=1 \
     bash bootstrap/build.sh \
-        soul/seed/canonical/main.saltic \
+        soul/canonical/main.saltic \
         "$closure_work/canonical.elf" \
         "$closure_work/canonical.s"
     test -x "$closure_work/canonical.elf"
@@ -499,7 +499,7 @@ test_closure() {
         "$closure_work/output.txt" \
         >"$closure_work/stdout.txt"
     diff -u \
-        soul/seed/canonical/expected/output.txt \
+        soul/canonical/expected/output.txt \
         "$closure_work/stdout.txt"
     test "$(<"$closure_work/output.txt")" = "pip:0"
     echo "closure: тот же ELF в Saltic VM, 100000 инструкций"

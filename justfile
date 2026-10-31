@@ -7,14 +7,14 @@ default:
 playground:
     node os/ui/playground/server.mjs
 
-compile file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf":
+compile file="soul/canonical/main.saltic" output="/tmp/saltic.elf":
     SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"
 
-run file="soul/seed/canonical/main.saltic" output="/tmp/saltic.elf" *args:
+run file="soul/canonical/main.saltic" output="/tmp/saltic.elf" *args:
     SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"
     nix --extra-experimental-features "nix-command flakes" develop --command qemu-riscv32 -B 0x100000000 "$2" "${@:3}"
 
-native file="soul/seed/canonical/main.saltic" output="/tmp/saltic-native" *args:
+native file="soul/canonical/main.saltic" output="/tmp/saltic-native" *args:
     SALTIC_TARGET=x86_64 SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"
     "$2" "${@:3}"
 
@@ -48,7 +48,7 @@ jtml:
 tasks:
     just test tasks
 
-selfhost source="soul/seed/canonical/main.saltic" output="/tmp/saltic-self-parser.elf" json=".cache/build/pipeline/parsed.json":
+selfhost source="soul/canonical/main.saltic" output="/tmp/saltic-self-parser.elf" json=".cache/build/pipeline/parsed.json":
     mkdir -p "$(dirname "$3")"
     bash bootstrap/build.sh soul/seed/selfhost/parser.saltic "$2"
     qemu-riscv32 -B 0x100000000 "$2" "$1" "$3"
@@ -94,7 +94,7 @@ native-test:
 native-bootstrap:
     just test native-bootstrap
 
-trace file="soul/seed/canonical/main.saltic":
+trace file="soul/canonical/main.saltic":
     mkdir -p .cache/build/tracer
     SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh "$1" .cache/build/tracer/target.elf .cache/build/tracer/target.s
     SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf .cache/build/tracer/tracer.s
