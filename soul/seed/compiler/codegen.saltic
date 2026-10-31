@@ -10,19 +10,14 @@ use seed.machine.layout
 
 skill box_field_symbol(compiler, box_name, field_name) {
     @box = state.symbol_find(compiler.boxes, box_name)
-    @result = state.Symbol {}
-    @index = 2
     @count = seed.group.count(ast.plain(box.node))
-    drum (count) {
-        (index < count) {
-            @member = ast.part(box.node, index)
-            (ast.tag(member) == "field") {
-                (ast.part(member, 1) == field_name) { result = state.Symbol { name = field_name kind = "field" node = member } }
-            }
-            index = index + 1
+    drum (count - 2) {
+        @member = ast.part(box.node, count - 1 - beat)
+        (ast.tag(member) == "field") {
+            (ast.part(member, 1) == field_name) { out state.Symbol { name = field_name kind = "field" node = member } }
         }
     }
-    out result
+    out state.Symbol {}
 }
 
 skill error_id(compiler, name) {
@@ -75,12 +70,7 @@ skill compile_path(compiler, node) {
         }
     }
     (count > 2) {
-        @enum_text = seed.group.item(parts, 1)
-        @enum_index = 2
-        drum (count - 1) {
-            (enum_index < count - 1) { enum_text = seed.str.add(enum_text, seed.str.add(".", seed.group.item(parts, enum_index))) enum_index = enum_index + 1 }
-        }
-        @enum_name = resolve_symbol(compiler.enums, compiler.aliases, enum_text, compiler.current_function.module)
+        @enum_name = resolve_symbol(compiler.enums, compiler.aliases, ast.path_prefix(parts), compiler.current_function.module)
         (seed.str.len(enum_name) > 0) {
             @full_name = seed.str.add(enum_name, ".")
             full_name = seed.str.add(full_name, seed.group.item(parts, count - 1))
@@ -114,13 +104,9 @@ skill compile_path(compiler, node) {
             }
         }
     }
-    @index = 2
-    (seed.str.len(constant.name) > 0) { index = count }
-    drum (count) {
-        (index < count) {
-            compiler = emit_field_get(compiler, seed.group.item(parts, index))
-            index = index + 1
-        }
+    (seed.str.len(constant.name) > 0) { out compiler }
+    drum (count - 2) {
+        compiler = emit_field_get(compiler, seed.group.item(parts, beat + 2))
     }
     out compiler
 }
@@ -210,12 +196,7 @@ skill immediate_operand(compiler, node) {
         @parts = ast.plain(node)
         @count = seed.group.count(parts)
         (count > 2) {
-            @enum_text = seed.group.item(parts, 1)
-            @enum_index = 2
-            drum (count - 1) {
-                (enum_index < count - 1) { enum_text = seed.str.add(enum_text, seed.str.add(".", seed.group.item(parts, enum_index))) enum_index = enum_index + 1 }
-            }
-            (seed.str.len(resolve_symbol(compiler.enums, compiler.aliases, enum_text, compiler.current_function.module)) > 0) { out yes }
+            (seed.str.len(resolve_symbol(compiler.enums, compiler.aliases, ast.path_prefix(parts), compiler.current_function.module)) > 0) { out yes }
         }
         (state.symbol_has(compiler.current_function.slots, seed.group.item(parts, 1)) == no) {
             @constant_name = resolve_symbol(compiler.constants, compiler.aliases, ast.path_text(parts), compiler.current_function.module)
@@ -244,19 +225,13 @@ skill compile_rescue(compiler, node) {
 
 skill box_has_skill(compiler, box_name, skill_name) {
     @box = state.symbol_find(compiler.boxes, box_name)
-    @found = no
-    @index = 2
-    @count = seed.group.count(ast.plain(box.node))
-    drum (count) {
-        (index < count) {
-            @member = ast.part(box.node, index)
-            (ast.tag(member) == "subject-skill") {
-                (ast.part(member, 1) == skill_name) { found = yes }
-            }
-            index = index + 1
+    drum (seed.group.count(ast.plain(box.node)) - 2) {
+        @member = ast.part(box.node, beat + 2)
+        (ast.tag(member) == "subject-skill") {
+            (ast.part(member, 1) == skill_name) { out yes }
         }
     }
-    out found
+    out no
 }
 
 skill infer_type(compiler, node) {
@@ -332,23 +307,13 @@ skill call_arguments(node) {
 }
 
 skill compile_arguments(compiler, args) {
-    @index = 0
     @count = seed.group.count(args)
-    drum (count) {
-        (index < count) {
-            compiler = compile_expression(compiler, seed.group.item(args, index))
-            compiler = state.push(compiler, "a0", codec.A0)
-            index = index + 1
-        }
+    drum (args) {
+        compiler = compile_expression(compiler, beat)
+        compiler = state.push(compiler, "a0", codec.A0)
     }
-    index = 0
     drum (count) {
-        (index < count) {
-            @register = seed.str.add("a", seed.num.text(index))
-            @offset = seed.num.text(constants.stack_source_offset(count, index))
-            compiler = state.emit_op(compiler, instruction.Kind.LW, abi.argument_register(index), codec.SP, codec.ZERO, constants.stack_source_offset(count, index))
-            index = index + 1
-        }
+        compiler = state.emit_op(compiler, instruction.Kind.LW, abi.argument_register(beat), codec.SP, codec.ZERO, constants.stack_source_offset(count, beat))
     }
     (count > 0) {
         compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, constants.stack_bytes(count))
@@ -357,20 +322,15 @@ skill compile_arguments(compiler, args) {
 }
 
 skill compile_show(compiler, args) {
-    @index = 0
-    @count = seed.group.count(args)
-    drum (count) {
-        (index < count) {
-            compiler = compile_expression(compiler, seed.group.item(args, index))
-            @type = infer_type(compiler, seed.group.item(args, index))
+    drum (args) {
+        compiler = compile_expression(compiler, beat)
+        @type = infer_type(compiler, beat)
+        pick {
             (contract.is_fixed_type(type) == yes) {
                 compiler = state.load_immediate(compiler, "a6", abi.CALL_FIXED_SOURCE_KIND_REGISTER, contract.fixed_kind(type))
                 compiler.machine = layout.emit_call(compiler.machine, "rt_fixed_show")
             }
-            (contract.is_fixed_type(type) == no) {
-                compiler.machine = layout.emit_call(compiler.machine, "rt_show")
-            }
-            index = index + 1
+            { compiler.machine = layout.emit_call(compiler.machine, "rt_show") }
         }
     }
     compiler.machine = layout.emit_call(compiler.machine, "rt_newline")
@@ -384,48 +344,37 @@ skill intrinsic(name) {
 skill ascii_code(ch) {
     (ch == "\n") { out 10 }
     (ch == "\t") { out 9 }
-    @index = 0
     @length = seed.str.len(state.PRINTABLE)
-    @code = 0
     drum (length) {
-        (index < length) {
-            (seed.str.at(state.PRINTABLE, index) == ch) { code = index + 32 }
-            index = index + 1
-        }
+        @index = length - 1 - beat
+        (seed.str.at(state.PRINTABLE, index) == ch) { out index + 32 }
     }
-    out code
+    out 0
 }
 
 skill string_find(compiler, text) {
-    @result = state.Symbol {}
-    @index = 0
     @count = seed.group.count(compiler.strings)
     drum (count) {
-        (index < count) {
-            @item = seed.group.item(compiler.strings, index)
-            (item.text == text) { result = item }
-            index = index + 1
-        }
+        @item = seed.group.item(compiler.strings, count - 1 - beat)
+        (item.text == text) { out item }
     }
-    out result
+    out state.Symbol {}
 }
 
 skill emit_string_data(compiler, text) {
     @line = "  .byte "
     @line_bytes = 0
-    @index = 0
     @length = seed.str.len(text)
     @total = length + 1
     drum (total) {
         @value = 0
-        (index < length) { value = seed.str.byte(text, index) }
+        (beat < length) { value = seed.str.byte(text, beat) }
         (line_bytes > 0) { line = seed.str.add(line, ", ") }
         line = seed.str.add(line, seed.num.text(value))
         line_bytes = line_bytes + 1
-        index = index + 1
 
         @flush = line_bytes == constants.STRING_DATA_LINE_BYTES
-        (index == total) { flush = yes }
+        (beat + 1 == total) { flush = yes }
         (flush == yes) {
             compiler = state.emit_data(compiler, line)
             line = "  .byte "
@@ -461,14 +410,10 @@ skill string_label(compiler, text) {
 }
 
 skill compile_group(compiler, items) {
-    @index = 0
     @count = seed.group.count(items)
-    drum (count) {
-        (index < count) {
-            compiler = compile_expression(compiler, seed.group.item(items, index))
-            compiler = state.push(compiler, "a0", codec.A0)
-            index = index + 1
-        }
+    drum (items) {
+        compiler = compile_expression(compiler, beat)
+        compiler = state.push(compiler, "a0", codec.A0)
     }
     compiler = state.load_immediate(compiler, "a0", codec.A0, constants.group_storage_bytes(count))
     compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
@@ -476,16 +421,9 @@ skill compile_group(compiler, items) {
     compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, abi.OBJECT_HEADER_KIND_OFFSET)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T3, codec.ZERO, codec.ZERO, count)
     compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, abi.OBJECT_PAYLOAD_OFFSET + constants.GROUP_COUNT_OFFSET)
-    index = 0
     drum (count) {
-        (index < count) {
-            @source_offset = seed.num.text(constants.stack_source_offset(count, index))
-            @item_offset = abi.OBJECT_PAYLOAD_OFFSET + constants.group_item_offset(index)
-            @target_offset = seed.num.text(item_offset)
-            compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, constants.stack_source_offset(count, index))
-            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, item_offset)
-            index = index + 1
-        }
+        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, constants.stack_source_offset(count, beat))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.group_item_offset(beat))
     }
     (count > 0) {
         compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, constants.stack_bytes(count))
@@ -494,46 +432,32 @@ skill compile_group(compiler, items) {
 }
 
 skill box_override(overrides, field_name) {
-    @result = []
-    @index = 0
     @count = seed.group.count(overrides)
     drum (count) {
-        (index < count) {
-            @field = ast.plain(seed.group.item(overrides, index))
-            (seed.group.item(field, 1) == field_name) { result = seed.group.item(field, 2) }
-            index = index + 1
-        }
+        @field = ast.plain(seed.group.item(overrides, count - 1 - beat))
+        (seed.group.item(field, 1) == field_name) { out seed.group.item(field, 2) }
     }
-    out result
+    out []
 }
 
 skill compile_box(compiler, name, overrides) {
     @model = state.symbol_find(compiler.boxes, name)
     @fields = []
-    @index = 2
     @member_count = seed.group.count(ast.plain(model.node))
-    drum (member_count) {
-        (index < member_count) {
-            @member = ast.part(model.node, index)
-            (ast.tag(member) == "field") { fields = seed.group.add(fields, member) }
-            index = index + 1
-        }
+    drum (member_count - 2) {
+        @member = ast.part(model.node, beat + 2)
+        (ast.tag(member) == "field") { fields = seed.group.add(fields, member) }
     }
     @count = seed.group.count(fields)
-    index = 0
-    drum (count) {
-        (index < count) {
-            @field = seed.group.item(fields, index)
-            @value = box_override(overrides, ast.part(field, 1))
-            @default_value = no
-            (seed.group.count(value) == 0) { value = ast.part(field, 2) default_value = yes }
-            @caller_module = compiler.current_function.module
-            (default_value == yes) { compiler.current_function.module = model.text }
-            compiler = compile_expression(compiler, value)
-            compiler.current_function.module = caller_module
-            compiler = state.push(compiler, "a0", codec.A0)
-            index = index + 1
-        }
+    drum (fields) {
+        @value = box_override(overrides, ast.part(beat, 1))
+        @default_value = no
+        (seed.group.count(value) == 0) { value = ast.part(beat, 2) default_value = yes }
+        @caller_module = compiler.current_function.module
+        (default_value == yes) { compiler.current_function.module = model.text }
+        compiler = compile_expression(compiler, value)
+        compiler.current_function.module = caller_module
+        compiler = state.push(compiler, "a0", codec.A0)
     }
     compiler = state.load_immediate(compiler, "a0", codec.A0, constants.box_storage_bytes(count))
     compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
@@ -541,19 +465,12 @@ skill compile_box(compiler, name, overrides) {
     compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, abi.OBJECT_HEADER_KIND_OFFSET)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T3, codec.ZERO, codec.ZERO, count)
     compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_COUNT_OFFSET)
-    index = 0
     drum (count) {
-        (index < count) {
-            @field = seed.group.item(fields, index)
-            @field_id = state.field(compiler, ast.part(field, 1))
-            compiler = state.load_immediate(compiler, "t0", codec.T0, field_id)
-            @field_id_offset = abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_id_offset(index)
-            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, field_id_offset)
-            compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, constants.stack_source_offset(count, index))
-            @field_value_offset = abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_value_offset(index)
-            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, field_value_offset)
-            index = index + 1
-        }
+        @field_id = state.field(compiler, ast.part(seed.group.item(fields, beat), 1))
+        compiler = state.load_immediate(compiler, "t0", codec.T0, field_id)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_id_offset(beat))
+        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, constants.stack_source_offset(count, beat))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_value_offset(beat))
     }
     (count > 0) {
         compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, constants.stack_bytes(count))
@@ -712,17 +629,13 @@ skill compile_expression(compiler, node) {
 
 skill compile_block(compiler, block, keep) {
     @plain = ast.plain(block)
-    @index = 1
     @count = seed.group.count(plain)
-    drum (count) {
-        (index < count) {
-            @last = no
-            (keep == yes) {
-                (index + 1 == count) { last = yes }
-            }
-            compiler = compile_statement(compiler, seed.group.item(plain, index), last)
-            index = index + 1
+    drum (count - 1) {
+        @last = no
+        (keep == yes) {
+            (beat + 2 == count) { last = yes }
         }
+        compiler = compile_statement(compiler, seed.group.item(plain, beat + 1), last)
     }
     (keep == yes) {
         (count == 1) { compiler = state.load_immediate(compiler, "a0", codec.A0, abi.NONE) }
@@ -783,9 +696,8 @@ skill compile_statement(compiler, node, keep) {
     (tag == "expr") { out compile_expression(compiler, seed.group.item(plain, 1)) }
     (tag == "pick") {
         @end = state.label(compiler, "pick_end")
-        @choice_index = 1
         drum (seed.group.count(plain) - 1) {
-            @choice = ast.plain(seed.group.item(plain, choice_index))
+            @choice = ast.plain(seed.group.item(plain, beat + 1))
             (seed.group.item(choice, 0) == "if") {
                 @next = state.label(compiler, "pick_next")
                 compiler = compile_expression(compiler, seed.group.item(choice, 1))
@@ -804,7 +716,6 @@ skill compile_statement(compiler, node, keep) {
             (seed.group.item(choice, 0) == "otherwise") {
                 compiler = compile_block(compiler, seed.group.item(choice, 1), keep)
             }
-            choice_index = choice_index + 1
         }
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
         out compiler
@@ -832,21 +743,16 @@ skill compile_statement(compiler, node, keep) {
         @end = state.label(compiler, "switch_end")
         compiler = compile_expression(compiler, seed.group.item(plain, 1))
         compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.A0, codec.ZERO, 0)
-        @index = 2
-        @count = seed.group.count(plain)
-        drum (count) {
-            (index < count) {
-                @case_node = ast.plain(seed.group.item(plain, index))
-                @next = state.label(compiler, "case_next")
-                @variant = state.symbol_find(compiler.variants, seed.group.item(case_node, 1))
-                compiler = state.load_immediate(compiler, "t0", codec.T0, variant.value)
-                compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, codec.ZERO, codec.T2, codec.T0, 8)
-                compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, next)
-                compiler = compile_expression(compiler, seed.group.item(case_node, 2))
-                compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
-                compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, next)
-                index = index + 1
-            }
+        drum (seed.group.count(plain) - 2) {
+            @case_node = ast.plain(seed.group.item(plain, beat + 2))
+            @next = state.label(compiler, "case_next")
+            @variant = state.symbol_find(compiler.variants, seed.group.item(case_node, 1))
+            compiler = state.load_immediate(compiler, "t0", codec.T0, variant.value)
+            compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, codec.ZERO, codec.T2, codec.T0, 8)
+            compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, next)
+            compiler = compile_expression(compiler, seed.group.item(case_node, 2))
+            compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
+            compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, next)
         }
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
         out compiler
@@ -858,7 +764,7 @@ skill compile_statement(compiler, node, keep) {
         @source = state.slot(compiler, seed.str.add("$drum_source:", drum_number))
         @position = state.slot(compiler, seed.str.add("$drum_index:", drum_number))
         @saved = state.slot(compiler, seed.str.add("$drum_saved:", drum_number))
-        @beat = state.slot(compiler, state.DRUM_BEAT)
+        @beat_slot = state.slot(compiler, state.DRUM_BEAT)
         @start = state.label(compiler, "drum")
         @end = state.label(compiler, "drum_end")
         @numeric = state.label(compiler, "drum_numeric")
@@ -905,7 +811,7 @@ skill compile_statement(compiler, node, keep) {
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, counted)
         compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, counter)
         compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.ZERO, position)
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, beat)
+        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, beat_slot)
         compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T0, saved)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, start)
         compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, counter)
@@ -924,7 +830,7 @@ skill compile_statement(compiler, node, keep) {
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, beat_number)
         compiler = state.emit_op(compiler, instruction.Kind.SLLI, codec.T2, codec.T1, codec.ZERO, abi.TAG_SHIFT)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, beat_ready)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T2, beat)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T2, beat_slot)
         compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.T1, codec.ZERO, 1)
         compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T1, position)
         @outer_exit = compiler.current_function.drum_exit
@@ -934,7 +840,7 @@ skill compile_statement(compiler, node, keep) {
         compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, start)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
         compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, saved)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T0, beat)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T0, beat_slot)
         out compiler
     }
     out compiler
@@ -947,14 +853,7 @@ skill compile_function(compiler, name, params, body, subject, module) {
     @slots = state.make_slots(locals.names, constants.local_offset(0))
     @end = state.label(compiler, seed.str.add(name, "_return"))
     @types = []
-    @type_index = 0
-    @type_count = seed.group.count(params)
-    drum (type_count) {
-        (type_index < type_count) {
-            types = state.type_set(types, seed.group.item(params, type_index), "unknown")
-            type_index = type_index + 1
-        }
-    }
+    drum (params) { types = state.type_set(types, beat, "unknown") }
     (seed.str.len(subject) > 0) { types = state.type_set(types, "$self", seed.str.add("box:", subject)) }
     compiler.current_function = state.Function { name = name slots = slots end = end subject = subject module = module types = types }
     @function_label = seed.str.add("saltic_", state.safe(name))
@@ -967,15 +866,9 @@ skill compile_function(compiler, name, params, body, subject, module) {
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S0, codec.SP, codec.ZERO, frame)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S4, codec.S1, codec.ZERO, 0)
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S5, codec.S2, codec.ZERO, 0)
-    @index = 0
-    @param_count = seed.group.count(params)
-    drum (param_count) {
-        (index < param_count) {
-            @register = seed.str.add("a", seed.num.text(index))
-            @slot = state.slot(compiler, seed.group.item(params, index))
-            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, abi.argument_register(index), slot)
-            index = index + 1
-        }
+    drum (seed.group.count(params)) {
+        @slot = state.slot(compiler, seed.group.item(params, beat))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, abi.argument_register(beat), slot)
     }
     compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
     compiler = compile_block(compiler, body, no)
@@ -1061,48 +954,24 @@ skill compile_constant(compiler, constant) {
 }
 
 skill compile_constants(compiler) {
-    @index = 0
-    @count = seed.group.count(compiler.constants)
-    drum (count) {
-        (index < count) {
-            compiler = compile_constant(compiler, seed.group.item(compiler.constants, index))
-            index = index + 1
-        }
-    }
+    drum (compiler.constants) { compiler = compile_constant(compiler, beat) }
     out compiler
 }
 
 skill compile_functions(compiler) {
-    @index = 0
-    @count = seed.group.count(compiler.skills)
-    drum (count) {
-        (index < count) {
-            @symbol = seed.group.item(compiler.skills, index)
-            @skill_node = symbol.node
-            compiler = compile_function(compiler, symbol.name, ast.part(skill_node, 2), ast.part(skill_node, 3), "", symbol.text)
-            index = index + 1
-        }
+    drum (compiler.skills) {
+        compiler = compile_function(compiler, beat.name, ast.part(beat.node, 2), ast.part(beat.node, 3), "", beat.text)
     }
-    @box_index = 0
-    @box_count = seed.group.count(compiler.boxes)
-    drum (box_count) {
-        (box_index < box_count) {
-            @box = seed.group.item(compiler.boxes, box_index)
-            @member_index = 2
-            @member_count = seed.group.count(ast.plain(box.node))
-            drum (member_count) {
-                (member_index < member_count) {
-                    @member = ast.part(box.node, member_index)
-                    (ast.tag(member) == "subject-skill") {
-                        @name = seed.str.add(box.name, ".")
-                        name = seed.str.add(name, ast.part(member, 1))
-                        @params = state.group_prepend("$self", ast.part(member, 2))
-                        compiler = compile_function(compiler, name, params, ast.part(member, 3), box.name, ast.module_name(box.node))
-                    }
-                    member_index = member_index + 1
-                }
+    drum (compiler.boxes) {
+        @box = beat
+        drum (seed.group.count(ast.plain(box.node)) - 2) {
+            @member = ast.part(box.node, beat + 2)
+            (ast.tag(member) == "subject-skill") {
+                @name = seed.str.add(box.name, ".")
+                name = seed.str.add(name, ast.part(member, 1))
+                @params = state.group_prepend("$self", ast.part(member, 2))
+                compiler = compile_function(compiler, name, params, ast.part(member, 3), box.name, ast.module_name(box.node))
             }
-            box_index = box_index + 1
         }
     }
     compiler = compile_function(compiler, "program", ast.part(compiler.entry, 1), ast.part(compiler.entry, 2), "", "")
