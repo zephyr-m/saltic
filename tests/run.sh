@@ -336,6 +336,11 @@ test_qemu_virt() {
         bash os/target/qemu_virt/build-graphics.sh --check
 }
 
+test_uefi() {
+    SALTIC_UEFI_DIR="$work/uefi" bash os/target/uefi_x86_64/build.sh
+    SALTIC_UEFI_DIR="$work/uefi" bash os/target/uefi_x86_64/run.sh --check
+}
+
 test_jtml() {
     mkdir -p "$work/jtml"
     build jtml \
@@ -539,6 +544,7 @@ run_case() {
         native) test_native ;;
         native-bootstrap) test_native_bootstrap ;;
         qemu-virt) test_qemu_virt ;;
+        uefi) test_uefi ;;
         jtml) test_jtml ;;
         tasks) test_tasks ;;
         bootstrap) test_bootstrap ;;
@@ -572,6 +578,7 @@ if [[ "$1" == "all" || "$1" == "fast" ]]; then
         jtml \
         tasks \
         qemu-virt \
+        uefi \
         closure \
         bootstrap \
         native-bootstrap
