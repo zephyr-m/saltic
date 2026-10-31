@@ -1,0 +1,126 @@
+use seed.machine.codec
+use seed.machine.layout
+use seed.machine.image
+
+PE_OFFSET = 64
+HEADERS_BYTES = 512
+FILE_ALIGNMENT = 512
+SECTION_ALIGNMENT = 4096
+MACHINE_X86_64 = 34404
+SECTION_COUNT = 1
+OPTIONAL_HEADER_BYTES = 240
+EXECUTABLE_IMAGE = 34
+PE32_PLUS = 523
+EFI_APPLICATION = 10
+DIRECTORY_COUNT = 16
+RELOCATION_DIRECTORY = 5
+RELOCATION_BYTES = 12
+STACK_RESERVE = 1048576
+
+skill append_dos_header(target) {
+    target = image.append_text(target, "MZ")
+    target = image.pad_to(target, 60)
+    target = image.append_number32(target, PE_OFFSET)
+    out image.pad_to(target, PE_OFFSET)
+}
+
+skill append_file_header(target) {
+    target = image.append_text(target, "PE")
+    target = image.append_u16(target, 0)
+    target = image.append_u16(target, MACHINE_X86_64)
+    target = image.append_u16(target, SECTION_COUNT)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = image.append_u16(target, OPTIONAL_HEADER_BYTES)
+    out image.append_u16(target, EXECUTABLE_IMAGE)
+}
+
+skill append_optional_header(target, firmware, raw_bytes, image_bytes) {
+    target = image.append_u16(target, PE32_PLUS)
+    target = image.append_u16(target, 0)
+    target = image.append_number32(target, raw_bytes)
+    target = image.append_number32(target, raw_bytes)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, firmware.entry_rva)
+    target = image.append_number32(target, SECTION_ALIGNMENT)
+    target = codec.append_word(target, codec.word(0, 0, 0, 16))
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, SECTION_ALIGNMENT)
+    target = image.append_number32(target, FILE_ALIGNMENT)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, image_bytes)
+    target = image.append_number32(target, HEADERS_BYTES)
+    target = image.append_number32(target, 0)
+    target = image.append_u16(target, EFI_APPLICATION)
+    target = image.append_u16(target, 0)
+    drum (4) {
+        target = image.append_number32(target, STACK_RESERVE)
+        target = image.append_number32(target, 0)
+    }
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, DIRECTORY_COUNT)
+    drum (DIRECTORY_COUNT) {
+        pick {
+            (beat == RELOCATION_DIRECTORY) {
+                target = image.append_number32(target, firmware.relocation_rva)
+                target = image.append_number32(target, RELOCATION_BYTES)
+            }
+            {
+                target = image.append_number32(target, 0)
+                target = image.append_number32(target, 0)
+            }
+        }
+    }
+    out target
+}
+
+skill append_section_header(target, raw_bytes, virtual_bytes) {
+    target = image.append_text(target, ".text")
+    target = codec.append_zeroes(target, 3)
+    target = image.append_number32(target, virtual_bytes)
+    target = image.append_number32(target, SECTION_ALIGNMENT)
+    target = image.append_number32(target, raw_bytes)
+    target = image.append_number32(target, HEADERS_BYTES)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = image.append_u16(target, 0)
+    target = image.append_u16(target, 0)
+    out codec.append_word(target, codec.word(224, 0, 0, 224))
+}
+
+skill section(firmware) {
+    @base = firmware.table_rva
+    @body = codec.buffer()
+    body = codec.append_buffer(body, firmware.table)
+    body = image.pad_to(body, firmware.code_rva - base)
+    body = codec.append_buffer(body, firmware.code)
+    body = image.pad_to(body, firmware.relocation_rva - base)
+    body = image.append_number32(body, SECTION_ALIGNMENT)
+    body = image.append_number32(body, RELOCATION_BYTES)
+    body = image.append_number32(body, 0)
+    body = image.pad_to(body, firmware.guest_rva - base)
+    out codec.append_buffer(body, image.payload(firmware.rv, firmware.rv_layout))
+}
+
+skill executable(firmware) {
+    @body = section(firmware)
+    @raw_bytes = layout.align(body.length, FILE_ALIGNMENT)
+    @virtual_bytes = firmware.guest_rva - firmware.table_rva + firmware.guest_bytes
+    @image_bytes = layout.align(firmware.table_rva + virtual_bytes, SECTION_ALIGNMENT)
+    @result = codec.buffer()
+    result = append_dos_header(result)
+    result = append_file_header(result)
+    result = append_optional_header(result, firmware, raw_bytes, image_bytes)
+    result = append_section_header(result, raw_bytes, virtual_bytes)
+    result = image.pad_to(result, HEADERS_BYTES)
+    result = codec.append_buffer(result, body)
+    out image.pad_to(result, HEADERS_BYTES + raw_bytes)
+}
+
+skill write(path, firmware) {
+    out image.write_buffer(path, executable(firmware))
+}
