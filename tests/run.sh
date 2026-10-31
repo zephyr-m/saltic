@@ -252,6 +252,7 @@ test_native() {
     fi
     grep -q "duplicate_import|.*'add'" "$work/native/import-errors.txt"
     grep -q "unknown_import|.*'nothing_here'" "$work/native/import-errors.txt"
+    grep -q "import_shadowed|.*'clear'" "$work/native/import-errors.txt"
     echo "x86-64: канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает"
 }
 
