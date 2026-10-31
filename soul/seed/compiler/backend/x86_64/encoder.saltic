@@ -34,6 +34,15 @@ GUEST_MODRM_EAX = 4
 GUEST_MODRM_ECX = 12
 GUEST_SIB = 6
 TWO_BYTE_OPCODE = 15
+REX = 64
+REX_REGISTER = 4
+REX_BASE = 1
+REGISTER_COUNT = 32
+
+HOST_OF_REGISTER = [
+    -1, 8, 3, -1, -1, 7, 10, 12, 2, -1, 5, 6, 9, -1, -1, -1,
+    -1, -1, -1, -1, 11, -1, -1, -1, -1, -1, -1, -1, 13, -1, -1, -1,
+]
 
 skill bytes(code, items) {
     drum (items) { code = codec.append_byte(code, beat) }
@@ -49,12 +58,62 @@ skill immediate32(code, value) {
     out codec.append_word(code, signed_word(value))
 }
 
+skill host_register(index) {
+    out seed.group.item(HOST_OF_REGISTER, index)
+}
+
+skill low_bits(register) {
+    (register > 7) { out register - 8 }
+    out register
+}
+
+skill file_prefix(register) {
+    (register > 7) { out REGISTER_FILE_PREFIX + REX_REGISTER }
+    out REGISTER_FILE_PREFIX
+}
+
+skill move_register(code, target, source) {
+    @prefix = REX
+    (source > 7) { prefix = prefix + REX_REGISTER }
+    (target > 7) { prefix = prefix + REX_BASE }
+    (prefix > REX) { code = codec.append_byte(code, prefix) }
+    out bytes(code, [STORE_OPCODE, 192 + low_bits(source) * 8 + low_bits(target)])
+}
+
+skill load_file_register(code, target, index) {
+    out bytes(code, [file_prefix(target), LOAD_OPCODE, DISPLACEMENT8_R15 + low_bits(target) * 8, index * 4])
+}
+
+skill store_file_register(code, index, source) {
+    out bytes(code, [file_prefix(source), STORE_OPCODE, DISPLACEMENT8_R15 + low_bits(source) * 8, index * 4])
+}
+
 skill load_register(code, target, index) {
-    out bytes(code, [REGISTER_FILE_PREFIX, LOAD_OPCODE, DISPLACEMENT8_R15 + target * 8, index * 4])
+    @host = host_register(index)
+    (host > -1) { out move_register(code, target, host) }
+    out load_file_register(code, target, index)
 }
 
 skill store_register(code, index, source) {
-    out bytes(code, [REGISTER_FILE_PREFIX, STORE_OPCODE, DISPLACEMENT8_R15 + source * 8, index * 4])
+    @host = host_register(index)
+    (host > -1) { out move_register(code, host, source) }
+    out store_file_register(code, index, source)
+}
+
+skill spill_registers(code) {
+    drum (REGISTER_COUNT) {
+        @host = host_register(beat)
+        (host > -1) { code = store_file_register(code, beat, host) }
+    }
+    out code
+}
+
+skill reload_registers(code) {
+    drum (REGISTER_COUNT) {
+        @host = host_register(beat)
+        (host > -1) { code = load_file_register(code, host, beat) }
+    }
+    out code
 }
 
 skill move_immediate(code, target, value) {
