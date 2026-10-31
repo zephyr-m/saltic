@@ -124,51 +124,43 @@ Parser = Box {
     skill sequence(start, end_kind, item_kind, item_message, eof_message, require_separator, allow_comma) {
         @items = []
         @next = skip_lines(start)
-        @done = no
         @diagnostics = []
-        @count = lexer.token_buffer_count(tokens)
-        drum (count) {
-            (done == no) {
-                (is(next, end_kind) == yes) {
+        drum (lexer.token_buffer_count(tokens)) {
+            (is(next, end_kind) == yes) {
+                next = next + 1
+                leave
+            }
+            (is(next, lexer.TokenKind.EOF) == yes) {
+                @failure = fail(next, eof_message)
+                diagnostics = failure.diagnostics
+                leave
+            }
+            @item = sequence_item(next, item_kind, item_message)
+            (has_diagnostics(item.diagnostics) == yes) {
+                diagnostics = item.diagnostics
+                leave
+            }
+            items = seed.group.add(items, item.node.datum)
+            next = item.next
+            @separated = no
+            (allow_comma == yes) {
+                (is(next, lexer.TokenKind.COMMA) == yes) {
                     next = next + 1
-                    done = yes
+                    separated = yes
                 }
-                (done == no) {
-                    (is(next, lexer.TokenKind.EOF) == yes) {
-                        @failure = fail(next, eof_message)
-                        diagnostics = failure.diagnostics
-                        done = yes
-                    }
-                }
-                (done == no) {
-                    @item = sequence_item(next, item_kind, item_message)
-                    (has_diagnostics(item.diagnostics) == yes) { diagnostics = item.diagnostics done = yes }
-                    (done == no) {
-                        items = seed.group.add(items, item.node.datum)
-                        next = item.next
-                        @separated = no
-                        (allow_comma == yes) {
-                            (is(next, lexer.TokenKind.COMMA) == yes) {
-                                next = next + 1
-                                separated = yes
-                            }
-                        }
-                        @before_lines = next
-                        next = skip_lines(next)
-                        (next > before_lines) { separated = yes }
-                        (is(next, end_kind) == no) {
-                            (require_separator == yes) {
-                                (separated == no) {
-                                    @separator_failure = fail(next, "ожидался разделитель")
-                                    diagnostics = separator_failure.diagnostics
-                                    done = yes
-                                }
-                            }
-                        }
+            }
+            @before_lines = next
+            next = skip_lines(next)
+            (next > before_lines) { separated = yes }
+            (is(next, end_kind) == no) {
+                (require_separator == yes) {
+                    (separated == no) {
+                        @separator_failure = fail(next, "ожидался разделитель")
+                        diagnostics = separator_failure.diagnostics
+                        leave
                     }
                 }
             }
-            (done == yes) { out Read { node = make_node("sequence", items) next = next diagnostics = diagnostics } }
         }
         out Read { node = make_node("sequence", items) next = next diagnostics = diagnostics }
     }
@@ -288,18 +280,15 @@ Parser = Box {
         @ast = group1("program")
         @next = skip_lines(0)
         @diagnostics = []
-        @done = no
-        @count = lexer.token_buffer_count(tokens)
-        drum (count) {
-            (done == no) {
-                (is(next, lexer.TokenKind.EOF) == yes) { done = yes }
-                (done == no) {
-                    @item = top(next)
-                    (has_diagnostics(item.diagnostics) == yes) { diagnostics = item.diagnostics done = yes }
-                    (done == no) { ast = seed.group.add(ast, item.node.datum) next = skip_lines(item.next) }
-                }
+        drum (lexer.token_buffer_count(tokens)) {
+            (is(next, lexer.TokenKind.EOF) == yes) { leave }
+            @item = top(next)
+            (has_diagnostics(item.diagnostics) == yes) {
+                diagnostics = item.diagnostics
+                leave
             }
-            (done == yes) { out Parse { ast = ast tokens = tokens diagnostics = diagnostics } }
+            ast = seed.group.add(ast, item.node.datum)
+            next = skip_lines(item.next)
         }
         out Parse { ast = ast tokens = tokens diagnostics = diagnostics }
     }
@@ -313,24 +302,13 @@ Parser = Box {
         @parts = group2("path", token.value)
         cursor = cursor.next()
         @count = lexer.token_buffer_count(tokens)
-        @active = yes
         drum (count) {
-            (active == yes) {
-                (cursor.index + 1 < count) {
-                    (cursor.is(lexer.TokenKind.DOT) == yes) {
-                        @has_part = cursor.is_at(1, lexer.TokenKind.IDENT)
-                        (has_part == yes) {
-                            @part_token = cursor.at(1)
-                            parts = seed.group.add(parts, part_token.value)
-                            cursor = cursor.move(2)
-                        }
-                        (has_part == no) { active = no }
-                    }
-                    (cursor.is(lexer.TokenKind.DOT) == no) { active = no }
-                }
-                (cursor.index + 1 == count) { active = no }
-            }
-            (active == no) { out ok("path", loc(parts, token, with_locations), cursor.index) }
+            ((cursor.index + 1 < count) == no) { leave }
+            (cursor.is(lexer.TokenKind.DOT) == no) { leave }
+            (cursor.is_at(1, lexer.TokenKind.IDENT) == no) { leave }
+            @part_token = cursor.at(1)
+            parts = seed.group.add(parts, part_token.value)
+            cursor = cursor.move(2)
         }
         out ok("path", loc(parts, token, with_locations), cursor.index)
     }
@@ -385,52 +363,42 @@ Parser = Box {
         (has_diagnostics(base.diagnostics) == yes) { out base }
         @node = base.node
         @next = base.next
-        @active = yes
         @diagnostics = []
-        @count = lexer.token_buffer_count(tokens)
-        drum (count) {
-            (active == yes) {
-                (is(next, lexer.TokenKind.LPAREN) == yes) {
-                    @call_token = at(next)
-                    @args = args(next)
-                    (has_diagnostics(args.diagnostics) == yes) { diagnostics = args.diagnostics active = no }
-                    (has_diagnostics(args.diagnostics) == no) {
-                        @call = group2("call", node.datum)
-                        call = append_tail(call, args.node.datum, 0)
-                        node = make_node("call", loc(call, call_token, locations))
-                        next = args.next
-                    }
+        drum (lexer.token_buffer_count(tokens)) {
+            (is(next, lexer.TokenKind.LPAREN) == yes) {
+                @call_token = at(next)
+                @args = args(next)
+                (has_diagnostics(args.diagnostics) == yes) {
+                    diagnostics = args.diagnostics
+                    leave
                 }
-                (is(next, lexer.TokenKind.LPAREN) == no) {
-                    @box_candidate = no
-                    (node.tag == "path") {
-                        @plain_path = node.datum
-                        (locations == yes) { plain_path = seed.group.item(node.datum, 3) }
-                        (is(next, lexer.TokenKind.LBRACE) == yes) { box_candidate = yes }
-                    }
-                    (box_candidate == yes) {
-                        @box_token = at(next)
-                        @fields = fields(next)
-                        (has_diagnostics(fields.diagnostics) == yes) { diagnostics = fields.diagnostics active = no }
-                        (has_diagnostics(fields.diagnostics) == no) {
-                            @plain_name = node.datum
-                            (locations == yes) { plain_name = seed.group.item(node.datum, 3) }
-                            @box_name = seed.group.item(plain_name, 1)
-                            @name_index = 2
-                            @name_count = seed.group.count(plain_name)
-                            drum (name_count) {
-                                (name_index < name_count) { box_name = seed.str.add(box_name, seed.str.add(".", seed.group.item(plain_name, name_index))) name_index = name_index + 1 }
-                            }
-                            @box = group2("box-new", box_name)
-                            box = append_tail(box, fields.node.datum, 0)
-                            node = make_node("box-new", loc(box, box_token, locations))
-                            next = fields.next
-                        }
-                    }
-                    (box_candidate == no) { active = no }
-                }
+                @call = group2("call", node.datum)
+                call = append_tail(call, args.node.datum, 0)
+                node = make_node("call", loc(call, call_token, locations))
+                next = args.next
             }
-            (active == no) { out Read { node = node next = next diagnostics = diagnostics } }
+            (is(next, lexer.TokenKind.LPAREN) == no) {
+                ((node.tag == "path") == no) { leave }
+                (is(next, lexer.TokenKind.LBRACE) == no) { leave }
+                @box_token = at(next)
+                @fields = fields(next)
+                (has_diagnostics(fields.diagnostics) == yes) {
+                    diagnostics = fields.diagnostics
+                    leave
+                }
+                @plain_name = node.datum
+                (locations == yes) { plain_name = seed.group.item(node.datum, 3) }
+                @box_name = seed.group.item(plain_name, 1)
+                @name_index = 2
+                drum (seed.group.count(plain_name) - 2) {
+                    box_name = seed.str.add(box_name, seed.str.add(".", seed.group.item(plain_name, name_index)))
+                    name_index = name_index + 1
+                }
+                @box = group2("box-new", box_name)
+                box = append_tail(box, fields.node.datum, 0)
+                node = make_node("box-new", loc(box, box_token, locations))
+                next = fields.next
+            }
         }
         out Read { node = node next = next diagnostics = diagnostics }
     }
@@ -451,25 +419,19 @@ Parser = Box {
         (has_diagnostics(first.diagnostics) == yes) { out first }
         @left = first.node
         @next = first.next
-        @active = yes
         @diagnostics = []
-        @count = lexer.token_buffer_count(tokens)
-        drum (count) {
-            (active == yes) {
-                @operator = at(next)
-                @level = precedence(operator.kind)
-                (level < minimum) { active = no }
-                (level == 0) { active = no }
-                (active == yes) {
-                    @right = binary(next + 1, level + 1)
-                    (has_diagnostics(right.diagnostics) == yes) { diagnostics = right.diagnostics active = no }
-                    (has_diagnostics(right.diagnostics) == no) {
-                        left = make_node("binary", loc(group4("binary", operator.value, left.datum, right.node.datum), operator, locations))
-                        next = right.next
-                    }
-                }
+        drum (lexer.token_buffer_count(tokens)) {
+            @operator = at(next)
+            @level = precedence(operator.kind)
+            (level < minimum) { leave }
+            (level == 0) { leave }
+            @right = binary(next + 1, level + 1)
+            (has_diagnostics(right.diagnostics) == yes) {
+                diagnostics = right.diagnostics
+                leave
             }
-            (active == no) { out Read { node = left next = next diagnostics = diagnostics } }
+            left = make_node("binary", loc(group4("binary", operator.value, left.datum, right.node.datum), operator, locations))
+            next = right.next
         }
         out Read { node = left next = next diagnostics = diagnostics }
     }
@@ -570,26 +532,23 @@ Parser = Box {
         @next = skip_lines(open.next)
         @count = lexer.token_buffer_count(tokens)
         drum (count) {
-            @handled = no
-            (is(next, lexer.TokenKind.RBRACE) == yes) { out Read { node = make_node("pick", loc(items, token, locations)) next = next + 1 diagnostics = [] } }
-            (is(next, lexer.TokenKind.LBRACE) == yes) {
-                @fallback_token = at(next)
-                @fallback = block(next)
-                (has_diagnostics(fallback.diagnostics) == yes) { out fallback }
-                items = seed.group.add(items, loc(group2("otherwise", fallback.node.datum), fallback_token, locations))
-                next = skip_lines(fallback.next)
-                handled = yes
-            }
-            (handled == no) {
+            pick {
+                (is(next, lexer.TokenKind.RBRACE) == yes) { out Read { node = make_node("pick", loc(items, token, locations)) next = next + 1 diagnostics = [] } }
+                (is(next, lexer.TokenKind.LBRACE) == yes) {
+                    @fallback_token = at(next)
+                    @fallback = block(next)
+                    (has_diagnostics(fallback.diagnostics) == yes) { out fallback }
+                    items = seed.group.add(items, loc(group2("otherwise", fallback.node.datum), fallback_token, locations))
+                    next = skip_lines(fallback.next)
+                }
                 (is(next, lexer.TokenKind.LPAREN) == yes) {
                     @choice = paren_statement(next)
                     (has_diagnostics(choice.diagnostics) == yes) { out choice }
                     items = seed.group.add(items, choice.node.datum)
                     next = skip_lines(choice.next)
-                    handled = yes
                 }
+                { out fail(next, "ожидался вариант pick: (условие) { } или { }") }
             }
-            (handled == no) { out fail(next, "ожидался вариант pick: (условие) { } или { }") }
         }
         out fail(next, "ожидалась } после pick")
     }
@@ -605,38 +564,39 @@ Parser = Box {
         @next = skip_lines(open.next)
         (is(next, lexer.TokenKind.DOT) == yes) {
             @cases = group2("switch", value.node.datum)
-            @done = no
             @diagnostics = []
-            @count = lexer.token_buffer_count(tokens)
-            drum (count) {
-                (done == no) {
-                    (is(next, lexer.TokenKind.RBRACE) == yes) { next = next + 1 done = yes }
-                    (done == no) {
-                        @case_token = at(next)
-                        @dot = expect(next, lexer.TokenKind.DOT, "ожидалась .")
-                        (has_diagnostics(dot.diagnostics) == yes) { diagnostics = dot.diagnostics done = yes }
-                        (done == no) {
-                            (is(dot.next, lexer.TokenKind.IDENT) == no) { @failure = fail(dot.next, "ожидалась метка ветки выбора") diagnostics = failure.diagnostics done = yes }
-                        }
-                        (done == no) {
-                            @tag_token = at(dot.next)
-                            @tag = tag_token.value
-                            @arrow = expect(dot.next + 1, lexer.TokenKind.ARROW, "ожидался =>")
-                            (has_diagnostics(arrow.diagnostics) == yes) { diagnostics = arrow.diagnostics done = yes }
-                            (done == no) {
-                                @body = expression(arrow.next)
-                                (has_diagnostics(body.diagnostics) == yes) { diagnostics = body.diagnostics done = yes }
-                                (done == no) {
-                                    cases = seed.group.add(cases, loc(group3("case", tag, body.node.datum), case_token, locations))
-                                    next = body.next
-                                    (is(next, lexer.TokenKind.COMMA) == yes) { next = next + 1 }
-                                    next = skip_lines(next)
-                                }
-                            }
-                        }
-                    }
+            drum (lexer.token_buffer_count(tokens)) {
+                (is(next, lexer.TokenKind.RBRACE) == yes) {
+                    next = next + 1
+                    leave
                 }
-                (done == yes) { out Read { node = make_node("switch", loc(cases, token, locations)) next = next diagnostics = diagnostics } }
+                @case_token = at(next)
+                @dot = expect(next, lexer.TokenKind.DOT, "ожидалась .")
+                (has_diagnostics(dot.diagnostics) == yes) {
+                    diagnostics = dot.diagnostics
+                    leave
+                }
+                (is(dot.next, lexer.TokenKind.IDENT) == no) {
+                    @failure = fail(dot.next, "ожидалась метка ветки выбора")
+                    diagnostics = failure.diagnostics
+                    leave
+                }
+                @tag_token = at(dot.next)
+                @tag = tag_token.value
+                @arrow = expect(dot.next + 1, lexer.TokenKind.ARROW, "ожидался =>")
+                (has_diagnostics(arrow.diagnostics) == yes) {
+                    diagnostics = arrow.diagnostics
+                    leave
+                }
+                @body = expression(arrow.next)
+                (has_diagnostics(body.diagnostics) == yes) {
+                    diagnostics = body.diagnostics
+                    leave
+                }
+                cases = seed.group.add(cases, loc(group3("case", tag, body.node.datum), case_token, locations))
+                next = body.next
+                (is(next, lexer.TokenKind.COMMA) == yes) { next = next + 1 }
+                next = skip_lines(next)
             }
             out Read { node = make_node("switch", loc(cases, token, locations)) next = next diagnostics = diagnostics }
         }
@@ -726,17 +686,17 @@ skill number_value(text) {
     @fraction = 0
     @scale = 1
     @after_dot = no
-    @index = 0
-    @length = seed.str.len(text)
-    drum (length) {
-        (index < length) {
-            @ch = seed.str.at(text, index)
-            (ch == ".") { after_dot = yes }
-            (is_digit(ch) == yes) {
+    drum (seed.str.len(text)) {
+        @ch = seed.str.at(text, beat)
+        (ch == ".") { after_dot = yes }
+        (is_digit(ch) == yes) {
+            pick {
                 (after_dot == no) { whole = whole * 10 + digit_value(ch) }
-                (after_dot == yes) { fraction = fraction * 10 + digit_value(ch) scale = scale * 10 }
+                {
+                    fraction = fraction * 10 + digit_value(ch)
+                    scale = scale * 10
+                }
             }
-            index = index + 1
         }
     }
     out whole + fraction / scale
@@ -748,13 +708,11 @@ skill number_is_wide(text) {
     (length > 9) { out yes }
     (length < 9) { out no }
     @limit = "268435455"
-    @index = 0
     drum (9) {
-        @actual = digit_value(seed.str.at(text, index))
-        @maximum = digit_value(seed.str.at(limit, index))
+        @actual = digit_value(seed.str.at(text, beat))
+        @maximum = digit_value(seed.str.at(limit, beat))
         (actual > maximum) { out yes }
         (actual < maximum) { out no }
-        index = index + 1
     }
     out no
 }
@@ -778,10 +736,10 @@ skill ok(tag, datum, next) {
 
 skill append_tail(head, tail, start) {
     @result = head
-    @cursor = start
     @count = seed.group.count(tail)
-    drum (count) {
-        (cursor < count) { result = seed.group.add(result, seed.group.item(tail, cursor)) cursor = cursor + 1 }
+    (start > count) { out result }
+    drum (count - start) {
+        result = seed.group.add(result, seed.group.item(tail, start + beat))
     }
     out result
 }

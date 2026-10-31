@@ -202,9 +202,18 @@ Lexer = Box {
                     diagnostics = diagnostics
                 }
             }
-            @escaped = no
-            (ch == ESCAPE) {
-                (index + 1 < length) {
+            pick {
+                (ch == ESCAPE) {
+                    ((index + 1 < length) == no) {
+                        diagnostics = seed.group.add(diagnostics, diagnostic.make_at("lexer_error", path, next_line, next_col, "незавершённая escape-последовательность"))
+                        out Lexeme {
+                            token = none
+                            next = index
+                            line = next_line
+                            col = next_col
+                            diagnostics = diagnostics
+                        }
+                    }
                     @escape = seed.str.at(source, index + 1)
                     @decoded = escape
                     (escape == ESCAPE_NEWLINE) { decoded = NEWLINE }
@@ -214,32 +223,18 @@ Lexer = Box {
                     value = seed.str.add(value, decoded)
                     index = index + 2
                     next_col = next_col + 2
-                    escaped = yes
                 }
-                (escaped == no) {
-                    diagnostics = seed.group.add(diagnostics, diagnostic.make_at("lexer_error", path, next_line, next_col, "незавершённая escape-последовательность"))
-                    out Lexeme {
-                        token = none
-                        next = index
-                        line = next_line
-                        col = next_col
-                        diagnostics = diagnostics
-                    }
-                }
-            }
-            (escaped == no) {
                 (ch == NEWLINE) {
                     value = seed.str.add(value, ch)
                     index = index + 1
                     next_line = next_line + 1
                     next_col = 1
                 }
-                (ch == NEWLINE) { escaped = yes }
-            }
-            (escaped == no) {
-                value = seed.str.add(value, ch)
-                index = index + 1
-                next_col = next_col + 1
+                {
+                    value = seed.str.add(value, ch)
+                    index = index + 1
+                    next_col = next_col + 1
+                }
             }
         }
         diagnostics = seed.group.add(diagnostics, diagnostic.make_at("lexer_error", path, line, col, "незавершённая строка"))
@@ -253,15 +248,15 @@ Lexer = Box {
     }
 
     skill table_kind(values, kinds, value, fallback) {
-        @index = 0
-        @count = seed.group.count(values)
-        drum (count) {
-            (index < count) {
-                (seed.group.item(values, index) == value) { out seed.group.item(kinds, index) }
-                index = index + 1
-            }
+        drum (seed.group.count(values)) {
+            (seed.group.item(values, beat) == value) { out seed.group.item(kinds, beat) }
         }
         out fallback
+    }
+
+    skill pair_at(index) {
+        (index + 1 < seed.str.len(source)) { out seed.str.slice(source, index, index + 2) }
+        out ""
     }
 
     skill word_kind(word) {
@@ -279,77 +274,66 @@ Lexer = Box {
         @line = 1
         @col = 1
         @length = seed.str.len(source)
-        @active = yes
         drum (length + 1) {
-            (active == yes) {
-                (index < length) {
-                    @ch = seed.str.at(source, index)
-                    @handled = no
-                    (ch == " ") { index = index + 1 col = col + 1 handled = yes }
-                    (ch == TAB) { index = index + 1 col = col + 1 handled = yes }
-                    (ch == NEWLINE) {
-                        tokens = token_buffer_add(tokens, token(TokenKind.NEWLINE, NEWLINE, line, col))
-                        index = index + 1
-                        line = line + 1
-                        col = 1
-                        handled = yes
-                    }
-                    (handled == no) {
-                        (ident_start(ch) == yes) {
-                            @lexeme = word(index, line, col)
-                            tokens = token_buffer_add(tokens, lexeme.token)
-                            index = lexeme.next
-                            line = lexeme.line
-                            col = lexeme.col
-                            handled = yes
-                        }
-                    }
-                    (handled == no) {
-                        (is_digit(ch) == yes) {
-                            @lexeme = number(index, line, col)
-                            tokens = token_buffer_add(tokens, lexeme.token)
-                            index = lexeme.next
-                            line = lexeme.line
-                            col = lexeme.col
-                            handled = yes
-                        }
-                    }
-                    (handled == no) {
-                        (ch == QUOTE) {
-                            @lexeme = text(index, line, col)
-                            index = lexeme.next
-                            line = lexeme.line
-                            col = lexeme.col
-                            diagnostics = lexeme.diagnostics
-                            (has_diagnostics(diagnostics) == no) { tokens = token_buffer_add(tokens, lexeme.token) }
-                            (has_diagnostics(diagnostics) == yes) { active = no }
-                            handled = yes
-                        }
-                    }
-                    (handled == no) {
-                        @pair = ""
-                        (index + 1 < length) { pair = seed.str.slice(source, index, index + 2) }
-                        (pair == "==") { tokens = token_buffer_add(tokens, token(TokenKind.EQ, pair, line, col)) index = index + 2 col = col + 2 handled = yes }
-                        (pair == "=>") { tokens = token_buffer_add(tokens, token(TokenKind.ARROW, pair, line, col)) index = index + 2 col = col + 2 handled = yes }
-                    }
-                    (handled == no) {
-                        @sign = sign_kind(ch)
-                        @valid_sign = yes
-                        (sign == TokenKind.INVALID) {
-                            @message = seed.str.add("неожиданный символ ", ch)
-                            diagnostics = seed.group.add(diagnostics, diagnostic.make_at("lexer_error", path, line, col, message))
-                            active = no
-                            valid_sign = no
-                        }
-                        (valid_sign == yes) {
-                            tokens = token_buffer_add(tokens, token(sign, ch, line, col))
-                            index = index + 1
-                            col = col + 1
-                            handled = yes
-                        }
-                    }
+            ((index < length) == no) { leave }
+            @ch = seed.str.at(source, index)
+            pick {
+                (ch == " ") {
+                    index = index + 1
+                    col = col + 1
                 }
-                (index == length) { active = no }
+                (ch == TAB) {
+                    index = index + 1
+                    col = col + 1
+                }
+                (ch == NEWLINE) {
+                    tokens = token_buffer_add(tokens, token(TokenKind.NEWLINE, NEWLINE, line, col))
+                    index = index + 1
+                    line = line + 1
+                    col = 1
+                }
+                (ident_start(ch) == yes) {
+                    @lexeme = word(index, line, col)
+                    tokens = token_buffer_add(tokens, lexeme.token)
+                    index = lexeme.next
+                    line = lexeme.line
+                    col = lexeme.col
+                }
+                (is_digit(ch) == yes) {
+                    @lexeme = number(index, line, col)
+                    tokens = token_buffer_add(tokens, lexeme.token)
+                    index = lexeme.next
+                    line = lexeme.line
+                    col = lexeme.col
+                }
+                (ch == QUOTE) {
+                    @lexeme = text(index, line, col)
+                    index = lexeme.next
+                    line = lexeme.line
+                    col = lexeme.col
+                    diagnostics = lexeme.diagnostics
+                    (has_diagnostics(diagnostics) == yes) { leave }
+                    tokens = token_buffer_add(tokens, lexeme.token)
+                }
+                (pair_at(index) == "==") {
+                    tokens = token_buffer_add(tokens, token(TokenKind.EQ, "==", line, col))
+                    index = index + 2
+                    col = col + 2
+                }
+                (pair_at(index) == "=>") {
+                    tokens = token_buffer_add(tokens, token(TokenKind.ARROW, "=>", line, col))
+                    index = index + 2
+                    col = col + 2
+                }
+                (sign_kind(ch) == TokenKind.INVALID) {
+                    diagnostics = seed.group.add(diagnostics, diagnostic.make_at("lexer_error", path, line, col, seed.str.add("неожиданный символ ", ch)))
+                    leave
+                }
+                {
+                    tokens = token_buffer_add(tokens, token(sign_kind(ch), ch, line, col))
+                    index = index + 1
+                    col = col + 1
+                }
             }
         }
         tokens = token_buffer_add(tokens, token(TokenKind.EOF, "", line, col))
