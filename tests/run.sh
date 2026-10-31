@@ -220,7 +220,19 @@ test_native() {
         "$work/native/memory" \
         1048576
     "$work/native/memory"
-    echo "x86-64: канон и память работают на родном процессоре"
+    SALTIC_TARGET=x86_64 build native-deep \
+        tests/fixtures/deep-recursion.saltic \
+        "$work/native/deep" \
+        1048576
+    if (ulimit -c 0; "$work/native/deep") >"$work/native/deep.txt" 2>&1; then
+        echo "x86-64: переполнение стека прошло молча" >&2
+        return 1
+    fi
+    if grep -q "вынырнул" "$work/native/deep.txt"; then
+        echo "x86-64: переполненный стек вернулся из рекурсии" >&2
+        return 1
+    fi
+    echo "x86-64: канон и память работают на родном процессоре, переполнение стека падает сразу"
 }
 
 test_native_bootstrap() {
