@@ -298,7 +298,7 @@ test_vm_machine() {
         "$work/vm-machine/program.elf" \
         "$platform_elf"
     test -s "$platform_elf"
-    timeout 10 qemu-system-riscv32 \
+    env -u LD_LIBRARY_PATH timeout 10 qemu-system-riscv32 \
         -machine virt -m 128M -display none -monitor none \
         -serial file:"$work/vm-machine/qemu-serial.txt" \
         -d in_asm,guest_errors \
@@ -441,6 +441,7 @@ elif [[ "$1" == "all" ]]; then
     set -- \
         checker \
         vm \
+        vm-machine \
         fixed-types \
         modules \
         json-rpc \
