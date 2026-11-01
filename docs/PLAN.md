@@ -90,16 +90,15 @@ Saltic и проверка решений из `docs/OS-core.md`. Детали �
 
 ## Рефакторинг
 
-- Файлы больше лимита канона в 500 строк. **Решает автор**, как делить:
-  - `soul/seed/selfhost/compiler/runtime/emit.saltic` — 1750
-  - `soul/seed/selfhost/compiler/codegen.saltic` — 1033
-  - `soul/seed/selfhost/parser/syntax.saltic` — 831
-  - `soul/seed/selfhost/machine/layout.saltic` — 547
-  - `soul/seed/selfhost/compiler/state.saltic` — 545
-  - `os/apps/colony/colony.saltic` — 569, `os/ui/jtml.saltic` — 535
+- Файлы больше лимита канона в 500 строк кода (пустые строки не считаются):
+  - `soul/seed/selfhost/parser/syntax.saltic` — 753. Почти весь файл — один
+    Box `Parser` с 49 методами, а Box в Saltic описывается в одном месте и
+    между файлами не делится; грамматика к тому же рекурсивна. Уложить его в
+    лимит — значит перестроить парсер: методы стать навыками с парсером в
+    параметре, работа с токенами — отдельно от грамматики. **Решает автор.**
+  - `os/apps/colony/colony.saltic` — 513.
   - не считаются: `os/fonts/spleen.saltic` (данные шрифта),
-    `tests/machine/translation.saltic` (эталоны), `.archive/` (архив)
-- Находки карты зависимостей `selfhost` (собрана из строк `use`):
+    `soul/seed/tests/machine/translation.saltic` (эталоны), `.archive/` (архив)
 - Ручные курсоры в лексере и парсере остаются как есть: позиция сдвигается на
   разную длину, `beat` туда не подходит.
 

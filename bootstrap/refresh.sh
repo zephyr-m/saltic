@@ -65,12 +65,14 @@ stage "$native" x86_64 "$work/stage-1/toolchain"
 
 echo "bootstrap refresh: stage-1 собирает stage-2 (rv32i и x86-64)"
 stage "$work/stage-1/toolchain" rv32i "$work/stage-2/toolchain.elf"
+native_started=$EPOCHREALTIME
 stage "$work/stage-1/toolchain" x86_64 "$work/stage-2/toolchain"
+native_seconds="$(saltic_seconds_since "$native_started")"
 
 echo "bootstrap refresh: stage-2 собирает stage-3 (rv32i)"
 started=$EPOCHREALTIME
 stage "$work/stage-2/toolchain" rv32i "$work/stage-3/toolchain.elf"
-self_build_seconds="$(LC_ALL=C awk "BEGIN { printf \"%.1f\", ${EPOCHREALTIME/,/.} - ${started/,/.} }")"
+self_build_seconds="$(saltic_seconds_since "$started")"
 echo "bootstrap refresh: новый компилятор собрал себя за $self_build_seconds с"
 
 echo "bootstrap refresh: проверяю fixed point"
@@ -97,7 +99,7 @@ else
     cp "$work/stage-2/toolchain" "$native_path"
     chmod +x "$native_path"
     saltic_write_passport "$native_path" "x86_64, linux" "rv32i, x86_64" \
-        "$compiler" "$heap_bytes" "stage-2 самосборки на x86-64"
+        "$compiler" "$heap_bytes" "stage-2 самосборки на x86-64" "$native_seconds" сборки
     echo "bootstrap refresh: $(basename "$compiler") обновлён"
 fi
 sha256sum "$compiler"

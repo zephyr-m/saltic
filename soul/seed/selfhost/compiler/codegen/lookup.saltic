@@ -1,0 +1,86 @@
+use core.str
+use core.group
+use selfhost.abi
+use selfhost.ast
+use selfhost.intrinsic.contract
+use selfhost.compiler.state
+
+skill box_field_symbol(compiler, box_name, field_name) {
+    @box = state.symbol_find(compiler.boxes, box_name)
+    @count = group.count(ast.plain(box.node))
+    drum (count - 2) {
+        @member = ast.part(box.node, count - 1 - beat)
+        (ast.tag(member) == "field") {
+            (ast.part(member, 1) == field_name) { out state.Symbol { name = field_name, kind = "field", node = member } }
+        }
+    }
+    out state.Symbol {}
+}
+
+skill error_id(compiler, name) {
+    (name == "FixedIntegerOverflow") { out abi.ERROR_FIXED_INTEGER_OVERFLOW }
+    (name == "MemoryExhausted") { out abi.ERROR_MEMORY_EXHAUSTED }
+    @error_item = state.symbol_find(compiler.errors, name)
+    (str.len(error_item.name) == 0) {
+        @id = abi.user_error_id(group.count(compiler.errors))
+        compiler.errors = state.symbol_add(compiler.errors, name, "error", [], id)
+        error_item = state.symbol_find(compiler.errors, name)
+    }
+    out error_item.value
+}
+
+skill resolve_symbol(compiler, symbols, name) {
+    (state.symbol_has(symbols, name) == yes) { out name }
+    out ""
+}
+
+skill call_name(compiler, callee) {
+    @name = ast.path_text(callee)
+    @resolved = resolve_symbol(compiler, compiler.natives, name)
+    (str.len(resolved) > 0) { out resolved }
+    out name
+}
+
+skill resolve_skill(compiler, path) {
+    out resolve_symbol(compiler, compiler.skills, ast.path_text(path))
+}
+
+skill intrinsic(name) {
+    out contract.target(contract.find(name), "unknown")
+}
+
+skill infer_type(compiler, node) {
+    @known = ast.type_of(node)
+    ((known == "unknown") == no) { out known }
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "path") {
+        @name = group.get(plain, 1)
+        @type_item = state.type_find(compiler.current_function.types, name)
+        @type = type_item.text
+        (group.count(plain) == 2) { out type }
+        (str.starts_with(type, "box:") == yes) {
+            @field = box_field_symbol(compiler, str.slice(type, 4, str.len(type)), group.get(plain, 2))
+            (str.len(field.name) > 0) {
+                @value = ast.part(field.node, 2)
+                (ast.tag(value) == "box-new") { out str.add("box:", ast.part(value, 1)) }
+            }
+        }
+        out "unknown"
+    }
+    out "unknown"
+}
+
+skill box_override(overrides, field_name) {
+    @count = group.count(overrides)
+    drum (count) {
+        @field = ast.plain(group.get(overrides, count - 1 - beat))
+        (group.get(field, 1) == field_name) { out group.get(field, 2) }
+    }
+    out []
+}
+
+skill call_arguments(node) {
+    @plain = ast.plain(node)
+    out state.group_slice(plain, 2, group.count(plain))
+}

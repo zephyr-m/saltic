@@ -40,11 +40,14 @@
 - `checker` + `checker/{names,signatures,rules,types,lookup,walk,top_level}` — проверка: верх программы, обход выражений и инструкций, справки об именах;
 - `errors` — каталог ошибок языка: у каждой свой навык с кодом и текстом
   (`errors.unknown_name(name)`); `diagnostic` ставит её на место в файле;
-- `compiler` + `compiler/{codegen,state,constants}` — перевод в машинный код;
-  backend `compiler/backend/rv32i` и `compiler/backend/x86_64`
+- `compiler` + `compiler/{codegen,functions,state,constants}` — перевод в
+  машинный код: `codegen` — сердце (выражения, инструкции, вызовы) с
+  помощниками `codegen/{lookup,emitters,loops}`, `functions` собирает функции
+  и константы; backend `compiler/backend/rv32i` и `compiler/backend/x86_64`
   (`encoder`, `translator`, `image`, `platform`, `pe`, `uefi`);
-- `compiler/runtime/emit` + `emit/{memory,terminal}` — машинный runtime и
-  регионы памяти;
+- `compiler/runtime/emit` + `emit/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
+  машинный runtime: арифметика, Box и группы, строки, фиксированные типы,
+  прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
 - `machine/{instruction,registers,codec,decoder,word,buffer,layout,image,profile}` —
   команды и регистры RV32I, кодирование и разбор команд, 32-битное слово,
   байтовый буфер, раскладка, ELF32-образ;

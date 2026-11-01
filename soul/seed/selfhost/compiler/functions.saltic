@@ -1,0 +1,142 @@
+use core.str
+use core.group
+use selfhost.abi
+use selfhost.ast
+use selfhost.compiler.state
+use selfhost.compiler.constants
+use selfhost.machine.instruction
+use selfhost.machine.layout
+use selfhost.machine.registers
+use selfhost.compiler.codegen
+
+skill compile_function(compiler, name, params, body, subject, module) {
+    @locals = state.collect_locals(params, body)
+    @local_count = group.count(locals.names)
+    @frame = constants.frame_bytes(local_count)
+    @slots = state.make_slots(locals.names, constants.local_offset(0))
+    @end = state.label(compiler, "{name}_return")
+    @types = []
+    drum (params) { types = state.type_set(types, beat, "unknown") }
+    (str.len(subject) > 0) { types = state.type_set(types, "$self", "box:{subject}") }
+    compiler.current_function = state.Function { name = name, slots = slots, end = end, subject = subject, module = module, types = types }
+    @function_label = str.add("saltic_", state.safe(name))
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, function_label)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - frame)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, constants.return_address_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.S0, constants.previous_frame_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.S4, constants.region_mark_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.S5, constants.region_escape_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S0, registers.SP, registers.ZERO, frame)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S4, registers.S1, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S5, registers.S2, registers.ZERO, 0)
+    drum (group.count(params)) {
+        @slot = state.slot(compiler, group.get(params, beat))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, abi.argument_register(beat), slot)
+    }
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler = codegen.compile_block(compiler, body, no)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, abi.NONE)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
+    @region_done = "{end}_region"
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.S1, registers.S4, region_done)
+    compiler.machine = layout.emit_call(compiler.machine, "rt_region_exit")
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, region_done)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.S0, registers.ZERO, constants.return_address_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.S4, registers.S0, registers.ZERO, constants.region_mark_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.S5, registers.S0, registers.ZERO, constants.region_escape_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, constants.previous_frame_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.S0, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S0, registers.T0, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = state.emit_blank(compiler)
+    compiler.current_function = state.Function {}
+    out compiler
+}
+
+skill compile_constant(compiler, constant) {
+    @ready = state.label(compiler, "constant_ready")
+    @cycle = state.label(compiler, "constant_cycle")
+    @failure = state.label(compiler, "constant_failure")
+    @finish = state.label(compiler, "constant_finish")
+    @before = compiler.current_function
+    compiler.current_function = state.Function { name = constant.name, module = constant.text }
+
+    @getter = constants.getter_label(constant.name)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, getter)
+    @frame = constants.constant_frame_bytes()
+    @return_address_offset = constants.constant_return_address_offset()
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - frame)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, return_address_offset)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.state_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.T0, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, constants.STATE_READY)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T1, registers.T2, 8)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ready)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, constants.STATE_INITIALIZING)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T1, registers.T2, 8)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, cycle)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, constants.STATE_INITIALIZING)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
+
+    compiler = codegen.compile_expression(compiler, constant.node)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, registers.ZERO, registers.A1, registers.ZERO, 8)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, failure)
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.value_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.A0, 0)
+    compiler.machine = layout.emit_call(compiler.machine, "rt_region_remember_slot")
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.state_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, constants.STATE_READY)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, finish)
+
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ready)
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.value_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.T0, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, finish)
+
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, cycle)
+    compiler = state.load_immediate(compiler, "a0", registers.A0, 0)
+    compiler = state.load_immediate(compiler, "a1", registers.A1, abi.ERROR_CONSTANT_CYCLE)
+
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, failure)
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.state_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, constants.STATE_EMPTY)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
+
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, finish)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.SP, registers.ZERO, return_address_offset)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, frame)
+    compiler = state.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = state.emit_blank(compiler)
+    compiler.current_function = before
+    out compiler
+}
+
+skill compile_constants(compiler) {
+    drum (compiler.constants) { compiler = compile_constant(compiler, beat) }
+    out compiler
+}
+
+skill compile_functions(compiler) {
+    drum (compiler.skills) {
+        compiler = compile_function(compiler, beat.name, ast.part(beat.node, 2), ast.part(beat.node, 3), "", beat.text)
+    }
+    drum (compiler.boxes) {
+        @box = beat
+        drum (group.count(ast.plain(box.node)) - 2) {
+            @member = ast.part(box.node, beat + 2)
+            (ast.tag(member) == "subject-skill") {
+                @name = "{box.name}."
+                name = str.add(name, ast.part(member, 1))
+                @params = state.group_prepend("$self", ast.part(member, 2))
+                compiler = compile_function(compiler, name, params, ast.part(member, 3), box.name, ast.module_name(box.node))
+            }
+        }
+    }
+    compiler = compile_function(compiler, "program", ast.part(compiler.entry, 1), ast.part(compiler.entry, 2), "", "")
+    out compiler
+}
