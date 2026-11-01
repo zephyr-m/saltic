@@ -16,7 +16,9 @@ PORT = 5555
 DATA_PORT = 5556
 UPLOAD_OFFSET = 65536
 UPLOAD_LIMIT = 1966080
-REPORT_EVERY = 65536
+REPORT_EVERY = 32768
+BAR_HEIGHT = 16
+BAR_SPACE = 64
 MY_IP = [10, 0, 0, 2]
 MEMORY_DEFAULT = 16
 MEMORY_LIMIT = 64
@@ -37,7 +39,9 @@ Agent = Box {
     cursor = 0,
     console = yes,
     shown_second = -1,
-    rounds = 0
+    rounds = 0,
+    failures = 0,
+    last_error = "нет"
 }
 
 MARGIN = 40
@@ -165,9 +169,11 @@ skill information(agent) {
     @frames = agent.frames
     @commands = agent.commands
     @arp = agent.arp
+    @failures = agent.failures
+    @last_error = agent.last_error
     @columns = agent.columns
     @rows = agent.rows
-    out "агент Saltic на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов"
+    out "агент Saltic на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
 }
 
 skill draw_test(agent) {
@@ -212,7 +218,7 @@ skill faint(screen) {
 }
 
 skill next_row(agent, screen, face) {
-    (agent.cursor + face.height > screen.height - 16) {
+    (agent.cursor + face.height > screen.height - BAR_SPACE - 32) {
         graphics.fill(screen, 0, TOP - 8, screen.width, screen.height - TOP + 8, paper(screen))
         agent.cursor = TOP
     }
@@ -363,6 +369,23 @@ skill answer(agent, bytes) {
     out agent
 }
 
+skill draw_progress(agent) {
+    (agent.console == yes) { out none }
+    @screen = graphics.open(agent.card.base)
+    @width = screen.width - MARGIN * 2
+    @top = screen.height - BAR_SPACE
+    graphics.fill(screen, 0, top - 24, screen.width, BAR_SPACE + 24, paper(screen))
+    @done = agent.received / 1024
+    @total = agent.expected / 1024
+    @percent = done * 100 / total
+    @label = "приём программы: {done} КБ из {total} КБ - {percent} %"
+    (agent.received == agent.expected) { label = "программа принята целиком: {total} КБ" }
+    lettering.paint_text(screen, lettering.FACE_SMALL, MARGIN, top - 20, label, faint(screen))
+    graphics.fill(screen, MARGIN, top, width, BAR_HEIGHT, graphics.color(screen, 228, 228, 231))
+    graphics.fill(screen, MARGIN, top, width * percent / 100, BAR_HEIGHT, graphics.color(screen, 24, 24, 27))
+    out none
+}
+
 skill store_chunk(agent, bytes) {
     @offset = net.word(bytes, 42) * 65536 + net.word(bytes, 44)
     @size = net.word(bytes, 38) - 12
@@ -380,7 +403,9 @@ skill store_chunk(agent, bytes) {
                 @received = agent.received
                 @expected = agent.expected
                 log(agent, "upload: {received} of {expected} bytes")
+                draw_progress(agent)
             }
+            (agent.received == agent.expected) { draw_progress(agent) }
         }
     }
     @reply = "ok {agent.received}"
@@ -420,8 +445,34 @@ skill tick(agent) {
     out none
 }
 
+skill banner(base, message) {
+    @screen = graphics.open(base)
+    @top = screen.height - BAR_SPACE - 40
+    graphics.fill(screen, 0, top, screen.width, 36, graphics.color(screen, 254, 226, 226))
+    lettering.paint_text(screen, lettering.FACE_TEXT, MARGIN, top + 6, message, graphics.color(screen, 153, 27, 27))
+    out none
+}
+
+skill last_cry(card, message) {
+    banner(card.base, message)
+    rtl8111.send(card, net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, message))
+    out none
+}
+
+skill survive(agent) {
+    tick(agent) rescue |err| {
+        agent.failures = agent.failures + 1
+        agent.last_error = "{err}"
+        banner(agent.card.base, "сбой в цикле: {err} (агент продолжает работу)")
+        none
+    }
+    out none
+}
+
 skill serve(agent) {
-    drum (LISTEN_ROUNDS) { tick(agent) }
+    drum (LISTEN_ROUNDS) {
+        drum (LISTEN_ROUNDS) { survive(agent) }
+    }
     out agent
 }
 
@@ -443,7 +494,11 @@ skill run() {
     io.show("")
     @agent = Agent { card = card, columns = columns, rows = rows }
     clear_screen(agent)
-    serve(agent)
+    serve(agent) rescue |err| {
+        last_cry(card, "агент остановился: {err}")
+        out err
+    }
+    last_cry(card, "агент остановился: главный цикл закончился")
     out none
 }
 
@@ -451,6 +506,7 @@ program() {
     io.show("Saltic agent: commands over the network")
     @done = run() rescue |err| {
         io.show("FAILED: ", err)
+        banner(firmware.guest_base(), "агент не запустился: {err}") rescue |again| { none }
         none
     }
     io.show("")
