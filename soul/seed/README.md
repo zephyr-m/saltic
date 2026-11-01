@@ -45,9 +45,9 @@
   (`encoder`, `translator`, `image`, `platform`, `pe`, `uefi`);
 - `compiler/runtime/emit` + `emit/{memory,terminal}` — машинный runtime и
   регионы памяти;
-- `machine/{instruction,registers,codec,word,buffer,layout,image,profile}` —
-  команды и регистры RV32I, кодирование команд, 32-битное слово, байтовый
-  буфер, раскладка, ELF32-образ;
+- `machine/{instruction,registers,codec,decoder,word,buffer,layout,image,profile}` —
+  команды и регистры RV32I, кодирование и разбор команд, 32-битное слово,
+  байтовый буфер, раскладка, ELF32-образ;
 - `vm` + `vm/{cpu,loader,state,syscalls,system}` — исполнение ELF внутри
   Saltic;
 - `abi` — одно машинное слово, теги значений, номер ошибки в отдельном
