@@ -1,200 +1,24 @@
 use core.str
 use core.group
 use selfhost.ast
-use selfhost.diagnostic
 use selfhost.errors
 use selfhost.intrinsic.contract
 use selfhost.checker.names
 use selfhost.checker.types
 use selfhost.checker.signatures
 use selfhost.checker.rules
-
-Result = Box {
-    diagnostics = [],
-    globals = []
-}
+use selfhost.checker.lookup
 
 DRUM_MARKER = "$drum"
-
-skill long_call(callee) {
-    @count = group.count(callee)
-    @full = ast.path_text(callee)
-    @module = group.get(callee, 1)
-    drum (count - 3) { module = str.add(module, str.add(".", group.get(callee, beat + 2))) }
-    @short = str.add(group.get(callee, count - 2), str.add(".", group.get(callee, count - 1)))
-    out errors.long_call(full, module, short)
-}
-
-skill placed(node, found) {
-    @place = ast.location(node)
-    found.line = group.get(place, 0)
-    found.col = group.get(place, 1)
-    out found
-}
-
-skill add_diagnostic(diagnostics, item) {
-    out group.add(diagnostics, item)
-}
-
-skill collect(program_ast) {
-    @result = Result {}
-    @program_seen = no
-    drum (group.count(program_ast) - 1) {
-        @item = group.get(program_ast, beat + 1)
-        @tag = ast.tag(item)
-        @module = ast.module_name(item)
-        @first = group.count(result.diagnostics)
-        @name = ""
-        @kind = ""
-        (tag == "use") {
-            (ast.part(item, 1) == "seed") {
-                (names.has(result.globals, "__seed__") == no) { result.globals = names.put(result.globals, "__seed__", "import", "module-path") }
-            }
-            @target = ast.path_text(item)
-            @plain_use = ast.plain(item)
-            @alias = group.get(plain_use, group.count(plain_use) - 1)
-            @alias_key = ast.alias_key(module, alias)
-            @old_alias = names.find(result.globals, alias_key)
-            pick {
-                (str.len(old_alias.name) > 0) {
-                    ((old_alias.type == target) == no) { result.diagnostics = add_diagnostic(result.diagnostics, errors.duplicate_alias(alias)) }
-                }
-                { result.globals = names.put(result.globals, alias_key, "import", target) }
-            }
-        }
-        (tag == "entry") {
-            (program_seen == yes) { result.diagnostics = add_diagnostic(result.diagnostics, errors.duplicate_program()) }
-            program_seen = yes
-        }
-        (tag == "const") { name = ast.qualified(module, ast.part(item, 1)) kind = "const" }
-        (tag == "enum") { name = ast.qualified(module, ast.part(item, 1)) kind = "enum" }
-        (tag == "box") { name = ast.qualified(module, ast.part(item, 1)) kind = "box" }
-        (tag == "skill") { name = ast.qualified(module, ast.part(item, 1)) kind = "skill" }
-        (tag == "native") { name = ast.qualified(module, ast.part(item, 1)) kind = "native" }
-        (str.len(name) > 0) {
-            @type = "unknown"
-            (kind == "const") { type = types.type_in_module(ast.part(item, 2), module, result.globals) }
-            (kind == "enum") { type = "enum-type" }
-            (kind == "box") { type = "box-type" }
-            (kind == "skill") { type = "function" }
-            (kind == "native") { type = "function" }
-            pick {
-                (names.has(result.globals, name) == yes) {
-                    result.diagnostics = add_diagnostic(result.diagnostics, errors.duplicate_global(name))
-                }
-                {
-                    result.globals = names.put_node(result.globals, name, kind, type, item)
-                    (kind == "enum") {
-                        drum (ast.enum_variant_count(item)) {
-                            @variant = ast.enum_variant(item, beat)
-                            @variant_key = names.variant_key(variant)
-                            @old_variant = names.find(result.globals, variant_key)
-                            pick {
-                                (str.len(old_variant.name) > 0) {
-                                    result.diagnostics = add_diagnostic(result.diagnostics, placed(item, errors.duplicate_enum_variant(variant)))
-                                }
-                                { result.globals = names.put_node(result.globals, variant_key, "enum-variant", "enum:{name}", item) }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        result.diagnostics = diagnostic.in_module(result.diagnostics, first, module)
-    }
-    (program_seen == no) {
-        result.diagnostics = add_diagnostic(result.diagnostics, errors.missing_program())
-    }
-    out result
-}
-
-skill box_has_skill(globals, box_name, skill_name) {
-    @box = names.find(globals, box_name)
-    drum (group.count(ast.plain(box.node)) - 2) {
-        @member = ast.part(box.node, beat + 2)
-        (ast.tag(member) == "subject-skill") {
-            (ast.part(member, 1) == skill_name) { out yes }
-        }
-    }
-    out no
-}
-
-skill enum_has(globals, enum_name, variant) {
-    @model = names.find(globals, enum_name)
-    drum (ast.enum_variant_count(model.node)) {
-        (ast.enum_variant(model.node, beat) == variant) { out yes }
-    }
-    out no
-}
-
-skill check_path(node, scope, globals, diagnostics) {
-    @parts = ast.plain(node)
-    @name = group.get(parts, 1)
-    @count = group.count(parts)
-    @long = names.long_reference(node, scope, globals)
-    (errors.is_ok(long) == no) { out add_diagnostic(diagnostics, placed(node, long)) }
-    @resolved = names.resolve_path(node, scope, globals)
-    (str.len(resolved) > 0) { out diagnostics }
-    (count == 2) {
-        @known = names.has(scope.names, name)
-        (known == no) { known = names.has(globals, name) }
-        (name == "error") { known = yes }
-        (known == no) { out add_diagnostic(diagnostics, placed(node, errors.unknown_name(name))) }
-        out diagnostics
-    }
-    (name == "error") { out diagnostics }
-    (name == "seed") {
-        (names.has(globals, "__seed__") == no) { out add_diagnostic(diagnostics, placed(node, errors.seed_not_imported())) }
-        @full = ast.path_text(node)
-        (contract.is_known(full) == no) { out add_diagnostic(diagnostics, placed(node, errors.unknown_seed_operation(full))) }
-        out diagnostics
-    }
-    @enum_name = names.resolve_name(ast.path_prefix(node), scope.module, globals)
-    @enum_model = names.find(globals, enum_name)
-    (enum_model.kind == "enum") {
-        @variant = group.get(parts, count - 1)
-        (enum_has(globals, enum_name, variant) == no) { out add_diagnostic(diagnostics, placed(node, errors.enum_lacks_variant(enum_name, variant))) }
-        out diagnostics
-    }
-    @import = names.find(globals, ast.alias_key(scope.module, name))
-    (import.kind == "import") {
-        (names.has(scope.names, name) == no) {
-            @full = ast.path_text(node)
-            out add_diagnostic(diagnostics, placed(node, errors.unknown_name(full)))
-        }
-    }
-    @global = names.find(globals, name)
-    @base = names.find(scope.names, name)
-    (str.len(base.name) == 0) { base = global }
-    (str.len(base.name) == 0) { out add_diagnostic(diagnostics, placed(node, errors.unknown_namespace(name))) }
-    @type = base.type
-    drum (count - 2) {
-        @field_name = group.get(parts, beat + 2)
-        (type == "unknown") { leave }
-        (str.starts_with(type, "box:") == no) {
-            @type_name = types.type_text(type)
-            diagnostics = add_diagnostic(diagnostics, placed(node, errors.field_on_non_box(field_name, type_name)))
-            leave
-        }
-        @box_name = types.tail(type, 4)
-        @field = types.box_field(globals, box_name, field_name)
-        (str.len(field.name) == 0) {
-            diagnostics = add_diagnostic(diagnostics, placed(node, errors.unknown_field(box_name, field_name)))
-            leave
-        }
-        type = field.type
-    }
-    out diagnostics
-}
 
 skill check_expression(node, scope, globals, diagnostics) {
     @plain = ast.plain(node)
     @tag = group.get(plain, 0)
     (tag == "fraction-number") {
-        out add_diagnostic(diagnostics, placed(node, errors.fraction_not_supported()))
+        out lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.fraction_not_supported()))
     }
     (tag == "wide-number") {
-        out add_diagnostic(diagnostics, placed(node, errors.number_out_of_range()))
+        out lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.number_out_of_range()))
     }
     (tag == "template") {
         drum ((group.count(plain) - 2) / 2) {
@@ -207,7 +31,7 @@ skill check_expression(node, scope, globals, diagnostics) {
             (type == "answer") { allowed = yes }
             (type == "unknown") { allowed = yes }
             (allowed == no) {
-                diagnostics = add_diagnostic(diagnostics, placed(placeholder, errors.template_type(ast.path_text(placeholder), types.type_text(type))))
+                diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(placeholder, errors.template_type(ast.path_text(placeholder), types.type_text(type))))
             }
         }
         out diagnostics
@@ -215,11 +39,11 @@ skill check_expression(node, scope, globals, diagnostics) {
     (tag == "enum-value") {
         @variant = names.find(globals, names.variant_key(group.get(plain, 1)))
         (str.len(variant.name) == 0) {
-            out add_diagnostic(diagnostics, placed(node, errors.unknown_enum_variant(group.get(plain, 1))))
+            out lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_enum_variant(group.get(plain, 1))))
         }
         out diagnostics
     }
-    (tag == "path") { out check_path(node, scope, globals, diagnostics) }
+    (tag == "path") { out lookup.check_path(node, scope, globals, diagnostics) }
     (tag == "binary") {
         @left_node = group.get(plain, 2)
         @right_node = group.get(plain, 3)
@@ -261,12 +85,12 @@ skill check_expression(node, scope, globals, diagnostics) {
                             ((left_type == right_type) == no) { problem = errors.operator_mixes_fixed(operator, left_type, right_type) }
                         }
                     }
-                    (errors.is_ok(problem) == no) { diagnostics = add_diagnostic(diagnostics, placed(node, problem)) }
+                    (errors.is_ok(problem) == no) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, problem)) }
                 }
                 (both_numbers == no) {
                     @left_name = types.type_text(left_type)
                     @right_name = types.type_text(right_type)
-                    diagnostics = add_diagnostic(diagnostics, errors.operator_expects_numbers(operator, left_name, right_name))
+                    diagnostics = lookup.add_diagnostic(diagnostics, errors.operator_expects_numbers(operator, left_name, right_name))
                 }
             }
         }
@@ -278,7 +102,7 @@ skill check_expression(node, scope, globals, diagnostics) {
             @part_count = group.count(callee)
             (part_count > 3) {
                 (names.has(scope.names, group.get(callee, 1)) == no) {
-                    out add_diagnostic(diagnostics, placed(node, long_call(callee)))
+                    out lookup.add_diagnostic(diagnostics, lookup.placed(node, lookup.long_call(callee)))
                 }
             }
         }
@@ -290,14 +114,14 @@ skill check_expression(node, scope, globals, diagnostics) {
             (callee_count == 2) {
                 (contract.is_fixed_type(group.get(callee, 1)) == yes) { skip_callee = yes }
                 (str.len(scope.subject) > 0) {
-                    (box_has_skill(globals, scope.subject, group.get(callee, 1)) == yes) { skip_callee = yes }
+                    (lookup.box_has_skill(globals, scope.subject, group.get(callee, 1)) == yes) { skip_callee = yes }
                 }
             }
             (callee_count == 3) {
                 @receiver_path = ["path", group.get(callee, 1)]
                 @receiver_type = types.path_type(receiver_path, scope, globals)
                 (str.starts_with(receiver_type, "box:") == yes) {
-                    (box_has_skill(globals, types.tail(receiver_type, 4), group.get(callee, 2)) == yes) { skip_callee = yes }
+                    (lookup.box_has_skill(globals, types.tail(receiver_type, 4), group.get(callee, 2)) == yes) { skip_callee = yes }
                 }
             }
         }
@@ -322,7 +146,7 @@ skill check_expression(node, scope, globals, diagnostics) {
             (str.starts_with(full, "core.group.") == yes) { keeps_fixed = no }
             (keeps_fixed == no) {
                 drum (argument_count) {
-                    diagnostics = check_fixed_escape(node, ast.call_argument(node, beat), "передать в '{full}'", scope, globals, diagnostics)
+                    diagnostics = lookup.check_fixed_escape(node, ast.call_argument(node, beat), "передать в '{full}'", scope, globals, diagnostics)
                 }
             }
         }
@@ -333,7 +157,7 @@ skill check_expression(node, scope, globals, diagnostics) {
         }
         @signature = signatures.resolve(callee, scope, globals, receiver_type)
         @arity = rules.arity(signature, argument_count)
-        (errors.is_ok(arity) == no) { diagnostics = add_diagnostic(diagnostics, placed(node, arity)) }
+        (errors.is_ok(arity) == no) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, arity)) }
         (fixed_call == yes) {
             (argument_count > 0) {
                 @fixed_argument = ast.call_argument(node, 0)
@@ -341,12 +165,12 @@ skill check_expression(node, scope, globals, diagnostics) {
                 (str.len(text) > 0) {
                     (contract.fixed_in_range(full, text) == no) {
                         @range = contract.fixed_range_text(full)
-                        diagnostics = add_diagnostic(diagnostics, placed(node, errors.fixed_integer_out_of_range(text, full, range)))
+                        diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.fixed_integer_out_of_range(text, full, range)))
                     }
                 }
                 @actual_type = types.value_type(fixed_argument, scope, globals)
                 @fixed_problem = rules.fixed_argument(fixed_argument, actual_type)
-                (errors.is_ok(fixed_problem) == no) { diagnostics = add_diagnostic(diagnostics, placed(node, fixed_problem)) }
+                (errors.is_ok(fixed_problem) == no) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, fixed_problem)) }
             }
         }
         @seed_kind = contract.find(full)
@@ -355,7 +179,7 @@ skill check_expression(node, scope, globals, diagnostics) {
             ((expected_argument == "unknown") == no) {
                 @actual_argument = types.value_type(ast.call_argument(node, beat), scope, globals)
                 @argument_problem = rules.argument(full, beat, expected_argument, actual_argument)
-                (errors.is_ok(argument_problem) == no) { diagnostics = add_diagnostic(diagnostics, placed(node, argument_problem)) }
+                (errors.is_ok(argument_problem) == no) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, argument_problem)) }
             }
         }
         @address_type = "unknown"
@@ -367,7 +191,7 @@ skill check_expression(node, scope, globals, diagnostics) {
                 @actual = types.value_type(group.get(plain, 4), scope, globals)
                 (actual == expected) { expected = "" }
                 (str.len(expected) > 0) {
-                    diagnostics = add_diagnostic(diagnostics, placed(node, errors.store_type_mismatch(full, expected, actual)))
+                    diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.store_type_mismatch(full, expected, actual)))
                 }
                 }
             }
@@ -382,7 +206,7 @@ skill check_expression(node, scope, globals, diagnostics) {
                 (str.len(expected_type) > 0) {
                     @expected_text = expected_type
                     (expected_type == "u8") { expected_text = "сдвиг {expected_type}" }
-                    diagnostics = add_diagnostic(diagnostics, placed(node, errors.fixed_argument_type_mismatch(full, expected_text, actual)))
+                    diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.fixed_argument_type_mismatch(full, expected_text, actual)))
                 }
             }
         }
@@ -390,7 +214,7 @@ skill check_expression(node, scope, globals, diagnostics) {
     }
     (tag == "group") {
         drum (group.count(plain) - 1) {
-            diagnostics = check_fixed_escape(node, group.get(plain, beat + 1), "положить в группу", scope, globals, diagnostics)
+            diagnostics = lookup.check_fixed_escape(node, group.get(plain, beat + 1), "положить в группу", scope, globals, diagnostics)
             diagnostics = check_expression(group.get(plain, beat + 1), scope, globals, diagnostics)
         }
         out diagnostics
@@ -398,7 +222,7 @@ skill check_expression(node, scope, globals, diagnostics) {
     (tag == "box-new") {
         @name = group.get(plain, 1)
         @long_box = names.long_reference(names.path_from_text(name), scope, globals)
-        (errors.is_ok(long_box) == no) { out add_diagnostic(diagnostics, placed(node, long_box)) }
+        (errors.is_ok(long_box) == no) { out lookup.add_diagnostic(diagnostics, lookup.placed(node, long_box)) }
         @resolved_box = names.resolve_name(name, scope.module, globals)
         @model = names.find(globals, resolved_box)
         (model.kind == "box") {
@@ -409,49 +233,37 @@ skill check_expression(node, scope, globals, diagnostics) {
                 @value = ast.part(override, 2)
                 diagnostics = check_expression(value, scope, globals, diagnostics)
                 (names.has(seen, field_name) == yes) {
-                    diagnostics = add_diagnostic(diagnostics, placed(node, errors.duplicate_literal_field(field_name, name)))
+                    diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.duplicate_literal_field(field_name, name)))
                 }
                 seen = names.put(seen, field_name, "field", "unknown")
                 @field = types.box_field(globals, resolved_box, field_name)
                 pick {
                     (str.len(field.name) == 0) {
-                        diagnostics = add_diagnostic(diagnostics, placed(node, errors.unknown_field(name, field_name)))
+                        diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_field(name, field_name)))
                     }
                     {
                         @value_type = types.value_type(value, scope, globals)
                         (types.compatible(field.type, value_type) == no) {
                             @value_name = types.type_text(value_type)
                             @field_type = types.type_text(field.type)
-                            diagnostics = add_diagnostic(diagnostics, placed(node, errors.field_type_mismatch(value_name, field_name, name, field_type)))
+                            diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.field_type_mismatch(value_name, field_name, name, field_type)))
                         }
                     }
                 }
             }
             out diagnostics
         }
-        diagnostics = add_diagnostic(diagnostics, placed(node, errors.unknown_box(name)))
+        diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_box(name)))
         out diagnostics
     }
     (tag == "rescue") {
         diagnostics = check_expression(group.get(plain, 1), scope, globals, diagnostics)
         @child = names.Scope { names = scope.names, subject = scope.subject, module = scope.module }
-        diagnostics = check_module_name(node, group.get(plain, 2), scope.module, globals, diagnostics)
+        diagnostics = lookup.check_module_name(node, group.get(plain, 2), scope.module, globals, diagnostics)
         child.names = names.put(child.names, group.get(plain, 2), "variable", "error")
         out check_block(group.get(plain, 3), child, globals, diagnostics)
     }
     out diagnostics
-}
-
-skill check_module_name(node, name, module, globals, diagnostics) {
-    @target = names.module_alias(globals, module, name)
-    (str.len(target) == 0) { out diagnostics }
-    out add_diagnostic(diagnostics, placed(node, errors.name_taken_by_module(name, target)))
-}
-
-skill check_fixed_escape(node, value, place, scope, globals, diagnostics) {
-    @problem = rules.fixed_escape(types.value_type(value, scope, globals), place)
-    (errors.is_ok(problem) == yes) { out diagnostics }
-    out add_diagnostic(diagnostics, placed(node, problem))
 }
 
 skill check_statement(node, scope, globals, diagnostics) {
@@ -461,13 +273,13 @@ skill check_statement(node, scope, globals, diagnostics) {
         @name = group.get(plain, 1)
         @value = group.get(plain, 2)
         diagnostics = check_expression(value, scope, globals, diagnostics)
-        (names.has(scope.names, name) == yes) { diagnostics = add_diagnostic(diagnostics, placed(node, errors.duplicate_variable(name))) }
+        (names.has(scope.names, name) == yes) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.duplicate_variable(name))) }
         (names.has(scope.names, name) == no) {
             (names.has(globals, name) == yes) {
-                diagnostics = add_diagnostic(diagnostics, placed(node, errors.variable_shadows_global(name)))
+                diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.variable_shadows_global(name)))
             }
             (names.has(globals, name) == no) {
-                diagnostics = check_module_name(node, name, scope.module, globals, diagnostics)
+                diagnostics = lookup.check_module_name(node, name, scope.module, globals, diagnostics)
                 scope.names = names.put(scope.names, name, "variable", types.value_type(value, scope, globals))
             }
         }
@@ -484,20 +296,20 @@ skill check_statement(node, scope, globals, diagnostics) {
             (types.compatible(old.type, value_type) == no) {
                 @value_name = types.type_text(value_type)
                 @old_name = types.type_text(old.type)
-                diagnostics = add_diagnostic(diagnostics, placed(node, errors.variable_type_mismatch(value_name, name, old_name)))
+                diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.variable_type_mismatch(value_name, name, old_name)))
             }
         }
         (names.has(scope.names, name) == no) {
             @global = names.find(globals, name)
             @is_constant = no
             (global.kind == "const") { is_constant = yes }
-            (global.kind == "const") { diagnostics = add_diagnostic(diagnostics, placed(node, errors.constant_assignment(name))) }
+            (global.kind == "const") { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.constant_assignment(name))) }
             (str.len(global.name) > 0) {
                 (is_constant == no) {
-                    diagnostics = add_diagnostic(diagnostics, placed(node, errors.assign_to_global(name)))
+                    diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.assign_to_global(name)))
                 }
             }
-            (str.len(global.name) == 0) { diagnostics = add_diagnostic(diagnostics, placed(node, errors.variable_not_declared(name))) }
+            (str.len(global.name) == 0) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.variable_not_declared(name))) }
         }
         out diagnostics
     }
@@ -508,7 +320,7 @@ skill check_statement(node, scope, globals, diagnostics) {
         drum (part_count - 2) {
             base_parts = group.add(base_parts, group.get(target, beat + 1))
         }
-        diagnostics = check_path(base_parts, scope, globals, diagnostics)
+        diagnostics = lookup.check_path(base_parts, scope, globals, diagnostics)
         @value = group.get(plain, 2)
         diagnostics = check_expression(value, scope, globals, diagnostics)
         @base_type = types.path_type(base_parts, scope, globals)
@@ -517,20 +329,20 @@ skill check_statement(node, scope, globals, diagnostics) {
             @field_name = group.get(target, part_count - 1)
             @field = types.box_field(globals, box_name, field_name)
             (str.len(field.name) == 0) {
-                diagnostics = add_diagnostic(diagnostics, placed(node, errors.unknown_field(box_name, field_name)))
+                diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_field(box_name, field_name)))
             }
             (str.len(field.name) > 0) {
                 @value_type = types.value_type(value, scope, globals)
                 (types.compatible(field.type, value_type) == no) {
                     @value_name = types.type_text(value_type)
-                    diagnostics = add_diagnostic(diagnostics, placed(node, errors.field_assign_type_mismatch(value_name, field_name, box_name)))
+                    diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.field_assign_type_mismatch(value_name, field_name, box_name)))
                 }
             }
         }
         out diagnostics
     }
     (tag == "out") {
-        diagnostics = check_fixed_escape(node, group.get(plain, 1), "вернуть из навыка", scope, globals, diagnostics)
+        diagnostics = lookup.check_fixed_escape(node, group.get(plain, 1), "вернуть из навыка", scope, globals, diagnostics)
         out check_expression(group.get(plain, 1), scope, globals, diagnostics)
     }
     (tag == "pick") {
@@ -544,16 +356,16 @@ skill check_statement(node, scope, globals, diagnostics) {
                 diagnostics = check_expression(group.get(choice_plain, 1), scope, globals, diagnostics)
                 diagnostics = check_block(group.get(choice_plain, 2), child, globals, diagnostics)
             }
-            (choice_tag == "switch") { diagnostics = add_diagnostic(diagnostics, placed(choice, errors.pick_branch_not_condition())) }
+            (choice_tag == "switch") { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(choice, errors.pick_branch_not_condition())) }
             (choice_tag == "otherwise") {
-                (beat + 2 < count) { diagnostics = add_diagnostic(diagnostics, placed(choice, errors.pick_default_not_last())) }
+                (beat + 2 < count) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(choice, errors.pick_default_not_last())) }
                 diagnostics = check_block(group.get(choice_plain, 1), child, globals, diagnostics)
             }
         }
         out diagnostics
     }
     (tag == "leave") {
-        (names.has(scope.names, DRUM_MARKER) == no) { out add_diagnostic(diagnostics, placed(node, errors.leave_outside_drum())) }
+        (names.has(scope.names, DRUM_MARKER) == no) { out lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.leave_outside_drum())) }
         out diagnostics
     }
     (tag == "expr") { out check_expression(group.get(plain, 1), scope, globals, diagnostics) }
@@ -566,7 +378,7 @@ skill check_statement(node, scope, globals, diagnostics) {
         diagnostics = check_expression(count_node, scope, globals, diagnostics)
         @count_type = types.value_type(count_node, scope, globals)
         @drum_problem = rules.drum_count(count_type)
-        (errors.is_ok(drum_problem) == no) { diagnostics = add_diagnostic(diagnostics, placed(count_node, drum_problem)) }
+        (errors.is_ok(drum_problem) == no) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(count_node, drum_problem)) }
         @drum_scope = names.Scope { names = scope.names, subject = scope.subject, module = scope.module }
         drum_scope.names = names.put(drum_scope.names, ast.DRUM_BEAT, "variable", "unknown")
         drum_scope.names = names.put(drum_scope.names, DRUM_MARKER, "variable", "unknown")
@@ -582,20 +394,20 @@ skill check_statement(node, scope, globals, diagnostics) {
             @variant_name = ast.case_variant(case_node)
             pick {
                 (names.has(seen, variant_name) == yes) {
-                    diagnostics = add_diagnostic(diagnostics, placed(case_node, errors.duplicate_switch_case(variant_name)))
+                    diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(case_node, errors.duplicate_switch_case(variant_name)))
                 }
                 { seen = names.put(seen, variant_name, "case", "unknown") }
             }
             @variant = names.find(globals, names.variant_key(variant_name))
             pick {
                 (str.len(variant.name) == 0) {
-                    diagnostics = add_diagnostic(diagnostics, placed(case_node, errors.unknown_enum_variant(variant_name)))
+                    diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(case_node, errors.unknown_enum_variant(variant_name)))
                 }
                 (str.starts_with(subject_type, "enum:") == yes) {
                     ((variant.type == subject_type) == no) {
                         @owner_name = types.type_text(variant.type)
                         @subject_name = types.type_text(subject_type)
-                        diagnostics = add_diagnostic(diagnostics, placed(case_node, errors.enum_type_mismatch(variant_name, owner_name, subject_name)))
+                        diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(case_node, errors.enum_type_mismatch(variant_name, owner_name, subject_name)))
                     }
                 }
             }
@@ -603,7 +415,7 @@ skill check_statement(node, scope, globals, diagnostics) {
         }
         out diagnostics
     }
-    out add_diagnostic(diagnostics, placed(node, errors.unknown_statement(tag)))
+    out lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_statement(tag)))
 }
 
 skill check_block(block, scope, globals, diagnostics) {
@@ -625,54 +437,12 @@ skill check_params(params, globals, subject, module, body, diagnostics) {
     }
     drum (params) {
         pick {
-            (names.has(scope.names, beat) == yes) { diagnostics = add_diagnostic(diagnostics, errors.duplicate_param(beat)) }
+            (names.has(scope.names, beat) == yes) { diagnostics = lookup.add_diagnostic(diagnostics, errors.duplicate_param(beat)) }
             {
-                diagnostics = check_module_name([], beat, module, globals, diagnostics)
+                diagnostics = lookup.check_module_name([], beat, module, globals, diagnostics)
                 scope.names = names.put(scope.names, beat, "parameter", "unknown")
             }
         }
     }
     out check_block(body, scope, globals, diagnostics)
-}
-
-skill check(program_ast) {
-    @result = collect(program_ast)
-    drum (group.count(program_ast) - 1) {
-        @item = group.get(program_ast, beat + 1)
-        @tag = ast.tag(item)
-        @module = ast.module_name(item)
-        @first = group.count(result.diagnostics)
-        (tag == "const") { result.diagnostics = check_expression(ast.part(item, 2), names.Scope { module = module }, result.globals, result.diagnostics) }
-        (tag == "skill") { result.diagnostics = check_params(ast.part(item, 2), result.globals, "", module, ast.part(item, 3), result.diagnostics) }
-        (tag == "entry") { result.diagnostics = check_params(ast.part(item, 1), result.globals, "", module, ast.part(item, 2), result.diagnostics) }
-        (tag == "box") {
-            @seen_fields = []
-            @seen_skills = []
-            drum (group.count(ast.plain(item)) - 2) {
-                @member = ast.part(item, beat + 2)
-                @member_tag = ast.tag(member)
-                (member_tag == "field") {
-                    @field_name = ast.part(member, 1)
-                    (names.has(seen_fields, field_name) == yes) {
-                        @box_name = ast.part(item, 1)
-                        result.diagnostics = add_diagnostic(result.diagnostics, errors.duplicate_field(field_name, box_name))
-                    }
-                    seen_fields = names.put(seen_fields, field_name, "field", "unknown")
-                    result.diagnostics = check_fixed_escape(member, ast.part(member, 2), "положить в поле Box", names.Scope { module = module }, result.globals, result.diagnostics)
-                    result.diagnostics = check_expression(ast.part(member, 2), names.Scope { module = module }, result.globals, result.diagnostics)
-                }
-                (member_tag == "subject-skill") {
-                    @skill_name = ast.part(member, 1)
-                    (names.has(seen_skills, skill_name) == yes) {
-                        @box_name = ast.part(item, 1)
-                        result.diagnostics = add_diagnostic(result.diagnostics, errors.duplicate_box_skill(skill_name, box_name))
-                    }
-                    seen_skills = names.put(seen_skills, skill_name, "skill", "function")
-                    result.diagnostics = check_params(ast.part(member, 2), result.globals, ast.qualified(module, ast.part(item, 1)), module, ast.part(member, 3), result.diagnostics)
-                }
-            }
-        }
-        result.diagnostics = diagnostic.in_module(result.diagnostics, first, module)
-    }
-    out result
 }

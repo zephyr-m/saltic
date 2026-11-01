@@ -1,0 +1,119 @@
+use core.str
+use core.group
+use selfhost.ast
+use selfhost.errors
+use selfhost.intrinsic.contract
+use selfhost.checker.names
+use selfhost.checker.types
+use selfhost.checker.rules
+
+skill long_call(callee) {
+    @count = group.count(callee)
+    @full = ast.path_text(callee)
+    @module = group.get(callee, 1)
+    drum (count - 3) { module = str.add(module, str.add(".", group.get(callee, beat + 2))) }
+    @short = str.add(group.get(callee, count - 2), str.add(".", group.get(callee, count - 1)))
+    out errors.long_call(full, module, short)
+}
+
+skill placed(node, found) {
+    @place = ast.location(node)
+    found.line = group.get(place, 0)
+    found.col = group.get(place, 1)
+    out found
+}
+
+skill add_diagnostic(diagnostics, item) {
+    out group.add(diagnostics, item)
+}
+
+skill box_has_skill(globals, box_name, skill_name) {
+    @box = names.find(globals, box_name)
+    drum (group.count(ast.plain(box.node)) - 2) {
+        @member = ast.part(box.node, beat + 2)
+        (ast.tag(member) == "subject-skill") {
+            (ast.part(member, 1) == skill_name) { out yes }
+        }
+    }
+    out no
+}
+
+skill enum_has(globals, enum_name, variant) {
+    @model = names.find(globals, enum_name)
+    drum (ast.enum_variant_count(model.node)) {
+        (ast.enum_variant(model.node, beat) == variant) { out yes }
+    }
+    out no
+}
+
+skill check_path(node, scope, globals, diagnostics) {
+    @parts = ast.plain(node)
+    @name = group.get(parts, 1)
+    @count = group.count(parts)
+    @long = names.long_reference(node, scope, globals)
+    (errors.is_ok(long) == no) { out add_diagnostic(diagnostics, placed(node, long)) }
+    @resolved = names.resolve_path(node, scope, globals)
+    (str.len(resolved) > 0) { out diagnostics }
+    (count == 2) {
+        @known = names.has(scope.names, name)
+        (known == no) { known = names.has(globals, name) }
+        (name == "error") { known = yes }
+        (known == no) { out add_diagnostic(diagnostics, placed(node, errors.unknown_name(name))) }
+        out diagnostics
+    }
+    (name == "error") { out diagnostics }
+    (name == "seed") {
+        (names.has(globals, "__seed__") == no) { out add_diagnostic(diagnostics, placed(node, errors.seed_not_imported())) }
+        @full = ast.path_text(node)
+        (contract.is_known(full) == no) { out add_diagnostic(diagnostics, placed(node, errors.unknown_seed_operation(full))) }
+        out diagnostics
+    }
+    @enum_name = names.resolve_name(ast.path_prefix(node), scope.module, globals)
+    @enum_model = names.find(globals, enum_name)
+    (enum_model.kind == "enum") {
+        @variant = group.get(parts, count - 1)
+        (enum_has(globals, enum_name, variant) == no) { out add_diagnostic(diagnostics, placed(node, errors.enum_lacks_variant(enum_name, variant))) }
+        out diagnostics
+    }
+    @import = names.find(globals, ast.alias_key(scope.module, name))
+    (import.kind == "import") {
+        (names.has(scope.names, name) == no) {
+            @full = ast.path_text(node)
+            out add_diagnostic(diagnostics, placed(node, errors.unknown_name(full)))
+        }
+    }
+    @global = names.find(globals, name)
+    @base = names.find(scope.names, name)
+    (str.len(base.name) == 0) { base = global }
+    (str.len(base.name) == 0) { out add_diagnostic(diagnostics, placed(node, errors.unknown_namespace(name))) }
+    @type = base.type
+    drum (count - 2) {
+        @field_name = group.get(parts, beat + 2)
+        (type == "unknown") { leave }
+        (str.starts_with(type, "box:") == no) {
+            @type_name = types.type_text(type)
+            diagnostics = add_diagnostic(diagnostics, placed(node, errors.field_on_non_box(field_name, type_name)))
+            leave
+        }
+        @box_name = types.tail(type, 4)
+        @field = types.box_field(globals, box_name, field_name)
+        (str.len(field.name) == 0) {
+            diagnostics = add_diagnostic(diagnostics, placed(node, errors.unknown_field(box_name, field_name)))
+            leave
+        }
+        type = field.type
+    }
+    out diagnostics
+}
+
+skill check_module_name(node, name, module, globals, diagnostics) {
+    @target = names.module_alias(globals, module, name)
+    (str.len(target) == 0) { out diagnostics }
+    out add_diagnostic(diagnostics, placed(node, errors.name_taken_by_module(name, target)))
+}
+
+skill check_fixed_escape(node, value, place, scope, globals, diagnostics) {
+    @problem = rules.fixed_escape(types.value_type(value, scope, globals), place)
+    (errors.is_ok(problem) == yes) { out diagnostics }
+    out add_diagnostic(diagnostics, placed(node, problem))
+}

@@ -1,0 +1,128 @@
+use core.str
+use core.group
+use selfhost.ast
+use selfhost.diagnostic
+use selfhost.errors
+use selfhost.checker.names
+use selfhost.checker.types
+use selfhost.checker.lookup
+use selfhost.checker.walk
+
+Result = Box {
+    diagnostics = [],
+    globals = []
+}
+
+skill collect(program_ast) {
+    @result = Result {}
+    @program_seen = no
+    drum (group.count(program_ast) - 1) {
+        @item = group.get(program_ast, beat + 1)
+        @tag = ast.tag(item)
+        @module = ast.module_name(item)
+        @first = group.count(result.diagnostics)
+        @name = ""
+        @kind = ""
+        (tag == "use") {
+            (ast.part(item, 1) == "seed") {
+                (names.has(result.globals, "__seed__") == no) { result.globals = names.put(result.globals, "__seed__", "import", "module-path") }
+            }
+            @target = ast.path_text(item)
+            @plain_use = ast.plain(item)
+            @alias = group.get(plain_use, group.count(plain_use) - 1)
+            @alias_key = ast.alias_key(module, alias)
+            @old_alias = names.find(result.globals, alias_key)
+            pick {
+                (str.len(old_alias.name) > 0) {
+                    ((old_alias.type == target) == no) { result.diagnostics = lookup.add_diagnostic(result.diagnostics, errors.duplicate_alias(alias)) }
+                }
+                { result.globals = names.put(result.globals, alias_key, "import", target) }
+            }
+        }
+        (tag == "entry") {
+            (program_seen == yes) { result.diagnostics = lookup.add_diagnostic(result.diagnostics, errors.duplicate_program()) }
+            program_seen = yes
+        }
+        (tag == "const") { name = ast.qualified(module, ast.part(item, 1)) kind = "const" }
+        (tag == "enum") { name = ast.qualified(module, ast.part(item, 1)) kind = "enum" }
+        (tag == "box") { name = ast.qualified(module, ast.part(item, 1)) kind = "box" }
+        (tag == "skill") { name = ast.qualified(module, ast.part(item, 1)) kind = "skill" }
+        (tag == "native") { name = ast.qualified(module, ast.part(item, 1)) kind = "native" }
+        (str.len(name) > 0) {
+            @type = "unknown"
+            (kind == "const") { type = types.type_in_module(ast.part(item, 2), module, result.globals) }
+            (kind == "enum") { type = "enum-type" }
+            (kind == "box") { type = "box-type" }
+            (kind == "skill") { type = "function" }
+            (kind == "native") { type = "function" }
+            pick {
+                (names.has(result.globals, name) == yes) {
+                    result.diagnostics = lookup.add_diagnostic(result.diagnostics, errors.duplicate_global(name))
+                }
+                {
+                    result.globals = names.put_node(result.globals, name, kind, type, item)
+                    (kind == "enum") {
+                        drum (ast.enum_variant_count(item)) {
+                            @variant = ast.enum_variant(item, beat)
+                            @variant_key = names.variant_key(variant)
+                            @old_variant = names.find(result.globals, variant_key)
+                            pick {
+                                (str.len(old_variant.name) > 0) {
+                                    result.diagnostics = lookup.add_diagnostic(result.diagnostics, lookup.placed(item, errors.duplicate_enum_variant(variant)))
+                                }
+                                { result.globals = names.put_node(result.globals, variant_key, "enum-variant", "enum:{name}", item) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result.diagnostics = diagnostic.in_module(result.diagnostics, first, module)
+    }
+    (program_seen == no) {
+        result.diagnostics = lookup.add_diagnostic(result.diagnostics, errors.missing_program())
+    }
+    out result
+}
+
+skill check(program_ast) {
+    @result = collect(program_ast)
+    drum (group.count(program_ast) - 1) {
+        @item = group.get(program_ast, beat + 1)
+        @tag = ast.tag(item)
+        @module = ast.module_name(item)
+        @first = group.count(result.diagnostics)
+        (tag == "const") { result.diagnostics = walk.check_expression(ast.part(item, 2), names.Scope { module = module }, result.globals, result.diagnostics) }
+        (tag == "skill") { result.diagnostics = walk.check_params(ast.part(item, 2), result.globals, "", module, ast.part(item, 3), result.diagnostics) }
+        (tag == "entry") { result.diagnostics = walk.check_params(ast.part(item, 1), result.globals, "", module, ast.part(item, 2), result.diagnostics) }
+        (tag == "box") {
+            @seen_fields = []
+            @seen_skills = []
+            drum (group.count(ast.plain(item)) - 2) {
+                @member = ast.part(item, beat + 2)
+                @member_tag = ast.tag(member)
+                (member_tag == "field") {
+                    @field_name = ast.part(member, 1)
+                    (names.has(seen_fields, field_name) == yes) {
+                        @box_name = ast.part(item, 1)
+                        result.diagnostics = lookup.add_diagnostic(result.diagnostics, errors.duplicate_field(field_name, box_name))
+                    }
+                    seen_fields = names.put(seen_fields, field_name, "field", "unknown")
+                    result.diagnostics = lookup.check_fixed_escape(member, ast.part(member, 2), "положить в поле Box", names.Scope { module = module }, result.globals, result.diagnostics)
+                    result.diagnostics = walk.check_expression(ast.part(member, 2), names.Scope { module = module }, result.globals, result.diagnostics)
+                }
+                (member_tag == "subject-skill") {
+                    @skill_name = ast.part(member, 1)
+                    (names.has(seen_skills, skill_name) == yes) {
+                        @box_name = ast.part(item, 1)
+                        result.diagnostics = lookup.add_diagnostic(result.diagnostics, errors.duplicate_box_skill(skill_name, box_name))
+                    }
+                    seen_skills = names.put(seen_skills, skill_name, "skill", "function")
+                    result.diagnostics = walk.check_params(ast.part(member, 2), result.globals, ast.qualified(module, ast.part(item, 1)), module, ast.part(member, 3), result.diagnostics)
+                }
+            }
+        }
+        result.diagnostics = diagnostic.in_module(result.diagnostics, first, module)
+    }
+    out result
+}

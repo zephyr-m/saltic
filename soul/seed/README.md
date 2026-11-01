@@ -37,7 +37,7 @@
 ## Устройство `selfhost`
 
 - `parser` + `parser/{lexer,loader,syntax}` — текст в дерево, загрузка модулей;
-- `checker` + `checker/{names,signatures,rules,types,semantics}` — проверка;
+- `checker` + `checker/{names,signatures,rules,types,lookup,walk,top_level}` — проверка: верх программы, обход выражений и инструкций, справки об именах;
 - `errors` — каталог ошибок языка: у каждой свой навык с кодом и текстом
   (`errors.unknown_name(name)`); `diagnostic` ставит её на место в файле;
 - `compiler` + `compiler/{codegen,state,constants}` — перевод в машинный код;

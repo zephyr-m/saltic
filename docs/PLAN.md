@@ -94,13 +94,21 @@ Saltic и проверка решений из `docs/OS-core.md`. Детали �
   - `soul/seed/selfhost/runtime/emit.saltic` — 1750
   - `soul/seed/selfhost/compiler/codegen.saltic` — 1033
   - `soul/seed/selfhost/parser/syntax.saltic` — 831
-  - `soul/seed/selfhost/checker/semantics.saltic` — 679
   - `soul/seed/selfhost/machine/layout.saltic` — 547
   - `soul/seed/selfhost/vm/state.saltic` — 526
   - `soul/seed/selfhost/compiler/state.saltic` — 545
   - `os/apps/colony/colony.saltic` — 569, `os/ui/jtml.saltic` — 535
   - не считаются: `os/fonts/spleen.saltic` (данные шрифта),
     `tests/machine/translation.saltic` (эталоны), `.archive/` (архив)
+- Находки карты зависимостей `selfhost` (собрана из строк `use`):
+  - цикл слоёв `compiler ↔ runtime`: лицо `compiler` зовёт `runtime.emit`,
+    а `runtime` пользуется `compiler.state` и `compiler.constants`; по смыслу
+    `runtime` — часть компилятора, живущая отдельно;
+  - x86-переводчик (`compiler/backend/x86_64/translator`) берёт декодер
+    команд у `vm.cpu`: компилятор зависит от своего свидетеля;
+  - `vm.cpu` и `vm.system` читают ту же таблицу команд
+    (`machine.instruction`), что и кодировщик: ошибка в таблице не будет
+    поймана, потому что свидетель повторит её.
 - Ручные курсоры в лексере и парсере остаются как есть: позиция сдвигается на
   разную длину, `beat` туда не подходит.
 
