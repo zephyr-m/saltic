@@ -1,0 +1,64 @@
+use core.str
+use selfhost.abi
+use selfhost.compiler.state
+use selfhost.compiler.codegen.lookup
+use selfhost.machine.instruction
+use selfhost.machine.layout
+use selfhost.machine.registers
+
+Rescue = Box {
+    done = "",
+    caught = "",
+    stack_slot = 0,
+    outer = ""
+}
+
+skill check(compiler) {
+    (str.len(compiler.current_function.failure) == 0) { out compiler }
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, registers.ZERO, registers.A1, registers.ZERO, 8)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, compiler.current_function.failure)
+    out compiler
+}
+
+skill load_value(compiler, name) {
+    compiler = lookup.remember_error(compiler, name)
+    compiler = state.load_immediate(compiler, "a0", registers.A0, abi.error_value(lookup.error_id(compiler, name)))
+    out state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+}
+
+skill load_failure(compiler, name) {
+    compiler = lookup.remember_error(compiler, name)
+    compiler = state.load_immediate(compiler, "a0", registers.A0, 0)
+    out state.load_immediate(compiler, "a1", registers.A1, lookup.error_id(compiler, name))
+}
+
+skill raise_value(compiler) {
+    compiler = state.emit_op(compiler, instruction.Kind.SRLI, registers.A1, registers.A0, registers.ZERO, abi.TAG_SHIFT)
+    out state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 0)
+}
+
+skill rescue_frame(compiler) {
+    @done = state.label(compiler, "rescue_done")
+    @caught = state.label(compiler, "rescue_caught")
+    @stack_slot = state.slot(compiler, "$rescue:{compiler.current_function.next_rescue}")
+    out Rescue { done = done, caught = caught, stack_slot = stack_slot, outer = compiler.current_function.failure }
+}
+
+skill enter(compiler, frame) {
+    compiler.current_function.next_rescue = compiler.current_function.next_rescue + 1
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.SP, frame.stack_slot)
+    compiler.current_function.failure = frame.caught
+    out compiler
+}
+
+skill catch(compiler, frame, name) {
+    compiler.current_function.failure = frame.outer
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A1, registers.ZERO, 8)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.done)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.caught)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.SP, registers.S0, registers.ZERO, frame.stack_slot)
+    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.A0, registers.A1, registers.ZERO, abi.TAG_SHIFT)
+    compiler = state.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_ERROR)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, state.slot(compiler, name))
+    out state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+}

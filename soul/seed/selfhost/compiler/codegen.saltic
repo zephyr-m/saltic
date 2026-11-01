@@ -15,6 +15,7 @@ use selfhost.errors
 use selfhost.compiler.codegen.lookup
 use selfhost.compiler.codegen.emitters
 use selfhost.compiler.codegen.loops
+use selfhost.compiler.codegen.failures
 
 skill compile_path(compiler, node) {
     @parts = ast.plain(node)
@@ -24,11 +25,7 @@ skill compile_path(compiler, node) {
     @constant_name = ""
     @constant = state.Symbol {}
     (name == "error") {
-        (count == 3) {
-            compiler = lookup.remember_error(compiler, group.get(parts, 2))
-            compiler = state.load_immediate(compiler, "a0", registers.A0, abi.error_value(lookup.error_id(compiler, group.get(parts, 2))))
-            out state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-        }
+        (count == 3) { out failures.load_value(compiler, group.get(parts, 2)) }
     }
     (count > 2) {
         @enum_name = lookup.resolve_symbol(compiler, compiler.enums, ast.path_prefix(parts))
@@ -54,6 +51,7 @@ skill compile_path(compiler, node) {
             (emitters.constant_literal(constant.node) == no) {
                 @getter = constants.getter_label(constant.name)
                 compiler.machine = layout.emit_call(compiler.machine, getter)
+                compiler = failures.check(compiler)
             }
         }
         (str.len(constant.name) == 0) {
@@ -110,22 +108,17 @@ skill compile_binary(compiler, operator, left, right) {
         }
     }
     compiler.machine = layout.emit_call(compiler.machine, target)
-    out compiler
+    out failures.check(compiler)
 }
 
 skill compile_rescue(compiler, node) {
     @plain = ast.plain(node)
-    @done = state.label(compiler, "rescue_done")
+    @frame = failures.rescue_frame(compiler)
+    compiler = failures.enter(compiler, frame)
     compiler = compile_expression(compiler, group.get(plain, 1))
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A1, registers.ZERO, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, done)
-    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.A0, registers.A1, registers.ZERO, abi.TAG_SHIFT)
-    compiler = state.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_ERROR)
-    @slot = state.slot(compiler, group.get(plain, 2))
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, slot)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler = failures.catch(compiler, frame, group.get(plain, 2))
     compiler = compile_block(compiler, group.get(plain, 3), yes)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, done)
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.done)
     out compiler
 }
 
@@ -259,6 +252,7 @@ skill compile_call(compiler, node) {
         @fixed_type = lookup.infer_type(compiler, group.get(args, 0))
         compiler = state.load_immediate(compiler, "a6", abi.CALL_FIXED_SOURCE_KIND_REGISTER, contract.fixed_kind(fixed_type))
         compiler.machine = layout.emit_call(compiler.machine, fixed_target)
+        compiler = failures.check(compiler)
         out compiler
     }
     @memory_target = ""
@@ -269,6 +263,7 @@ skill compile_call(compiler, node) {
     (str.len(memory_target) > 0) {
         compiler = compile_arguments(compiler, args)
         compiler.machine = layout.emit_call(compiler.machine, memory_target)
+        compiler = failures.check(compiler)
         out compiler
     }
     @resolved_box = lookup.resolve_symbol(compiler, compiler.boxes, name)
@@ -283,7 +278,7 @@ skill compile_call(compiler, node) {
                 target = str.add(target, short_name)
                 @method_target = str.add("saltic_", state.safe(target))
                 compiler.machine = layout.emit_call(compiler.machine, method_target)
-                out compiler
+                out failures.check(compiler)
             }
         }
     }
@@ -300,7 +295,7 @@ skill compile_call(compiler, node) {
                 target = str.add(target, method)
                 @method_target = str.add("saltic_", state.safe(target))
                 compiler.machine = layout.emit_call(compiler.machine, method_target)
-                out compiler
+                out failures.check(compiler)
             }
         }
     }
@@ -316,7 +311,7 @@ skill compile_call(compiler, node) {
     }
     compiler = compile_arguments(compiler, args)
     compiler.machine = layout.emit_call(compiler.machine, target)
-    out compiler
+    out failures.check(compiler)
 }
 
 skill compile_template(compiler, plain) {
@@ -413,11 +408,8 @@ skill compile_statement(compiler, node, keep) {
     (tag == "out") {
         @failure = lookup.failure_name(group.get(plain, 1))
         pick {
-            (str.len(failure) > 0) {
-                compiler = lookup.remember_error(compiler, failure)
-                compiler = state.load_immediate(compiler, "a0", registers.A0, 0)
-                compiler = state.load_immediate(compiler, "a1", registers.A1, lookup.error_id(compiler, failure))
-            }
+            (str.len(failure) > 0) { compiler = failures.load_failure(compiler, failure) }
+            (lookup.infer_type(compiler, group.get(plain, 1)) == "error") { compiler = failures.raise_value(compile_expression(compiler, group.get(plain, 1))) }
             { compiler = compile_expression(compiler, group.get(plain, 1)) }
         }
         @value_root = constants.REGION_VALUE_ROOT
