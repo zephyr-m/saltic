@@ -36,15 +36,14 @@ if ! command -v qemu-riscv32 >/dev/null 2>&1; then
         bash "$root/bootstrap/build.sh" "$@"
 fi
 
-if (( $# < 2 || $# > 3 )); then
-    echo "использование: bootstrap/build.sh <исходник.saltic> <результат.elf> [результат.s]" >&2
+if (( $# != 2 )); then
+    echo "использование: bootstrap/build.sh <исходник.saltic> <результат.elf>" >&2
     exit 2
 fi
 
 source_path="$1"
 output_path="$2"
 work="${SALTIC_BUILD_DIR:-.cache/build/bootstrap}"
-assembly_path="${3:-$work/program.s}"
 compiler="${SALTIC_BOOTSTRAP_COMPILER:-$(saltic_bootstrap_compiler)}"
 heap_bytes="${SALTIC_HEAP_BYTES:-536870912}"
 target="${SALTIC_TARGET:-rv32i}"
@@ -59,8 +58,8 @@ if [[ ! "$heap_bytes" =~ ^[0-9]+$ ]] || (( heap_bytes < 12 || heap_bytes % 8 != 
     exit 2
 fi
 
-mkdir -p "$work" "$(dirname "$output_path")" "$(dirname "$assembly_path")"
-rm -f "$compiler_output" "$assembly_path"
+mkdir -p "$work" "$(dirname "$output_path")"
+rm -f "$compiler_output"
 
 # Загрузочный компилятор с полки работает своей родной x86-версией: те же байты,
 # в разы быстрее. Любой другой rv32i-компилятор (stage-1 и т. п.) — под QEMU.

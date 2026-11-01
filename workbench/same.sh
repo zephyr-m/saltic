@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Проверка рефакторинга без изменения смысла: текущие исходники собираются
-# зафиксированным compiler.elf и компилятором из этих же исходников (stage-1).
+# компилятором с полки bootstrap/ и компилятором из этих же исходников (stage-1).
 # Результаты обязаны совпасть побайтово, а набор ошибок канона — с эталоном.
 source "$(dirname "$0")/../bootstrap/stamp.sh"
 saltic_stamp_output "$0" "$@"
@@ -11,7 +11,7 @@ rm -f "$W"/*.elf
 status=0
 
 echo "== stage-1 из текущих исходников"
-if ! SALTIC_BUILD_DIR="$W/stage" SALTIC_HEAP_BYTES=4026531840 SALTIC_DIRECT_ONLY=1 \
+if ! SALTIC_BUILD_DIR="$W/stage" SALTIC_HEAP_BYTES=4026531840 \
     bash bootstrap/build.sh soul/seed/selfhost/toolchain.saltic "$W/stage-1.elf" > "$W/stage.log" 2>&1; then
     grep -v "^warning" "$W/stage.log" | tail -5
     exit 1
@@ -19,9 +19,9 @@ fi
 
 for source in soul/seed/selfhost/toolchain.saltic soul/canonical/main.saltic soul/seed/tests/contract.saltic "$@"; do
     name="$(basename "$source" .saltic)"
-    SALTIC_BUILD_DIR="$W/old-$name" SALTIC_DIRECT_ONLY=1 \
+    SALTIC_BUILD_DIR="$W/old-$name" \
         bash bootstrap/build.sh "$source" "$W/old-$name.elf" > /dev/null 2>&1
-    SALTIC_BOOTSTRAP_COMPILER="$W/stage-1.elf" SALTIC_BUILD_DIR="$W/new-$name" SALTIC_DIRECT_ONLY=1 \
+    SALTIC_BOOTSTRAP_COMPILER="$W/stage-1.elf" SALTIC_BUILD_DIR="$W/new-$name" \
         bash bootstrap/build.sh "$source" "$W/new-$name.elf" > "$W/new-$name.log" 2>&1
     if cmp -s "$W/old-$name.elf" "$W/new-$name.elf"; then
         echo "одинаково: $name"

@@ -21,7 +21,7 @@ ls -l "$prev.elf" "$compiler" | awk '{print $5, $9}'
 echo "== тесты (полный лог: .cache/build/workbench/global-check.log)"
 pattern='итог|проверка:|error|подтвержд|ок$|ok$|пройдена|^x86-64:|^uefi: образ грузится'
 nix --extra-experimental-features "nix-command flakes" develop \
-    --command bash tests/run.sh fast 2>&1 | tee .cache/build/workbench/global-check.log \
+    --command bash tests/run.sh 2>&1 | tee .cache/build/workbench/global-check.log \
     | grep --line-buffered -E "$pattern" | grep --line-buffered -v '\[ok\]'
 tests_status=${PIPESTATUS[0]}
 echo "== упавших проверок: $(grep -c 'FAIL\]' .cache/build/workbench/global-check.log)"

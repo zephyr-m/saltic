@@ -9,6 +9,23 @@ permissions:
   contents: read
 
 jobs:
+  notify-start:
+    name: Notify start
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tell Telegram the release started
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [[ -n "${TELEGRAM_BOT_TOKEN}" && -n "${TELEGRAM_CHAT_ID}" ]] || exit 0
+          curl -sS -m 20 -o /dev/null \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=🕷 Saltic ${GITHUB_REF_NAME}: релиз пошёл
+          ${RUN_URL}" || true
+
   verify:
     name: Verify
     runs-on: ubuntu-latest
@@ -32,6 +49,16 @@ jobs:
           test "${tag}" = "v${version//:/.}"
           git cat-file -e "${tag}^{tag}"
           grep -q "^## ${version} — " CHANGELOG.md
+
+      - name: Rebuild the compiler from its own sources
+        run: >-
+          nix --extra-experimental-features "nix-command flakes"
+          develop --command bash bootstrap/refresh.sh
+
+      - name: Check the committed compiler is the fixed point
+        run: |
+          git status --porcelain -- bootstrap/
+          test -z "$(git status --porcelain -- bootstrap/)"
 
       - name: Run the complete test suite
         run: >-
@@ -111,3 +138,31 @@ jobs:
           --verify-tag
           --title "${{ steps.release.outputs.title }}"
           --notes-file "${{ steps.release.outputs.notes }}"
+
+  notify-finish:
+    name: Notify finish
+    needs: [verify, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tell Telegram how the release ended
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VERIFY: ${{ needs.verify.result }}
+          PUBLISH: ${{ needs.publish.result }}
+        run: |
+          [[ -n "${TELEGRAM_BOT_TOKEN}" && -n "${TELEGRAM_CHAT_ID}" ]] || exit 0
+          if [[ "${PUBLISH}" == "success" ]]; then
+            status="✅ опубликован"
+          elif [[ "${VERIFY}" != "success" ]]; then
+            status="❌ проверка: ${VERIFY}"
+          else
+            status="❌ публикация: ${PUBLISH}"
+          fi
+          curl -sS -m 20 -o /dev/null \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=🕷 Saltic ${GITHUB_REF_NAME}: ${status}
+          ${RUN_URL}" || true

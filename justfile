@@ -8,14 +8,14 @@ playground:
     node os/ui/playground/server.mjs
 
 compile file="soul/canonical/main.saltic" output="/tmp/saltic.elf":
-    SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"
+    bash bootstrap/build.sh "$1" "$2"
 
 run file="soul/canonical/main.saltic" output="/tmp/saltic.elf" *args:
-    SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"
+    bash bootstrap/build.sh "$1" "$2"
     nix --extra-experimental-features "nix-command flakes" develop --command qemu-riscv32 -B 0x100000000 "$2" "${@:3}"
 
 native file="soul/canonical/main.saltic" output="/tmp/saltic-native" *args:
-    SALTIC_TARGET=x86_64 SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh "$1" "$2"
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh "$1" "$2"
     "$2" "${@:3}"
 
 qemu file="os/target/qemu_virt/smoke.saltic":
@@ -42,94 +42,25 @@ os-send command port="46321":
 qemu-graphics-check:
     bash os/target/qemu_virt/build-graphics.sh --check
 
-jtml:
-    just test jtml
-
-tasks:
-    just test tasks
-
-selfhost source="soul/canonical/main.saltic" output="/tmp/saltic-self-parser.elf" json=".cache/build/pipeline/parsed.json":
-    mkdir -p "$(dirname "$3")"
-    bash bootstrap/build.sh soul/seed/selfhost/parser.saltic "$2"
-    qemu-riscv32 -B 0x100000000 "$2" "$1" "$3"
-
-selfcheck input=".cache/build/pipeline/parsed.json" output="/tmp/saltic-self-checker.elf" json=".cache/build/pipeline/checked.json":
-    mkdir -p "$(dirname "$3")"
-    bash bootstrap/build.sh soul/seed/selfhost/checker.saltic "$2"
-    qemu-riscv32 -B 0x100000000 "$2" "$1" "$3"
-
-checker:
-    just test checker
-
-vm:
-    just test vm
-
-fixed-types:
-    just test fixed-types
-
-modules:
-    just test modules
-
-json-rpc:
-    just test json-rpc
-
-diagnostics:
-    just test diagnostics
-
-seed-contract:
-    just test seed-contract
-
-machine:
-    just test machine
-
-abi:
-    just test abi
-
-memory:
-    just test memory
-
-native-test:
-    just test native
-
-native-bootstrap:
-    just test native-bootstrap
-
 trace file="soul/canonical/main.saltic":
     mkdir -p .cache/build/tracer
-    SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh "$1" .cache/build/tracer/target.elf .cache/build/tracer/target.s
-    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf .cache/build/tracer/tracer.s
+    SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh "$1" .cache/build/tracer/target.elf
+    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf
     qemu-riscv32 -B 0x100000000 .cache/build/tracer/tracer.elf .cache/build/tracer/target.elf
 
 trace-elf file:
     mkdir -p .cache/build/tracer
-    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf .cache/build/tracer/tracer.s
+    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf
     qemu-riscv32 -B 0x100000000 .cache/build/tracer/tracer.elf "$1"
-
-bootstrap-parity:
-    just test bootstrap
 
 bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic":
     bash bootstrap/refresh.sh "$1"
 
-toolchain-step:
-    just checker
-    just bootstrap-refresh
-    just modules
-    just bootstrap-parity
-
-vm-step:
-    just vm
-
 test case="all":
     nix --extra-experimental-features "nix-command flakes" develop --command bash tests/run.sh "$1"
-
-fast:
-    just test fast
 
 package:
     bash .github/package.sh
 
 clean:
     rm -rf -- .cache/build .cache/dist
-
-verify: test

@@ -145,14 +145,12 @@ test_tracer() {
     SALTIC_BUILD_DIR="$work/build/tracer" \
     bash bootstrap/build.sh \
         tests/tracer.saltic \
-        "$work/tracer/target.elf" \
-        "$work/tracer/target.s"
+        "$work/tracer/target.elf"
     SALTIC_HEAP_BYTES=536870912 \
     SALTIC_BUILD_DIR="$work/build/tracer" \
     bash bootstrap/build.sh \
         soul/craft/tracer.saltic \
-        "$work/tracer/tracer.elf" \
-        "$work/tracer/tracer.s"
+        "$work/tracer/tracer.elf"
     qemu-riscv32 -B 0x100000000 \
         "$work/tracer/tracer.elf" \
         "$work/tracer/target.elf" \
@@ -240,28 +238,6 @@ test_native() {
         1048576
     test "$("$work/native/big-numbers" | tr '\n' ' ')" = "-268435455 268435455 33554432 -33554433 100000000 33554431 -256 255 4096 -4097 200000001 268435455 "
     echo "x86-64: канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает, большие числа точны"
-}
-
-test_native_bootstrap() {
-    local native_work="$work/native-bootstrap"
-    local heap_bytes=4026531840
-    mkdir -p "$native_work"
-    echo "native-bootstrap: compiler.elf переводит компилятор в x86-64"
-    SALTIC_TARGET=x86_64 build native-bootstrap \
-        soul/seed/selfhost/toolchain.saltic \
-        "$native_work/compiler.native" \
-        "$heap_bytes"
-    echo "native-bootstrap: x86-компилятор собирает себя (stage A)"
-    "$native_work/compiler.native" soul/seed/selfhost/toolchain.saltic \
-        "$native_work/stage-a.native" "$heap_bytes" x86_64 >/dev/null
-    chmod +x "$native_work/stage-a.native"
-    echo "native-bootstrap: stage A собирает себя (stage B)"
-    "$native_work/stage-a.native" soul/seed/selfhost/toolchain.saltic \
-        "$native_work/stage-b.native" "$heap_bytes" x86_64 >/dev/null
-    cmp "$native_work/compiler.native" "$native_work/stage-a.native"
-    cmp "$native_work/stage-a.native" "$native_work/stage-b.native"
-    echo "native-bootstrap: fixed point $(sha256sum "$native_work/stage-b.native" | awk '{print $1}')"
-    echo "native-bootstrap: ok"
 }
 
 test_seed_contract() {
@@ -366,128 +342,16 @@ test_tasks() {
     echo "tasks: модель и интерфейс подтверждены"
 }
 
-test_bootstrap() {
-    local bootstrap_work="$work/bootstrap"
-    local heap_bytes=4026531840
-    mkdir -p \
-        "$bootstrap_work/stage-1" \
-        "$bootstrap_work/stage-2" \
-        "$bootstrap_work/stage-3" \
-        "$bootstrap_work/canonical"
-
-    local gnu_bin="$bootstrap_work/gnu-bin"
-    local gnu_log="$bootstrap_work/gnu.log"
-    local tool
-    local saved_path="$PATH"
-    mkdir -p "$gnu_bin"
-    : >"$gnu_log"
-    for tool in riscv32-none-elf-as riscv32-none-elf-gcc; do
-        printf '%s\n' \
-            '#!/bin/sh' \
-            "printf '%s\\n' '$tool' \"\$*\" >>'$gnu_log'" \
-            'exit 99' \
-            >"$gnu_bin/$tool"
-        chmod +x "$gnu_bin/$tool"
-    done
-    PATH="$gnu_bin:$saved_path"
-
-    echo "bootstrap: зафиксированный компилятор собирает прямой ELF stage-1"
-    SALTIC_BUILD_DIR="$bootstrap_work/stage-1" \
-    SALTIC_HEAP_BYTES="$heap_bytes" \
-    SALTIC_DIRECT_ONLY=1 \
-    bash bootstrap/build.sh \
-        soul/seed/selfhost/toolchain.saltic \
-        "$bootstrap_work/stage-1/toolchain.elf" \
-        "$bootstrap_work/stage-1/toolchain.s"
-    test -x "$bootstrap_work/stage-1/toolchain.elf"
-    test ! -e "$bootstrap_work/stage-1/toolchain.s"
-
-    echo "bootstrap: stage-1 создаёт прямой ELF stage-2"
-    SALTIC_BOOTSTRAP_COMPILER="$bootstrap_work/stage-1/toolchain.elf" \
-    SALTIC_BUILD_DIR="$bootstrap_work/stage-2" \
-    SALTIC_HEAP_BYTES="$heap_bytes" \
-    SALTIC_DIRECT_ONLY=1 \
-    bash bootstrap/build.sh \
-        soul/seed/selfhost/toolchain.saltic \
-        "$bootstrap_work/stage-2/toolchain.elf" \
-        "$bootstrap_work/stage-2/toolchain.s"
-    test -x "$bootstrap_work/stage-2/toolchain.elf"
-    test ! -e "$bootstrap_work/stage-2/toolchain.s"
-
-    echo "bootstrap: stage-2 создаёт прямой ELF stage-3"
-    SALTIC_BOOTSTRAP_COMPILER="$bootstrap_work/stage-2/toolchain.elf" \
-    SALTIC_BUILD_DIR="$bootstrap_work/stage-3" \
-    SALTIC_HEAP_BYTES="$heap_bytes" \
-    SALTIC_DIRECT_ONLY=1 \
-    bash bootstrap/build.sh \
-        soul/seed/selfhost/toolchain.saltic \
-        "$bootstrap_work/stage-3/toolchain.elf" \
-        "$bootstrap_work/stage-3/toolchain.s"
-    test -x "$bootstrap_work/stage-3/toolchain.elf"
-    test ! -e "$bootstrap_work/stage-3/toolchain.s"
-    PATH="$saved_path"
-
-    echo "bootstrap: три стадии не создали .s и не вызвали GNU as/gcc"
-    test ! -s "$gnu_log"
-    test -z "$(find "$bootstrap_work/stage-1" "$bootstrap_work/stage-2" "$bootstrap_work/stage-3" -name '*.s' -print)"
-
-    echo "bootstrap: сравниваю прямые stage-2 и stage-3"
-    cmp \
-        "$bootstrap_work/stage-2/toolchain.elf" \
-        "$bootstrap_work/stage-3/toolchain.elf"
-    echo "bootstrap: fixed point $(sha256sum "$bootstrap_work/stage-3/toolchain.elf" | awk '{print $1}')"
-
-    echo "bootstrap: прямой toolchain компилирует канон"
-    SALTIC_BOOTSTRAP_COMPILER="$bootstrap_work/stage-2/toolchain.elf" \
-    SALTIC_BUILD_DIR="$bootstrap_work/canonical" \
-    SALTIC_DIRECT_ONLY=1 \
-    bash bootstrap/build.sh \
-        soul/canonical/main.saltic \
-        "$bootstrap_work/canonical/canonical.elf" \
-        "$bootstrap_work/canonical/canonical.s"
-    test -x "$bootstrap_work/canonical/canonical.elf"
-    test ! -e "$bootstrap_work/canonical/canonical.s"
-    cp tests/fixtures/input.txt "$bootstrap_work/canonical/input.txt"
-    qemu-riscv32 -B 0x100000000 \
-        "$bootstrap_work/canonical/canonical.elf" \
-        "$bootstrap_work/canonical/input.txt" \
-        "$bootstrap_work/canonical/output.txt" \
-        >"$bootstrap_work/canonical/stdout.txt"
-    diff -u \
-        soul/canonical/expected/output.txt \
-        "$bootstrap_work/canonical/stdout.txt"
-    test "$(<"$bootstrap_work/canonical/output.txt")" = "pip:0"
-    echo "bootstrap: ok"
-}
-
 test_closure() {
     local closure_work="$work/closure"
-    local deny_bin="$closure_work/deny-bin"
-    local deny_log="$closure_work/deny.log"
-    local tool
-    mkdir -p "$deny_bin"
-    : >"$deny_log"
-    for tool in riscv32-none-elf-as riscv32-none-elf-gcc node; do
-        printf '%s\n' \
-            '#!/bin/sh' \
-            "printf '%s\\n' '$tool' \"\$*\" >>'$deny_log'" \
-            'exit 99' \
-            >"$deny_bin/$tool"
-        chmod +x "$deny_bin/$tool"
-    done
-    PATH="$deny_bin:$PATH"
-    echo "closure: source → прямой ELF"
+    mkdir -p "$closure_work"
+    echo "closure: канон → ELF rv32i"
     SALTIC_BUILD_DIR="$closure_work/build" \
     SALTIC_HEAP_BYTES=67108864 \
-    SALTIC_DIRECT_ONLY=1 \
     bash bootstrap/build.sh \
         soul/canonical/main.saltic \
-        "$closure_work/canonical.elf" \
-        "$closure_work/canonical.s"
+        "$closure_work/canonical.elf"
     test -x "$closure_work/canonical.elf"
-    test ! -e "$closure_work/canonical.s"
-    echo "closure: цепочка не вызвала GNU и JavaScript"
-    test ! -s "$deny_log"
     local magic
     magic="$(od -An -t x1 -N 4 "$closure_work/canonical.elf" | tr -d ' \n')"
     test "$magic" = "7f454c46"
@@ -547,12 +411,10 @@ run_case() {
         abi) test_abi ;;
         memory) test_memory ;;
         native) test_native ;;
-        native-bootstrap) test_native_bootstrap ;;
         qemu-virt) test_qemu_virt ;;
         uefi) test_uefi ;;
         jtml) test_jtml ;;
         tasks) test_tasks ;;
-        bootstrap) test_bootstrap ;;
         closure) test_closure ;;
         *)
             echo "неизвестная проверка: $1" >&2
@@ -565,8 +427,7 @@ if (( $# == 0 )); then
     set -- all
 fi
 
-if [[ "$1" == "all" || "$1" == "fast" ]]; then
-    scope="$1"
+if [[ "$1" == "all" ]]; then
     set -- \
         checker \
         vm \
@@ -584,12 +445,7 @@ if [[ "$1" == "all" || "$1" == "fast" ]]; then
         tasks \
         qemu-virt \
         uefi \
-        closure \
-        bootstrap \
-        native-bootstrap
-    if [[ "$scope" == "fast" ]]; then
-        set -- "${@:1:$#-3}"
-    fi
+        closure
 fi
 
 for name in "$@"; do

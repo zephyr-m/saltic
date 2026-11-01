@@ -15,6 +15,6 @@ echo "== 2. родной компилятор собирает toolchain под 
 time $R/compiler.native soul/seed/selfhost/toolchain.saltic $R/from-native.elf $H rv32i | tail -1
 echo "== 3. тот же компилятор под QEMU собирает то же самое"
 time SALTIC_BOOTSTRAP_COMPILER=$R/stage-1.elf SALTIC_BUILD_DIR=$R/rv-build SALTIC_HEAP_BYTES=$H \
-    SALTIC_DIRECT_ONLY=1 bash bootstrap/build.sh soul/seed/selfhost/toolchain.saltic $R/from-rv.elf 2>&1 | tail -1
+    bash bootstrap/build.sh soul/seed/selfhost/toolchain.saltic $R/from-rv.elf 2>&1 | tail -1
 echo "== 4. сравнение"
 cmp $R/from-native.elf $R/from-rv.elf && echo "ПОБАЙТОВО ОДИНАКОВО"
