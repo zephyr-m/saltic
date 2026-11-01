@@ -34,12 +34,15 @@ Agent = Box {
     columns = 0,
     rows = 0,
     line = 0,
+    cursor = 0,
     console = yes,
     shown_second = -1,
     rounds = 0
 }
 
 MARGIN = 40
+LINE_GAP = 4
+LOG_LIMIT = 150
 ZONE_HOURS = 5
 MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 CLOCK_EVERY = 20000
@@ -199,21 +202,46 @@ skill clear_screen(agent) {
     lettering.paint_text(screen, lettering.FACE_TITLE, MARGIN, 32, "Saltic - агент на Acer", ink(screen))
     graphics.fill(screen, MARGIN, 76, screen.width - MARGIN * 2, 1, graphics.color(screen, 228, 228, 231))
     agent.line = 0
+    agent.cursor = TOP
     agent.console = no
     out "экран очищен"
+}
+
+skill faint(screen) {
+    out graphics.color(screen, 113, 113, 122)
+}
+
+skill next_row(agent, screen, face) {
+    (agent.cursor + face.height > screen.height - 16) {
+        graphics.fill(screen, 0, TOP - 8, screen.width, screen.height - TOP + 8, paper(screen))
+        agent.cursor = TOP
+    }
+    @y = agent.cursor
+    agent.cursor = agent.cursor + face.height + LINE_GAP
+    out y
 }
 
 skill print_line(agent, line_bytes) {
     @screen = graphics.open(agent.card.base)
     @face = lettering.FACE_TEXT
-    @y = TOP + agent.line * (face.height + 4)
-    (y + face.height > screen.height - 16) {
-        clear_screen(agent)
-        y = TOP
-    }
-    lettering.paint_bytes(screen, face, MARGIN, y, line_bytes, ink(screen))
+    lettering.paint_bytes(screen, face, MARGIN, next_row(agent, screen, face), line_bytes, ink(screen))
     agent.line = agent.line + 1
     out "напечатал строку {agent.line}"
+}
+
+skill journal(agent, who, payload) {
+    (agent.console == yes) { out none }
+    @screen = graphics.open(agent.card.base)
+    @face = lettering.FACE_SMALL
+    @clock = clock_text(local_time(uefi.now(agent.card.base)))
+    @prefix = "{clock}  {who}  "
+    @bytes = []
+    drum (str.len(prefix)) { bytes = group.add(bytes, str.byte(prefix, beat)) }
+    @shown = group.count(payload)
+    (shown > LOG_LIMIT) { shown = LOG_LIMIT }
+    bytes = group.concat(bytes, group.slice(payload, 0, shown))
+    lettering.paint_bytes(screen, face, MARGIN, next_row(agent, screen, face), bytes, faint(screen))
+    out none
 }
 
 skill prepare_disk(agent, words) {
@@ -326,6 +354,7 @@ skill answer(agent, bytes) {
     @who = net.ip_text(packet.from_ip)
     @command = packet.text
     log(agent, "command from {who}: {command}")
+    journal(agent, who, packet.payload)
     @reply = execute(agent, command, packet.payload) rescue |err| { "ошибка: {err}" }
     @frame = net.udp_frame(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply)
     @sent = rtl8111.send(agent.card, frame)
