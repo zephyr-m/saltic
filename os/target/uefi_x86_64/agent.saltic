@@ -2,23 +2,31 @@ use io
 use core.num
 use core.str
 use core.group
+use core.cpu
 use os.target.uefi_x86_64.firmware
 use os.target.uefi_x86_64.pci
 use os.target.uefi_x86_64.rtl8111
 use os.target.uefi_x86_64.net
 
 PORT = 5555
+DATA_PORT = 5556
+UPLOAD_OFFSET = 65536
+UPLOAD_LIMIT = 1966080
+REPORT_EVERY = 65536
 MY_IP = [10, 0, 0, 2]
 MEMORY_DEFAULT = 16
 MEMORY_LIMIT = 64
 LISTEN_ROUNDS = 200000000
-HELP = "commands: help | info | pci | mem <hex address> [bytes, up to 64] | echo <text>"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое"
 
 Agent = Box {
     card = rtl8111.Card {},
     frames = 0,
     commands = 0,
-    arp = 0
+    arp = 0,
+    expected = 0,
+    received = 0,
+    total = 0
 }
 
 skill parse_hex(text) {
@@ -47,9 +55,52 @@ skill parse_count(text) {
     out value
 }
 
+skill parse_size(text) {
+    @value = 0
+    drum (str.len(text)) {
+        @ch = str.get(text, beat)
+        (str.is_digit(ch) == no) { out 0 }
+        value = value * 10 + num.digit(ch)
+    }
+    out value
+}
+
+skill begin_upload(agent, words) {
+    (group.count(words) < 2) { out "как: upload <байт>" }
+    @size = parse_size(group.get(words, 1))
+    (size < 1) { out "плохой размер" }
+    (size > UPLOAD_LIMIT) { out "слишком много: предел {UPLOAD_LIMIT} байт" }
+    agent.expected = size
+    agent.received = 0
+    agent.total = 0
+    io.show("upload: waiting for {size} bytes on port 5556")
+    out "жду {size} байт на порту 5556"
+}
+
+skill upload_state(agent) {
+    @received = agent.received
+    @expected = agent.expected
+    @total = agent.total
+    out "принято {received} из {expected} байт, сумма {total}"
+}
+
+skill launch(agent) {
+    (agent.expected == 0) { out "ничего не принято" }
+    ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
+    @image = firmware.guest(firmware.add(agent.card.arena, UPLOAD_OFFSET), agent.card.base)
+    @size = agent.expected
+    io.show("run: starting uploaded image, {size} bytes")
+    @status = cpu.start_image(group.get(image, 0), group.get(image, 1), size)
+    io.show("run: image returned, status {status}")
+    rtl8111.configure(agent.card)
+    rtl8111.wait_link(agent.card)
+    io.show("run: card configured again, listening")
+    out "программа закончила работу, статус {status}"
+}
+
 skill memory_dump(agent, words) {
-    (group.count(words) < 2) { out "usage: mem <hex address> [bytes]" }
-    @at = parse_hex(group.get(words, 1)) rescue |err| { out "bad address: {err}" }
+    (group.count(words) < 2) { out "как: mem <адрес hex> [байт]" }
+    @at = parse_hex(group.get(words, 1)) rescue |err| { out "плохой адрес: {err}" }
     @count = MEMORY_DEFAULT
     (group.count(words) > 2) { count = parse_count(group.get(words, 2)) }
     @dump = []
@@ -67,15 +118,26 @@ skill memory_dump(agent, words) {
     out str.join(dump, "\n")
 }
 
+skill link_russian(status) {
+    (rtl8111.has_bit(status, rtl8111.PHY_LINK) == no) { out "нет" }
+    @speed = "?"
+    (rtl8111.has_bit(status, rtl8111.PHY_10) == yes) { speed = "10" }
+    (rtl8111.has_bit(status, rtl8111.PHY_100) == yes) { speed = "100" }
+    (rtl8111.has_bit(status, rtl8111.PHY_1000) == yes) { speed = "1000" }
+    @duplex = "полудуплекс"
+    (rtl8111.has_bit(status, rtl8111.PHY_FULL_DUPLEX) == yes) { duplex = "полный дуплекс" }
+    out "есть, {speed} Мбит/с, {duplex}"
+}
+
 skill information(agent) {
     @mac = net.mac_text(agent.card.mac)
     @ip = net.ip_text(MY_IP)
     @arena = firmware.phys_text(agent.card.arena)
-    @link = rtl8111.link(agent.card)
+    @link = link_russian(rtl8111.status(agent.card))
     @frames = agent.frames
     @commands = agent.commands
     @arp = agent.arp
-    out "Saltic agent on Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp port 5555\nlink {link}\nDMA arena {arena}\nframes {frames}, commands {commands}, arp answers {arp}"
+    out "агент Saltic на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}\nкадров {frames}, команд {commands}, ответов ARP {arp}"
 }
 
 skill device_list(agent) {
@@ -91,7 +153,10 @@ skill execute(agent, text) {
     (name == "pci") { out device_list(agent) }
     (name == "mem") { out memory_dump(agent, words) }
     (name == "echo") { out str.slice(text, 4, str.len(text)) }
-    out "unknown command '{name}'. {HELP}"
+    (name == "upload") { out begin_upload(agent, words) }
+    (name == "check") { out upload_state(agent) }
+    (name == "run") { out launch(agent) }
+    out "не знаю команду '{name}'. {HELP}"
 }
 
 skill answer(agent, bytes) {
@@ -99,11 +164,38 @@ skill answer(agent, bytes) {
     @who = net.ip_text(packet.from_ip)
     @command = packet.text
     io.show("command from {who}: {command}")
-    @reply = execute(agent, command) rescue |err| { "error: {err}" }
+    @reply = execute(agent, command) rescue |err| { "ошибка: {err}" }
     @frame = net.udp_frame(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply)
     @sent = rtl8111.send(agent.card, frame)
     io.show("  replied {sent} bytes")
     agent.commands = agent.commands + 1
+    out agent
+}
+
+skill store_chunk(agent, bytes) {
+    @offset = net.word(bytes, 42) * 65536 + net.word(bytes, 44)
+    @size = net.word(bytes, 38) - 12
+    (size > group.count(bytes) - 46) { size = group.count(bytes) - 46 }
+    (agent.expected > 0) {
+        (offset == agent.received) {
+            (offset + size > agent.expected) { size = agent.expected - offset }
+            drum (size) {
+                @value = group.get(bytes, 46 + beat)
+                firmware.write8(agent.card.arena, agent.card.base, UPLOAD_OFFSET + offset + beat, value)
+                agent.total = num.mod(agent.total + value, 65536)
+            }
+            agent.received = offset + size
+            (num.mod(agent.received, REPORT_EVERY) < size) {
+                @received = agent.received
+                @expected = agent.expected
+                io.show("upload: {received} of {expected} bytes")
+            }
+        }
+    }
+    @reply = "ok {agent.received}"
+    @to_mac = net.slice_bytes(bytes, 6, 6)
+    @to_ip = net.slice_bytes(bytes, 26, 4)
+    rtl8111.send(agent.card, net.udp_frame(agent.card.mac, MY_IP, to_mac, to_ip, DATA_PORT, net.word(bytes, 34), reply))
     out agent
 }
 
@@ -117,6 +209,7 @@ skill handle(agent, bytes) {
         out agent
     }
     (net.is_udp_to(bytes, PORT) == yes) { out answer(agent, bytes) }
+    (net.is_udp_to(bytes, DATA_PORT) == yes) { out store_chunk(agent, bytes) }
     out agent
 }
 
@@ -141,7 +234,7 @@ skill run() {
     io.show("[2] card configured, waiting for link...")
     @link = rtl8111.wait_link(card)
     io.show("[3] link {link}")
-    @hello = net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "Saltic agent is up on 10.0.0.2:5555, say help")
+    @hello = net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic слушает 10.0.0.2:5555, скажи help")
     rtl8111.send(card, hello)
     io.show("[4] listening on 10.0.0.2:5555 (arp + udp commands)")
     io.show("")
