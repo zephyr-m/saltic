@@ -1,0 +1,102 @@
+use io
+use core.num
+use core.str
+use os.target.uefi_x86_64.firmware
+
+VENDOR_REALTEK = 4332
+MODEL_RTL8111 = 33128
+PCI_COMMAND = 4
+PCI_BAR2 = 24
+PCI_BAR2_HIGH = 28
+COMMAND_MEMORY = 2
+COMMAND_BUS_MASTER = 4
+REGISTER_TX_CONFIG = 64
+REGISTER_PHY_STATUS = 108
+PHY_FULL_DUPLEX = 1
+PHY_LINK = 2
+PHY_10 = 4
+PHY_100 = 8
+PHY_1000 = 16
+
+skill has_bit(value, bit) {
+    out num.mod(value / bit, 2) == 1
+}
+
+skill with_bit(value, bit) {
+    (has_bit(value, bit) == yes) { out value }
+    out value + bit
+}
+
+skill enable(base, config) {
+    @before = firmware.read16(config, base, PCI_COMMAND)
+    @after = with_bit(with_bit(before, COMMAND_MEMORY), COMMAND_BUS_MASTER)
+    firmware.write16(config, base, PCI_COMMAND, after)
+    @was = firmware.hex(before, 4)
+    @now = firmware.hex(firmware.read16(config, base, PCI_COMMAND), 4)
+    io.show("[2] PCI command: {was} -> {now}")
+    out none
+}
+
+skill registers(base, config) {
+    @low = firmware.read32(config, base, PCI_BAR2)
+    (has_bit(low.lo, 1) == yes) { out error.Bar2IsNotMemory }
+    @high = firmware.read32(config, base, PCI_BAR2_HIGH)
+    (high.hi > 0) { out error.RegistersAbove4G }
+    (high.lo > 0) { out error.RegistersAbove4G }
+    out firmware.Phys { hi = low.hi, lo = low.lo - num.mod(low.lo, 16) }
+}
+
+skill mac_text(base, mmio) {
+    @text = firmware.hex(firmware.read8(mmio, base, 0), 2)
+    drum (5) {
+        @part = firmware.hex(firmware.read8(mmio, base, beat + 1), 2)
+        text = "{text}:{part}"
+    }
+    out text
+}
+
+skill link_text(status) {
+    (has_bit(status, PHY_LINK) == no) { out "down (no cable?)" }
+    @speed = "?"
+    (has_bit(status, PHY_10) == yes) { speed = "10" }
+    (has_bit(status, PHY_100) == yes) { speed = "100" }
+    (has_bit(status, PHY_1000) == yes) { speed = "1000" }
+    @duplex = "half"
+    (has_bit(status, PHY_FULL_DUPLEX) == yes) { duplex = "full" }
+    out "up, {speed} Mbit/s, {duplex} duplex"
+}
+
+skill run() {
+    @base = firmware.guest_base()
+    @space = firmware.ecam(base)
+    @config = firmware.find_device(base, space, VENDOR_REALTEK, MODEL_RTL8111)
+    @at = firmware.phys_text(config)
+    io.show("[1] found 10ec:8168, config space at {at}")
+    enable(base, config)
+    @mmio = registers(base, config)
+    @window = firmware.phys_text(mmio)
+    io.show("[3] registers (BAR2) at {window}")
+    @mac = mac_text(base, mmio)
+    io.show("[4] MAC address: {mac}")
+    @tx = firmware.read32(mmio, base, REGISTER_TX_CONFIG)
+    @version = firmware.hex(tx.hi, 4)
+    io.show("[5] chip version (TxConfig high): {version}")
+    @status = firmware.read8(mmio, base, REGISTER_PHY_STATUS)
+    @link = link_text(status)
+    @raw = firmware.hex(status, 2)
+    io.show("[6] link: {link} (PHYstatus {raw})")
+    out none
+}
+
+program() {
+    io.show("Saltic RTL8111 driver, step 1: find the card and read it")
+    @done = run() rescue |err| {
+        io.show("FAILED: ", err)
+        none
+    }
+    io.show("")
+    io.show("This program never exits. Turn the laptop off when done.")
+    drum (200000000) {
+        @key = io.key()
+    }
+}

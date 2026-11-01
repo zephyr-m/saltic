@@ -1,0 +1,143 @@
+use core.cpu
+use core.mem
+use core.num
+use core.str
+
+PAGE = 65536
+ACPI20_GUID_LOW = 59505
+ACPI20_GUID_HIGH = 34920
+ACPI20_GUID_DATA2 = 58609
+SIGNATURE_MC = 17229
+SIGNATURE_FG = 18246
+NO_DEVICE = 65535
+
+Phys = Box {
+    hi = 0,
+    lo = 0
+}
+
+Ecam = Box {
+    start = Phys {},
+    first = 0,
+    last = 0
+}
+
+skill hex(value, digits) {
+    @text = ""
+    @rest = value
+    drum (digits) {
+        text = str.add(num.hex_digit(num.mod(rest, 16)), text)
+        rest = rest / 16
+    }
+    out text
+}
+
+skill phys_text(p) {
+    out str.add(hex(p.hi, 4), hex(p.lo, 4))
+}
+
+skill add(p, offset) {
+    @total = p.lo + num.mod(offset, PAGE)
+    out Phys { hi = p.hi + offset / PAGE + total / PAGE, lo = num.mod(total, PAGE) }
+}
+
+skill guest_base() {
+    (cpu.firmware(2) > 0) { out error.GuestBaseAbove4G }
+    (cpu.firmware(3) > 0) { out error.GuestBaseAbove4G }
+    out Phys { hi = cpu.firmware(1), lo = cpu.firmware(0) }
+}
+
+skill guest(p, base) {
+    @lo = p.lo - base.lo
+    @hi = p.hi - base.hi
+    (lo < 0) {
+        lo = lo + PAGE
+        hi = hi - 1
+    }
+    (hi < 0) { out error.BelowGuestBase }
+    out [hi, lo]
+}
+
+skill read8(p, base, offset) {
+    out mem.load8(guest(add(p, offset), base), 0)
+}
+
+skill read16(p, base, offset) {
+    out mem.load16(guest(add(p, offset), base), 0)
+}
+
+skill read32(p, base, offset) {
+    out Phys { hi = read16(p, base, offset + 2), lo = read16(p, base, offset) }
+}
+
+skill write16(p, base, offset, value) {
+    out mem.store16(guest(add(p, offset), base), 0, value)
+}
+
+skill pointer(p, base, offset) {
+    (read16(p, base, offset + 4) > 0) { out error.PointerAbove4G }
+    (read16(p, base, offset + 6) > 0) { out error.PointerAbove4G }
+    out read32(p, base, offset)
+}
+
+skill system_table() {
+    (cpu.firmware(6) > 0) { out error.SystemTableAbove4G }
+    (cpu.firmware(7) > 0) { out error.SystemTableAbove4G }
+    out Phys { hi = cpu.firmware(5), lo = cpu.firmware(4) }
+}
+
+skill find_rsdp(base) {
+    @table = system_table()
+    @count = read16(table, base, 104)
+    @entries = pointer(table, base, 112)
+    drum (count) {
+        @entry = add(entries, beat * 24)
+        (read16(entry, base, 0) == ACPI20_GUID_LOW) {
+            (read16(entry, base, 2) == ACPI20_GUID_HIGH) {
+                (read16(entry, base, 4) == ACPI20_GUID_DATA2) { out pointer(entry, base, 16) }
+            }
+        }
+    }
+    out error.NoAcpi20
+}
+
+skill find_mcfg(base, rsdp) {
+    @xsdt = pointer(rsdp, base, 24)
+    @length = read16(xsdt, base, 4) + read16(xsdt, base, 6) * PAGE
+    drum ((length - 36) / 8) {
+        @table = pointer(xsdt, base, 36 + beat * 8)
+        (read16(table, base, 0) == SIGNATURE_MC) {
+            (read16(table, base, 2) == SIGNATURE_FG) { out table }
+        }
+    }
+    out error.NoMcfg
+}
+
+skill ecam(base) {
+    @mcfg = find_mcfg(base, find_rsdp(base))
+    out Ecam { start = pointer(mcfg, base, 44), first = read8(mcfg, base, 54), last = read8(mcfg, base, 55) }
+}
+
+skill function_config(space, bus, device, function) {
+    out add(space.start, bus * 1048576 + device * 32768 + function * 4096)
+}
+
+skill find_device(base, space, vendor, model) {
+    drum (space.last - space.first + 1) {
+        @bus = space.first + beat
+        drum (32) {
+            @device = beat
+            drum (8) {
+                @config = function_config(space, bus, device, beat)
+                @found = read16(config, base, 0)
+                (found == NO_DEVICE) {
+                    (beat == 0) { leave }
+                }
+                (found == vendor) {
+                    (read16(config, base, 2) == model) { out config }
+                }
+            }
+        }
+    }
+    out error.DeviceNotFound
+}
