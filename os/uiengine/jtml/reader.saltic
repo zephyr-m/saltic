@@ -1,0 +1,132 @@
+use core.str
+use core.num
+use core.group
+
+Kind = enum {
+    NOTHING,
+    OBJECT,
+    ARRAY,
+    WORDS,
+    AMOUNT,
+    TRUTH,
+}
+
+Value = Box {
+    kind = Kind.NOTHING,
+    words = "",
+    amount = 0,
+    truth = no,
+    keys = [],
+    items = []
+}
+
+Step = Box {
+    value = Value {},
+    next = 0
+}
+
+skill skip_space(source, at) {
+    @index = at
+    drum (str.len(source) - at) {
+        (str.byte(source, index) > 32) { out index }
+        index = index + 1
+    }
+    out index
+}
+
+skill read_words(source, at) {
+    @words = ""
+    @from = at + 1
+    @index = at + 1
+    drum (str.len(source) - at) {
+        @ch = str.get(source, index)
+        (ch == "\"") { out Step { value = Value { kind = Kind.WORDS, words = str.add(words, str.slice(source, from, index)) }, next = index + 1 } }
+        (ch == "\\") {
+            words = str.add(words, str.slice(source, from, index))
+            @escaped = str.get(source, index + 1)
+            @decoded = escaped
+            (escaped == "n") { decoded = "\n" }
+            (escaped == "t") { decoded = "\t" }
+            (escaped == "u") {
+                decoded = "?"
+                index = index + 4
+            }
+            words = str.add(words, decoded)
+            index = index + 2
+            from = index
+        }
+        ((ch == "\\") == no) { index = index + 1 }
+    }
+    out error.BadJtml
+}
+
+skill read_amount(source, at) {
+    @index = at
+    @sign = 1
+    (str.get(source, index) == "-") {
+        sign = -1
+        index = index + 1
+    }
+    @amount = 0
+    drum (str.len(source) - index) {
+        @ch = str.get(source, index)
+        (str.is_digit(ch) == no) { out Step { value = Value { kind = Kind.AMOUNT, amount = amount * sign }, next = index } }
+        amount = amount * 10 + num.digit(ch)
+        index = index + 1
+    }
+    out Step { value = Value { kind = Kind.AMOUNT, amount = amount * sign }, next = index }
+}
+
+skill read_array(source, at) {
+    @items = []
+    @index = skip_space(source, at + 1)
+    (str.get(source, index) == "]") { out Step { value = Value { kind = Kind.ARRAY }, next = index + 1 } }
+    drum (str.len(source)) {
+        @step = read_value(source, index)
+        items = group.add(items, step.value)
+        index = skip_space(source, step.next)
+        @ch = str.get(source, index)
+        (ch == "]") { out Step { value = Value { kind = Kind.ARRAY, items = items }, next = index + 1 } }
+        ((ch == ",") == no) { out error.BadJtml }
+        index = index + 1
+    }
+    out error.BadJtml
+}
+
+skill read_object(source, at) {
+    @keys = []
+    @items = []
+    @index = skip_space(source, at + 1)
+    (str.get(source, index) == "\}") { out Step { value = Value { kind = Kind.OBJECT }, next = index + 1 } }
+    drum (str.len(source)) {
+        @key = read_words(source, skip_space(source, index))
+        index = skip_space(source, key.next)
+        ((str.get(source, index) == ":") == no) { out error.BadJtml }
+        @step = read_value(source, index + 1)
+        keys = group.add(keys, key.value.words)
+        items = group.add(items, step.value)
+        index = skip_space(source, step.next)
+        @ch = str.get(source, index)
+        (ch == "\}") { out Step { value = Value { kind = Kind.OBJECT, keys = keys, items = items }, next = index + 1 } }
+        ((ch == ",") == no) { out error.BadJtml }
+        index = index + 1
+    }
+    out error.BadJtml
+}
+
+skill read_value(source, at) {
+    @index = skip_space(source, at)
+    @ch = str.get(source, index)
+    (ch == "\{") { out read_object(source, index) }
+    (ch == "[") { out read_array(source, index) }
+    (ch == "\"") { out read_words(source, index) }
+    (ch == "t") { out Step { value = Value { kind = Kind.TRUTH, truth = yes }, next = index + 4 } }
+    (ch == "f") { out Step { value = Value { kind = Kind.TRUTH }, next = index + 5 } }
+    (ch == "n") { out Step { value = Value {}, next = index + 4 } }
+    out read_amount(source, index)
+}
+
+skill read_jtml(source) {
+    @step = read_value(source, 0)
+    out step.value
+}

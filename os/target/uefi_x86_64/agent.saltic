@@ -18,18 +18,21 @@ use os.target.uefi_x86_64.spider
 use os.target.uefi_x86_64.usb
 use os.target.uefi_x86_64.feed
 use os.target.uefi_x86_64.camera
+use os.target.uefi_x86_64.shot
 
-VERSION = 4
+VERSION = 6
 REPLY_LIMIT = 1400
 PORT = 5555
 DATA_PORT = 5556
 UPLOAD_OFFSET = 65536
-UPLOAD_LIMIT = 1966080
+UPLOAD_LIMIT = 33554432
+ARENA_LIMIT = 1966080
+UPLOAD_PAGES = 8192
 REPORT_EVERY = 32768
 BAR_HEIGHT = 16
 MY_IP = [10, 0, 0, 2]
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | usb — устройства USB | camera — что умеет камера | code <текст> — показать кусок кода | time — дата и время | reboot — перезагрузить ноутбук | shot — снимок экрана (забирает tools/shot.py; сбрасывает принятую программу)"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран (после run экран у программы, лента молчит до clear) | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | usb — устройства USB | camera — что умеет камера | code <текст> — показать кусок кода | time — дата и время | reboot — перезагрузить ноутбук | shot — снимок экрана (забирает tools/shot.py)"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -50,13 +53,14 @@ Agent = Box {
     last_error = "нет",
     shot_bytes = 0,
     restart = no,
-    output = []
+    output = [],
+    lent = no,
+    bay = firmware.Phys {},
+    limit = ARENA_LIMIT
 }
 
 COUNTDOWN = 5
 SECOND_WAIT = 50000000
-SHOT_CHUNK = 1024
-SHOT_HEADER = 46
 SHOT_PREFIX = "shot-part "
 CLOCK_EVERY = 20000
 CLOCK_WIDTH = 160
@@ -71,7 +75,10 @@ skill begin_upload(agent, words) {
     (group.count(words) < 2) { out "как: upload <байт>" }
     @size = parse.parse_size(group.get(words, 1))
     (size < 1) { out "плохой размер" }
-    (size > UPLOAD_LIMIT) { out "слишком много: предел {UPLOAD_LIMIT} байт" }
+    (size > agent.limit) {
+        @limit = agent.limit
+        out "слишком много: предел {limit} байт"
+    }
     agent.expected = size
     agent.received = 0
     agent.total = 0
@@ -91,8 +98,9 @@ skill launch(agent) {
     ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
     @size = agent.expected
     log(agent, "run: starting uploaded image, {size} bytes")
-    @launched = uefi.start_image(agent.card.base, firmware.add(agent.card.arena, UPLOAD_OFFSET), size)
+    @launched = uefi.start_image(agent.card.base, agent.bay, size)
     agent.output = launched.output
+    agent.lent = yes
     @outcome = launched.outcome
     @code = outcome.value.lo
     @status = "{code}"
@@ -139,6 +147,8 @@ skill information(agent) {
     @mac = net.mac_text(agent.card.mac)
     @ip = net.ip_text(MY_IP)
     @arena = firmware.phys_text(agent.card.arena)
+    @bay = firmware.phys_text(agent.bay)
+    @limit = agent.limit
     @link = link_russian(rtl8111.status(agent.card))
     @frames = agent.frames
     @commands = agent.commands
@@ -147,7 +157,7 @@ skill information(agent) {
     @last_error = agent.last_error
     @columns = agent.columns
     @rows = agent.rows
-    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
+    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}, приём программ {bay}, предел {limit} байт\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
 }
 
 skill draw_test(agent) {
@@ -176,6 +186,7 @@ skill clear_screen(agent) {
     agent.line = 0
     agent.cursor = feed.TOP
     agent.console = no
+    agent.lent = no
     spider.draw(agent.card.base)
     out "экран очищен"
 }
@@ -205,7 +216,7 @@ skill prepare_disk(agent, words) {
 skill install_image(agent) {
     (agent.expected == 0) { out "сначала upload программы" }
     ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
-    @written = files.install(agent.card.base, firmware.add(agent.card.arena, UPLOAD_OFFSET), agent.expected)
+    @written = files.install(agent.card.base, agent.bay, agent.expected)
     out "записал \\EFI\\BOOT\\BOOTX64.EFI на том SALTIC: {written} байт"
 }
 
@@ -259,7 +270,7 @@ skill execute(agent, text, payload) {
     (name == "protocols") { out usb.protocols(agent.card.base, words) }
     (name == "time") { out time_reply(agent) }
     (name == "reboot") { out restart_later(agent) }
-    (name == "shot") { out take_shot(agent) }
+    (name == "shot") { out shot.take_shot(agent) }
     (name == "prepare-disk") { out prepare_disk(agent, words) }
     (name == "install") { out install_image(agent) }
     (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
@@ -291,60 +302,10 @@ skill restart_later(agent) {
     out "перезагружаюсь через {COUNTDOWN} секунд"
 }
 
-skill take_shot(agent) {
-    @base = agent.card.base
-    @screen = graphics.open(base)
-    @width = screen.width / 2
-    @height = screen.height / 2
-    @arena = firmware.guest(agent.card.arena, base)
-    agent.expected = 0
-    agent.received = 0
-    @at = UPLOAD_OFFSET
-    @red = 2
-    @blue = 0
-    (screen.format == graphics.FORMAT_RGB) {
-        red = 0
-        blue = 2
-    }
-    drum (height) {
-        @line = beat * 2 * screen.stride * graphics.PIXEL_BYTES
-        drum (width) {
-            @pixel = line + beat * 2 * graphics.PIXEL_BYTES
-            mem.store8(arena, at, mem.load8(screen.memory, pixel + red))
-            mem.store8(arena, at + 1, mem.load8(screen.memory, pixel + 1))
-            mem.store8(arena, at + 2, mem.load8(screen.memory, pixel + blue))
-            at = at + 3
-        }
-    }
-    agent.shot_bytes = width * height * 3
-    @total = agent.shot_bytes
-    @chunks = (total + SHOT_CHUNK - 1) / SHOT_CHUNK
-    out "снимок {width} {height} {total} {chunks}"
-}
-
-skill send_chunk(agent, packet, index) {
-    @first = index * SHOT_CHUNK
-    @size = agent.shot_bytes - first
-    (size > SHOT_CHUNK) { size = SHOT_CHUNK }
-    (size < 1) { out none }
-    @header = net.udp_header(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, size + 4)
-    header = net.add16(net.add16(header, index / 65536), num.mod(index, 65536))
-    @arena = firmware.guest(agent.card.arena, agent.card.base)
-    drum (SHOT_HEADER) { mem.store8(arena, rtl8111.TX_BUFFER + beat, group.get(header, beat)) }
-    drum (size) { mem.store8(arena, rtl8111.TX_BUFFER + SHOT_HEADER + beat, mem.load8(arena, UPLOAD_OFFSET + first + beat)) }
-    @length = SHOT_HEADER + size
-    (length < net.FRAME_MINIMUM) {
-        drum (net.FRAME_MINIMUM - length) { mem.store8(arena, rtl8111.TX_BUFFER + length + beat, 0) }
-        length = net.FRAME_MINIMUM
-    }
-    rtl8111.send_prepared(agent.card, length)
-    out none
-}
-
 skill answer(agent, bytes) {
     @packet = net.udp(bytes)
     (str.starts_with(packet.text, SHOT_PREFIX) == yes) {
-        send_chunk(agent, packet, parse.parse_size(str.slice(packet.text, str.len(SHOT_PREFIX), str.len(packet.text))))
+        shot.send_chunk(agent, packet, parse.parse_size(str.slice(packet.text, str.len(SHOT_PREFIX), str.len(packet.text))))
         out agent
     }
     @who = net.ip_text(packet.from_ip)
@@ -370,6 +331,7 @@ skill answer(agent, bytes) {
 
 skill draw_progress(agent) {
     (agent.console == yes) { out none }
+    (agent.lent == yes) { out none }
     @screen = graphics.open(agent.card.base)
     @width = screen.width - feed.MARGIN * 2
     @top = screen.height - feed.BAR_SPACE
@@ -394,7 +356,7 @@ skill store_chunk(agent, bytes) {
             (offset + size > agent.expected) { size = agent.expected - offset }
             drum (size) {
                 @value = group.get(bytes, 46 + beat)
-                firmware.write8(agent.card.arena, agent.card.base, UPLOAD_OFFSET + offset + beat, value)
+                firmware.write8(agent.bay, agent.card.base, offset + beat, value)
                 agent.total = num.mod(agent.total + value, 65536)
             }
             agent.received = offset + size
@@ -439,7 +401,9 @@ skill tick(agent) {
     agent.rounds = agent.rounds + 1
     (agent.rounds == CLOCK_EVERY) {
         agent.rounds = 0
-        (agent.console == no) { draw_clock(agent) }
+        (agent.console == no) {
+            (agent.lent == no) { draw_clock(agent) }
+        }
     }
     out none
 }
@@ -491,7 +455,16 @@ skill run() {
     rtl8111.send(card, hello)
     io.show("[4] listening on 10.0.0.2:5555 (arp + udp commands)")
     io.show("")
-    @agent = Agent { card = card, columns = columns, rows = rows }
+    @bay = firmware.add(card.arena, UPLOAD_OFFSET)
+    @limit = ARENA_LIMIT
+    @pages = uefi.pages_below_4g(card.base, UPLOAD_PAGES) rescue |err| { bay }
+    ((firmware.phys_text(pages) == firmware.phys_text(bay)) == no) {
+        bay = pages
+        limit = UPLOAD_LIMIT
+    }
+    @where = firmware.phys_text(bay)
+    io.show("[5] upload bay {where}, limit {limit} bytes")
+    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = limit }
     clear_screen(agent)
     serve(agent) rescue |err| {
         last_cry(card, "агент остановился: {err}")

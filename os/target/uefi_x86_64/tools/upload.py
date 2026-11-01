@@ -26,7 +26,11 @@ def ask(text, timeout=5):
 
 
 print(f"upload: {path}, {len(data)} байт", flush=True)
-print(f"upload: агент говорит: {ask(f'upload {len(data)}')}", flush=True)
+answer = ask(f"upload {len(data)}")
+print(f"upload: агент говорит: {answer}", flush=True)
+if answer.startswith("жду") == False:
+    print("upload: агент не принял заливку, останавливаюсь", file=sys.stderr)
+    sys.exit(1)
 
 started = time.time()
 offset = 0

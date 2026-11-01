@@ -1,0 +1,80 @@
+use core.num
+use core.mem
+use os.target.uefi_x86_64.graphics
+use os.uiengine.canvas
+
+SAMPLES = 4
+FULL = 16
+SHADOW_STEP = 8
+
+skill coverage(column, row, radius) {
+    @limit = 64 * radius * radius
+    @inside = 0
+    drum (SAMPLES) {
+        @dx = 8 * column + 2 * beat + 1 - 8 * radius
+        drum (SAMPLES) {
+            @dy = 8 * row + 2 * beat + 1 - 8 * radius
+            (dx * dx + dy * dy < limit + 1) { inside = inside + 1 }
+        }
+    }
+    out inside
+}
+
+skill rounded(screen, x, y, width, height, radius, color, under) {
+    @solid = canvas.paint(screen, color)
+    drum (height) {
+        @row = beat
+        @from_edge = row
+        (row > height - radius - 1) { from_edge = height - 1 - row }
+        pick {
+            (from_edge < radius) {
+                drum (radius) {
+                    @shade = canvas.paint(screen, canvas.mix(under, color, coverage(beat, from_edge, radius), FULL))
+                    graphics.fill(screen, x + beat, y + row, 1, 1, shade)
+                    graphics.fill(screen, x + width - 1 - beat, y + row, 1, 1, shade)
+                }
+                graphics.fill(screen, x + radius, y + row, width - 2 * radius, 1, solid)
+            }
+            { graphics.fill(screen, x, y + row, width, 1, solid) }
+        }
+    }
+    out none
+}
+
+skill framed_box(screen, x, y, width, height, radius, style, under) {
+    (style.framed == no) { out rounded(screen, x, y, width, height, radius, style.fill, under) }
+    rounded(screen, x, y, width, height, radius, style.edge, under)
+    out rounded(screen, x + 1, y + 1, width - 2, height - 2, radius - 1, style.fill, style.edge)
+}
+
+skill hairline(screen, x, y, width, color) {
+    out graphics.fill(screen, x, y, width, 1, canvas.paint(screen, color))
+}
+
+skill shadow(screen, x, y, width, height, radius, under, blur) {
+    @drop = blur / 3 + 1
+    drum (blur) {
+        @spread = blur - beat
+        @strength = (beat + 1) * SHADOW_STEP
+        rounded(screen, x - spread, y - spread + drop, width + 2 * spread, height + 2 * spread, radius + spread, canvas.mix(under, canvas.BLACK, strength, 1000), under)
+    }
+    out none
+}
+
+skill dim_row(screen, row, keep) {
+    @start = row * screen.stride * graphics.PIXEL_BYTES
+    drum (screen.width) {
+        @at = start + beat * graphics.PIXEL_BYTES
+        @value = mem.load32(screen.memory, at)
+        @high = num.mod(value / 65536, 256) * keep / 100
+        @middle = num.mod(value / 256, 256) * keep / 100
+        @low = num.mod(value, 256) * keep / 100
+        mem.store32(screen.memory, at, high * 65536 + middle * 256 + low)
+    }
+    out none
+}
+
+skill dim(screen, keep) {
+    drum (screen.height) { dim_row(screen, beat, keep) }
+    out none
+}

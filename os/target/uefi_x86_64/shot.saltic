@@ -1,0 +1,61 @@
+use core.num
+use core.mem
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.graphics
+use os.target.uefi_x86_64.rtl8111
+use os.target.uefi_x86_64.net
+
+SHOT_CHUNK = 1024
+SHOT_HEADER = 46
+UPLOAD_OFFSET = 65536
+MY_IP = [10, 0, 0, 2]
+PORT = 5555
+
+skill take_shot(agent) {
+    @base = agent.card.base
+    @screen = graphics.open(base)
+    @width = screen.width / 2
+    @height = screen.height / 2
+    @arena = firmware.guest(agent.card.arena, base)
+    @at = UPLOAD_OFFSET
+    @red = 2
+    @blue = 0
+    (screen.format == graphics.FORMAT_RGB) {
+        red = 0
+        blue = 2
+    }
+    drum (height) {
+        @line = beat * 2 * screen.stride * graphics.PIXEL_BYTES
+        drum (width) {
+            @pixel = line + beat * 2 * graphics.PIXEL_BYTES
+            mem.store8(arena, at, mem.load8(screen.memory, pixel + red))
+            mem.store8(arena, at + 1, mem.load8(screen.memory, pixel + 1))
+            mem.store8(arena, at + 2, mem.load8(screen.memory, pixel + blue))
+            at = at + 3
+        }
+    }
+    agent.shot_bytes = width * height * 3
+    @total = agent.shot_bytes
+    @chunks = (total + SHOT_CHUNK - 1) / SHOT_CHUNK
+    out "снимок {width} {height} {total} {chunks}"
+}
+
+skill send_chunk(agent, packet, index) {
+    @first = index * SHOT_CHUNK
+    @size = agent.shot_bytes - first
+    (size > SHOT_CHUNK) { size = SHOT_CHUNK }
+    (size < 1) { out none }
+    @header = net.udp_header(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, size + 4)
+    header = net.add16(net.add16(header, index / 65536), num.mod(index, 65536))
+    @arena = firmware.guest(agent.card.arena, agent.card.base)
+    drum (SHOT_HEADER) { mem.store8(arena, rtl8111.TX_BUFFER + beat, group.get(header, beat)) }
+    drum (size) { mem.store8(arena, rtl8111.TX_BUFFER + SHOT_HEADER + beat, mem.load8(arena, UPLOAD_OFFSET + first + beat)) }
+    @length = SHOT_HEADER + size
+    (length < net.FRAME_MINIMUM) {
+        drum (net.FRAME_MINIMUM - length) { mem.store8(arena, rtl8111.TX_BUFFER + length + beat, 0) }
+        length = net.FRAME_MINIMUM
+    }
+    rtl8111.send_prepared(agent.card, length)
+    out none
+}
