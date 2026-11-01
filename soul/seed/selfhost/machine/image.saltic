@@ -3,19 +3,21 @@ use core.str
 use selfhost.machine.codec
 use selfhost.machine.layout
 use core.num
+use selfhost.machine.word
+use selfhost.machine.buffer
 
 Tables = Box {
-    symbols = codec.Buffer {},
-    names = codec.Buffer {}
+    symbols = buffer.Buffer {},
+    names = buffer.Buffer {}
 }
 
 ProgramHeader = Box {
     type = 0,
     offset = 0,
-    virtual_address = codec.Word {},
-    physical_address = codec.Word {},
+    virtual_address = word.Word {},
+    physical_address = word.Word {},
     file_size = 0,
-    memory_size = codec.Word {},
+    memory_size = word.Word {},
     flags = 0,
     alignment = 0
 }
@@ -24,9 +26,9 @@ SectionHeader = Box {
     name = 0,
     type = 0,
     flags = 0,
-    address = codec.Word {},
+    address = word.Word {},
     offset = 0,
-    size = codec.Word {},
+    size = word.Word {},
     link = 0,
     info = 0,
     alignment = 0,
@@ -35,37 +37,37 @@ SectionHeader = Box {
 
 skill pad_to(target, offset) {
     (offset < target.length) { out error.InvalidFileLayout }
-    out codec.append_zeroes(target, offset - target.length)
+    out buffer.append_zeroes(target, offset - target.length)
 }
 
 skill append_u16(target, value) {
     (codec.valid_unsigned(value, 16) == no) { out error.ValueOutsideRange }
-    target = codec.append_byte(target, num.mod(value, 256))
-    out codec.append_byte(target, value / 256)
+    target = buffer.append_byte(target, num.mod(value, 256))
+    out buffer.append_byte(target, value / 256)
 }
 
 skill append_u32(target, value) {
-    out codec.append_word(target, value)
+    out buffer.append_word(target, value)
 }
 
 skill append_number32(target, value) {
     (value < 0) { out error.ValueOutsideRange }
-    @word = layout.address_from_number(value)
-    out append_u32(target, word)
+    @address = layout.address_from_number(value)
+    out append_u32(target, address)
 }
 
 skill append_cstring(target, text) {
-    target = codec.append_text(target, text)
-    out codec.append_byte(target, 0)
+    target = buffer.append_text(target, text)
+    out buffer.append_byte(target, 0)
 }
 
 skill payload(value, current_layout) {
-    @result = codec.buffer()
-    result = codec.append_buffer(result, value.code)
+    @result = buffer.empty()
+    result = buffer.append_buffer(result, value.code)
     result = pad_to(result, current_layout.rodata_offset)
-    result = codec.append_buffer(result, value.rodata)
+    result = buffer.append_buffer(result, value.rodata)
     result = pad_to(result, current_layout.data_offset)
-    result = codec.append_buffer(result, value.data)
+    result = buffer.append_buffer(result, value.data)
     out pad_to(result, current_layout.file_size)
 }
 
@@ -77,10 +79,10 @@ skill section_index(section) {
 }
 
 skill symbol_tables(value, current_layout) {
-    @symbols = codec.buffer()
-    symbols = codec.append_zeroes(symbols, 16)
-    @names = codec.buffer()
-    names = codec.append_byte(names, 0)
+    @symbols = buffer.empty()
+    symbols = buffer.append_zeroes(symbols, 16)
+    @names = buffer.empty()
+    names = buffer.append_byte(names, 0)
     @label = value.labels_first
     drum (value.label_count) {
         @name_offset = names.length
@@ -91,8 +93,8 @@ skill symbol_tables(value, current_layout) {
         symbols = append_number32(symbols, name_offset)
         symbols = append_u32(symbols, address)
         symbols = append_number32(symbols, 0)
-        symbols = codec.append_byte(symbols, info)
-        symbols = codec.append_byte(symbols, 0)
+        symbols = buffer.append_byte(symbols, info)
+        symbols = buffer.append_byte(symbols, 0)
         symbols = append_u16(symbols, section_index(label.section))
         label = label.next
     }
@@ -100,8 +102,8 @@ skill symbol_tables(value, current_layout) {
 }
 
 skill section_names() {
-    @names = codec.buffer()
-    names = codec.append_byte(names, 0)
+    @names = buffer.empty()
+    names = buffer.append_byte(names, 0)
     names = append_cstring(names, ".text")
     names = append_cstring(names, ".rodata")
     names = append_cstring(names, ".data")
@@ -139,14 +141,14 @@ skill append_section_header(target, header) {
 }
 
 skill append_header(target, entry, program_count, section_table_offset) {
-    target = codec.append_byte(target, 127)
-    target = codec.append_byte(target, 69)
-    target = codec.append_byte(target, 76)
-    target = codec.append_byte(target, 70)
-    target = codec.append_byte(target, 1)
-    target = codec.append_byte(target, 1)
-    target = codec.append_byte(target, 1)
-    target = codec.append_zeroes(target, 9)
+    target = buffer.append_byte(target, 127)
+    target = buffer.append_byte(target, 69)
+    target = buffer.append_byte(target, 76)
+    target = buffer.append_byte(target, 70)
+    target = buffer.append_byte(target, 1)
+    target = buffer.append_byte(target, 1)
+    target = buffer.append_byte(target, 1)
+    target = buffer.append_zeroes(target, 9)
     target = append_u16(target, 2)
     target = append_u16(target, 243)
     target = append_number32(target, 1)
@@ -179,7 +181,7 @@ skill executable(value) {
     @section_names_offset = strings_offset + tables.names.length
     @section_table_offset = layout.align(section_names_offset + names.length, 4)
     @has_writable = value.data.length > 0
-    (codec.word_is_zero(value.bss_size) == no) { has_writable = yes }
+    (word.is_zero(value.bss_size) == no) { has_writable = yes }
     @program_count = 1
     (has_writable == yes) { program_count = program_count + 1 }
     (value.low_memory_size > 0) { program_count = 2 }
@@ -187,14 +189,14 @@ skill executable(value) {
         (has_writable == yes) { program_count = 3 }
     }
 
-    @result = codec.buffer()
+    @result = buffer.empty()
     result = append_header(result, entry, program_count, section_table_offset)
     (value.low_memory_size > 0) {
         result = append_program_header(result, ProgramHeader {
             type = 1,
             offset = 0,
-            virtual_address = codec.word(0, 0, 0, 0),
-            physical_address = codec.word(0, 0, 0, 0),
+            virtual_address = word.from_bytes(0, 0, 0, 0),
+            physical_address = word.from_bytes(0, 0, 0, 0),
             file_size = 52 + program_count * 32,
             memory_size = layout.address_from_number(value.low_memory_size),
             flags = 6,
@@ -220,20 +222,20 @@ skill executable(value) {
             virtual_address = data_address,
             physical_address = data_address,
             file_size = data_file_size,
-            memory_size = codec.word_add_number(value.bss_size, data_file_size),
+            memory_size = word.add_number(value.bss_size, data_file_size),
             flags = 6,
             alignment = 4096
         })
     }
     result = pad_to(result, segment_offset)
-    result = codec.append_buffer(result, body)
+    result = buffer.append_buffer(result, body)
     result = pad_to(result, symbols_offset)
-    result = codec.append_buffer(result, tables.symbols)
-    result = codec.append_buffer(result, tables.names)
-    result = codec.append_buffer(result, names)
+    result = buffer.append_buffer(result, tables.symbols)
+    result = buffer.append_buffer(result, tables.names)
+    result = buffer.append_buffer(result, names)
     result = pad_to(result, section_table_offset)
 
-    result = codec.append_zeroes(result, 40)
+    result = buffer.append_zeroes(result, 40)
     result = append_section_header(result, SectionHeader {
         name = 1, type = 1, flags = 6,
         address = layout.address_add(value.load_address, current_layout.code_offset),
@@ -259,17 +261,17 @@ skill executable(value) {
         size = value.bss_size, link = 0, info = 0, alignment = 8, entry_size = 0
     })
     result = append_section_header(result, SectionHeader {
-        name = 26, type = 2, flags = 0, address = codec.word(0, 0, 0, 0),
+        name = 26, type = 2, flags = 0, address = word.from_bytes(0, 0, 0, 0),
         offset = symbols_offset, size = layout.address_from_number(tables.symbols.length),
         link = 6, info = 1, alignment = 4, entry_size = 16
     })
     result = append_section_header(result, SectionHeader {
-        name = 34, type = 3, flags = 0, address = codec.word(0, 0, 0, 0),
+        name = 34, type = 3, flags = 0, address = word.from_bytes(0, 0, 0, 0),
         offset = strings_offset, size = layout.address_from_number(tables.names.length),
         link = 0, info = 0, alignment = 1, entry_size = 0
     })
     result = append_section_header(result, SectionHeader {
-        name = 42, type = 3, flags = 0, address = codec.word(0, 0, 0, 0),
+        name = 42, type = 3, flags = 0, address = word.from_bytes(0, 0, 0, 0),
         offset = section_names_offset, size = layout.address_from_number(names.length),
         link = 0, info = 0, alignment = 1, entry_size = 0
     })
@@ -277,7 +279,7 @@ skill executable(value) {
 }
 
 skill write_buffer(path, output) {
-    out file.write_bytes(path, codec.file_chunks(output))
+    out file.write_bytes(path, buffer.file_chunks(output))
 }
 
 skill write(path, value) {

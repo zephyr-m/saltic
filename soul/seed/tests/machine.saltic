@@ -14,6 +14,9 @@ use seed.tests.machine.elf
 use seed.tests.machine.scale
 use seed.tests.machine.translation
 use seed.tests.machine.qemu
+use selfhost.machine.registers
+use selfhost.machine.word
+use selfhost.machine.buffer
 
 skill machine_profile(suite) {
     @names = [
@@ -64,33 +67,33 @@ skill machine_profile(suite) {
 
 skill lowering(suite) {
     @target = rv32i.host("_start")
-    target = rv32i.load_immediate(target, codec.T0, 5)
-    target = rv32i.load_immediate(target, codec.T0, 2048)
+    target = rv32i.load_immediate(target, registers.T0, 5)
+    target = rv32i.load_immediate(target, registers.T0, 2048)
     target = rv32i.label(target, layout.Section.CODE, "target")
-    target = rv32i.branch_unsigned_greater(target, codec.T1, codec.T2, "target")
+    target = rv32i.branch_unsigned_greater(target, registers.T1, registers.T2, "target")
     target = rv32i.resolve(target)
 
-    suite = testing.test_equal(suite, "lowering: li малого значения", codec.byte_at(target.code, 0), 147)
-    suite = testing.test_equal(suite, "lowering: li малого значения bs1", codec.byte_at(target.code, 1), 2)
-    suite = testing.test_equal(suite, "lowering: li малого значения bs2", codec.byte_at(target.code, 2), 80)
-    suite = testing.test_equal(suite, "lowering: li малого значения bs3", codec.byte_at(target.code, 3), 0)
-    suite = testing.test_equal(suite, "lowering: li большого значения — lui", codec.byte_at(target.code, 4), 183)
-    suite = testing.test_equal(suite, "lowering: li большого значения — addi b0", codec.byte_at(target.code, 8), 147)
+    suite = testing.test_equal(suite, "lowering: li малого значения", buffer.byte_at(target.code, 0), 147)
+    suite = testing.test_equal(suite, "lowering: li малого значения bs1", buffer.byte_at(target.code, 1), 2)
+    suite = testing.test_equal(suite, "lowering: li малого значения bs2", buffer.byte_at(target.code, 2), 80)
+    suite = testing.test_equal(suite, "lowering: li малого значения bs3", buffer.byte_at(target.code, 3), 0)
+    suite = testing.test_equal(suite, "lowering: li большого значения — lui", buffer.byte_at(target.code, 4), 183)
+    suite = testing.test_equal(suite, "lowering: li большого значения — addi b0", buffer.byte_at(target.code, 8), 147)
     suite = testing.test_yes(suite, "lowering: li эмитит четыре байта на два слова", target.code.length == 16)
     suite = testing.test_yes(suite, "lowering: bgtu эмитирует bltu с перестановкой", target.patch_count == 1)
     out suite
 }
 
 skill encoding(suite) {
-    @encoded = codec.buffer()
+    @encoded = buffer.empty()
     @valid = yes
     drum (instruction.count()) {
         @item = instruction.at(beat)
-        @word = codec.encode(item, 1, 2, 3, 4) rescue |failure| {
+        @bits = codec.encode(item, 1, 2, 3, 4) rescue |failure| {
             valid = no
-            codec.word(0, 0, 0, 0)
+            word.from_bytes(0, 0, 0, 0)
         }
-        encoded = codec.append_word(encoded, word)
+        encoded = buffer.append_word(encoded, bits)
     }
     @addi = codec.encode_kind(instruction.Kind.ADDI, 1, 2, 0, 3)
     suite = testing.test_yes(suite, "кодировщик: все 44 команды кодируются", valid)
@@ -102,7 +105,7 @@ skill encoding(suite) {
     suite = testing.test_equal(
         suite,
         "кодировщик: машинное слово видно только нулями и единицами",
-        codec.word_bits(addi),
+        word.binary_text(addi),
         "10010011 00000000 00110001 00000000"
     )
     out suite
@@ -111,17 +114,17 @@ skill encoding(suite) {
 skill executable(suite) {
     @target = rv32i.host("_start")
     target = rv32i.label(target, layout.Section.CODE, "_start")
-    target = rv32i.branch(target, instruction.Kind.BEQ, codec.ZERO, codec.ZERO, "done")
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, 9))
+    target = rv32i.branch(target, instruction.Kind.BEQ, registers.ZERO, registers.ZERO, "done")
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 9))
     target = rv32i.label(target, layout.Section.CODE, "done")
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.EBREAK, codec.ZERO, codec.ZERO, codec.ZERO, 0))
+    target = rv32i.emit(target, rv32i.operation(instruction.Kind.EBREAK, registers.ZERO, registers.ZERO, registers.ZERO, 0))
     target = rv32i.resolve(target)
 
     @current_layout = layout.layout(target)
     @done_offset = layout.label_offset(target, current_layout, "done")
-    @branch_byte = codec.byte_at(target.code, 1)
+    @branch_byte = buffer.byte_at(target.code, 1)
     @output = rv32i.executable(target)
-    @chunks = codec.chunks(output, state.PAGE_SIZE)
+    @chunks = buffer.chunks(output, state.PAGE_SIZE)
     @options = state.Options {
         load_address = 4096,
         memory_size = 262144,
@@ -151,61 +154,61 @@ skill codegen_execute(target, limit) {
         arguments = ["alpha", "beta"],
         files = []
     }
-    out vm.run(codec.chunks(output, state.PAGE_SIZE), options)
+    out vm.run(buffer.chunks(output, state.PAGE_SIZE), options)
 }
 
 skill codegen_behavior(suite) {
     @string_result = codegen_execute(translation.behavior_string_program(), 32)
     suite = testing.test_equal(suite, "поведение string: нет trap", string_result.trap, "")
     suite = testing.test_equal(suite, "поведение string: остановка", string_result.reason, "break")
-    suite = testing.test_equal(suite, "поведение string: длина saltic", group.get(string_result.registers, codec.A0), "00000030")
+    suite = testing.test_equal(suite, "поведение string: длина saltic", group.get(string_result.registers, registers.A0), "00000030")
 
     @arithmetic_result = codegen_execute(translation.behavior_arithmetic_program(), 32)
     suite = testing.test_equal(suite, "поведение арифметики: нет trap", arithmetic_result.trap, "")
     suite = testing.test_equal(suite, "поведение арифметики: остановка", arithmetic_result.reason, "break")
-    suite = testing.test_equal(suite, "поведение арифметики: 2 + 3", group.get(arithmetic_result.registers, codec.A0), "00000028")
-    suite = testing.test_equal(suite, "поведение арифметики: ошибка очищена", group.get(arithmetic_result.registers, codec.A1), "00000000")
+    suite = testing.test_equal(suite, "поведение арифметики: 2 + 3", group.get(arithmetic_result.registers, registers.A0), "00000028")
+    suite = testing.test_equal(suite, "поведение арифметики: ошибка очищена", group.get(arithmetic_result.registers, registers.A1), "00000000")
 
     @division_error_result = codegen_execute(translation.behavior_division_error_program(), 64)
     suite = testing.test_equal(suite, "поведение ошибки деления: нет trap VM", division_error_result.trap, "")
     suite = testing.test_equal(suite, "поведение ошибки деления: остановка", division_error_result.reason, "break")
-    suite = testing.test_equal(suite, "поведение ошибки деления: значение обнулено", group.get(division_error_result.registers, codec.A0), "00000000")
-    suite = testing.test_equal(suite, "поведение ошибки деления: raw id в a1", group.get(division_error_result.registers, codec.A1), "00000003")
+    suite = testing.test_equal(suite, "поведение ошибки деления: значение обнулено", group.get(division_error_result.registers, registers.A0), "00000000")
+    suite = testing.test_equal(suite, "поведение ошибки деления: raw id в a1", group.get(division_error_result.registers, registers.A1), "00000003")
 
     @rescue_error_result = codegen_execute(translation.behavior_rescue_error_program(), 32)
     suite = testing.test_equal(suite, "поведение rescue: нет trap VM", rescue_error_result.trap, "")
     suite = testing.test_equal(suite, "поведение rescue: остановка", rescue_error_result.reason, "break")
-    suite = testing.test_equal(suite, "поведение rescue: handler получил tagged Error", group.get(rescue_error_result.registers, codec.A0), "0000004f")
-    suite = testing.test_equal(suite, "поведение rescue: ошибка погашена", group.get(rescue_error_result.registers, codec.A1), "00000000")
+    suite = testing.test_equal(suite, "поведение rescue: handler получил tagged Error", group.get(rescue_error_result.registers, registers.A0), "0000004f")
+    suite = testing.test_equal(suite, "поведение rescue: ошибка погашена", group.get(rescue_error_result.registers, registers.A1), "00000000")
 
     @start_arguments_result = codegen_execute(translation.behavior_start_arguments_program(), 256)
     suite = testing.test_equal(suite, "поведение _start: нет trap VM", start_arguments_result.trap, "")
     suite = testing.test_equal(suite, "поведение _start: завершение", start_arguments_result.reason, "exit")
-    suite = testing.test_equal(suite, "поведение _start: первый аргумент сохранён", group.get(start_arguments_result.registers, codec.S4), "00000005")
-    suite = testing.test_equal(suite, "поведение _start: второй аргумент сохранён", group.get(start_arguments_result.registers, codec.S5), "00000004")
+    suite = testing.test_equal(suite, "поведение _start: первый аргумент сохранён", group.get(start_arguments_result.registers, registers.S4), "00000005")
+    suite = testing.test_equal(suite, "поведение _start: второй аргумент сохранён", group.get(start_arguments_result.registers, registers.S5), "00000004")
 
     @if_result = codegen_execute(translation.behavior_if_program(), 32)
     suite = testing.test_equal(suite, "поведение if: нет trap", if_result.trap, "")
     suite = testing.test_equal(suite, "поведение if: остановка", if_result.reason, "break")
-    suite = testing.test_equal(suite, "поведение if: ветка выполнена", group.get(if_result.registers, codec.A0), "00000038")
+    suite = testing.test_equal(suite, "поведение if: ветка выполнена", group.get(if_result.registers, registers.A0), "00000038")
 
     @group_result = codegen_execute(translation.behavior_group_program(), 96)
     suite = testing.test_equal(suite, "поведение group: нет trap", group_result.trap, "")
     suite = testing.test_equal(suite, "поведение group: остановка", group_result.reason, "break")
-    suite = testing.test_equal(suite, "поведение group: два элемента", group.get(group_result.registers, codec.A0), "00000010")
+    suite = testing.test_equal(suite, "поведение group: два элемента", group.get(group_result.registers, registers.A0), "00000010")
 
     @box_result = codegen_execute(translation.behavior_box_program(), 192)
     suite = testing.test_equal(suite, "поведение box: нет trap", box_result.trap, "")
     suite = testing.test_equal(suite, "поведение box: остановка", box_result.reason, "break")
-    suite = testing.test_equal(suite, "поведение box: запись и чтение поля", group.get(box_result.registers, codec.A0), "00000038")
+    suite = testing.test_equal(suite, "поведение box: запись и чтение поля", group.get(box_result.registers, registers.A0), "00000038")
 
     @number_text_result = codegen_execute(translation.behavior_number_text_program(), 256)
     suite = testing.test_equal(suite, "поведение number text: нет trap", number_text_result.trap, "")
     suite = testing.test_equal(suite, "поведение number text: остановка", number_text_result.reason, "break")
-    suite = testing.test_equal(suite, "поведение number text: длина -42", group.get(number_text_result.registers, codec.S4), "00000018")
-    suite = testing.test_equal(suite, "поведение number text: знак -42", group.get(number_text_result.registers, codec.S5), "00000168")
-    suite = testing.test_equal(suite, "поведение number text: первая цифра -42", group.get(number_text_result.registers, codec.S6), "000001a0")
-    suite = testing.test_equal(suite, "поведение number text: вторая цифра -42", group.get(number_text_result.registers, codec.A0), "00000190")
+    suite = testing.test_equal(suite, "поведение number text: длина -42", group.get(number_text_result.registers, registers.S4), "00000018")
+    suite = testing.test_equal(suite, "поведение number text: знак -42", group.get(number_text_result.registers, registers.S5), "00000168")
+    suite = testing.test_equal(suite, "поведение number text: первая цифра -42", group.get(number_text_result.registers, registers.S6), "000001a0")
+    suite = testing.test_equal(suite, "поведение number text: вторая цифра -42", group.get(number_text_result.registers, registers.A0), "00000190")
 
     out suite
 }

@@ -57,18 +57,21 @@ enum — только через короткое имя модуля (`io.show`
   а печатается ошибка как `<value>`, а не по имени (`Missing`). В `rescue`
   сейчас не узнать, что именно случилось. **Решает автор:** как сравнивать
   и показывать ошибки.
+- Диагностика чекера не называет файл: ошибка в подключённом модуле
+  печатается как `checker_error|203|5|имя 'word' занято модулем …` — номер
+  строки есть, а в каком из модулей программы она, не сказано. Часть таких
+  ошибок к тому же приходит со строкой `0|0`.
 
 ## Рефакторинг
 
 - Файлы больше лимита канона в 500 строк. **Решает автор**, как делить:
-  - `soul/seed/selfhost/runtime/emit.saltic` — 1728
-  - `soul/seed/selfhost/compiler/codegen.saltic` — 1000
-  - `soul/seed/selfhost/parser/syntax.saltic` — 796
-  - `soul/seed/selfhost/checker/semantics.saltic` — 680
-  - `soul/seed/selfhost/machine/layout.saltic` — 551
-  - `soul/seed/selfhost/machine/codec.saltic` — 550
-  - `soul/seed/selfhost/vm/state.saltic` — 540
-  - `soul/seed/selfhost/compiler/state.saltic` — 537
+  - `soul/seed/selfhost/runtime/emit.saltic` — 1750
+  - `soul/seed/selfhost/compiler/codegen.saltic` — 1033
+  - `soul/seed/selfhost/parser/syntax.saltic` — 831
+  - `soul/seed/selfhost/checker/semantics.saltic` — 679
+  - `soul/seed/selfhost/machine/layout.saltic` — 547
+  - `soul/seed/selfhost/vm/state.saltic` — 526
+  - `soul/seed/selfhost/compiler/state.saltic` — 545
   - `os/apps/colony/colony.saltic` — 569, `os/ui/jtml.saltic` — 535
   - не считаются: `os/fonts/spleen.saltic` (данные шрифта),
     `tests/machine/translation.saltic` (эталоны), `.archive/` (архив)

@@ -4,6 +4,9 @@ use io
 use selfhost.machine.instruction
 use selfhost.machine.codec
 use core.num
+use selfhost.machine.registers
+use selfhost.machine.word
+use selfhost.machine.buffer
 
 Section = enum {
     CODE,
@@ -57,18 +60,18 @@ Layout = Box {
     data_offset = 0,
     bss_offset = 0,
     file_size = 0,
-    memory_size = codec.Word {}
+    memory_size = word.Word {}
 }
 
 Program = Box {
-    load_address = codec.Word {},
+    load_address = word.Word {},
     low_memory_size = 0,
     entry = "",
-    code = codec.Buffer {},
-    rodata = codec.Buffer {},
-    data = codec.Buffer {},
-    bss_size = codec.Word {},
-    heap_size = codec.Word {},
+    code = buffer.Buffer {},
+    rodata = buffer.Buffer {},
+    data = buffer.Buffer {},
+    bss_size = word.Word {},
+    heap_size = word.Word {},
     labels_first = none,
     labels_last = none,
     label_buckets = [],
@@ -86,11 +89,11 @@ skill word_address(b0, b1, b2, b3) {
     (codec.valid_unsigned(b1, 8) == no) { out error.InvalidAddress }
     (codec.valid_unsigned(b2, 8) == no) { out error.InvalidAddress }
     (codec.valid_unsigned(b3, 8) == no) { out error.InvalidAddress }
-    out codec.word(b0, b1, b2, b3)
+    out word.from_bytes(b0, b1, b2, b3)
 }
 
 skill address_from_number(value) {
-    out codec.word_from_number(value)
+    out word.from_number(value)
 }
 
 skill address_add(value, amount) {
@@ -103,7 +106,7 @@ skill address_add(value, amount) {
     amount = amount / 256
     @v3 = value.b3 + num.mod(amount, 256) + v2 / 256
     (v3 > 255) { out error.AddressOverflow }
-    out codec.word(num.mod(v0, 256), num.mod(v1, 256), num.mod(v2, 256), v3)
+    out word.from_bytes(num.mod(v0, 256), num.mod(v1, 256), num.mod(v2, 256), v3)
 }
 
 skill address_upper(value) {
@@ -187,21 +190,21 @@ skill assign_section(value, section, target) {
 
 skill align_buffer(target, boundary) {
     @target_length = align(target.length, boundary)
-    out codec.append_zeroes(target, target_length - target.length)
+    out buffer.append_zeroes(target, target_length - target.length)
 }
 
-skill emit_word(value, word) {
-    value.code = codec.append_word(value.code, word)
+skill emit_word(value, encoded) {
+    value.code = buffer.append_word(value.code, encoded)
     value.resolved = no
     out value
 }
 
 skill emit(value, kind, rd, rs1, rs2, immediate) {
-    @word = codec.encode_kind(kind, rd, rs1, rs2, immediate) rescue |failure| {
+    @encoded = codec.encode_kind(kind, rd, rs1, rs2, immediate) rescue |failure| {
         value.encoding_errors = value.encoding_errors + 1
-        codec.word(0, 0, 0, 0)
+        word.from_bytes(0, 0, 0, 0)
     }
-    out emit_word(value, word)
+    out emit_word(value, encoded)
 }
 
 skill emit_patch(value, patch, placeholder) {
@@ -265,33 +268,33 @@ skill define_label(value, section, name) {
 }
 
 skill reserve_bss(value, count) {
-    value.bss_size = codec.word_add(value.bss_size, count)
+    value.bss_size = word.add(value.bss_size, count)
     value.resolved = no
     out value
 }
 
 skill append_section_byte(value, section, byte) {
     @target = section_buffer(value, section)
-    target = codec.append_byte(target, byte)
+    target = buffer.append_byte(target, byte)
     out assign_section(value, section, target)
 }
 
-skill append_section_word(value, section, word) {
+skill append_section_word(value, section, data) {
     @target = section_buffer(value, section)
-    target = codec.append_word(target, word)
+    target = buffer.append_word(target, data)
     out assign_section(value, section, target)
 }
 
 skill append_section_text(value, section, text, terminated) {
     @target = section_buffer(value, section)
-    target = codec.append_text(target, text)
-    (terminated == yes) { target = codec.append_byte(target, 0) }
+    target = buffer.append_text(target, text)
+    (terminated == yes) { target = buffer.append_byte(target, 0) }
     out assign_section(value, section, target)
 }
 
 skill align_section(value, section, boundary) {
     (section == Section.BSS) {
-        value.bss_size = codec.word_align(value.bss_size, boundary)
+        value.bss_size = word.align(value.bss_size, boundary)
         value.resolved = no
         out value
     }
@@ -303,7 +306,7 @@ skill align_section(value, section, boundary) {
 skill emit_branch(value, kind, rs1, rs2, label) {
     @item = instruction.find_kind(kind)
     ((item.form == instruction.Form.B) == no) { out error.InvalidBranchInstruction }
-    @placeholder = codec.encode(item, codec.ZERO, rs1, rs2, 0)
+    @placeholder = codec.encode(item, registers.ZERO, rs1, rs2, 0)
     out emit_patch(value, Patch {
         kind = PatchKind.BRANCH,
         instruction_kind = kind,
@@ -314,7 +317,7 @@ skill emit_branch(value, kind, rs1, rs2, label) {
 }
 
 skill emit_jump(value, rd, label) {
-    @placeholder = codec.encode_kind(instruction.Kind.JAL, rd, codec.ZERO, codec.ZERO, 0)
+    @placeholder = codec.encode_kind(instruction.Kind.JAL, rd, registers.ZERO, registers.ZERO, 0)
     out emit_patch(value, Patch {
         kind = PatchKind.JUMP,
         instruction_kind = instruction.Kind.JAL,
@@ -326,23 +329,23 @@ skill emit_jump(value, rd, label) {
 skill emit_load_immediate(value, rd, immediate) {
     (immediate > -2049) {
         (immediate < 2048) {
-            @word = codec.encode_kind(instruction.Kind.ADDI, rd, codec.ZERO, codec.ZERO, immediate)
-            out emit_word(value, word)
+            @encoded = codec.encode_kind(instruction.Kind.ADDI, rd, registers.ZERO, registers.ZERO, immediate)
+            out emit_word(value, encoded)
         }
     }
-    out emit_load_word(value, rd, codec.word_from_signed(immediate))
+    out emit_load_word(value, rd, word.from_signed(immediate))
 }
 
 skill emit_load_word(value, rd, immediate) {
-    @lui = codec.encode_kind(instruction.Kind.LUI, rd, codec.ZERO, codec.ZERO, address_upper(immediate))
+    @lui = codec.encode_kind(instruction.Kind.LUI, rd, registers.ZERO, registers.ZERO, address_upper(immediate))
     value = emit_word(value, lui)
-    @addi = codec.encode_kind(instruction.Kind.ADDI, rd, rd, codec.ZERO, address_low(immediate))
+    @addi = codec.encode_kind(instruction.Kind.ADDI, rd, rd, registers.ZERO, address_low(immediate))
     out emit_word(value, addi)
 }
 
 skill emit_branch_unsigned_greater(value, rs1, rs2, label) {
     @item = instruction.find_kind(instruction.Kind.BLTU)
-    @placeholder = codec.encode(item, codec.ZERO, rs2, rs1, 0)
+    @placeholder = codec.encode(item, registers.ZERO, rs2, rs1, 0)
     out emit_patch(value, Patch {
         kind = PatchKind.BRANCH,
         instruction_kind = instruction.Kind.BLTU,
@@ -354,7 +357,7 @@ skill emit_branch_unsigned_greater(value, rs1, rs2, label) {
 
 skill emit_relative_address(value, rd, label, addend) {
     @base = value.code.length
-    @high = codec.encode_kind(instruction.Kind.AUIPC, rd, codec.ZERO, codec.ZERO, 0)
+    @high = codec.encode_kind(instruction.Kind.AUIPC, rd, registers.ZERO, registers.ZERO, 0)
     value = emit_patch(value, Patch {
         kind = PatchKind.RELATIVE_HIGH,
         instruction_kind = instruction.Kind.AUIPC,
@@ -363,7 +366,7 @@ skill emit_relative_address(value, rd, label, addend) {
         addend = addend,
         rd = rd
     }, high)
-    @low = codec.encode_kind(instruction.Kind.ADDI, rd, rd, codec.ZERO, 0)
+    @low = codec.encode_kind(instruction.Kind.ADDI, rd, rd, registers.ZERO, 0)
     out emit_patch(value, Patch {
         kind = PatchKind.RELATIVE_LOW,
         instruction_kind = instruction.Kind.ADDI,
@@ -376,29 +379,29 @@ skill emit_relative_address(value, rd, label, addend) {
 }
 
 skill emit_call(value, label) {
-    (value.far_calls == no) { out emit_jump(value, codec.RA, label) }
+    (value.far_calls == no) { out emit_jump(value, registers.RA, label) }
     @base = value.code.length
-    @high = codec.encode_kind(instruction.Kind.AUIPC, codec.RA, codec.ZERO, codec.ZERO, 0)
+    @high = codec.encode_kind(instruction.Kind.AUIPC, registers.RA, registers.ZERO, registers.ZERO, 0)
     value = emit_patch(value, Patch {
         kind = PatchKind.RELATIVE_HIGH,
         instruction_kind = instruction.Kind.AUIPC,
         base = base,
         label = label,
-        rd = codec.RA
+        rd = registers.RA
     }, high)
-    @low = codec.encode_kind(instruction.Kind.JALR, codec.RA, codec.RA, codec.ZERO, 0)
+    @low = codec.encode_kind(instruction.Kind.JALR, registers.RA, registers.RA, registers.ZERO, 0)
     out emit_patch(value, Patch {
         kind = PatchKind.RELATIVE_LOW,
         instruction_kind = instruction.Kind.JALR,
         base = base,
         label = label,
-        rd = codec.RA,
-        rs1 = codec.RA
+        rd = registers.RA,
+        rs1 = registers.RA
     }, low)
 }
 
 skill emit_absolute_address(value, rd, label, addend) {
-    @high = codec.encode_kind(instruction.Kind.LUI, rd, codec.ZERO, codec.ZERO, 0)
+    @high = codec.encode_kind(instruction.Kind.LUI, rd, registers.ZERO, registers.ZERO, 0)
     value = emit_patch(value, Patch {
         kind = PatchKind.ABSOLUTE_HIGH,
         instruction_kind = instruction.Kind.LUI,
@@ -406,7 +409,7 @@ skill emit_absolute_address(value, rd, label, addend) {
         addend = addend,
         rd = rd
     }, high)
-    @low = codec.encode_kind(instruction.Kind.ADDI, rd, rd, codec.ZERO, 0)
+    @low = codec.encode_kind(instruction.Kind.ADDI, rd, rd, registers.ZERO, 0)
     out emit_patch(value, Patch {
         kind = PatchKind.ABSOLUTE_LOW,
         instruction_kind = instruction.Kind.ADDI,
@@ -420,7 +423,7 @@ skill emit_absolute_address(value, rd, label, addend) {
 skill append_label_address(value, section, label, addend) {
     @target = section_buffer(value, section)
     @offset = target.length
-    target = codec.append_word(target, codec.word(0, 0, 0, 0))
+    target = buffer.append_word(target, word.from_bytes(0, 0, 0, 0))
     value = assign_section(value, section, target)
     @patch = Patch {
         kind = PatchKind.ADDRESS_WORD,
@@ -447,7 +450,7 @@ skill layout(value) {
         data_offset = data_offset,
         bss_offset = bss_offset,
         file_size = bss_offset,
-        memory_size = codec.word_add_number(value.bss_size, bss_offset)
+        memory_size = word.add_number(value.bss_size, bss_offset)
     }
 }
 
@@ -462,8 +465,8 @@ skill label_offset(value, current_layout, name) {
     @label = find_label(value, name)
     (label.present == no) { out error.UnknownLabel }
     (label.section == Section.BSS) {
-        @offset = codec.word_add_number(label.offset, current_layout.bss_offset)
-        out codec.word_to_number(offset)
+        @offset = word.add_number(label.offset, current_layout.bss_offset)
+        out word.to_number(offset)
     }
     out section_offset(current_layout, label.section) + label.offset
 }
@@ -472,17 +475,17 @@ skill label_address(value, current_layout, name, addend) {
     @label = find_label(value, name)
     (label.present == no) { out error.UnknownLabel }
     (label.section == Section.BSS) {
-        @offset = codec.word_add_number(label.offset, current_layout.bss_offset + addend)
-        out codec.word_add(value.load_address, offset)
+        @offset = word.add_number(label.offset, current_layout.bss_offset + addend)
+        out word.add(value.load_address, offset)
     }
     @offset = label_offset(value, current_layout, name) + addend
     (offset < 0) { out error.InvalidAddress }
     out address_add(value.load_address, offset)
 }
 
-skill set_section_word(value, section, offset, word) {
+skill set_section_word(value, section, offset, data) {
     @target = section_buffer(value, section)
-    target = codec.set_word(target, offset, word)
+    target = buffer.set_word(target, offset, data)
     out assign_section(value, section, target)
 }
 
@@ -491,35 +494,35 @@ skill resolve_patch(value, current_layout, patch) {
     @target_offset = label_base + patch.addend
     (patch.kind == PatchKind.BRANCH) {
         @distance = target_offset - patch.offset
-        @word = codec.encode_kind(patch.instruction_kind, codec.ZERO, patch.rs1, patch.rs2, distance) rescue |failure| { out error.PatchOutOfRange }
-        out set_section_word(value, Section.CODE, patch.offset, word)
+        @encoded = codec.encode_kind(patch.instruction_kind, registers.ZERO, patch.rs1, patch.rs2, distance) rescue |failure| { out error.PatchOutOfRange }
+        out set_section_word(value, Section.CODE, patch.offset, encoded)
     }
     (patch.kind == PatchKind.JUMP) {
         @distance = target_offset - patch.offset
-        @word = codec.encode_kind(patch.instruction_kind, patch.rd, codec.ZERO, codec.ZERO, distance) rescue |failure| { out error.PatchOutOfRange }
-        out set_section_word(value, Section.CODE, patch.offset, word)
+        @encoded = codec.encode_kind(patch.instruction_kind, patch.rd, registers.ZERO, registers.ZERO, distance) rescue |failure| { out error.PatchOutOfRange }
+        out set_section_word(value, Section.CODE, patch.offset, encoded)
     }
     (patch.kind == PatchKind.RELATIVE_HIGH) {
         @distance = target_offset - patch.base
         @upper = codec.signed_value(relative_high(distance), 20)
-        @word = codec.encode_kind(patch.instruction_kind, patch.rd, codec.ZERO, codec.ZERO, upper)
-        out set_section_word(value, Section.CODE, patch.offset, word)
+        @encoded = codec.encode_kind(patch.instruction_kind, patch.rd, registers.ZERO, registers.ZERO, upper)
+        out set_section_word(value, Section.CODE, patch.offset, encoded)
     }
     (patch.kind == PatchKind.RELATIVE_LOW) {
         @distance = target_offset - patch.base
         @low = relative_low(distance)
-        @word = codec.encode_kind(patch.instruction_kind, patch.rd, patch.rs1, codec.ZERO, low)
-        out set_section_word(value, Section.CODE, patch.offset, word)
+        @encoded = codec.encode_kind(patch.instruction_kind, patch.rd, patch.rs1, registers.ZERO, low)
+        out set_section_word(value, Section.CODE, patch.offset, encoded)
     }
     (patch.kind == PatchKind.ABSOLUTE_HIGH) {
         @target = label_address(value, current_layout, patch.label, patch.addend)
-        @word = codec.encode_kind(patch.instruction_kind, patch.rd, codec.ZERO, codec.ZERO, address_upper(target))
-        out set_section_word(value, Section.CODE, patch.offset, word)
+        @encoded = codec.encode_kind(patch.instruction_kind, patch.rd, registers.ZERO, registers.ZERO, address_upper(target))
+        out set_section_word(value, Section.CODE, patch.offset, encoded)
     }
     (patch.kind == PatchKind.ABSOLUTE_LOW) {
         @target = label_address(value, current_layout, patch.label, patch.addend)
-        @word = codec.encode_kind(patch.instruction_kind, patch.rd, patch.rs1, codec.ZERO, address_low(target))
-        out set_section_word(value, Section.CODE, patch.offset, word)
+        @encoded = codec.encode_kind(patch.instruction_kind, patch.rd, patch.rs1, registers.ZERO, address_low(target))
+        out set_section_word(value, Section.CODE, patch.offset, encoded)
     }
     (patch.kind == PatchKind.ADDRESS_WORD) {
         @target = label_address(value, current_layout, patch.label, patch.addend)

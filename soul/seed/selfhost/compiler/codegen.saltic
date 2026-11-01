@@ -7,8 +7,9 @@ use selfhost.intrinsic.contract
 use selfhost.compiler.state
 use selfhost.compiler.constants
 use selfhost.machine.instruction
-use selfhost.machine.codec
 use selfhost.machine.layout
+use selfhost.machine.registers
+use selfhost.machine.word
 
 skill box_field_symbol(compiler, box_name, field_name) {
     @box = state.symbol_find(compiler.boxes, box_name)
@@ -59,16 +60,16 @@ skill constant_literal(node) {
 
 skill emit_field_get(compiler, name) {
     @field = state.symbol_find(compiler.fields, name)
-    compiler = state.load_immediate(compiler, "a1", codec.A1, field.value)
-    compiler = state.load_immediate(compiler, "a2", codec.A2, field.slot)
+    compiler = state.load_immediate(compiler, "a1", registers.A1, field.value)
+    compiler = state.load_immediate(compiler, "a2", registers.A2, field.slot)
     compiler.machine = layout.emit_call(compiler.machine, "rt_box_get")
     out compiler
 }
 
 skill emit_field_set(compiler, name) {
     @field = state.symbol_find(compiler.fields, name)
-    compiler = state.load_immediate(compiler, "a1", codec.A1, field.value)
-    compiler = state.load_immediate(compiler, "a3", codec.A3, field.slot)
+    compiler = state.load_immediate(compiler, "a1", registers.A1, field.value)
+    compiler = state.load_immediate(compiler, "a3", registers.A3, field.slot)
     compiler.machine = layout.emit_call(compiler.machine, "rt_box_set")
     out compiler
 }
@@ -82,8 +83,8 @@ skill compile_path(compiler, node) {
     @constant = state.Symbol {}
     (name == "error") {
         (count == 3) {
-            compiler = state.load_immediate(compiler, "a0", codec.A0, 0)
-            out state.load_immediate(compiler, "a1", codec.A1, error_id(compiler, group.get(parts, 2)))
+            compiler = state.load_immediate(compiler, "a0", registers.A0, 0)
+            out state.load_immediate(compiler, "a1", registers.A1, error_id(compiler, group.get(parts, 2)))
         }
     }
     (count > 2) {
@@ -92,12 +93,12 @@ skill compile_path(compiler, node) {
             @full_name = "{enum_name}."
             full_name = str.add(full_name, group.get(parts, count - 1))
             @variant = state.symbol_find(compiler.variants, full_name)
-            out state.load_immediate(compiler, "a0", codec.A0, variant.value)
+            out state.load_immediate(compiler, "a0", registers.A0, variant.value)
         }
     }
     (state.symbol_has(compiler.current_function.slots, name) == yes) {
         @slot = state.slot(compiler, name)
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.S0, codec.ZERO, slot)
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.S0, registers.ZERO, slot)
     }
     (state.symbol_has(compiler.current_function.slots, name) == no) {
         constant_name = resolve_symbol(compiler.constants, compiler.aliases, path_name, compiler.current_function.module)
@@ -105,7 +106,7 @@ skill compile_path(compiler, node) {
         (str.len(constant.name) > 0) {
             (constant_literal(constant.node) == yes) {
                 compiler = compile_expression(compiler, constant.node)
-                compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
+                compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
             }
             (constant_literal(constant.node) == no) {
                 @getter = constants.getter_label(constant.name)
@@ -116,7 +117,7 @@ skill compile_path(compiler, node) {
             @subject_field = box_field_symbol(compiler, compiler.current_function.subject, name)
             (str.len(subject_field.name) > 0) {
                 @self_slot = state.slot(compiler, "$self")
-                compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.S0, codec.ZERO, self_slot)
+                compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.S0, registers.ZERO, self_slot)
                 compiler = emit_field_get(compiler, name)
             }
         }
@@ -130,10 +131,10 @@ skill compile_path(compiler, node) {
 
 skill compile_binary(compiler, operator, left, right) {
     compiler = compile_expression(compiler, left)
-    compiler = state.push(compiler, "a0", codec.A0)
+    compiler = state.push(compiler, "a0", registers.A0)
     compiler = compile_expression(compiler, right)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.A0, codec.ZERO, 0)
-    compiler = state.pop(compiler, "a0", codec.A0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.A0, registers.ZERO, 0)
+    compiler = state.pop(compiler, "a0", registers.A0)
     @target = ""
     @fixed_type = infer_type(compiler, left)
     @fixed = contract.is_fixed_type(fixed_type)
@@ -155,10 +156,10 @@ skill compile_binary(compiler, operator, left, right) {
         compiler = state.load_immediate(compiler, "a6", abi.CALL_FIXED_SOURCE_KIND_REGISTER, contract.fixed_kind(fixed_type))
     }
     (fixed == no) {
-        (operator == "+") { out emit_word_result(state.emit_op(compiler, instruction.Kind.ADD, codec.A0, codec.A0, codec.A1, 0)) }
-        (operator == "-") { out emit_word_result(state.emit_op(compiler, instruction.Kind.SUB, codec.A0, codec.A0, codec.A1, 0)) }
-        (operator == "<") { out emit_number_less(compiler, codec.A0, codec.A1) }
-        (operator == ">") { out emit_number_less(compiler, codec.A1, codec.A0) }
+        (operator == "+") { out emit_word_result(state.emit_op(compiler, instruction.Kind.ADD, registers.A0, registers.A0, registers.A1, 0)) }
+        (operator == "-") { out emit_word_result(state.emit_op(compiler, instruction.Kind.SUB, registers.A0, registers.A0, registers.A1, 0)) }
+        (operator == "<") { out emit_number_less(compiler, registers.A0, registers.A1) }
+        (operator == ">") { out emit_number_less(compiler, registers.A1, registers.A0) }
         (operator == "==") {
             (immediate_operand(compiler, left) == yes) { out emit_word_equal(compiler) }
             (immediate_operand(compiler, right) == yes) { out emit_word_equal(compiler) }
@@ -170,35 +171,35 @@ skill compile_binary(compiler, operator, left, right) {
 }
 
 skill emit_word_result(compiler) {
-    out state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
+    out state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
 }
 
 skill emit_answer_from_bit(compiler) {
-    compiler = state.emit_op(compiler, instruction.Kind.SLLI, codec.A0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.A0, codec.ZERO, abi.NO)
+    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.A0, registers.A0, registers.ZERO, abi.TAG_SHIFT)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.A0, registers.ZERO, abi.NO)
     out emit_word_result(compiler)
 }
 
 skill emit_number_less(compiler, smaller, larger) {
-    compiler = state.emit_op(compiler, instruction.Kind.SRAI, codec.A0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
-    compiler = state.emit_op(compiler, instruction.Kind.SRAI, codec.A1, codec.A1, codec.ZERO, abi.TAG_SHIFT)
-    compiler = state.emit_op(compiler, instruction.Kind.SLT, codec.A0, smaller, larger, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.SRAI, registers.A0, registers.A0, registers.ZERO, abi.TAG_SHIFT)
+    compiler = state.emit_op(compiler, instruction.Kind.SRAI, registers.A1, registers.A1, registers.ZERO, abi.TAG_SHIFT)
+    compiler = state.emit_op(compiler, instruction.Kind.SLT, registers.A0, smaller, larger, 0)
     out emit_answer_from_bit(compiler)
 }
 
 skill emit_word_equal(compiler) {
-    compiler = state.emit_op(compiler, instruction.Kind.SUB, codec.A0, codec.A0, codec.A1, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.SLTIU, codec.A0, codec.A0, codec.ZERO, 1)
+    compiler = state.emit_op(compiler, instruction.Kind.SUB, registers.A0, registers.A0, registers.A1, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.SLTIU, registers.A0, registers.A0, registers.ZERO, 1)
     out emit_answer_from_bit(compiler)
 }
 
 skill emit_equal_fast_path(compiler) {
     @slow = state.label(compiler, "equal_slow")
     @done = state.label(compiler, "equal_done")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.A0, codec.A1, slow)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, abi.YES)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A0, registers.A1, slow)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, abi.YES)
     compiler = emit_word_result(compiler)
-    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, done)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, done)
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, slow)
     compiler.machine = layout.emit_call(compiler.machine, "rt_equal")
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, done)
@@ -228,13 +229,13 @@ skill compile_rescue(compiler, node) {
     @plain = ast.plain(node)
     @done = state.label(compiler, "rescue_done")
     compiler = compile_expression(compiler, group.get(plain, 1))
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.A1, codec.ZERO, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, done)
-    compiler = state.emit_op(compiler, instruction.Kind.SLLI, codec.A0, codec.A1, codec.ZERO, abi.TAG_SHIFT)
-    compiler = state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_ERROR)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A1, registers.ZERO, 8)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, done)
+    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.A0, registers.A1, registers.ZERO, abi.TAG_SHIFT)
+    compiler = state.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_ERROR)
     @slot = state.slot(compiler, group.get(plain, 2))
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, slot)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, slot)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
     compiler = compile_block(compiler, group.get(plain, 3), yes)
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, done)
     out compiler
@@ -335,13 +336,13 @@ skill compile_arguments(compiler, args) {
     @count = group.count(args)
     drum (args) {
         compiler = compile_expression(compiler, beat)
-        compiler = state.push(compiler, "a0", codec.A0)
+        compiler = state.push(compiler, "a0", registers.A0)
     }
     drum (count) {
-        compiler = state.emit_op(compiler, instruction.Kind.LW, abi.argument_register(beat), codec.SP, codec.ZERO, constants.stack_source_offset(count, beat))
+        compiler = state.emit_op(compiler, instruction.Kind.LW, abi.argument_register(beat), registers.SP, registers.ZERO, constants.stack_source_offset(count, beat))
     }
     (count > 0) {
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, constants.stack_bytes(count))
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, constants.stack_bytes(count))
     }
     out compiler
 }
@@ -359,7 +360,7 @@ skill compile_show(compiler, args) {
         }
     }
     compiler.machine = layout.emit_call(compiler.machine, "rt_newline")
-    out state.load_immediate(compiler, "a0", codec.A0, abi.NONE)
+    out state.load_immediate(compiler, "a0", registers.A0, abi.NONE)
 }
 
 skill intrinsic(name) {
@@ -427,22 +428,22 @@ skill compile_group(compiler, items) {
     @count = group.count(items)
     drum (items) {
         compiler = compile_expression(compiler, beat)
-        compiler = state.push(compiler, "a0", codec.A0)
+        compiler = state.push(compiler, "a0", registers.A0)
     }
-    compiler = state.load_immediate(compiler, "a0", codec.A0, constants.group_storage_bytes(count))
+    compiler = state.load_immediate(compiler, "a0", registers.A0, constants.group_storage_bytes(count))
     compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T3, codec.ZERO, codec.ZERO, abi.OBJECT_KIND_GROUP)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T3, codec.ZERO, codec.ZERO, count)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, abi.OBJECT_PAYLOAD_OFFSET + constants.GROUP_COUNT_OFFSET)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, abi.OBJECT_KIND_GROUP)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T3, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, count)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T3, abi.OBJECT_PAYLOAD_OFFSET + constants.GROUP_COUNT_OFFSET)
     drum (count) {
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, constants.stack_source_offset(count, beat))
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.group_item_offset(beat))
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.SP, registers.ZERO, constants.stack_source_offset(count, beat))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.group_item_offset(beat))
     }
     (count > 0) {
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, constants.stack_bytes(count))
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, constants.stack_bytes(count))
     }
-    out state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_GROUP)
+    out state.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_GROUP)
 }
 
 skill box_override(overrides, field_name) {
@@ -471,25 +472,25 @@ skill compile_box(compiler, name, overrides) {
         (default_value == yes) { compiler.current_function.module = model.text }
         compiler = compile_expression(compiler, value)
         compiler.current_function.module = caller_module
-        compiler = state.push(compiler, "a0", codec.A0)
+        compiler = state.push(compiler, "a0", registers.A0)
     }
-    compiler = state.load_immediate(compiler, "a0", codec.A0, constants.box_storage_bytes(count))
+    compiler = state.load_immediate(compiler, "a0", registers.A0, constants.box_storage_bytes(count))
     compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T3, codec.ZERO, codec.ZERO, abi.OBJECT_KIND_BOX)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T3, codec.ZERO, codec.ZERO, count)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T3, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_COUNT_OFFSET)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, abi.OBJECT_KIND_BOX)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T3, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, count)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T3, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_COUNT_OFFSET)
     drum (count) {
         @field_id = state.field(compiler, ast.part(group.get(fields, beat), 1))
-        compiler = state.load_immediate(compiler, "t0", codec.T0, field_id)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_id_offset(beat))
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.SP, codec.ZERO, constants.stack_source_offset(count, beat))
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.A0, codec.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_value_offset(beat))
+        compiler = state.load_immediate(compiler, "t0", registers.T0, field_id)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_id_offset(beat))
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.SP, registers.ZERO, constants.stack_source_offset(count, beat))
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_value_offset(beat))
     }
     (count > 0) {
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, constants.stack_bytes(count))
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, constants.stack_bytes(count))
     }
-    out state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_BOX)
+    out state.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_BOX)
 }
 
 skill compile_call(compiler, node) {
@@ -504,9 +505,9 @@ skill compile_call(compiler, node) {
         @value_tag = group.get(value, 0)
         (value_tag == "wide-number") {
             @wide = group.get(value, 1)
-            compiler.machine = layout.emit_load_word(compiler.machine, codec.A0, codec.word_from_decimal(wide))
+            compiler.machine = layout.emit_load_word(compiler.machine, registers.A0, word.from_decimal(wide))
         }
-        (value_tag == "number") { compiler = state.load_immediate(compiler, "a0", codec.A0, group.get(value, 1)) }
+        (value_tag == "number") { compiler = state.load_immediate(compiler, "a0", registers.A0, group.get(value, 1)) }
         (value_tag == "binary") {
             (group.get(value, 1) == "-") {
                 @left = ast.plain(group.get(value, 2))
@@ -514,10 +515,10 @@ skill compile_call(compiler, node) {
                 (group.get(left, 0) == "number") {
                     (group.get(left, 1) == 0) {
                         @right_tag = group.get(right, 0)
-                        (right_tag == "number") { compiler = state.load_immediate(compiler, "a0", codec.A0, 0 - group.get(right, 1)) value_tag = "ready" }
+                        (right_tag == "number") { compiler = state.load_immediate(compiler, "a0", registers.A0, 0 - group.get(right, 1)) value_tag = "ready" }
                         (right_tag == "wide-number") {
                             @wide = str.add("-", group.get(right, 1))
-                            compiler.machine = layout.emit_load_word(compiler.machine, codec.A0, codec.word_from_decimal(wide))
+                            compiler.machine = layout.emit_load_word(compiler.machine, registers.A0, word.from_decimal(wide))
                             value_tag = "ready"
                         }
                     }
@@ -533,7 +534,7 @@ skill compile_call(compiler, node) {
             compiler = compile_expression(compiler, group.get(args, 0))
             @source_type = infer_type(compiler, group.get(args, 0))
             (contract.is_fixed_type(source_type) == no) {
-                compiler = state.emit_op(compiler, instruction.Kind.SRAI, codec.A0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
+                compiler = state.emit_op(compiler, instruction.Kind.SRAI, registers.A0, registers.A0, registers.ZERO, abi.TAG_SHIFT)
             }
         }
         compiler = state.load_immediate(compiler, "a6", abi.CALL_FIXED_SOURCE_KIND_REGISTER, contract.fixed_kind(name))
@@ -612,15 +613,15 @@ skill compile_call(compiler, node) {
 }
 
 skill emit_string_join(compiler) {
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.A0, codec.ZERO, 0)
-    compiler = state.pop(compiler, "a0", codec.A0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.A0, registers.ZERO, 0)
+    compiler = state.pop(compiler, "a0", registers.A0)
     compiler.machine = layout.emit_call(compiler.machine, "rt_string_add")
-    out state.push(compiler, "a0", codec.A0)
+    out state.push(compiler, "a0", registers.A0)
 }
 
 skill compile_template(compiler, plain) {
     compiler = compile_expression(compiler, ["string", group.get(plain, 1)])
-    compiler = state.push(compiler, "a0", codec.A0)
+    compiler = state.push(compiler, "a0", registers.A0)
     drum ((group.count(plain) - 2) / 2) {
         compiler = compile_expression(compiler, group.get(plain, beat * 2 + 2))
         compiler.machine = layout.emit_call(compiler.machine, "rt_value_text")
@@ -631,15 +632,15 @@ skill compile_template(compiler, plain) {
             compiler = emit_string_join(compiler)
         }
     }
-    out state.pop(compiler, "a0", codec.A0)
+    out state.pop(compiler, "a0", registers.A0)
 }
 
 skill load_number(compiler, number) {
     (number > -257) {
-        (number < 256) { out state.load_immediate(compiler, "a0", codec.A0, abi.tagged(number, abi.TAG_NUMBER)) }
+        (number < 256) { out state.load_immediate(compiler, "a0", registers.A0, abi.tagged(number, abi.TAG_NUMBER)) }
     }
-    @word = codec.word_add_number(codec.word_shift_left(codec.word_from_signed(number), abi.TAG_SHIFT), abi.TAG_NUMBER)
-    compiler.machine = layout.emit_load_word(compiler.machine, codec.A0, word)
+    @tagged = word.add_number(word.shift_left(word.from_signed(number), abi.TAG_SHIFT), abi.TAG_NUMBER)
+    compiler.machine = layout.emit_load_word(compiler.machine, registers.A0, tagged)
     out compiler
 }
 
@@ -650,14 +651,14 @@ skill compile_expression(compiler, node) {
     (tag == "template") { out compile_template(compiler, plain) }
     (tag == "string") {
         @label = string_label(compiler, group.get(plain, 1))
-        compiler.machine = layout.emit_relative_address(compiler.machine, codec.A0, label, 0)
-        out state.emit_op(compiler, instruction.Kind.ORI, codec.A0, codec.A0, codec.ZERO, abi.TAG_STRING)
+        compiler.machine = layout.emit_relative_address(compiler.machine, registers.A0, label, 0)
+        out state.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_STRING)
     }
     (tag == "answer") {
-        (group.get(plain, 1) == "yes") { out state.load_immediate(compiler, "a0", codec.A0, abi.YES) }
-        out state.load_immediate(compiler, "a0", codec.A0, abi.NO)
+        (group.get(plain, 1) == "yes") { out state.load_immediate(compiler, "a0", registers.A0, abi.YES) }
+        out state.load_immediate(compiler, "a0", registers.A0, abi.NO)
     }
-    (tag == "none") { out state.load_immediate(compiler, "a0", codec.A0, abi.NONE) }
+    (tag == "none") { out state.load_immediate(compiler, "a0", registers.A0, abi.NONE) }
     (tag == "path") { out compile_path(compiler, node) }
     (tag == "binary") {
         (negative_literal(node) == yes) {
@@ -675,7 +676,7 @@ skill compile_expression(compiler, node) {
     (tag == "rescue") { out compile_rescue(compiler, node) }
     (tag == "enum-value") {
         @variant = state.symbol_find(compiler.variants, group.get(plain, 1))
-        out state.load_immediate(compiler, "a0", codec.A0, variant.value)
+        out state.load_immediate(compiler, "a0", registers.A0, variant.value)
     }
     out compiler
 }
@@ -691,7 +692,7 @@ skill compile_block(compiler, block, keep) {
         compiler = compile_statement(compiler, group.get(plain, beat + 1), last)
     }
     (keep == yes) {
-        (count == 1) { compiler = state.load_immediate(compiler, "a0", codec.A0, abi.NONE) }
+        (count == 1) { compiler = state.load_immediate(compiler, "a0", registers.A0, abi.NONE) }
     }
     out compiler
 }
@@ -703,7 +704,7 @@ skill compile_statement(compiler, node, keep) {
         @value = group.get(plain, 2)
         compiler = compile_expression(compiler, value)
         @slot = state.slot(compiler, group.get(plain, 1))
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, slot)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, slot)
         @type = infer_type(compiler, value)
         @known = state.type_find(compiler.current_function.types, group.get(plain, 1))
         (type == "unknown") {
@@ -717,7 +718,7 @@ skill compile_statement(compiler, node, keep) {
         @value = group.get(plain, 2)
         compiler = compile_expression(compiler, value)
         @slot = state.slot(compiler, group.get(plain, 1))
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, slot)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, slot)
         @type = infer_type(compiler, value)
         @known = state.type_find(compiler.current_function.types, group.get(plain, 1))
         (type == "unknown") {
@@ -732,18 +733,18 @@ skill compile_statement(compiler, node, keep) {
         @part_count = group.count(target)
         @base = state.group_slice(target, 0, part_count - 1)
         compiler = compile_expression(compiler, base)
-        compiler = state.push(compiler, "a0", codec.A0)
+        compiler = state.push(compiler, "a0", registers.A0)
         compiler = compile_expression(compiler, group.get(plain, 2))
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A2, codec.A0, codec.ZERO, 0)
-        compiler = state.pop(compiler, "a0", codec.A0)
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.A0, registers.ZERO, 0)
+        compiler = state.pop(compiler, "a0", registers.A0)
         out emit_field_set(compiler, group.get(target, part_count - 1))
     }
     (tag == "out") {
         compiler = compile_expression(compiler, group.get(plain, 1))
         @value_root = constants.REGION_VALUE_ROOT
         (abi.is_raw_value(infer_type(compiler, group.get(plain, 1))) == yes) { value_root = constants.REGION_VALUE_SKIPPED }
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A2, codec.ZERO, codec.ZERO, value_root)
-        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, compiler.current_function.end)
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, value_root)
+        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, compiler.current_function.end)
         out compiler
     }
     (tag == "expr") { out compile_expression(compiler, group.get(plain, 1)) }
@@ -754,16 +755,16 @@ skill compile_statement(compiler, node, keep) {
             (group.get(choice, 0) == "if") {
                 @next = state.label(compiler, "pick_next")
                 compiler = compile_expression(compiler, group.get(choice, 1))
-                compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, abi.NO)
-                compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.A0, codec.T0, 8)
-                compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, next)
-                compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, abi.NONE)
-                compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.A0, codec.T0, 8)
-                compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, next)
-                compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.A0, codec.ZERO, 8)
-                compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, next)
+                compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.NO)
+                compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A0, registers.T0, 8)
+                compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, next)
+                compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.NONE)
+                compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A0, registers.T0, 8)
+                compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, next)
+                compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A0, registers.ZERO, 8)
+                compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, next)
                 compiler = compile_block(compiler, group.get(choice, 2), keep)
-                compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
+                compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
                 compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, next)
             }
             (group.get(choice, 0) == "otherwise") {
@@ -774,20 +775,20 @@ skill compile_statement(compiler, node, keep) {
         out compiler
     }
     (tag == "leave") {
-        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, compiler.current_function.drum_exit)
+        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, compiler.current_function.drum_exit)
         out compiler
     }
     (tag == "if") {
         @end = state.label(compiler, "if_end")
         compiler = compile_expression(compiler, group.get(plain, 1))
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, abi.NO)
-        compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.A0, codec.T0, 8)
-        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.ZERO, codec.ZERO, abi.NONE)
-        compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.A0, codec.T0, 8)
-        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
-        compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.A0, codec.ZERO, 8)
-        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.NO)
+        compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A0, registers.T0, 8)
+        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.NONE)
+        compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A0, registers.T0, 8)
+        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
+        compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A0, registers.ZERO, 8)
+        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
         compiler = compile_block(compiler, group.get(plain, 2), keep)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
         out compiler
@@ -795,16 +796,16 @@ skill compile_statement(compiler, node, keep) {
     (tag == "switch") {
         @end = state.label(compiler, "switch_end")
         compiler = compile_expression(compiler, group.get(plain, 1))
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.A0, codec.ZERO, 0)
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.A0, registers.ZERO, 0)
         drum (group.count(plain) - 2) {
             @case_node = ast.plain(group.get(plain, beat + 2))
             @next = state.label(compiler, "case_next")
             @variant = state.symbol_find(compiler.variants, group.get(case_node, 1))
-            compiler = state.load_immediate(compiler, "t0", codec.T0, variant.value)
-            compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, codec.ZERO, codec.T2, codec.T0, 8)
-            compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, next)
+            compiler = state.load_immediate(compiler, "t0", registers.T0, variant.value)
+            compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, registers.ZERO, registers.T2, registers.T0, 8)
+            compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, next)
             compiler = compile_expression(compiler, group.get(case_node, 2))
-            compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
+            compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
             compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, next)
         }
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
@@ -817,7 +818,7 @@ skill compile_statement(compiler, node, keep) {
         @source = state.slot(compiler, "$drum_source:{drum_number}")
         @position = state.slot(compiler, "$drum_index:{drum_number}")
         @saved = state.slot(compiler, "$drum_saved:{drum_number}")
-        @beat_slot = state.slot(compiler, state.DRUM_BEAT)
+        @beat_slot = state.slot(compiler, ast.DRUM_BEAT)
         @start = state.label(compiler, "drum")
         @end = state.label(compiler, "drum_end")
         @numeric = state.label(compiler, "drum_numeric")
@@ -827,73 +828,73 @@ skill compile_statement(compiler, node, keep) {
         @uses_beat = state.block_uses_beat(group.get(plain, 2))
         compiler = compile_expression(compiler, group.get(plain, 1))
         (uses_beat == no) {
-            compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T1, codec.A0, codec.ZERO, abi.TAG_MASK)
-            compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, abi.TAG_GROUP)
-            compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T1, codec.T2, numeric)
-            compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T1, codec.A0, codec.ZERO, abi.PAYLOAD_MASK)
-            compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.T1, codec.ZERO, abi.OBJECT_PAYLOAD_OFFSET)
-            compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, counted)
+            compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A0, registers.ZERO, abi.TAG_MASK)
+            compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, abi.TAG_GROUP)
+            compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T1, registers.T2, numeric)
+            compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A0, registers.ZERO, abi.PAYLOAD_MASK)
+            compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.T1, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET)
+            compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, counted)
             compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, numeric)
-            compiler = state.emit_op(compiler, instruction.Kind.SRAI, codec.A0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
+            compiler = state.emit_op(compiler, instruction.Kind.SRAI, registers.A0, registers.A0, registers.ZERO, abi.TAG_SHIFT)
             compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, counted)
-            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, counter)
+            compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, counter)
             compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, start)
-            compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, counter)
-            compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.T0, codec.ZERO, 8)
-            compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
-            compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.T0, codec.ZERO, -1)
-            compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T0, counter)
+            compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, counter)
+            compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T0, registers.ZERO, 8)
+            compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
+            compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, -1)
+            compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T0, counter)
             @light_exit = compiler.current_function.drum_exit
             compiler.current_function.drum_exit = end
             compiler = compile_block(compiler, group.get(plain, 2), no)
             compiler.current_function.drum_exit = light_exit
-            compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, start)
+            compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, start)
             compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
             out compiler
         }
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, source)
-        compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T1, codec.A0, codec.ZERO, abi.TAG_MASK)
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, abi.TAG_GROUP)
-        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, codec.T1, codec.T2, numeric)
-        compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T1, codec.A0, codec.ZERO, abi.PAYLOAD_MASK)
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.T1, codec.ZERO, abi.OBJECT_PAYLOAD_OFFSET)
-        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, counted)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, source)
+        compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A0, registers.ZERO, abi.TAG_MASK)
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, abi.TAG_GROUP)
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T1, registers.T2, numeric)
+        compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A0, registers.ZERO, abi.PAYLOAD_MASK)
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.T1, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET)
+        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, counted)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, numeric)
-        compiler = state.emit_op(compiler, instruction.Kind.SRAI, codec.A0, codec.A0, codec.ZERO, abi.TAG_SHIFT)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.ZERO, source)
+        compiler = state.emit_op(compiler, instruction.Kind.SRAI, registers.A0, registers.A0, registers.ZERO, abi.TAG_SHIFT)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.ZERO, source)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, counted)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.A0, counter)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.ZERO, position)
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, beat_slot)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T0, saved)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, counter)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.ZERO, position)
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, beat_slot)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T0, saved)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, start)
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, counter)
-        compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.T0, codec.ZERO, 8)
-        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T0, codec.T0, codec.ZERO, -1)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T0, counter)
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T1, codec.S0, codec.ZERO, position)
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T2, codec.S0, codec.ZERO, source)
-        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.T2, codec.ZERO, beat_number)
-        compiler = state.emit_op(compiler, instruction.Kind.ANDI, codec.T2, codec.T2, codec.ZERO, abi.PAYLOAD_MASK)
-        compiler = state.emit_op(compiler, instruction.Kind.SLLI, codec.T3, codec.T1, codec.ZERO, 2)
-        compiler = state.emit_op(compiler, instruction.Kind.ADD, codec.T2, codec.T2, codec.T3, 0)
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T2, codec.T2, codec.ZERO, abi.OBJECT_PAYLOAD_OFFSET + abi.VALUE_WORD_BYTES)
-        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, beat_ready)
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, counter)
+        compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T0, registers.ZERO, 8)
+        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, -1)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T0, counter)
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.S0, registers.ZERO, position)
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.S0, registers.ZERO, source)
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T2, registers.ZERO, beat_number)
+        compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T2, registers.T2, registers.ZERO, abi.PAYLOAD_MASK)
+        compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.T3, registers.T1, registers.ZERO, 2)
+        compiler = state.emit_op(compiler, instruction.Kind.ADD, registers.T2, registers.T2, registers.T3, 0)
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.T2, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET + abi.VALUE_WORD_BYTES)
+        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, beat_ready)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, beat_number)
-        compiler = state.emit_op(compiler, instruction.Kind.SLLI, codec.T2, codec.T1, codec.ZERO, abi.TAG_SHIFT)
+        compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.T2, registers.T1, registers.ZERO, abi.TAG_SHIFT)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, beat_ready)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T2, beat_slot)
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.T1, codec.ZERO, 1)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T1, position)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T2, beat_slot)
+        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.T1, registers.ZERO, 1)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T1, position)
         @outer_exit = compiler.current_function.drum_exit
         compiler.current_function.drum_exit = end
         compiler = compile_block(compiler, group.get(plain, 2), no)
         compiler.current_function.drum_exit = outer_exit
-        compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, start)
+        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, start)
         compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
-        compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, saved)
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, codec.T0, beat_slot)
+        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, saved)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T0, beat_slot)
         out compiler
     }
     out compiler
@@ -911,35 +912,35 @@ skill compile_function(compiler, name, params, body, subject, module) {
     compiler.current_function = state.Function { name = name, slots = slots, end = end, subject = subject, module = module, types = types }
     @function_label = str.add("saltic_", state.safe(name))
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, function_label)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - frame)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.RA, constants.return_address_save_offset(frame))
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.S0, constants.previous_frame_save_offset(frame))
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.S4, constants.region_mark_save_offset(frame))
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.S5, constants.region_escape_save_offset(frame))
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S0, codec.SP, codec.ZERO, frame)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S4, codec.S1, codec.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S5, codec.S2, codec.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - frame)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, constants.return_address_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.S0, constants.previous_frame_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.S4, constants.region_mark_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.S5, constants.region_escape_save_offset(frame))
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S0, registers.SP, registers.ZERO, frame)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S4, registers.S1, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S5, registers.S2, registers.ZERO, 0)
     drum (group.count(params)) {
         @slot = state.slot(compiler, group.get(params, beat))
-        compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.S0, abi.argument_register(beat), slot)
+        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, abi.argument_register(beat), slot)
     }
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
     compiler = compile_block(compiler, body, no)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A0, codec.ZERO, codec.ZERO, abi.NONE)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
-    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, end)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, abi.NONE)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
     @region_done = "{end}_region"
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, codec.S1, codec.S4, region_done)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.S1, registers.S4, region_done)
     compiler.machine = layout.emit_call(compiler.machine, "rt_region_exit")
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, region_done)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.RA, codec.S0, codec.ZERO, constants.return_address_load_offset())
-    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.S4, codec.S0, codec.ZERO, constants.region_mark_load_offset())
-    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.S5, codec.S0, codec.ZERO, constants.region_escape_load_offset())
-    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T0, codec.S0, codec.ZERO, constants.previous_frame_load_offset())
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.S0, codec.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.S0, codec.T0, codec.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.S0, registers.ZERO, constants.return_address_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.S4, registers.S0, registers.ZERO, constants.region_mark_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.S5, registers.S0, registers.ZERO, constants.region_escape_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, constants.previous_frame_load_offset())
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.S0, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S0, registers.T0, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
     compiler = state.emit_blank(compiler)
     compiler.current_function = state.Function {}
     out compiler
@@ -957,50 +958,50 @@ skill compile_constant(compiler, constant) {
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, getter)
     @frame = constants.constant_frame_bytes()
     @return_address_offset = constants.constant_return_address_offset()
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, 0 - frame)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.SP, codec.RA, return_address_offset)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
-    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.state_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.T1, codec.T0, codec.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, constants.STATE_READY)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.T1, codec.T2, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, ready)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T2, codec.ZERO, codec.ZERO, constants.STATE_INITIALIZING)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, codec.ZERO, codec.T1, codec.T2, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, cycle)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, constants.STATE_INITIALIZING)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.T0, codec.T1, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - frame)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, return_address_offset)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.state_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.T0, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, constants.STATE_READY)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T1, registers.T2, 8)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ready)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, constants.STATE_INITIALIZING)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T1, registers.T2, 8)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, cycle)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, constants.STATE_INITIALIZING)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
 
     compiler = compile_expression(compiler, constant.node)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, codec.ZERO, codec.A1, codec.ZERO, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, failure)
-    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.value_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.T0, codec.A0, 0)
+    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, registers.ZERO, registers.A1, registers.ZERO, 8)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, failure)
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.value_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.A0, 0)
     compiler.machine = layout.emit_call(compiler.machine, "rt_region_remember_slot")
-    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.state_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, constants.STATE_READY)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.T0, codec.T1, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, finish)
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.state_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, constants.STATE_READY)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, finish)
 
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ready)
-    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.value_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.A0, codec.T0, codec.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.A1, codec.ZERO, codec.ZERO, abi.CALL_NO_ERROR)
-    compiler.machine = layout.emit_jump(compiler.machine, codec.ZERO, finish)
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.value_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.T0, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, finish)
 
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, cycle)
-    compiler = state.load_immediate(compiler, "a0", codec.A0, 0)
-    compiler = state.load_immediate(compiler, "a1", codec.A1, abi.ERROR_CONSTANT_CYCLE)
+    compiler = state.load_immediate(compiler, "a0", registers.A0, 0)
+    compiler = state.load_immediate(compiler, "a1", registers.A1, abi.ERROR_CONSTANT_CYCLE)
 
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, failure)
-    compiler.machine = layout.emit_relative_address(compiler.machine, codec.T0, constants.state_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.T1, codec.ZERO, codec.ZERO, constants.STATE_EMPTY)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, codec.ZERO, codec.T0, codec.T1, 0)
+    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.state_label(constant.name), 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, constants.STATE_EMPTY)
+    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
 
     compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, finish)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, codec.RA, codec.SP, codec.ZERO, return_address_offset)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, codec.SP, codec.SP, codec.ZERO, frame)
-    compiler = state.emit_op(compiler, instruction.Kind.JALR, codec.ZERO, codec.RA, codec.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.SP, registers.ZERO, return_address_offset)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, frame)
+    compiler = state.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
     compiler = state.emit_blank(compiler)
     compiler.current_function = before
     out compiler

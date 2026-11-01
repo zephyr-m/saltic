@@ -1,0 +1,177 @@
+use core.str
+use core.group
+use core.num
+use selfhost.machine.codec
+
+Cell = Box {
+    value = 0
+}
+
+CHUNK_SIZE = 256
+
+Chunk = Box {
+    cells = [],
+    used = 0
+}
+
+Buffer = Box {
+    chunks = [],
+    tail = Chunk {},
+    length = 0
+}
+
+skill fresh_chunk() {
+    out Chunk { cells = [
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
+    ] }
+}
+
+skill empty() {
+    out Buffer { tail = fresh_chunk() }
+}
+
+skill prepare_tail(target) {
+    (group.count(target.tail.cells) == 0) { target.tail = fresh_chunk() }
+    (target.tail.used == CHUNK_SIZE) {
+        target.chunks = group.add(target.chunks, target.tail)
+        target.tail = fresh_chunk()
+    }
+    out target
+}
+
+skill chunk_count(target) {
+    @count = group.count(target.chunks)
+    (target.tail.used > 0) { count = count + 1 }
+    out count
+}
+
+skill chunk_at(target, index) {
+    (index < 0) { out error.BufferOutsideRange }
+    @complete = group.count(target.chunks)
+    (index < complete) { out group.get(target.chunks, index) }
+    (index == complete) {
+        (target.tail.used > 0) { out target.tail }
+    }
+    out error.BufferOutsideRange
+}
+
+skill cell_at(target, offset) {
+    (offset < 0) { out error.BufferOutsideRange }
+    (offset > target.length - 1) { out error.BufferOutsideRange }
+    @chunk_index = offset / CHUNK_SIZE
+    @cell_index = num.mod(offset, CHUNK_SIZE)
+    @chunk = chunk_at(target, chunk_index)
+    out group.get(chunk.cells, cell_index)
+}
+
+skill append_byte(target, value) {
+    (codec.valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
+    target = prepare_tail(target)
+    @cell = group.get(target.tail.cells, target.tail.used)
+    cell.value = value
+    target.tail.used = target.tail.used + 1
+    target.length = target.length + 1
+    out target
+}
+
+skill append_text(target, text) {
+    drum (str.len(text)) { target = append_byte(target, str.byte(text, beat)) }
+    out target
+}
+
+skill append_word(target, value) {
+    target = append_byte(target, value.b0)
+    target = append_byte(target, value.b1)
+    target = append_byte(target, value.b2)
+    target = append_byte(target, value.b3)
+    out target
+}
+
+skill byte_at(target, offset) {
+    @cell = cell_at(target, offset)
+    out cell.value
+}
+
+skill set_byte(target, offset, value) {
+    (codec.valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
+    @cell = cell_at(target, offset)
+    cell.value = value
+    out target
+}
+
+skill set_word(target, offset, value) {
+    target = set_byte(target, offset, value.b0)
+    target = set_byte(target, offset + 1, value.b1)
+    target = set_byte(target, offset + 2, value.b2)
+    target = set_byte(target, offset + 3, value.b3)
+    out target
+}
+
+skill append_zeroes(target, count) {
+    drum (count) { target = append_byte(target, 0) }
+    out target
+}
+
+skill append_buffer(target, source) {
+    drum (chunk_count(source)) {
+        @source_chunk = chunk_at(source, beat)
+        drum (source_chunk.used) {
+            @cell = group.get(source_chunk.cells, beat)
+            target = append_byte(target, cell.value)
+        }
+    }
+    out target
+}
+
+skill file_chunks(target) {
+    @result = target.chunks
+    (target.tail.used > 0) { result = group.add(result, target.tail) }
+    out result
+}
+
+skill chunks(target, chunk_size) {
+    (chunk_size < 1) { out error.InvalidChunkSize }
+    (chunk_size > CHUNK_SIZE) { out error.InvalidChunkSize }
+    @result = []
+    @chunk = []
+    drum (target.length) {
+        chunk = group.add(chunk, byte_at(target, beat))
+        (group.count(chunk) == chunk_size) {
+            result = group.add(result, chunk)
+            chunk = []
+        }
+    }
+    (group.count(chunk) > 0) { result = group.add(result, chunk) }
+    out result
+}

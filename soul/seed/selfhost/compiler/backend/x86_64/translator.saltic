@@ -1,4 +1,3 @@
-use selfhost.machine.codec
 use selfhost.machine.instruction
 use selfhost.machine.layout
 use selfhost.vm.cpu
@@ -6,9 +5,12 @@ use selfhost.compiler.backend.x86_64.encoder
 use selfhost.compiler.backend.x86_64.platform
 use selfhost.compiler.backend.x86_64.uefi
 use core.num
+use selfhost.machine.profile
+use selfhost.compiler.backend.x86_64.image
+use selfhost.compiler.backend.x86_64.pe
+use selfhost.machine.word
+use selfhost.machine.buffer
 
-PAGE_BYTES = 4096
-INSTRUCTION_BYTES = 4
 TABLE_ENTRY_BYTES = 8
 LEA_BYTES = 7
 REGISTER_FILE_BYTES = 4096
@@ -18,29 +20,28 @@ STACK_BYTES = 8388608
 STACK_GUARD_BYTES = 1048576
 HOST_ADDRESS = 4194304
 UEFI_TABLE_RVA = 4096
-RELOCATION_BYTES = 12
 
 Native = Box {
     rv = layout.Program {},
     rv_layout = layout.Layout {},
-    code = codec.Buffer {},
-    table = codec.Buffer {},
-    table_address = codec.Word {},
-    register_file = codec.Word {},
-    code_address = codec.Word {},
-    entry = codec.Word {},
+    code = buffer.Buffer {},
+    table = buffer.Buffer {},
+    table_address = word.Word {},
+    register_file = word.Word {},
+    code_address = word.Word {},
+    entry = word.Word {},
     data_bytes = 0,
-    guest_address = codec.Word {},
+    guest_address = word.Word {},
     guest_bytes = 0,
-    stack_address = codec.Word {},
+    stack_address = word.Word {},
     stack_bytes = 0
 }
 
 Firmware = Box {
     rv = layout.Program {},
     rv_layout = layout.Layout {},
-    code = codec.Buffer {},
-    table = codec.Buffer {},
+    code = buffer.Buffer {},
+    table = buffer.Buffer {},
     table_rva = 0,
     code_rva = 0,
     entry_rva = 0,
@@ -50,10 +51,10 @@ Firmware = Box {
 }
 
 Work = Box {
-    code = codec.Buffer {},
-    starts = codec.Buffer {},
-    fixups = codec.Buffer {},
-    load_address = codec.Word {},
+    code = buffer.Buffer {},
+    starts = buffer.Buffer {},
+    fixups = buffer.Buffer {},
+    load_address = word.Word {},
     table_displacement = 0
 }
 
@@ -62,22 +63,22 @@ skill wrap_add(left, right) {
     @v1 = left.b1 + right.b1 + v0 / 256
     @v2 = left.b2 + right.b2 + v1 / 256
     @v3 = left.b3 + right.b3 + v2 / 256
-    out codec.word(num.mod(v0, 256), num.mod(v1, 256), num.mod(v2, 256), num.mod(v3, 256))
+    out word.from_bytes(num.mod(v0, 256), num.mod(v1, 256), num.mod(v2, 256), num.mod(v3, 256))
 }
 
-skill page_align(word) {
-    @offset = word.b0 + num.mod(word.b1, 16) * 256
-    (offset == 0) { out word }
-    out codec.word_add_number(word, PAGE_BYTES - offset)
+skill page_align(address) {
+    @offset = address.b0 + num.mod(address.b1, 16) * 256
+    (offset == 0) { out address }
+    out word.add_number(address, image.PAGE_BYTES - offset)
 }
 
-skill read_number(buffer, offset) {
-    out codec.word_to_number(codec.word(codec.byte_at(buffer, offset), codec.byte_at(buffer, offset + 1), codec.byte_at(buffer, offset + 2), codec.byte_at(buffer, offset + 3)))
+skill read_number(bytes, offset) {
+    out word.to_number(word.from_bytes(buffer.byte_at(bytes, offset), buffer.byte_at(bytes, offset + 1), buffer.byte_at(bytes, offset + 2), buffer.byte_at(bytes, offset + 3)))
 }
 
 skill add_fixup(work, target_index) {
-    work.fixups = codec.append_word(work.fixups, codec.word_from_number(work.code.length - 4))
-    work.fixups = codec.append_word(work.fixups, codec.word_from_number(target_index))
+    work.fixups = buffer.append_word(work.fixups, word.from_number(work.code.length - 4))
+    work.fixups = buffer.append_word(work.fixups, word.from_number(target_index))
     out work
 }
 
@@ -137,14 +138,14 @@ skill shift_operation(kind) {
 
 skill translate_control(work, index, decoded) {
     @kind = decoded.kind
-    @next = codec.word_add_number(work.load_address, (index + 1) * INSTRUCTION_BYTES)
+    @next = word.add_number(work.load_address, (index + 1) * profile.INSTRUCTION_BYTES)
     (kind == instruction.Kind.JAL) {
         (decoded.rd > 0) {
             work.code = encoder.move_word(work.code, encoder.EAX, next)
             work = store_result(work, decoded.rd, encoder.EAX)
         }
         work.code = encoder.jump(work.code)
-        out add_fixup(work, index + cpu.immediate_j(decoded) / INSTRUCTION_BYTES)
+        out add_fixup(work, index + cpu.immediate_j(decoded) / profile.INSTRUCTION_BYTES)
     }
     (kind == instruction.Kind.JALR) {
         work.code = encoder.load_register(work.code, encoder.EAX, decoded.rs1)
@@ -163,7 +164,7 @@ skill translate_control(work, index, decoded) {
     work.code = encoder.load_register(work.code, encoder.ECX, decoded.rs2)
     work.code = encoder.operate(work.code, encoder.CMP, encoder.EAX, encoder.ECX)
     work.code = encoder.jump_condition(work.code, branch_condition(kind))
-    out add_fixup(work, index + cpu.immediate_b(decoded) / INSTRUCTION_BYTES)
+    out add_fixup(work, index + cpu.immediate_b(decoded) / profile.INSTRUCTION_BYTES)
 }
 
 skill translate_memory(work, decoded) {
@@ -242,7 +243,7 @@ skill translate_instruction(work, index, decoded) {
     }
     (kind == instruction.Kind.AUIPC) {
         (decoded.rd == 0) { out work }
-        @pc = codec.word_add_number(work.load_address, index * INSTRUCTION_BYTES)
+        @pc = word.add_number(work.load_address, index * profile.INSTRUCTION_BYTES)
         work.code = encoder.move_word(work.code, encoder.EAX, wrap_add(pc, cpu.immediate_u(decoded)))
         out store_result(work, decoded.rd, encoder.EAX)
     }
@@ -270,7 +271,7 @@ skill translate_instruction(work, index, decoded) {
 }
 
 skill patch_call(work, offset) {
-    work.code = codec.set_word(work.code, offset, encoder.signed_word(0 - (offset + 4)))
+    work.code = buffer.set_word(work.code, offset, encoder.signed_word(0 - (offset + 4)))
     out work
 }
 
@@ -279,27 +280,27 @@ skill resolve_fixups(work) {
         @offset = read_number(work.fixups, beat * 8)
         @target = read_number(work.fixups, beat * 8 + 4)
         @destination = read_number(work.starts, target * 4)
-        work.code = codec.set_word(work.code, offset, encoder.signed_word(destination - (offset + 4)))
+        work.code = buffer.set_word(work.code, offset, encoder.signed_word(destination - (offset + 4)))
     }
     out work
 }
 
 skill translate_body(work, machine, count) {
     drum (count) {
-        work.starts = codec.append_word(work.starts, codec.word_from_number(work.code.length))
-        @offset = beat * INSTRUCTION_BYTES
-        @word = codec.word(codec.byte_at(machine.code, offset), codec.byte_at(machine.code, offset + 1), codec.byte_at(machine.code, offset + 2), codec.byte_at(machine.code, offset + 3))
-        @decoded = cpu.decode(word)
+        work.starts = buffer.append_word(work.starts, word.from_number(work.code.length))
+        @offset = beat * profile.INSTRUCTION_BYTES
+        @encoded = word.from_bytes(buffer.byte_at(machine.code, offset), buffer.byte_at(machine.code, offset + 1), buffer.byte_at(machine.code, offset + 2), buffer.byte_at(machine.code, offset + 3))
+        @decoded = cpu.decode(encoded)
         work = translate_instruction(work, beat, decoded)
     }
     out work
 }
 
 skill jump_table(work, count, code_address) {
-    @table = codec.buffer()
+    @table = buffer.empty()
     drum (count) {
-        table = codec.append_word(table, codec.word_add_number(code_address, read_number(work.starts, beat * 4)))
-        table = codec.append_word(table, codec.word(0, 0, 0, 0))
+        table = buffer.append_word(table, word.add_number(code_address, read_number(work.starts, beat * 4)))
+        table = buffer.append_word(table, word.from_bytes(0, 0, 0, 0))
     }
     out table
 }
@@ -307,15 +308,15 @@ skill jump_table(work, count, code_address) {
 skill translate_uefi(machine) {
     (machine.resolved == no) { machine = layout.resolve(machine) rescue |failure| { out error.UnresolvedPatch } }
     @current = layout.layout(machine)
-    @count = machine.code.length / INSTRUCTION_BYTES
-    @table_bytes = layout.align(count * TABLE_ENTRY_BYTES, PAGE_BYTES)
+    @count = machine.code.length / profile.INSTRUCTION_BYTES
+    @table_bytes = layout.align(count * TABLE_ENTRY_BYTES, image.PAGE_BYTES)
     @register_file = UEFI_TABLE_RVA + table_bytes
     @code_rva = register_file + REGISTER_FILE_BYTES
-    @load = codec.word_to_number(machine.load_address)
+    @load = word.to_number(machine.load_address)
     @work = Work {
-        code = codec.buffer(),
-        starts = codec.buffer(),
-        fixups = codec.buffer(),
+        code = buffer.empty(),
+        starts = buffer.empty(),
+        fixups = buffer.empty(),
         load_address = machine.load_address,
         table_displacement = 0 - table_bytes - load * 2
     }
@@ -323,10 +324,10 @@ skill translate_uefi(machine) {
     work = translate_body(work, machine, count)
 
     @entry_rva = code_rva + work.code.length
-    @relocation_rva = layout.align(entry_rva + uefi.entry_bytes(), INSTRUCTION_BYTES)
-    @guest_rva = layout.align(relocation_rva + RELOCATION_BYTES, PAGE_BYTES)
-    @memory_end = codec.word_to_number(codec.word_add(machine.load_address, current.memory_size))
-    @stack = layout.align(memory_end, PAGE_BYTES) + STRINGS_BYTES
+    @relocation_rva = layout.align(entry_rva + uefi.entry_bytes(), profile.INSTRUCTION_BYTES)
+    @guest_rva = layout.align(relocation_rva + pe.RELOCATION_BYTES, image.PAGE_BYTES)
+    @memory_end = word.to_number(word.add(machine.load_address, current.memory_size))
+    @stack = layout.align(memory_end, image.PAGE_BYTES) + STRINGS_BYTES
     @entry = uefi.Entry {
         rva = entry_rva,
         register_file = register_file,
@@ -338,14 +339,14 @@ skill translate_uefi(machine) {
     }
     work.code = uefi.append_entry_stub(work.code, entry)
     @start = layout.find_label(machine, machine.entry)
-    work.fixups = codec.append_word(work.fixups, codec.word_from_number(work.code.length - 4))
-    work.fixups = codec.append_word(work.fixups, codec.word_from_number(start.offset / INSTRUCTION_BYTES))
+    work.fixups = buffer.append_word(work.fixups, word.from_number(work.code.length - 4))
+    work.fixups = buffer.append_word(work.fixups, word.from_number(start.offset / profile.INSTRUCTION_BYTES))
     work = resolve_fixups(work)
     out Firmware {
         rv = machine,
         rv_layout = current,
         code = work.code,
-        table = jump_table(work, count, codec.word_from_number(code_rva)),
+        table = jump_table(work, count, word.from_number(code_rva)),
         table_rva = UEFI_TABLE_RVA,
         code_rva = code_rva,
         entry_rva = entry_rva,
@@ -358,30 +359,30 @@ skill translate_uefi(machine) {
 skill translate(machine) {
     (machine.resolved == no) { machine = layout.resolve(machine) rescue |failure| { out error.UnresolvedPatch } }
     @current = layout.layout(machine)
-    @count = machine.code.length / INSTRUCTION_BYTES
-    @strings = page_align(codec.word_add(machine.load_address, current.memory_size))
-    @stack = codec.word_add_number(strings, STRINGS_BYTES + STACK_GUARD_BYTES)
-    @arguments = codec.word_add_number(stack, STACK_BYTES - ARGUMENTS_BYTES)
-    @table_address = codec.word_from_number(HOST_ADDRESS)
-    @table_bytes = layout.align(count * TABLE_ENTRY_BYTES, PAGE_BYTES)
-    @register_file = codec.word_add_number(table_address, table_bytes)
+    @count = machine.code.length / profile.INSTRUCTION_BYTES
+    @strings = page_align(word.add(machine.load_address, current.memory_size))
+    @stack = word.add_number(strings, STRINGS_BYTES + STACK_GUARD_BYTES)
+    @arguments = word.add_number(stack, STACK_BYTES - ARGUMENTS_BYTES)
+    @table_address = word.from_number(HOST_ADDRESS)
+    @table_bytes = layout.align(count * TABLE_ENTRY_BYTES, image.PAGE_BYTES)
+    @register_file = word.add_number(table_address, table_bytes)
     @data_bytes = table_bytes + REGISTER_FILE_BYTES
-    @code_address = codec.word_add_number(table_address, data_bytes)
+    @code_address = word.add_number(table_address, data_bytes)
 
     @work = Work {
-        code = codec.buffer(),
-        starts = codec.buffer(),
-        fixups = codec.buffer(),
+        code = buffer.empty(),
+        starts = buffer.empty(),
+        fixups = buffer.empty(),
         load_address = machine.load_address,
-        table_displacement = 0 - table_bytes - codec.word_to_number(machine.load_address) * 2
+        table_displacement = 0 - table_bytes - word.to_number(machine.load_address) * 2
     }
     work.code = platform.append_syscall_stub(work.code)
     @entry_offset = work.code.length
-    @entry_end = codec.word_to_number(code_address) + entry_offset + LEA_BYTES
-    work.code = platform.append_entry_stub(work.code, codec.word_to_number(register_file) - entry_end, arguments, strings)
+    @entry_end = word.to_number(code_address) + entry_offset + LEA_BYTES
+    work.code = platform.append_entry_stub(work.code, word.to_number(register_file) - entry_end, arguments, strings)
     @start = layout.find_label(machine, machine.entry)
-    work.fixups = codec.append_word(work.fixups, codec.word_from_number(work.code.length - 4))
-    work.fixups = codec.append_word(work.fixups, codec.word_from_number(start.offset / INSTRUCTION_BYTES))
+    work.fixups = buffer.append_word(work.fixups, word.from_number(work.code.length - 4))
+    work.fixups = buffer.append_word(work.fixups, word.from_number(start.offset / profile.INSTRUCTION_BYTES))
 
     work = translate_body(work, machine, count)
     work = resolve_fixups(work)
@@ -394,7 +395,7 @@ skill translate(machine) {
         table_address = table_address,
         register_file = register_file,
         code_address = code_address,
-        entry = codec.word_add_number(code_address, entry_offset),
+        entry = word.add_number(code_address, entry_offset),
         data_bytes = data_bytes,
         guest_address = strings,
         guest_bytes = STRINGS_BYTES,
