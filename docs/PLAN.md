@@ -91,7 +91,7 @@ Saltic и проверка решений из `docs/OS-core.md`. Детали �
 ## Рефакторинг
 
 - Файлы больше лимита канона в 500 строк. **Решает автор**, как делить:
-  - `soul/seed/selfhost/runtime/emit.saltic` — 1750
+  - `soul/seed/selfhost/compiler/runtime/emit.saltic` — 1750
   - `soul/seed/selfhost/compiler/codegen.saltic` — 1033
   - `soul/seed/selfhost/parser/syntax.saltic` — 831
   - `soul/seed/selfhost/machine/layout.saltic` — 547
@@ -101,9 +101,6 @@ Saltic и проверка решений из `docs/OS-core.md`. Детали �
   - не считаются: `os/fonts/spleen.saltic` (данные шрифта),
     `tests/machine/translation.saltic` (эталоны), `.archive/` (архив)
 - Находки карты зависимостей `selfhost` (собрана из строк `use`):
-  - цикл слоёв `compiler ↔ runtime`: лицо `compiler` зовёт `runtime.emit`,
-    а `runtime` пользуется `compiler.state` и `compiler.constants`; по смыслу
-    `runtime` — часть компилятора, живущая отдельно;
   - x86-переводчик (`compiler/backend/x86_64/translator`) берёт декодер
     команд у `vm.cpu`: компилятор зависит от своего свидетеля;
   - `vm.cpu` и `vm.system` читают ту же таблицу команд

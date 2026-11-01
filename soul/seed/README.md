@@ -43,7 +43,7 @@
 - `compiler` + `compiler/{codegen,state,constants}` — перевод в машинный код;
   backend `compiler/backend/rv32i` и `compiler/backend/x86_64`
   (`encoder`, `translator`, `image`, `platform`, `pe`, `uefi`);
-- `runtime/emit` + `runtime/emit/{memory,terminal}` — машинный runtime и
+- `compiler/runtime/emit` + `emit/{memory,terminal}` — машинный runtime и
   регионы памяти;
 - `machine/{instruction,registers,codec,word,buffer,layout,image,profile}` —
   команды и регистры RV32I, кодирование команд, 32-битное слово, байтовый
