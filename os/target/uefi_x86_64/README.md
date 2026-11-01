@@ -25,6 +25,10 @@ Saltic на ноутбуке без Linux: программа собираетс
 | `usb.saltic` | USB через прошивку (`UsbIo`): `usb` — интерфейсы с VID:PID, классом и названием; `protocols N` — какие протоколы висят на диске N |
 | `camera.saltic` | `camera` — описание конфигурации камеры `0408:a030`: форматы (MJPEG, YUYV), кадры, точки потока |
 | `reply.saltic` | трубка для программ: `reply.finish(текст)` завершает программу через `Exit` с `ExitData`, агент пересылает текст по сети и на экран |
+| `tint.saltic` | цвета (zinc из shadcn), смешивание, разбор пикселя видеопамяти |
+| `button.saltic` | кнопка UIEngine в духе shadcn: варианты, состояния, скруглённые углы со сглаживанием; `demo` — карточка с кнопками |
+| `typeset.saltic` | сглаженный текст: UTF-8 → глиф `sans`, перо с точностью 1/16 пикселя, полутона смешиваются с фоном |
+| `sans.saltic` | Noto Sans 14 px полутонами (16 уровней); генерируется `tools/sans.py` |
 | `visitor.saltic` | маленькая программа для проверки `upload`: печатает приветствие и возвращается к агенту |
 | `tools/listen.py` | «ухо» на проводе: печатает все кадры на интерфейсе (`sudo python3 tools/listen.py eno1`) |
 | `tools/talk.py` | сырой разговор без ARP: раз в секунду шлёт `ping N` и печатает ответы (`sudo python3 tools/talk.py eno1`) |
@@ -32,7 +36,8 @@ Saltic на ноутбуке без Linux: программа собираетс
 | `tools/glyphs.py` | пересобрать `glyphs.saltic` из `os/fonts/spleen.saltic` |
 | `tools/shot.py` | снимок экрана Acer в PNG: `python3 tools/shot.py shot.png` (683 × 384, кусками по 1024 байта с повтором) |
 | `tools/snippet.py` | кусок Saltic на Acer за ~1,3 с: `python3 tools/snippet.py '@x = 2 + 2\nout "x = {x}"'` — оборачивает в программу, собирает (`SALTIC_COMPILER` или полка), заливает, запускает, печатает ответ |
-| `tools/snippets/` | готовые куски для `snippet.py -f`: `smbios.saltic` — BIOS, плата, процессор, планки памяти; `bgrt.saltic` — логотип из ACPI BGRT на экран |
+| `tools/snippets/` | готовые куски для `snippet.py -f`: `smbios.saltic` — BIOS, плата, процессор, планки памяти; `bgrt.saltic` — логотип из ACPI BGRT на экран; `scaled.saltic` — карточка «как для Full HD», уменьшенная до 1366 (вывод: плывёт, не надо) |
+| `tools/sans.py` | свой растеризатор TrueType без библиотек: `glyf`/`cmap`/`hmtx`, составные глифы, покрытие пикселя → `sans.saltic`; `--preview out.png` — образец |
 | `tools/upload.py` | залить программу агенту и, с `--run`, запустить: `python3 tools/upload.py visitor.efi --run`; куски по 1024 байта с подтверждением, сверка суммы |
 | `build.sh` | собирает `EFI/BOOT/BOOTX64.EFI` и папку образа флешки |
 | `run.sh` | запускает собранное в QEMU x86-64 с прошивкой OVMF; `--check` — без окна, жмёт клавишу и ждёт «Bye!» (так его зовёт `tests/run.sh uefi`) |
