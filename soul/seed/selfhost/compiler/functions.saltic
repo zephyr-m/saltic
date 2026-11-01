@@ -8,6 +8,7 @@ use selfhost.machine.instruction
 use selfhost.machine.layout
 use selfhost.machine.registers
 use selfhost.compiler.codegen
+use selfhost.checker
 
 skill compile_function(compiler, name, params, body, subject, module) {
     @locals = state.collect_locals(params, body)
@@ -142,5 +143,34 @@ skill compile_functions(compiler) {
         }
     }
     compiler = compile_function(compiler, "program", ast.part(compiler.entry, 1), ast.part(compiler.entry, 2), "", "")
+    drum (compiler.dispatches) { compiler = compile_dispatch(compiler, beat) }
     out compiler
+}
+
+skill compile_dispatch(compiler, method) {
+    @label = state.dispatch_label(method)
+    @missing = "{label}_missing"
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, label)
+    compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.A0, registers.ZERO, abi.TAG_MASK)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, abi.TAG_BOX)
+    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T0, registers.T1, missing)
+    compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.A0, registers.ZERO, abi.PAYLOAD_MASK)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.T0, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_COUNT_OFFSET)
+    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.T1, registers.T1, registers.ZERO, 3)
+    compiler = state.emit_op(compiler, instruction.Kind.ADD, registers.T0, registers.T0, registers.T1, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.T0, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_LAST_VALUE_OFFSET)
+    drum (group.count(compiler.boxes)) {
+        @box = group.get(compiler.boxes, beat)
+        (checker.box_has_skill(compiler.boxes, box.name, method) == yes) {
+            @next = "{label}_{beat}"
+            compiler = state.load_immediate(compiler, "t1", registers.T1, abi.tagged(beat + 1, abi.TAG_NUMBER))
+            compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T2, registers.T1, next)
+            compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, str.add("saltic_", state.safe(str.add("{box.name}.", method))))
+            compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, next)
+        }
+    }
+    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, missing)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 0)
+    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.ERROR_NO_METHOD)
+    out state.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
 }
