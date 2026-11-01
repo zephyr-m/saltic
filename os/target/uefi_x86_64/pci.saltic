@@ -1,0 +1,174 @@
+use io
+use core.cpu
+use core.mem
+use core.num
+use core.str
+
+PAGE = 65536
+
+Phys = Box {
+    hi = 0,
+    lo = 0
+}
+
+skill hex(value, digits) {
+    @text = ""
+    @rest = value
+    drum (digits) {
+        text = str.add(num.hex_digit(num.mod(rest, 16)), text)
+        rest = rest / 16
+    }
+    out text
+}
+
+skill phys_text(p) {
+    out str.add(hex(p.hi, 4), hex(p.lo, 4))
+}
+
+skill add(p, offset) {
+    @total = p.lo + num.mod(offset, PAGE)
+    out Phys { hi = p.hi + offset / PAGE + total / PAGE, lo = num.mod(total, PAGE) }
+}
+
+skill guest(p, base) {
+    @lo = p.lo - base.lo
+    @hi = p.hi - base.hi
+    (lo < 0) {
+        lo = lo + PAGE
+        hi = hi - 1
+    }
+    (hi < 0) { out error.BelowGuestBase }
+    out [hi, lo]
+}
+
+skill read16(p, base, offset) {
+    @at = add(p, offset)
+    out mem.load16(guest(at, base), 0)
+}
+
+skill read8(p, base, offset) {
+    @at = add(p, offset)
+    out mem.load8(guest(at, base), 0)
+}
+
+skill pointer(p, base, offset) {
+    (read16(p, base, offset + 4) > 0) { out error.PointerAbove4G }
+    (read16(p, base, offset + 6) > 0) { out error.PointerAbove4G }
+    out Phys { hi = read16(p, base, offset + 2), lo = read16(p, base, offset) }
+}
+
+skill class_name(code) {
+    (code == 512) { out "Ethernet" }
+    (code == 640) { out "Network (Wi-Fi?)" }
+    (code == 768) { out "VGA" }
+    (code == 770) { out "3D controller" }
+    (code == 1027) { out "Audio" }
+    (code == 1536) { out "Host bridge" }
+    (code == 1537) { out "ISA bridge" }
+    (code == 1540) { out "PCI bridge" }
+    (code == 262) { out "SATA" }
+    (code == 264) { out "NVMe" }
+    (code == 3075) { out "USB" }
+    (code == 3077) { out "SMBus" }
+    (code == 1920) { out "Communication" }
+    (code == 4480) { out "Signal processing" }
+    (code == 2176) { out "System peripheral" }
+    out ""
+}
+
+skill find_acpi(base) {
+    @table = Phys { hi = cpu.firmware(5), lo = cpu.firmware(4) }
+    (cpu.firmware(6) > 0) { out error.SystemTableAbove4G }
+    io.show("[2] system table at ", phys_text(table))
+    @count = read16(table, base, 104)
+    @entries = pointer(table, base, 112)
+    io.show("[3] configuration tables: ", count)
+    drum (count) {
+        @entry = add(entries, beat * 24)
+        (read16(entry, base, 0) == 59505) {
+            (read16(entry, base, 2) == 34920) {
+                (read16(entry, base, 4) == 58609) { out pointer(entry, base, 16) }
+            }
+        }
+    }
+    out error.NoAcpi20
+}
+
+skill find_mcfg(base, rsdp) {
+    @xsdt = pointer(rsdp, base, 24)
+    io.show("[5] XSDT at ", phys_text(xsdt))
+    @length = read16(xsdt, base, 4) + read16(xsdt, base, 6) * PAGE
+    @count = (length - 36) / 8
+    drum (count) {
+        @table = pointer(xsdt, base, 36 + beat * 8)
+        (read16(table, base, 0) == 17229) {
+            (read16(table, base, 2) == 18246) { out table }
+        }
+    }
+    out error.NoMcfg
+}
+
+skill scan(base, ecam, first, last) {
+    @found = 0
+    drum (last - first + 1) {
+        @bus = first + beat
+        drum (32) {
+            @device = beat
+            drum (8) {
+                @function = beat
+                @at = add(ecam, bus * 1048576 + device * 32768 + function * 4096)
+                @vendor = read16(at, base, 0)
+                (vendor == 65535) {
+                    (function == 0) { leave }
+                }
+                ((vendor == 65535) == no) {
+                    @model = read16(at, base, 2)
+                    @class = read16(at, base, 10)
+                    @b = hex(bus, 2)
+                    @d = hex(device, 2)
+                    @v = hex(vendor, 4)
+                    @m = hex(model, 4)
+                    @c = hex(class, 4)
+                    @name = class_name(class)
+                    io.show("  {b}:{d}.{function}  {v}:{m}  class {c}  {name}")
+                    found = found + 1
+                    (function == 0) {
+                        (read8(at, base, 14) < 128) { leave }
+                    }
+                }
+            }
+        }
+    }
+    out found
+}
+
+skill run() {
+    @base = Phys { hi = cpu.firmware(1), lo = cpu.firmware(0) }
+    (cpu.firmware(2) > 0) { out error.GuestBaseAbove4G }
+    io.show("[1] guest base r14 = ", phys_text(base))
+    @rsdp = find_acpi(base)
+    io.show("[4] ACPI RSDP at ", phys_text(rsdp))
+    @mcfg = find_mcfg(base, rsdp)
+    @ecam = pointer(mcfg, base, 44)
+    @first = read8(mcfg, base, 54)
+    @last = read8(mcfg, base, 55)
+    io.show("[6] MCFG: ECAM at ", phys_text(ecam), ", buses ", first, "..", last)
+    io.show("")
+    @found = scan(base, ecam, first, last)
+    io.show("")
+    io.show("[7] devices found: ", found)
+    out none
+}
+
+program() {
+    io.show("Saltic PCI scan")
+    @done = run() rescue |err| {
+        io.show("FAILED: ", err)
+        none
+    }
+    io.show("")
+    io.show("This program never exits. Turn the laptop off when done.")
+    drum (200000000) {
+        @key = io.key()
+    }
+}
