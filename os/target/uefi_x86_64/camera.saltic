@@ -1,0 +1,126 @@
+use core.str
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.files
+use os.target.uefi_x86_64.usb
+
+CAMERA_VENDOR = 1032
+USB_CONTROL = 0
+DATA_IN = 0
+TIMEOUT_MS = 1000
+SCRATCH_REQUEST = 1200
+SCRATCH_CONFIG = 8192
+CONFIG_LIMIT = 16384
+GET_DESCRIPTOR = 6
+CONFIGURATION = 2
+INTERFACE = 4
+ENDPOINT = 5
+CLASS_INTERFACE = 36
+FORMAT_UNCOMPRESSED = 4
+FRAME_UNCOMPRESSED = 5
+FORMAT_MJPEG = 6
+FRAME_MJPEG = 7
+
+Reading = Box {
+    lines = [],
+    streaming = no,
+    format = ""
+}
+
+skill find_camera(base) {
+    files.connect_all(base)
+    @found = files.handles_with(base, files.BY_PROTOCOL, usb.USB_IO_GUID)
+    drum (found) {
+        @io = files.protocol_of(base, beat, usb.USB_IO_GUID)
+        @device = firmware.scratch(base, usb.SCRATCH_DESCRIPTOR)
+        @got = firmware.call(base, firmware.pointer(io, base, usb.USB_DEVICE_DESCRIPTOR), [io, device])
+        (got.failed == no) {
+            (firmware.read16(device, base, 8) == CAMERA_VENDOR) { out io }
+        }
+    }
+    out error.DeviceNotFound
+}
+
+skill control_in(base, io, kind, length) {
+    @request = firmware.scratch(base, SCRATCH_REQUEST)
+    firmware.write8(request, base, 0, 128)
+    firmware.write8(request, base, 1, GET_DESCRIPTOR)
+    firmware.write16(request, base, 2, kind * 256)
+    firmware.write16(request, base, 4, 0)
+    firmware.write16(request, base, 6, length)
+    @data = firmware.scratch(base, SCRATCH_CONFIG)
+    @status = firmware.scratch(base, usb.SCRATCH_STATUS)
+    @asked = firmware.call(base, firmware.pointer(io, base, USB_CONTROL), [io, request, firmware.number(DATA_IN), firmware.number(TIMEOUT_MS), data, firmware.number(length), status])
+    (asked.failed == yes) { out error.TransferFailed }
+    out data
+}
+
+skill transfer_kind(attributes) {
+    @kind = attributes - attributes / 4 * 4
+    (kind == 1) { out "изохронный" }
+    (kind == 2) { out "bulk" }
+    (kind == 3) { out "прерывания" }
+    out "управление"
+}
+
+skill read_interface(base, data, at, reading) {
+    @slot = firmware.read8(data, base, at + 2)
+    @alternate = firmware.read8(data, base, at + 3)
+    @subclass = firmware.read8(data, base, at + 6)
+    reading.streaming = subclass == 2
+    (reading.streaming == yes) { reading.lines = group.add(reading.lines, "интерфейс {slot}, вариант {alternate}: поток кадров") }
+    out reading
+}
+
+skill read_endpoint(base, data, at, reading) {
+    (reading.streaming == no) { out reading }
+    @address = firmware.hex(firmware.read8(data, base, at + 2), 2)
+    @kind = transfer_kind(firmware.read8(data, base, at + 3))
+    @packet = firmware.read16(data, base, at + 4)
+    @size = packet - packet / 2048 * 2048
+    @extra = packet / 2048
+    reading.lines = group.add(reading.lines, "  точка {address}: {kind}, пакет {size} байт, дополнительных {extra}")
+    out reading
+}
+
+skill read_class(base, data, at, reading) {
+    (reading.streaming == no) { out reading }
+    @subtype = firmware.read8(data, base, at + 2)
+    (subtype == FORMAT_UNCOMPRESSED) {
+        reading.format = "сырой (YUYV)"
+        reading.lines = group.add(reading.lines, "  формат: сырой (YUYV)")
+    }
+    (subtype == FORMAT_MJPEG) {
+        reading.format = "MJPEG"
+        reading.lines = group.add(reading.lines, "  формат: MJPEG")
+    }
+    @framed = subtype == FRAME_UNCOMPRESSED
+    (subtype == FRAME_MJPEG) { framed = yes }
+    (framed == yes) {
+        @width = firmware.read16(data, base, at + 5)
+        @height = firmware.read16(data, base, at + 7)
+        reading.lines = group.add(reading.lines, "    кадр {width}x{height}")
+    }
+    out reading
+}
+
+skill report(base) {
+    @io = find_camera(base)
+    @head = control_in(base, io, CONFIGURATION, 9)
+    @total = firmware.read16(head, base, 2)
+    (total > CONFIG_LIMIT) { total = CONFIG_LIMIT }
+    @data = control_in(base, io, CONFIGURATION, total)
+    @reading = Reading { lines = ["камера 0408:a030, описание конфигурации {total} байт"] }
+    @at = 0
+    drum (total) {
+        (at + 2 > total) { leave }
+        @length = firmware.read8(data, base, at)
+        (length < 2) { leave }
+        @kind = firmware.read8(data, base, at + 1)
+        (kind == INTERFACE) { reading = read_interface(base, data, at, reading) }
+        (kind == ENDPOINT) { reading = read_endpoint(base, data, at, reading) }
+        (kind == CLASS_INTERFACE) { reading = read_class(base, data, at, reading) }
+        at = at + length
+    }
+    out str.join(reading.lines, "\n")
+}

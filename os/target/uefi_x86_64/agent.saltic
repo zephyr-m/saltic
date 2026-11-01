@@ -15,17 +15,21 @@ use os.target.uefi_x86_64.disk
 use os.target.uefi_x86_64.clock
 use os.target.uefi_x86_64.parse
 use os.target.uefi_x86_64.spider
+use os.target.uefi_x86_64.usb
+use os.target.uefi_x86_64.feed
+use os.target.uefi_x86_64.camera
 
+VERSION = 2
+REPLY_LIMIT = 1400
 PORT = 5555
 DATA_PORT = 5556
 UPLOAD_OFFSET = 65536
 UPLOAD_LIMIT = 1966080
 REPORT_EVERY = 32768
 BAR_HEIGHT = 16
-BAR_SPACE = 64
 MY_IP = [10, 0, 0, 2]
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | time — дата и время | reboot — перезагрузить ноутбук | shot — снимок экрана (забирает tools/shot.py; сбрасывает принятую программу)"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | usb — устройства USB | camera — что умеет камера | time — дата и время | reboot — перезагрузить ноутбук | shot — снимок экрана (забирает tools/shot.py; сбрасывает принятую программу)"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -45,21 +49,18 @@ Agent = Box {
     failures = 0,
     last_error = "нет",
     shot_bytes = 0,
-    restart = no
+    restart = no,
+    output = []
 }
 
-MARGIN = 40
 COUNTDOWN = 5
 SECOND_WAIT = 50000000
 SHOT_CHUNK = 1024
 SHOT_HEADER = 46
 SHOT_PREFIX = "shot-part "
-LINE_GAP = 4
-LOG_LIMIT = 150
 CLOCK_EVERY = 20000
 CLOCK_WIDTH = 160
 ERASE_WORD = "ERASE-ACER-DISK"
-TOP = 96
 
 skill log(agent, message) {
     (agent.console == yes) { io.show(message) }
@@ -90,7 +91,9 @@ skill launch(agent) {
     ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
     @size = agent.expected
     log(agent, "run: starting uploaded image, {size} bytes")
-    @outcome = uefi.start_image(agent.card.base, firmware.add(agent.card.arena, UPLOAD_OFFSET), size)
+    @launched = uefi.start_image(agent.card.base, firmware.add(agent.card.arena, UPLOAD_OFFSET), size)
+    agent.output = launched.output
+    @outcome = launched.outcome
     @code = outcome.value.lo
     @status = "{code}"
     (outcome.failed == yes) { status = "ошибка прошивки {code}" }
@@ -144,7 +147,7 @@ skill information(agent) {
     @last_error = agent.last_error
     @columns = agent.columns
     @rows = agent.rows
-    out "агент Saltic на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
+    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
 }
 
 skill draw_test(agent) {
@@ -165,62 +168,24 @@ skill draw_test(agent) {
     out "графика: {width} × {height}, формат {format}, строка {stride} пикселей, кадр по адресу {frame}\nнарисовал серый прямоугольник 400 × 200 и красный, зелёный, синий квадраты"
 }
 
-skill paper(screen) {
-    out graphics.color(screen, 250, 250, 250)
-}
-
-skill ink(screen) {
-    out graphics.color(screen, 24, 24, 27)
-}
-
 skill clear_screen(agent) {
     @screen = graphics.open(agent.card.base)
-    graphics.fill(screen, 0, 0, screen.width, screen.height, paper(screen))
-    lettering.paint_text(screen, lettering.FACE_TITLE, MARGIN, 32, "Saltic - агент на Acer", ink(screen))
-    graphics.fill(screen, MARGIN, 76, screen.width - MARGIN * 2, 1, graphics.color(screen, 228, 228, 231))
+    graphics.fill(screen, 0, 0, screen.width, screen.height, feed.paper(screen))
+    lettering.paint_text(screen, lettering.FACE_TITLE, feed.MARGIN, 32, "Saltic — агент {VERSION} на Acer", feed.ink(screen))
+    graphics.fill(screen, feed.MARGIN, 76, screen.width - feed.MARGIN * 2, 1, graphics.color(screen, 228, 228, 231))
     agent.line = 0
-    agent.cursor = TOP
+    agent.cursor = feed.TOP
     agent.console = no
     spider.draw(agent.card.base)
     out "экран очищен"
 }
 
-skill faint(screen) {
-    out graphics.color(screen, 113, 113, 122)
-}
-
-skill next_row(agent, screen, face) {
-    (agent.cursor + face.height > screen.height - BAR_SPACE - 32) {
-        graphics.fill(screen, 0, TOP - 8, screen.width, screen.height - TOP - BAR_SPACE - 24, paper(screen))
-        spider.draw(agent.card.base)
-        agent.cursor = TOP
-    }
-    @y = agent.cursor
-    agent.cursor = agent.cursor + face.height + LINE_GAP
-    out y
-}
-
 skill print_line(agent, line_bytes) {
     @screen = graphics.open(agent.card.base)
     @face = lettering.FACE_TEXT
-    lettering.paint_bytes(screen, face, MARGIN, next_row(agent, screen, face), line_bytes, ink(screen))
+    lettering.paint_bytes(screen, face, feed.MARGIN, feed.next_row(agent, screen, face), line_bytes, feed.ink(screen))
     agent.line = agent.line + 1
     out "напечатал строку {agent.line}"
-}
-
-skill journal(agent, who, payload) {
-    (agent.console == yes) { out none }
-    @screen = graphics.open(agent.card.base)
-    @face = lettering.FACE_SMALL
-    @moment_text = clock.clock_text(clock.local_time(uefi.now(agent.card.base)))
-    @prefix = "{moment_text}  {who}  "
-    @bytes = []
-    drum (str.len(prefix)) { bytes = group.add(bytes, str.byte(prefix, beat)) }
-    @shown = group.count(payload)
-    (shown > LOG_LIMIT) { shown = LOG_LIMIT }
-    bytes = group.concat(bytes, group.slice(payload, 0, shown))
-    lettering.paint_bytes(screen, face, MARGIN, next_row(agent, screen, face), bytes, faint(screen))
-    out none
 }
 
 skill prepare_disk(agent, words) {
@@ -249,9 +214,9 @@ skill draw_clock(agent) {
     (moment.second == agent.shown_second) { out agent }
     agent.shown_second = moment.second
     @screen = graphics.open(agent.card.base)
-    @left = screen.width - MARGIN - CLOCK_WIDTH
-    graphics.fill(screen, left, 32, CLOCK_WIDTH, 32, paper(screen))
-    lettering.paint_text(screen, lettering.FACE_TITLE, left + 16, 32, clock.clock_text(moment), ink(screen))
+    @left = screen.width - feed.MARGIN - CLOCK_WIDTH
+    graphics.fill(screen, left, 32, CLOCK_WIDTH, 32, feed.paper(screen))
+    lettering.paint_text(screen, lettering.FACE_TITLE, left + 16, 32, clock.clock_text(moment), feed.ink(screen))
     out agent
 }
 
@@ -281,6 +246,9 @@ skill execute(agent, text, payload) {
     (name == "screen") { out draw_test(agent) }
     (name == "clear") { out clear_screen(agent) }
     (name == "volumes") { out files.report(agent.card.base) }
+    (name == "usb") { out usb.report(agent.card.base) }
+    (name == "camera") { out camera.report(agent.card.base) }
+    (name == "protocols") { out usb.protocols(agent.card.base, words) }
     (name == "time") { out time_reply(agent) }
     (name == "reboot") { out restart_later(agent) }
     (name == "shot") { out take_shot(agent) }
@@ -374,9 +342,14 @@ skill answer(agent, bytes) {
     @who = net.ip_text(packet.from_ip)
     @command = packet.text
     log(agent, "command from {who}: {command}")
-    journal(agent, who, packet.payload)
+    feed.show_command(agent, who, packet.payload)
     @reply = execute(agent, command, packet.payload) rescue |err| { "ошибка: {err}" }
-    @frame = net.udp_frame(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply)
+    @reply_bytes = feed.text_bytes(reply, REPLY_LIMIT)
+    (group.count(agent.output) > 0) { reply_bytes = group.concat(group.add(reply_bytes, 10), agent.output) }
+    agent.output = []
+    (group.count(reply_bytes) > REPLY_LIMIT) { reply_bytes = group.slice(reply_bytes, 0, REPLY_LIMIT) }
+    feed.show_reply(agent, reply_bytes)
+    @frame = net.udp_frame_bytes(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply_bytes)
     @sent = rtl8111.send(agent.card, frame)
     log(agent, "  replied {sent} bytes")
     agent.commands = agent.commands + 1
@@ -390,17 +363,17 @@ skill answer(agent, bytes) {
 skill draw_progress(agent) {
     (agent.console == yes) { out none }
     @screen = graphics.open(agent.card.base)
-    @width = screen.width - MARGIN * 2
-    @top = screen.height - BAR_SPACE
-    graphics.fill(screen, 0, top - 24, screen.width, BAR_SPACE + 24, paper(screen))
+    @width = screen.width - feed.MARGIN * 2
+    @top = screen.height - feed.BAR_SPACE
+    graphics.fill(screen, 0, top - 24, screen.width, feed.BAR_SPACE + 24, feed.paper(screen))
     @done = agent.received / 1024
     @total = agent.expected / 1024
     @percent = done * 100 / total
     @label = "приём программы: {done} КБ из {total} КБ - {percent} %"
     (agent.received == agent.expected) { label = "программа принята целиком: {total} КБ" }
-    lettering.paint_text(screen, lettering.FACE_SMALL, MARGIN, top - 20, label, faint(screen))
-    graphics.fill(screen, MARGIN, top, width, BAR_HEIGHT, graphics.color(screen, 228, 228, 231))
-    graphics.fill(screen, MARGIN, top, width * percent / 100, BAR_HEIGHT, graphics.color(screen, 24, 24, 27))
+    lettering.paint_text(screen, lettering.FACE_SMALL, feed.MARGIN, top - 20, label, feed.faint(screen))
+    graphics.fill(screen, feed.MARGIN, top, width, BAR_HEIGHT, graphics.color(screen, 228, 228, 231))
+    graphics.fill(screen, feed.MARGIN, top, width * percent / 100, BAR_HEIGHT, graphics.color(screen, 24, 24, 27))
     out none
 }
 
@@ -465,9 +438,9 @@ skill tick(agent) {
 
 skill banner(base, message) {
     @screen = graphics.open(base)
-    @top = screen.height - BAR_SPACE - 40
+    @top = screen.height - feed.BAR_SPACE - 40
     graphics.fill(screen, 0, top, screen.width, 36, graphics.color(screen, 254, 226, 226))
-    lettering.paint_text(screen, lettering.FACE_TEXT, MARGIN, top + 6, message, graphics.color(screen, 153, 27, 27))
+    lettering.paint_text(screen, lettering.FACE_TEXT, feed.MARGIN, top + 6, message, graphics.color(screen, 153, 27, 27))
     out none
 }
 
@@ -506,7 +479,7 @@ skill run() {
     io.show("[2] card configured, waiting for link...")
     @link = rtl8111.wait_link(card)
     io.show("[3] link {link}")
-    @hello = net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic слушает 10.0.0.2:5555, скажи help")
+    @hello = net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic {VERSION} слушает 10.0.0.2:5555, скажи help")
     rtl8111.send(card, hello)
     io.show("[4] listening on 10.0.0.2:5555 (arp + udp commands)")
     io.show("")

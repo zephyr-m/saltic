@@ -23,9 +23,19 @@ def table(name):
     return [[int(x) for x in re.findall(r"\d+", glyph)] for glyph in re.findall(r"\[([^\[\]]*)\]", body)]
 
 
+HYPHEN = 13
+
+
+def em_dash(glyphs, width):
+    """Длинное тире: строки дефиса, растянутые на всю ширину буквы."""
+    full = (1 << width) - 1
+    return [full if row else 0 for row in glyphs[HYPHEN]]
+
+
 lines = []
 for name, width, height in SIZES:
     glyphs = table(name)
+    glyphs.append(em_dash(glyphs, width))
     print(f"glyphs: {name} — {len(glyphs)} букв", flush=True)
     lines.append(f"GLYPHS_{name} = [")
     rows = []

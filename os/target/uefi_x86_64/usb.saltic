@@ -1,0 +1,119 @@
+use core.str
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.files
+use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.parse
+
+USB_IO_GUID = [214, 104, 47, 43, 210, 12, 207, 68, 142, 139, 187, 162, 11, 27, 91, 117]
+USB2_HC_GUID = [38, 82, 116, 62, 24, 152, 182, 69, 162, 172, 215, 205, 14, 139, 162, 188]
+PROTOCOLS_PER_HANDLE = 304
+USB_ISOCHRONOUS = 32
+USB_DEVICE_DESCRIPTOR = 48
+USB_INTERFACE_DESCRIPTOR = 64
+USB_STRING_DESCRIPTOR = 80
+ENGLISH = 1033
+SCRATCH_DESCRIPTOR = 1024
+SCRATCH_STRING = 1088
+SCRATCH_STATUS = 1096
+SCRATCH_DATA = 1104
+VIDEO_CLASS = 14
+NAME_LIMIT = 64
+
+skill class_name(code, subclass) {
+    (code == 1) { out "звук" }
+    (code == 2) { out "связь" }
+    (code == 3) { out "ввод" }
+    (code == 8) { out "накопитель" }
+    (code == 9) { out "хаб" }
+    (code == 11) { out "смарт-карта" }
+    (code == 224) { out "радио (Bluetooth)" }
+    (code == 255) { out "своё у производителя" }
+    (code == VIDEO_CLASS) {
+        (subclass == 1) { out "видео: управление (камера!)" }
+        (subclass == 2) { out "видео: поток кадров" }
+        out "видео"
+    }
+    out "класс {code}"
+}
+
+skill string_of(base, io, index) {
+    (index == 0) { out "" }
+    @at = firmware.scratch(base, SCRATCH_STRING)
+    @asked = firmware.call(base, firmware.pointer(io, base, USB_STRING_DESCRIPTOR), [io, firmware.number(ENGLISH), firmware.number(index), at])
+    (asked.failed == yes) { out "" }
+    out files.read_wide(base, firmware.pointer(at, base, 0), 0, NAME_LIMIT)
+}
+
+skill isochronous_answer(base, io) {
+    @status = firmware.scratch(base, SCRATCH_STATUS)
+    @data = firmware.scratch(base, SCRATCH_DATA)
+    @asked = firmware.call(base, firmware.pointer(io, base, USB_ISOCHRONOUS), [io, firmware.number(129), data, firmware.number(0), status])
+    (asked.failed == no) { out "изохронная передача: прошивка приняла вызов" }
+    (asked.value.lo == 3) { out "изохронная передача: прошивка не умеет (Unsupported)" }
+    @code = asked.value.lo
+    out "изохронная передача: ответ прошивки {code}"
+}
+
+skill interface_line(base, index, handle) {
+    @io = files.protocol_of(base, handle, USB_IO_GUID) rescue |err| { out "  {index}: нет UsbIo" }
+    @device = firmware.scratch(base, SCRATCH_DESCRIPTOR)
+    @got = firmware.call(base, firmware.pointer(io, base, USB_DEVICE_DESCRIPTOR), [io, device])
+    (got.failed == yes) { out "  {index}: нет описания устройства" }
+    @vendor = firmware.hex(firmware.read16(device, base, 8), 4)
+    @model = firmware.hex(firmware.read16(device, base, 10), 4)
+    @product = string_of(base, io, firmware.read8(device, base, 15))
+    @maker = string_of(base, io, firmware.read8(device, base, 14))
+    @face = firmware.scratch(base, SCRATCH_DESCRIPTOR)
+    @asked = firmware.call(base, firmware.pointer(io, base, USB_INTERFACE_DESCRIPTOR), [io, face])
+    (asked.failed == yes) { out "  {index}: {vendor}:{model} {maker} {product}, нет описания интерфейса" }
+    @slot = firmware.read8(face, base, 2)
+    @code = firmware.read8(face, base, 5)
+    @kind = class_name(code, firmware.read8(face, base, 6))
+    @line = "  {index}: {vendor}:{model} интерфейс {slot}, {kind} | {maker} {product}"
+    (code == VIDEO_CLASS) { out str.add(line, str.add("\n     ", isochronous_answer(base, io))) }
+    out line
+}
+
+skill report(base) {
+    @connected = files.connect_all(base)
+    @handles = files.handles_with(base, files.BY_PROTOCOL, USB_IO_GUID)
+    @total = group.count(handles)
+    @controllers = group.count(files.handles_with(base, files.BY_PROTOCOL, USB2_HC_GUID))
+    @lines = ["подключил драйверы к {connected} устройствам", "контроллеров USB у прошивки: {controllers}", "интерфейсов USB: {total}"]
+    drum (group.count(handles)) { lines = group.add(lines, interface_line(base, beat, group.get(handles, beat))) }
+    out str.join(lines, "\n")
+}
+
+skill guid_text(base, at) {
+    @first = str.add(firmware.hex(firmware.read16(at, base, 2), 4), firmware.hex(firmware.read16(at, base, 0), 4))
+    @text = "{first}-"
+    @second = firmware.hex(firmware.read16(at, base, 4), 4)
+    @third = firmware.hex(firmware.read16(at, base, 6), 4)
+    text = str.add(text, "{second}-{third}-")
+    drum (8) {
+        (beat == 2) { text = str.add(text, "-") }
+        text = str.add(text, firmware.hex(firmware.read8(at, base, 8 + beat), 2))
+    }
+    out text
+}
+
+skill protocols(base, words) {
+    files.connect_all(base)
+    @disks = files.handles_with(base, files.BY_PROTOCOL, files.BLOCK_IO_GUID)
+    @index = 0
+    (group.count(words) > 1) {
+        @asked_index = parse.parse_hex(group.get(words, 1))
+        index = asked_index.lo
+    }
+    ((index < group.count(disks)) == no) { out "нет диска {index}" }
+    @services = uefi.boot_services(base)
+    @list_at = firmware.scratch(base, SCRATCH_STRING)
+    @count_at = firmware.scratch(base, SCRATCH_STATUS)
+    @asked = firmware.call(base, firmware.pointer(services, base, PROTOCOLS_PER_HANDLE), [group.get(disks, index), list_at, count_at])
+    (asked.failed == yes) { out "прошивка не отдала протоколы" }
+    @list = firmware.pointer(list_at, base, 0)
+    @lines = ["протоколы диска {index}:"]
+    drum (firmware.read16(count_at, base, 0)) { lines = group.add(lines, str.add("  ", guid_text(base, firmware.pointer(list, base, beat * 8)))) }
+    out str.join(lines, "\n")
+}

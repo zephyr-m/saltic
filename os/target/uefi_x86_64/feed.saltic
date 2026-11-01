@@ -1,0 +1,94 @@
+use core.str
+use core.group
+use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.graphics
+use os.target.uefi_x86_64.lettering
+use os.target.uefi_x86_64.clock
+use os.target.uefi_x86_64.spider
+
+MARGIN = 40
+BAR_SPACE = 64
+TOP = 96
+LINE_GAP = 4
+LOG_LIMIT = 150
+REPLY_INDENT = 24
+REPLY_LINES = 24
+
+skill paper(screen) {
+    out graphics.color(screen, 250, 250, 250)
+}
+
+skill ink(screen) {
+    out graphics.color(screen, 24, 24, 27)
+}
+
+skill faint(screen) {
+    out graphics.color(screen, 113, 113, 122)
+}
+
+skill next_row(agent, screen, face) {
+    (agent.cursor + face.height > screen.height - BAR_SPACE - 32) {
+        graphics.fill(screen, 0, TOP - 8, screen.width, screen.height - TOP - BAR_SPACE - 24, paper(screen))
+        spider.draw(agent.card.base)
+        agent.cursor = TOP
+    }
+    @y = agent.cursor
+    agent.cursor = agent.cursor + face.height + LINE_GAP
+    out y
+}
+
+skill text_bytes(text, limit) {
+    @bytes = []
+    @count = str.len(text)
+    (count > limit) { count = limit }
+    drum (count) { bytes = group.add(bytes, str.byte(text, beat)) }
+    out bytes
+}
+
+skill show_command(agent, who, payload) {
+    (agent.console == yes) { out none }
+    @screen = graphics.open(agent.card.base)
+    @face = lettering.FACE_SMALL
+    @moment_text = clock.clock_text(clock.local_time(uefi.now(agent.card.base)))
+    @bytes = text_bytes("{moment_text}  {who}  ", LOG_LIMIT)
+    @shown = group.count(payload)
+    (shown > LOG_LIMIT) { shown = LOG_LIMIT }
+    bytes = group.concat(bytes, group.slice(payload, 0, shown))
+    lettering.paint_bytes(screen, face, MARGIN, next_row(agent, screen, face), bytes, faint(screen))
+    out none
+}
+
+skill split_lines(bytes) {
+    @lines = []
+    @line = []
+    drum (bytes) {
+        (beat == 10) {
+            lines = group.add(lines, line)
+            line = []
+        }
+        ((beat == 10) == no) { line = group.add(line, beat) }
+    }
+    out group.add(lines, line)
+}
+
+skill show_reply(agent, bytes) {
+    (agent.console == yes) { out none }
+    @screen = graphics.open(agent.card.base)
+    @face = lettering.FACE_SMALL
+    @lines = split_lines(bytes)
+    @shown = group.count(lines)
+    (shown > REPLY_LINES) { shown = REPLY_LINES }
+    drum (shown) {
+        @row = next_row(agent, screen, face)
+        @line = group.get(lines, beat)
+        @width = group.count(line)
+        (width > LOG_LIMIT) { width = LOG_LIMIT }
+        lettering.paint_bytes(screen, face, MARGIN + REPLY_INDENT, row, group.slice(line, 0, width), ink(screen))
+    }
+    @hidden = group.count(lines) - shown
+    (hidden > 0) {
+        @row = next_row(agent, screen, face)
+        lettering.paint_text(screen, face, MARGIN + REPLY_INDENT, row, "... и ещё {hidden} строк", faint(screen))
+    }
+    out none
+}

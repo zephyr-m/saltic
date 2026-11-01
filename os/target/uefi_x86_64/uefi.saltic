@@ -1,3 +1,4 @@
+use core.group
 use os.target.uefi_x86_64.firmware
 
 SYSTEM_CON_OUT = 64
@@ -12,6 +13,10 @@ TEXT_SET_MODE = 32
 TEXT_MODE = 72
 BOOT_LOAD_IMAGE = 200
 BOOT_START_IMAGE = 208
+BOOT_FREE_POOL = 72
+EXIT_SIZE_AT = 32
+EXIT_DATA_AT = 40
+OUTPUT_LIMIT = 1200
 
 Clock = Box {
     year = 0,
@@ -20,6 +25,11 @@ Clock = Box {
     hour = 0,
     minute = 0,
     second = 0
+}
+
+Launched = Box {
+    outcome = firmware.Answer {},
+    output = []
 }
 
 Console = Box {
@@ -63,9 +73,34 @@ skill start_image(base, image, size) {
     @services = boot_services(base)
     @handle_at = firmware.scratch(base, 16)
     @loaded = firmware.call(base, firmware.pointer(services, base, BOOT_LOAD_IMAGE), [firmware.number(0), firmware.image_handle(), firmware.number(0), image, firmware.number(size), handle_at])
-    (loaded.failed == yes) { out loaded }
+    (loaded.failed == yes) { out Launched { outcome = loaded } }
     @child = firmware.pointer(handle_at, base, 0)
-    out firmware.call(base, firmware.pointer(services, base, BOOT_START_IMAGE), [child, firmware.number(0), firmware.number(0)])
+    @size_at = firmware.scratch(base, EXIT_SIZE_AT)
+    @data_at = firmware.scratch(base, EXIT_DATA_AT)
+    firmware.write64(size_at, base, 0, firmware.Phys {})
+    firmware.write64(data_at, base, 0, firmware.Phys {})
+    @outcome = firmware.call(base, firmware.pointer(services, base, BOOT_START_IMAGE), [child, size_at, data_at])
+    out Launched { outcome = outcome, output = exit_output(base, services, size_at, data_at) }
+}
+
+skill exit_output(base, services, size_at, data_at) {
+    @size = firmware.read16(size_at, base, 0)
+    (firmware.read16(size_at, base, 2) > 0) { size = OUTPUT_LIMIT }
+    (size == 0) { out [] }
+    @data = firmware.pointer(data_at, base, 0)
+    @first = 0
+    drum (size / 2) {
+        (firmware.read16(data, base, beat * 2) == 0) {
+            first = beat * 2 + 2
+            leave
+        }
+    }
+    @count = size - first
+    (count > OUTPUT_LIMIT) { count = OUTPUT_LIMIT }
+    @bytes = []
+    drum (count) { bytes = group.add(bytes, firmware.read8(data, base, first + beat)) }
+    firmware.call(base, firmware.pointer(services, base, BOOT_FREE_POOL), [data])
+    out bytes
 }
 
 skill now(base) {
