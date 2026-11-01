@@ -1,0 +1,68 @@
+use core.str
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.files
+
+HOME = "SALTIC"
+SHELF = "BIN"
+TAIL = ".EFI"
+FILE_DELETE = 24
+MODE_READ_WRITE = 3
+
+skill shelf_path() {
+    out str.add(str.add(HOME, "\\"), SHELF)
+}
+
+skill file_name(name) {
+    out str.add(str.upper(name), TAIL)
+}
+
+skill forget(base, shelf, name) {
+    @child_at = firmware.scratch(base, files.SCRATCH_POINTER)
+    @opened = firmware.call(base, firmware.pointer(shelf, base, files.FILE_OPEN), [shelf, child_at, files.wide_name(base, file_name(name)), firmware.number(MODE_READ_WRITE), firmware.number(0)])
+    (opened.failed == yes) { out none }
+    @file = firmware.pointer(child_at, base, 0)
+    out firmware.call(base, firmware.pointer(file, base, FILE_DELETE), [file])
+}
+
+skill keep(base, image, size, name) {
+    @root = files.saltic_root(base)
+    @home = files.create(base, root, HOME, files.DIRECTORY)
+    @shelf = files.create(base, home, SHELF, files.DIRECTORY)
+    forget(base, shelf, name)
+    @file = files.create(base, shelf, file_name(name), 0)
+    @size_at = firmware.scratch(base, files.SCRATCH_SIZE)
+    firmware.write64(size_at, base, 0, firmware.number(size))
+    @written = firmware.call(base, firmware.pointer(file, base, files.FILE_WRITE), [file, size_at, image])
+    (written.failed == yes) { out error.WriteFailed }
+    @count = firmware.read16(size_at, base, 0) + firmware.read16(size_at, base, 2) * 65536
+    firmware.call(base, firmware.pointer(file, base, files.FILE_FLUSH), [file])
+    files.close_file(base, file)
+    files.close_file(base, shelf)
+    files.close_file(base, home)
+    files.close_file(base, root)
+    out count
+}
+
+skill shelf_names(base) {
+    @root = files.saltic_root(base) rescue |err| { out [] }
+    @found = files.folder_names(base, root, shelf_path())
+    files.close_file(base, root)
+    @names = []
+    drum (found) {
+        (str.ends_with(beat, TAIL) == yes) { names = group.add(names, str.slice(beat, 0, str.len(beat) - str.len(TAIL))) }
+    }
+    out names
+}
+
+skill load(base, name, place, limit) {
+    @root = files.saltic_root(base)
+    @file = files.open_child(base, root, str.add(str.add(shelf_path(), "\\"), file_name(name)))
+    @size_at = firmware.scratch(base, files.SCRATCH_SIZE)
+    firmware.write64(size_at, base, 0, firmware.number(limit))
+    @read = firmware.call(base, firmware.pointer(file, base, files.FILE_READ), [file, size_at, place])
+    files.close_file(base, file)
+    files.close_file(base, root)
+    (read.failed == yes) { out error.ReadFailed }
+    out firmware.read16(size_at, base, 0) + firmware.read16(size_at, base, 2) * 65536
+}

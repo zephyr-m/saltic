@@ -1,0 +1,222 @@
+use core.str
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.graphics
+use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.net
+use os.target.uefi_x86_64.reply
+use os.target.uefi_x86_64.remote
+use os.uiengine.canvas
+use os.uiengine.shapes
+use os.uiengine.fonts
+
+HEADER = 64
+INPUT = 44
+MARGIN = 24
+BUBBLE_PADDING = 10
+BUBBLE_GAP = 10
+BUBBLE_WIDTH = 520
+HOST_PORT = 5557
+SAY = "say "
+PAUSE = 5000
+LOOPS = 200000000
+SCAN_ESCAPE = 23
+ENTER = 13
+BACKSPACE = 8
+SPACE = 32
+
+Message = Box {
+    bytes = [],
+    mine = no
+}
+
+Chat = Box {
+    messages = [],
+    typed = "",
+    peer = none,
+    quit = no,
+    sent = 0
+}
+
+skill wrap(bytes, limit, face) {
+    @lines = []
+    @line = []
+    @word = []
+    drum (group.count(bytes) + 1) {
+        @ended = beat == group.count(bytes)
+        @code = SPACE
+        (ended == no) { code = group.get(bytes, beat) }
+        pick {
+            (code == SPACE) {
+                @joined = word
+                (group.count(line) > 0) { joined = group.concat(group.add(line, SPACE), word) }
+                pick {
+                    (fonts.measure_bytes(joined, face) > limit) {
+                        (group.count(line) > 0) { lines = group.add(lines, line) }
+                        line = word
+                    }
+                    { line = joined }
+                }
+                word = []
+            }
+            { word = group.add(word, code) }
+        }
+    }
+    (group.count(line) > 0) { lines = group.add(lines, line) }
+    out lines
+}
+
+skill bubble_height(message, face) {
+    out group.count(wrap(message.bytes, BUBBLE_WIDTH - 2 * BUBBLE_PADDING, face)) * face.line + 2 * BUBBLE_PADDING
+}
+
+skill draw_bubble(screen, message, bottom, face) {
+    @lines = wrap(message.bytes, BUBBLE_WIDTH - 2 * BUBBLE_PADDING, face)
+    @height = group.count(lines) * face.line + 2 * BUBBLE_PADDING
+    @wide = 0
+    drum (lines) {
+        @size = fonts.measure_bytes(beat, face)
+        (size > wide) { wide = size }
+    }
+    wide = wide + 2 * BUBBLE_PADDING
+    @x = MARGIN
+    @fill = canvas.ZINC_100
+    @ink = canvas.ZINC_900
+    (message.mine == yes) {
+        x = screen.width - MARGIN - wide
+        fill = canvas.ZINC_900
+        ink = canvas.PAPER
+    }
+    @top = bottom - height
+    shapes.rounded(screen, x, top, wide, height, 12, fill, canvas.PAPER)
+    drum (group.count(lines)) { fonts.draw_bytes(screen, x + BUBBLE_PADDING, top + BUBBLE_PADDING + beat * face.line, group.get(lines, beat), ink, face) }
+    out height
+}
+
+skill draw_messages(screen, chat) {
+    @face = fonts.REGULAR
+    @floor = screen.height - INPUT - 2 * MARGIN
+    graphics.fill(screen, 0, HEADER, screen.width, floor - HEADER + 8, canvas.paint(screen, canvas.PAPER))
+    @bottom = floor
+    @count = group.count(chat.messages)
+    drum (count) {
+        @message = group.get(chat.messages, count - 1 - beat)
+        @height = bubble_height(message, face)
+        (bottom - height < HEADER + MARGIN) { out none }
+        draw_bubble(screen, message, bottom, face)
+        bottom = bottom - height - BUBBLE_GAP
+    }
+    out none
+}
+
+skill draw_input(screen, chat) {
+    @top = screen.height - INPUT - MARGIN
+    @width = screen.width - 2 * MARGIN
+    graphics.fill(screen, 0, top - 4, screen.width, INPUT + 8, canvas.paint(screen, canvas.PAPER))
+    shapes.framed_box(screen, MARGIN, top, width, INPUT, 10, canvas.Look { fill = canvas.WHITE, edge = canvas.ZINC_200, framed = yes }, canvas.PAPER)
+    @face = fonts.REGULAR
+    @text_top = top + (INPUT - face.line) / 2
+    @pen = MARGIN + 14
+    pick {
+        (chat.typed == "") { fonts.draw_text(screen, pen, text_top, "Напишите сообщение латиницей…  Enter — отправить, Esc — выход", canvas.ZINC_500, face) }
+        { pen = fonts.draw_text(screen, pen, text_top, chat.typed, canvas.ZINC_900, face) }
+    }
+    graphics.fill(screen, pen + 1, text_top + 2, 2, face.line - 4, canvas.paint(screen, canvas.ZINC_900))
+    out none
+}
+
+skill draw_header(screen, chat) {
+    graphics.fill(screen, 0, 0, screen.width, HEADER, canvas.paint(screen, canvas.PAPER))
+    fonts.draw_text(screen, MARGIN, 18, "Чат с Claude", canvas.ZINC_900, fonts.HEADING)
+    @status = "провод 10.0.0.1 ↔ 10.0.0.2, ждём первого сообщения Claude"
+    ((chat.peer == none) == no) { status = "провод 10.0.0.1 ↔ 10.0.0.2, Claude на связи" }
+    fonts.draw_text(screen, MARGIN + 150, 22, status, canvas.ZINC_500, fonts.REGULAR)
+    out shapes.hairline(screen, 0, HEADER - 1, screen.width, canvas.ZINC_200)
+}
+
+skill hear(chat, screen, packets) {
+    drum (packets) {
+        (str.starts_with(beat.text, SAY) == yes) {
+            chat.peer = beat
+            chat.messages = group.add(chat.messages, Message { bytes = group.slice(beat.payload, str.len(SAY), group.count(beat.payload)) })
+            draw_header(screen, chat)
+            draw_messages(screen, chat)
+        }
+    }
+    out none
+}
+
+skill send(chat, screen, link) {
+    (chat.typed == "") { out none }
+    @bytes = fonts.bytes_of(chat.typed)
+    chat.messages = group.add(chat.messages, Message { bytes = bytes, mine = yes })
+    ((chat.peer == none) == no) { remote.send_to(link, chat.peer, HOST_PORT, bytes) }
+    chat.sent = chat.sent + 1
+    chat.typed = ""
+    draw_messages(screen, chat)
+    out draw_input(screen, chat)
+}
+
+skill type_key(chat, screen, link, key) {
+    (key.ready == no) { out none }
+    (key.scan == SCAN_ESCAPE) {
+        chat.quit = yes
+        out none
+    }
+    (key.char == ENTER) { out send(chat, screen, link) }
+    (key.char == BACKSPACE) {
+        (str.len(chat.typed) > 0) { chat.typed = str.slice(chat.typed, 0, str.len(chat.typed) - 1) }
+        out draw_input(screen, chat)
+    }
+    (key.char < SPACE) { out none }
+    (key.char > 126) { out none }
+    chat.typed = str.add(chat.typed, net.printable(key.char))
+    out draw_input(screen, chat)
+}
+
+skill complain(screen, stage, problem) {
+    graphics.fill(screen, 700, 8, screen.width - 700, 48, canvas.paint(screen, canvas.PAPER))
+    fonts.draw_text(screen, 700, 22, "ошибка ({stage}): {problem}", canvas.RED_500, fonts.MEDIUM)
+    out none
+}
+
+skill listen_step(chat, screen, link) {
+    @packets = remote.serve(link) rescue |err| {
+        complain(screen, "сеть", err)
+        out none
+    }
+    hear(chat, screen, packets) rescue |err| {
+        complain(screen, "сообщение", err)
+        out none
+    }
+    out none
+}
+
+skill step(chat, screen, base, link) {
+    listen_step(chat, screen, link)
+    out type_key(chat, screen, link, uefi.poll_key(base, PAUSE))
+}
+
+program() {
+    @base = firmware.guest_base()
+    @screen = graphics.open(base)
+    uefi.forget_keys(base)
+    @chat = Chat {}
+    graphics.fill(screen, 0, 0, screen.width, screen.height, canvas.paint(screen, canvas.PAPER))
+    draw_header(screen, chat)
+    draw_input(screen, chat)
+    @link = remote.open_remote()
+    drum (LOOPS) {
+        step(chat, screen, base, link) rescue |err| {
+            complain(screen, "клавиатура", err)
+            none
+        }
+        (chat.quit == yes) {
+            @total = group.count(chat.messages)
+            @sent = chat.sent
+            reply.home("чат: сообщений {total}, из них с клавиатуры Acer {sent}")
+            out none
+        }
+    }
+    out none
+}

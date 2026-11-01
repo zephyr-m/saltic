@@ -19,8 +19,15 @@ use os.target.uefi_x86_64.usb
 use os.target.uefi_x86_64.feed
 use os.target.uefi_x86_64.camera
 use os.target.uefi_x86_64.shot
+use os.target.uefi_x86_64.reply
+use os.target.uefi_x86_64.programs
+use os.target.uefi_x86_64.shelf
 
-VERSION = 6
+VERSION = 8
+KEY_EVERY = 256
+ENTER = 13
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
 REPLY_LIMIT = 1400
 PORT = 5555
 DATA_PORT = 5556
@@ -32,7 +39,7 @@ REPORT_EVERY = 32768
 BAR_HEIGHT = 16
 MY_IP = [10, 0, 0, 2]
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран (после run экран у программы, лента молчит до clear) | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | usb — устройства USB | camera — что умеет камера | code <текст> — показать кусок кода | time — дата и время | reboot — перезагрузить ноутбук | shot — снимок экрана (забирает tools/shot.py)"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран (после run экран у программы, лента молчит до clear) | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | usb — устройства USB | camera — что умеет камера | code <текст> — показать кусок кода | keep <имя> — сохранить принятую программу на диск, она появится в панели (Enter — открыть) | time — дата и время | reboot — перезагрузить ноутбук | shot — снимок экрана (забирает tools/shot.py)"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -56,6 +63,8 @@ Agent = Box {
     output = [],
     lent = no,
     bay = firmware.Phys {},
+    names = [],
+    chosen = 0,
     limit = ARENA_LIMIT
 }
 
@@ -63,7 +72,6 @@ COUNTDOWN = 5
 SECOND_WAIT = 50000000
 SHOT_PREFIX = "shot-part "
 CLOCK_EVERY = 20000
-CLOCK_WIDTH = 160
 ERASE_WORD = "ERASE-ACER-DISK"
 
 skill log(agent, message) {
@@ -109,6 +117,9 @@ skill launch(agent) {
     rtl8111.configure(agent.card)
     rtl8111.wait_link(agent.card)
     log(agent, "run: card configured again, listening")
+    (outcome.failed == no) {
+        (code == reply.HOME) { clear_screen(agent) }
+    }
     out "программа закончила работу, статус {status}"
 }
 
@@ -188,7 +199,45 @@ skill clear_screen(agent) {
     agent.console = no
     agent.lent = no
     spider.draw(agent.card.base)
+    refresh_shelf(agent)
     out "экран очищен"
+}
+
+skill refresh_shelf(agent) {
+    agent.names = programs.shelf_names(agent.card.base) rescue |err| { [] }
+    (agent.chosen > group.count(agent.names) - 1) { agent.chosen = 0 }
+    out shelf.draw_shelf(agent.card.base, agent.names, agent.chosen)
+}
+
+skill keep_program(agent, words) {
+    (group.count(words) < 2) { out "как: keep <имя>" }
+    (agent.expected == 0) { out "ничего не принято" }
+    @name = group.get(words, 1)
+    @written = programs.keep(agent.card.base, agent.bay, agent.expected, name)
+    (agent.lent == no) { refresh_shelf(agent) }
+    out "сохранил {name}: {written} байт в \\SALTIC\\BIN"
+}
+
+skill open_program(agent) {
+    (group.count(agent.names) == 0) { out none }
+    @name = group.get(agent.names, agent.chosen)
+    @size = programs.load(agent.card.base, name, agent.bay, agent.limit)
+    agent.expected = size
+    agent.received = size
+    feed.show_command(agent, "клавиатура", feed.text_bytes("открываю {name}", 64))
+    @result = launch(agent)
+    out feed.show_reply(agent, feed.text_bytes(result, 200))
+}
+
+skill press(agent, key) {
+    (key.ready == no) { out none }
+    (agent.lent == yes) { out clear_screen(agent) }
+    @count = group.count(agent.names)
+    (count == 0) { out none }
+    (key.scan == SCAN_RIGHT) { agent.chosen = num.mod(agent.chosen + 1, count) }
+    (key.scan == SCAN_LEFT) { agent.chosen = num.mod(agent.chosen + count - 1, count) }
+    (key.char == ENTER) { out open_program(agent) rescue |err| { feed.show_reply(agent, feed.text_bytes("не открылась: {err}", 200)) } }
+    out shelf.draw_shelf(agent.card.base, agent.names, agent.chosen)
 }
 
 skill print_line(agent, line_bytes) {
@@ -218,17 +267,6 @@ skill install_image(agent) {
     ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
     @written = files.install(agent.card.base, agent.bay, agent.expected)
     out "записал \\EFI\\BOOT\\BOOTX64.EFI на том SALTIC: {written} байт"
-}
-
-skill draw_clock(agent) {
-    @moment = clock.local_time(uefi.now(agent.card.base))
-    (moment.second == agent.shown_second) { out agent }
-    agent.shown_second = moment.second
-    @screen = graphics.open(agent.card.base)
-    @left = screen.width - feed.MARGIN - CLOCK_WIDTH
-    graphics.fill(screen, left, 32, CLOCK_WIDTH, 32, feed.paper(screen))
-    lettering.paint_text(screen, lettering.FACE_TITLE, left + 16, 32, clock.clock_text(moment), feed.ink(screen))
-    out agent
 }
 
 skill time_reply(agent) {
@@ -266,11 +304,15 @@ skill execute(agent, text, payload) {
     (name == "volumes") { out files.report(agent.card.base) }
     (name == "usb") { out usb.report(agent.card.base) }
     (name == "code") { out show_code(agent, payload) }
+    (name == "keep") { out keep_program(agent, words) }
     (name == "camera") { out camera.report(agent.card.base) }
     (name == "protocols") { out usb.protocols(agent.card.base, words) }
     (name == "time") { out time_reply(agent) }
     (name == "reboot") { out restart_later(agent) }
-    (name == "shot") { out shot.take_shot(agent) }
+    (name == "shot") {
+        agent.shot_bytes = shot.capture(agent.card)
+        out shot.caption(agent.card, agent.shot_bytes)
+    }
     (name == "prepare-disk") { out prepare_disk(agent, words) }
     (name == "install") { out install_image(agent) }
     (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
@@ -290,10 +332,10 @@ skill countdown(agent, seconds) {
     @base = agent.card.base
     drum (seconds) {
         @left = seconds - beat
-        banner(base, "перезагрузка через {left}...")
+        feed.banner(base, "перезагрузка через {left}...")
         wait_second(base)
     }
-    banner(base, "перезагружаюсь")
+    feed.banner(base, "перезагружаюсь")
     out none
 }
 
@@ -305,15 +347,15 @@ skill restart_later(agent) {
 skill answer(agent, bytes) {
     @packet = net.udp(bytes)
     (str.starts_with(packet.text, SHOT_PREFIX) == yes) {
-        shot.send_chunk(agent, packet, parse.parse_size(str.slice(packet.text, str.len(SHOT_PREFIX), str.len(packet.text))))
+        shot.send_chunk(agent.card, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.len(SHOT_PREFIX), str.len(packet.text))))
         out agent
     }
     @who = net.ip_text(packet.from_ip)
     @command = packet.text
     log(agent, "command from {who}: {command}")
     feed.show_command(agent, who, packet.payload)
-    @reply = execute(agent, command, packet.payload) rescue |err| { "ошибка: {err}" }
-    @reply_bytes = feed.text_bytes(reply, REPLY_LIMIT)
+    @said = execute(agent, command, packet.payload) rescue |err| { "ошибка: {err}" }
+    @reply_bytes = feed.text_bytes(said, REPLY_LIMIT)
     (group.count(agent.output) > 0) { reply_bytes = group.concat(group.add(reply_bytes, 10), agent.output) }
     agent.output = []
     (group.count(reply_bytes) > REPLY_LIMIT) { reply_bytes = group.slice(reply_bytes, 0, REPLY_LIMIT) }
@@ -369,10 +411,10 @@ skill store_chunk(agent, bytes) {
             (agent.received == agent.expected) { draw_progress(agent) }
         }
     }
-    @reply = "ok {agent.received}"
+    @said = "ok {agent.received}"
     @to_mac = net.slice_bytes(bytes, 6, 6)
     @to_ip = net.slice_bytes(bytes, 26, 4)
-    rtl8111.send(agent.card, net.udp_frame(agent.card.mac, MY_IP, to_mac, to_ip, DATA_PORT, net.word(bytes, 34), reply))
+    rtl8111.send(agent.card, net.udp_frame(agent.card.mac, MY_IP, to_mac, to_ip, DATA_PORT, net.word(bytes, 34), said))
     out agent
 }
 
@@ -399,25 +441,18 @@ skill tick(agent) {
         }
     }
     agent.rounds = agent.rounds + 1
+    (num.mod(agent.rounds, KEY_EVERY) == 0) { press(agent, uefi.poll_key(agent.card.base, 0)) }
     (agent.rounds == CLOCK_EVERY) {
         agent.rounds = 0
         (agent.console == no) {
-            (agent.lent == no) { draw_clock(agent) }
+            (agent.lent == no) { feed.draw_clock(agent) }
         }
     }
     out none
 }
 
-skill banner(base, message) {
-    @screen = graphics.open(base)
-    @top = screen.height - feed.BAR_SPACE - 40
-    graphics.fill(screen, 0, top, screen.width, 36, graphics.color(screen, 254, 226, 226))
-    lettering.paint_text(screen, lettering.FACE_TEXT, feed.MARGIN, top + 6, message, graphics.color(screen, 153, 27, 27))
-    out none
-}
-
 skill last_cry(card, message) {
-    banner(card.base, message)
+    feed.banner(card.base, message)
     rtl8111.send(card, net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, message))
     out none
 }
@@ -426,7 +461,7 @@ skill survive(agent) {
     tick(agent) rescue |err| {
         agent.failures = agent.failures + 1
         agent.last_error = "{err}"
-        banner(agent.card.base, "сбой в цикле: {err} (агент продолжает работу)")
+        feed.banner(agent.card.base, "сбой в цикле: {err} (агент продолжает работу)")
         none
     }
     out none
@@ -478,7 +513,7 @@ program() {
     io.show("Saltic agent: commands over the network")
     @done = run() rescue |err| {
         io.show("FAILED: ", err)
-        banner(firmware.guest_base(), "агент не запустился: {err}") rescue |again| { none }
+        feed.banner(firmware.guest_base(), "агент не запустился: {err}") rescue |again| { none }
         none
     }
     io.show("")

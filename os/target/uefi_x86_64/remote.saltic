@@ -1,0 +1,62 @@
+use core.str
+use core.group
+use os.target.uefi_x86_64.rtl8111
+use os.target.uefi_x86_64.net
+use os.target.uefi_x86_64.shot
+use os.target.uefi_x86_64.parse
+
+MY_IP = [10, 0, 0, 2]
+PORT = 5555
+PART = "shot-part "
+
+Remote = Box {
+    card = rtl8111.Card {},
+    shot_bytes = 0
+}
+
+skill open_remote() {
+    @card = rtl8111.open()
+    rtl8111.configure(card)
+    rtl8111.wait_link(card)
+    out Remote { card = card }
+}
+
+skill reply_text(remote, packet, text) {
+    out rtl8111.send(remote.card, net.udp_frame(remote.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, text))
+}
+
+skill answer(remote, bytes) {
+    (net.is_arp_request_for(bytes, MY_IP) == yes) {
+        rtl8111.send(remote.card, net.arp_reply(remote.card.mac, MY_IP, bytes))
+        out none
+    }
+    (net.is_udp_to(bytes, PORT) == no) { out none }
+    @packet = net.udp(bytes)
+    (str.starts_with(packet.text, PART) == yes) {
+        shot.send_chunk(remote.card, remote.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.len(PART), str.len(packet.text))))
+        out none
+    }
+    (packet.text == "shot") {
+        remote.shot_bytes = shot.capture(remote.card)
+        reply_text(remote, packet, shot.caption(remote.card, remote.shot_bytes))
+        out none
+    }
+    out packet
+}
+
+skill serve(remote) {
+    @packets = []
+    drum (rtl8111.RX_COUNT) {
+        (rtl8111.received(remote.card, beat) == yes) {
+            @bytes = rtl8111.read_frame(remote.card, beat)
+            rtl8111.release(remote.card, beat)
+            @packet = answer(remote, bytes)
+            ((packet == none) == no) { packets = group.add(packets, packet) }
+        }
+    }
+    out packets
+}
+
+skill send_to(remote, packet, port, text_bytes) {
+    out rtl8111.send(remote.card, net.udp_frame_bytes(remote.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, port, text_bytes))
+}

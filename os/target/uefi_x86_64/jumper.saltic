@@ -1,0 +1,313 @@
+use core.str
+use core.num
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.graphics
+use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.reply
+use os.target.uefi_x86_64.spider
+use os.target.uefi_x86_64.remote
+use os.uiengine.canvas
+use os.uiengine.shapes
+use os.uiengine.fonts
+
+SCALE = 2
+SPIDER_TOP = 4
+SPIDER_WIDTH = 80
+SPIDER_HEIGHT = 52
+BUG = 3
+FLY = [
+    "gg....gg",
+    ".ggkkgg.",
+    "..kkkk..",
+    ".kkkkkk.",
+    "..kkkk..",
+    "...kk..."
+]
+WASP = [
+    ".gg..gg.",
+    "..YKYK..",
+    ".YKYKYK.",
+    ".YKYKYK.",
+    "..YKYK..",
+    "...KK..."
+]
+BUG_WIDTH = 24
+BUG_HEIGHT = 18
+STEP = 9
+RUN_FRAMES = 12
+KEYS_PER_FRAME = 16
+PAUSE = 4000
+LEAP = 18
+FLOOR = 110
+HUD = 64
+LIVES = 3
+FRAMES = 200000000
+SCAN_UP = 1
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+SCAN_ESCAPE = 23
+SPACE = 32
+ENTER = 13
+
+Bug = Box {
+    x = 0,
+    y = 0,
+    speed = 0
+}
+
+Game = Box {
+    x = 600,
+    y = 0,
+    rise = 0,
+    fly = Bug {},
+    wasp = Bug {},
+    score = 0,
+    lives = LIVES,
+    seed = 1,
+    dir = 0,
+    running = 0,
+    over = no,
+    quit = no
+}
+
+skill random(game, limit) {
+    game.seed = num.mod(game.seed * 75 + 74, 65537)
+    out num.mod(game.seed, limit)
+}
+
+skill mark_color(screen, mark) {
+    (mark == "Y") { out graphics.color(screen, 250, 204, 21) }
+    (mark == "K") { out graphics.color(screen, 24, 24, 27) }
+    (mark == "g") { out graphics.color(screen, 203, 213, 225) }
+    (mark == "k") { out graphics.color(screen, 39, 39, 42) }
+    out spider.paint_color(screen, mark)
+}
+
+skill draw_grid(screen, rows, first, x, y, scale) {
+    drum (group.count(rows) - first) {
+        @row = group.get(rows, first + beat)
+        @top = y + beat * scale
+        drum (str.len(row)) {
+            @mark = str.get(row, beat)
+            ((mark == ".") == no) { graphics.fill(screen, x + beat * scale, top, scale, scale, mark_color(screen, mark)) }
+        }
+    }
+    out none
+}
+
+skill clear_box(screen, x, y, width, height) {
+    out graphics.fill(screen, x, y, width, height, canvas.paint(screen, canvas.PAPER))
+}
+
+skill ground(screen) {
+    out screen.height - FLOOR
+}
+
+skill draw_hud(screen, game) {
+    clear_box(screen, 0, 0, screen.width, HUD)
+    fonts.draw_text(screen, 24, 16, "Паучок-скакун: охота", canvas.ZINC_900, fonts.HEADING)
+    @score = game.score
+    @lives = game.lives
+    @face = fonts.MEDIUM
+    fonts.draw_text(screen, 320, 20, "Мух: {score}", canvas.ZINC_900, face)
+    fonts.draw_text(screen, 420, 20, "Жизни: {lives}", canvas.RED_500, face)
+    fonts.draw_text(screen, screen.width - 420, 20, "← → бег, ↑ или пробел — прыжок, Esc — выход", canvas.ZINC_500, fonts.REGULAR)
+    shapes.hairline(screen, 0, HUD - 1, screen.width, canvas.ZINC_200)
+    out none
+}
+
+skill draw_scene(screen, game) {
+    clear_box(screen, 0, 0, screen.width, screen.height)
+    draw_hud(screen, game)
+    @line = ground(screen)
+    shapes.stroke(screen, 0, line, screen.width - 1, line, 2, canvas.ZINC_500, canvas.PAPER)
+    out none
+}
+
+skill new_fly(game, screen) {
+    @line = ground(screen)
+    out Bug { x = 40 + random(game, screen.width - 80 - BUG_WIDTH), y = line - 120 - random(game, 150), speed = 3 + random(game, 3) }
+}
+
+skill new_wasp(game, screen) {
+    out Bug { x = 20 + random(game, screen.width - 40 - BUG_WIDTH), y = HUD + 4, speed = 4 + game.score / 4 }
+}
+
+skill touches(game, bug) {
+    (bug.x + BUG_WIDTH < game.x) { out no }
+    (bug.x > game.x + SPIDER_WIDTH) { out no }
+    (bug.y + BUG_HEIGHT < game.y) { out no }
+    out bug.y < game.y + SPIDER_HEIGHT
+}
+
+skill steer(game, screen, key) {
+    (key.ready == no) { out none }
+    (key.scan == SCAN_ESCAPE) { game.quit = yes }
+    (key.scan == SCAN_LEFT) {
+        game.dir = -1
+        game.running = RUN_FRAMES
+    }
+    (key.scan == SCAN_RIGHT) {
+        game.dir = 1
+        game.running = RUN_FRAMES
+    }
+    @line = ground(screen)
+    @standing = game.y == line - SPIDER_HEIGHT
+    (standing == yes) {
+        (key.scan == SCAN_UP) { game.rise = 0 - LEAP }
+        (key.char == SPACE) { game.rise = 0 - LEAP }
+    }
+    out none
+}
+
+skill read_keys(game, screen, base) {
+    drum (KEYS_PER_FRAME) {
+        @key = uefi.poll_key(base, 0)
+        (key.ready == no) { out none }
+        steer(game, screen, key)
+    }
+    out none
+}
+
+skill run(game, screen) {
+    (game.running > 0) {
+        game.x = game.x + game.dir * STEP
+        game.running = game.running - 1
+    }
+    (game.x < 0) { game.x = 0 }
+    (game.x > screen.width - SPIDER_WIDTH) { game.x = screen.width - SPIDER_WIDTH }
+    out none
+}
+
+skill move_fly(game, screen) {
+    @fly = game.fly
+    clear_box(screen, fly.x, fly.y, BUG_WIDTH, BUG_HEIGHT)
+    fly.x = fly.x + fly.speed
+    (fly.x < 4) { fly.speed = 0 - fly.speed }
+    (fly.x > screen.width - BUG_WIDTH - 4) { fly.speed = 0 - fly.speed }
+    (touches(game, fly) == yes) {
+        game.score = game.score + 1
+        game.fly = new_fly(game, screen)
+        draw_hud(screen, game)
+    }
+    @next = game.fly
+    out draw_grid(screen, FLY, 0, next.x, next.y, BUG)
+}
+
+skill move_wasp(game, screen) {
+    @wasp = game.wasp
+    clear_box(screen, wasp.x, wasp.y, BUG_WIDTH, BUG_HEIGHT)
+    wasp.y = wasp.y + wasp.speed
+    (wasp.y > ground(screen) - BUG_HEIGHT) { game.wasp = new_wasp(game, screen) }
+    (touches(game, game.wasp) == yes) {
+        game.lives = game.lives - 1
+        game.wasp = new_wasp(game, screen)
+        (game.lives < 1) { game.over = yes }
+        draw_hud(screen, game)
+    }
+    @next = game.wasp
+    out draw_grid(screen, WASP, 0, next.x, next.y, BUG)
+}
+
+skill move_spider(game, screen, old_x, old_y) {
+    @line = ground(screen)
+    game.y = game.y + game.rise
+    (game.y < line - SPIDER_HEIGHT) { game.rise = game.rise + 1 }
+    (game.y > line - SPIDER_HEIGHT - 1) {
+        game.y = line - SPIDER_HEIGHT
+        game.rise = 0
+    }
+    @moved = (old_x == game.x) == no
+    ((old_y == game.y) == no) { moved = yes }
+    (moved == yes) { clear_box(screen, old_x, old_y, SPIDER_WIDTH, SPIDER_HEIGHT) }
+    out draw_grid(screen, spider.SPIDER, SPIDER_TOP, game.x, game.y, SCALE)
+}
+
+skill tick(game, screen, base, link) {
+    @old_x = game.x
+    @old_y = game.y
+    read_keys(game, screen, base)
+    run(game, screen)
+    move_fly(game, screen)
+    move_wasp(game, screen)
+    move_spider(game, screen, old_x, old_y)
+    remote.serve(link)
+    steer(game, screen, uefi.poll_key(base, PAUSE))
+    out none
+}
+
+skill game_over(screen, game) {
+    @width = 420
+    @height = 150
+    @x = (screen.width - width) / 2
+    @y = (screen.height - height) / 2
+    shapes.shadow(screen, x, y, width, height, 12, canvas.PAPER, 10)
+    shapes.framed_box(screen, x, y, width, height, 12, canvas.Look { fill = canvas.WHITE, edge = canvas.ZINC_200, framed = yes }, canvas.PAPER)
+    @score = game.score
+    fonts.draw_text(screen, x + 24, y + 24, "Игра окончена", canvas.ZINC_900, fonts.HEADING)
+    fonts.draw_text(screen, x + 24, y + 60, "Поймано мух: {score}", canvas.ZINC_900, fonts.REGULAR)
+    fonts.draw_text(screen, x + 24, y + 100, "Enter — ещё раз, Esc — выход", canvas.ZINC_500, fonts.REGULAR)
+    out none
+}
+
+skill play(screen, base, seed, link) {
+    @game = Game { seed = seed }
+    game.y = ground(screen) - SPIDER_HEIGHT
+    game.fly = new_fly(game, screen)
+    game.wasp = new_wasp(game, screen)
+    draw_scene(screen, game)
+    draw_grid(screen, spider.SPIDER, SPIDER_TOP, game.x, game.y, SCALE)
+    drum (FRAMES) {
+        tick(game, screen, base, link)
+        (game.quit == yes) { out game }
+        (game.over == yes) {
+            game_over(screen, game)
+            out game
+        }
+    }
+    out game
+}
+
+skill again(base, link) {
+    drum (FRAMES) {
+        remote.serve(link)
+        @key = uefi.poll_key(base, PAUSE)
+        (key.scan == SCAN_ESCAPE) { out no }
+        (key.char == ENTER) { out yes }
+    }
+    out no
+}
+
+skill round_score(screen, base, seed, link) {
+    @game = play(screen, base, seed, link)
+    (game.quit == yes) { out 0 - 1 - game.score }
+    out game.score
+}
+
+program() {
+    @base = firmware.guest_base()
+    @screen = graphics.open(base)
+    uefi.forget_keys(base)
+    @link = remote.open_remote()
+    @moment = uefi.now(base)
+    @seed = moment.minute * 60 + moment.second + 1
+    @best = 0
+    @rounds = 0
+    drum (FRAMES) {
+        @score = round_score(screen, base, seed + rounds * 7, link)
+        rounds = rounds + 1
+        @quit = score < 0
+        (quit == yes) { score = 0 - 1 - score }
+        (score > best) { best = score }
+        (quit == yes) {
+            reply.home("паучок-скакун: раундов {rounds}, лучший счёт {best}")
+            out none
+        }
+        (again(base, link) == no) {
+            reply.home("паучок-скакун: раундов {rounds}, лучший счёт {best}")
+            out none
+        }
+    }
+    out none
+}
