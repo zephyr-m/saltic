@@ -21,7 +21,7 @@ MY_IP = [10, 0, 0, 2]
 MEMORY_DEFAULT = 16
 MEMORY_LIMIT = 64
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | time — дата и время"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -34,10 +34,16 @@ Agent = Box {
     columns = 0,
     rows = 0,
     line = 0,
-    console = yes
+    console = yes,
+    shown_second = -1,
+    rounds = 0
 }
 
 MARGIN = 40
+ZONE_HOURS = 5
+MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+CLOCK_EVERY = 20000
+CLOCK_WIDTH = 160
 ERASE_WORD = "ERASE-ACER-DISK"
 TOP = 96
 
@@ -231,6 +237,64 @@ skill install_image(agent) {
     out "записал \\EFI\\BOOT\\BOOTX64.EFI на том SALTIC: {written} байт"
 }
 
+skill two(value) {
+    (value < 10) { out "0{value}" }
+    out "{value}"
+}
+
+skill local_time(moment) {
+    moment.hour = moment.hour + ZONE_HOURS
+    (moment.hour > 23) {
+        moment.hour = moment.hour - 24
+        moment.day = moment.day + 1
+        @days = group.get(MONTH_DAYS, moment.month - 1)
+        (moment.month == 2) {
+            (num.mod(moment.year, 4) == 0) { days = 29 }
+        }
+        (moment.day > days) {
+            moment.day = 1
+            moment.month = moment.month + 1
+            (moment.month > 12) {
+                moment.month = 1
+                moment.year = moment.year + 1
+            }
+        }
+    }
+    out moment
+}
+
+skill clock_text(moment) {
+    @hours = two(moment.hour)
+    @minutes = two(moment.minute)
+    @seconds = two(moment.second)
+    out "{hours}:{minutes}:{seconds}"
+}
+
+skill date_text(moment) {
+    @day = two(moment.day)
+    @month = two(moment.month)
+    @year = moment.year
+    out "{day}.{month}.{year}"
+}
+
+skill draw_clock(agent) {
+    @moment = local_time(uefi.now(agent.card.base))
+    (moment.second == agent.shown_second) { out agent }
+    agent.shown_second = moment.second
+    @screen = graphics.open(agent.card.base)
+    @left = screen.width - MARGIN - CLOCK_WIDTH
+    graphics.fill(screen, left, 32, CLOCK_WIDTH, 32, paper(screen))
+    lettering.paint_text(screen, lettering.FACE_TITLE, left + 16, 32, clock_text(moment), ink(screen))
+    out agent
+}
+
+skill time_reply(agent) {
+    @moment = local_time(uefi.now(agent.card.base))
+    @clock = clock_text(moment)
+    @date = date_text(moment)
+    out "{date} {clock} (UTC+5, по часам ноутбука)"
+}
+
 skill device_list(agent) {
     @base = agent.card.base
     out str.join(pci.device_lines(base, firmware.ecam(base)), "\n")
@@ -250,6 +314,7 @@ skill execute(agent, text, payload) {
     (name == "screen") { out draw_test(agent) }
     (name == "clear") { out clear_screen(agent) }
     (name == "volumes") { out files.report(agent.card.base) }
+    (name == "time") { out time_reply(agent) }
     (name == "prepare-disk") { out prepare_disk(agent, words) }
     (name == "install") { out install_image(agent) }
     (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
@@ -319,6 +384,11 @@ skill serve(agent) {
                 agent = handle(agent, bytes)
             }
         }
+        agent.rounds = agent.rounds + 1
+        (agent.rounds == CLOCK_EVERY) {
+            agent.rounds = 0
+            (agent.console == no) { agent = draw_clock(agent) }
+        }
     }
     out agent
 }
@@ -339,7 +409,9 @@ skill run() {
     rtl8111.send(card, hello)
     io.show("[4] listening on 10.0.0.2:5555 (arp + udp commands)")
     io.show("")
-    serve(Agent { card = card, columns = columns, rows = rows })
+    @agent = Agent { card = card, columns = columns, rows = rows }
+    clear_screen(agent)
+    serve(agent)
     out none
 }
 
