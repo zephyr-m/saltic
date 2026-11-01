@@ -8,6 +8,7 @@ use os.target.uefi_x86_64.rtl8111
 use os.target.uefi_x86_64.net
 use os.target.uefi_x86_64.uefi
 use os.target.uefi_x86_64.graphics
+use os.target.uefi_x86_64.lettering
 
 PORT = 5555
 DATA_PORT = 5556
@@ -18,7 +19,7 @@ MY_IP = [10, 0, 0, 2]
 MEMORY_DEFAULT = 16
 MEMORY_LIMIT = 64
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — графика: нарисовать проверочную картинку"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -29,7 +30,17 @@ Agent = Box {
     received = 0,
     total = 0,
     columns = 0,
-    rows = 0
+    rows = 0,
+    line = 0,
+    console = yes
+}
+
+MARGIN = 40
+TOP = 96
+
+skill log(agent, message) {
+    (agent.console == yes) { io.show(message) }
+    out none
 }
 
 skill parse_hex(text) {
@@ -76,7 +87,7 @@ skill begin_upload(agent, words) {
     agent.expected = size
     agent.received = 0
     agent.total = 0
-    io.show("upload: waiting for {size} bytes on port 5556")
+    log(agent, "upload: waiting for {size} bytes on port 5556")
     out "жду {size} байт на порту 5556"
 }
 
@@ -91,15 +102,15 @@ skill launch(agent) {
     (agent.expected == 0) { out "ничего не принято" }
     ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
     @size = agent.expected
-    io.show("run: starting uploaded image, {size} bytes")
+    log(agent, "run: starting uploaded image, {size} bytes")
     @outcome = uefi.start_image(agent.card.base, firmware.add(agent.card.arena, UPLOAD_OFFSET), size)
     @code = outcome.value.lo
     @status = "{code}"
     (outcome.failed == yes) { status = "ошибка прошивки {code}" }
-    io.show("run: image returned")
+    log(agent, "run: image returned")
     rtl8111.configure(agent.card)
     rtl8111.wait_link(agent.card)
-    io.show("run: card configured again, listening")
+    log(agent, "run: card configured again, listening")
     out "программа закончила работу, статус {status}"
 }
 
@@ -165,12 +176,43 @@ skill draw_test(agent) {
     out "графика: {width} × {height}, формат {format}, строка {stride} пикселей, кадр по адресу {frame}\nнарисовал серый прямоугольник 400 × 200 и красный, зелёный, синий квадраты"
 }
 
+skill paper(screen) {
+    out graphics.color(screen, 250, 250, 250)
+}
+
+skill ink(screen) {
+    out graphics.color(screen, 24, 24, 27)
+}
+
+skill clear_screen(agent) {
+    @screen = graphics.open(agent.card.base)
+    graphics.fill(screen, 0, 0, screen.width, screen.height, paper(screen))
+    lettering.paint_text(screen, lettering.FACE_TITLE, MARGIN, 32, "Saltic - агент на Acer", ink(screen))
+    graphics.fill(screen, MARGIN, 76, screen.width - MARGIN * 2, 1, graphics.color(screen, 228, 228, 231))
+    agent.line = 0
+    agent.console = no
+    out "экран очищен"
+}
+
+skill print_line(agent, line_bytes) {
+    @screen = graphics.open(agent.card.base)
+    @face = lettering.FACE_TEXT
+    @y = TOP + agent.line * (face.height + 4)
+    (y + face.height > screen.height - 16) {
+        clear_screen(agent)
+        y = TOP
+    }
+    lettering.paint_bytes(screen, face, MARGIN, y, line_bytes, ink(screen))
+    agent.line = agent.line + 1
+    out "напечатал строку {agent.line}"
+}
+
 skill device_list(agent) {
     @base = agent.card.base
     out str.join(pci.device_lines(base, firmware.ecam(base)), "\n")
 }
 
-skill execute(agent, text) {
+skill execute(agent, text, payload) {
     @words = str.split(text, " ")
     @name = group.get(words, 0)
     (name == "help") { out HELP }
@@ -182,6 +224,8 @@ skill execute(agent, text) {
     (name == "check") { out upload_state(agent) }
     (name == "run") { out launch(agent) }
     (name == "screen") { out draw_test(agent) }
+    (name == "clear") { out clear_screen(agent) }
+    (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
     out "не знаю команду '{name}'. {HELP}"
 }
 
@@ -189,11 +233,11 @@ skill answer(agent, bytes) {
     @packet = net.udp(bytes)
     @who = net.ip_text(packet.from_ip)
     @command = packet.text
-    io.show("command from {who}: {command}")
-    @reply = execute(agent, command) rescue |err| { "ошибка: {err}" }
+    log(agent, "command from {who}: {command}")
+    @reply = execute(agent, command, packet.payload) rescue |err| { "ошибка: {err}" }
     @frame = net.udp_frame(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply)
     @sent = rtl8111.send(agent.card, frame)
-    io.show("  replied {sent} bytes")
+    log(agent, "  replied {sent} bytes")
     agent.commands = agent.commands + 1
     out agent
 }
@@ -214,7 +258,7 @@ skill store_chunk(agent, bytes) {
             (num.mod(agent.received, REPORT_EVERY) < size) {
                 @received = agent.received
                 @expected = agent.expected
-                io.show("upload: {received} of {expected} bytes")
+                log(agent, "upload: {received} of {expected} bytes")
             }
         }
     }
@@ -231,7 +275,7 @@ skill handle(agent, bytes) {
         rtl8111.send(agent.card, net.arp_reply(agent.card.mac, MY_IP, bytes))
         agent.arp = agent.arp + 1
         @asker = net.ip_text(net.slice_bytes(bytes, 28, 4))
-        io.show("arp: told {asker} that 10.0.0.2 is us")
+        log(agent, "arp: told {asker} that 10.0.0.2 is us")
         out agent
     }
     (net.is_udp_to(bytes, PORT) == yes) { out answer(agent, bytes) }

@@ -1,0 +1,90 @@
+use core.str
+use core.num
+use core.mem
+use core.group
+use os.target.uefi_x86_64.glyphs
+use os.target.uefi_x86_64.graphics
+
+BITS = [32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1]
+UNKNOWN = 31
+
+Face = Box {
+    glyphs = [],
+    width = 8,
+    height = 16
+}
+
+Point = Box {
+    value = 32,
+    width = 1
+}
+
+FACE_SMALL = Face { glyphs = glyphs.GLYPHS_8X16, width = 8, height = 16 }
+FACE_TEXT = Face { glyphs = glyphs.GLYPHS_12X24, width = 12, height = 24 }
+FACE_TITLE = Face { glyphs = glyphs.GLYPHS_16X32, width = 16, height = 32 }
+
+skill decode(bytes, index) {
+    @first = group.get(bytes, index)
+    (first < 194) { out Point { value = first } }
+    (first > 239) { out Point { value = UNKNOWN + 32, width = 4 } }
+    (first > 223) { out Point { value = UNKNOWN + 32, width = 3 } }
+    (index + 1 > group.count(bytes) - 1) { out Point { value = first } }
+    @second = group.get(bytes, index + 1)
+    (second < 128) { out Point { value = first } }
+    (second > 191) { out Point { value = first } }
+    out Point { value = (first - 192) * 64 + second - 128, width = 2 }
+}
+
+skill glyph_index(code) {
+    (code == 1025) { out 95 }
+    (code == 1105) { out 160 }
+    (code > 31) {
+        (code < 127) { out code - 32 }
+    }
+    (code > 1039) {
+        (code < 1104) { out 96 + code - 1040 }
+    }
+    out UNKNOWN
+}
+
+skill row_value(glyph, row) {
+    @value = 0
+    drum (4) { value = value * 16 + num.hex_value(str.get(glyph, row * 4 + beat)) }
+    out value
+}
+
+skill paint_glyph(screen, face, x, y, code, ink) {
+    @glyph = group.get(face.glyphs, glyph_index(code))
+    drum (face.height) {
+        @row = beat
+        @bits = row_value(glyph, row)
+        (bits > 0) {
+            @line = ((y + row) * screen.stride + x) * graphics.PIXEL_BYTES
+            drum (face.width) {
+                @shifted = bits / group.get(BITS, 16 - face.width + beat)
+                (num.mod(shifted, 2) == 1) { mem.store32(screen.memory, line + beat * graphics.PIXEL_BYTES, ink) }
+            }
+        }
+    }
+    out none
+}
+
+skill paint_bytes(screen, face, x, y, bytes, ink) {
+    @index = 0
+    @left = x
+    drum (group.count(bytes)) {
+        (index < group.count(bytes)) {
+            @point = decode(bytes, index)
+            ((left + face.width > screen.width) == no) { paint_glyph(screen, face, left, y, point.value, ink) }
+            left = left + face.width
+            index = index + point.width
+        }
+    }
+    out left
+}
+
+skill paint_text(screen, face, x, y, line, ink) {
+    @bytes = []
+    drum (str.len(line)) { bytes = group.add(bytes, str.byte(line, beat)) }
+    out paint_bytes(screen, face, x, y, bytes, ink)
+}
