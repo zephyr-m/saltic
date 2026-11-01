@@ -1,0 +1,47 @@
+use core.mem
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.graphics
+
+skill find_bgrt(base) {
+    @xsdt = firmware.pointer(firmware.find_rsdp(base), base, 24)
+    drum ((firmware.read16(xsdt, base, 4) - 36) / 8) {
+        @table = firmware.pointer(xsdt, base, 36 + beat * 8)
+        (firmware.read16(table, base, 0) == 18242) {
+            (firmware.read16(table, base, 2) == 21586) { out table }
+        }
+    }
+    out error.NoBgrt
+}
+
+skill snippet() {
+    @base = firmware.guest_base()
+    @bgrt = find_bgrt(base)
+    @image = firmware.pointer(bgrt, base, 40)
+    @left = firmware.read16(bgrt, base, 48)
+    @top = firmware.read16(bgrt, base, 52)
+    @pixels = firmware.add(image, firmware.read16(image, base, 10))
+    @width = firmware.read16(image, base, 18)
+    @height = firmware.read16(image, base, 22)
+    @upside_down = yes
+    (height > 32767) {
+        height = 65536 - height
+        upside_down = no
+    }
+    @depth = firmware.read16(image, base, 28)
+    @step = depth / 8
+    @row_bytes = (width * step + 3) / 4 * 4
+    @screen = graphics.open(base)
+    drum (height) {
+        @y = beat
+        (upside_down == yes) { y = height - 1 - beat }
+        @line = firmware.add(pixels, beat * row_bytes)
+        @at = ((top + y) * screen.stride + left) * graphics.PIXEL_BYTES
+        drum (width) {
+            @blue = firmware.read8(line, base, beat * step)
+            @green = firmware.read8(line, base, beat * step + 1)
+            @red = firmware.read8(line, base, beat * step + 2)
+            mem.store32(screen.memory, at + beat * graphics.PIXEL_BYTES, graphics.color(screen, red, green, blue))
+        }
+    }
+    out "логотип из BGRT: {width}x{height}, {depth} бит, на экране с ({left}, {top})"
+}

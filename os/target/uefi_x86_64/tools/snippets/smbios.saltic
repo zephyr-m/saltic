@@ -1,0 +1,104 @@
+use core.str
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.net
+
+skill find_smbios(base) {
+    @table = firmware.system_table()
+    @entries = firmware.pointer(table, base, 112)
+    drum (firmware.read16(table, base, 104)) {
+        @entry = firmware.add(entries, beat * 24)
+        (firmware.read16(entry, base, 0) == 11569) {
+            (firmware.read16(entry, base, 2) == 60317) { out firmware.pointer(entry, base, 16) }
+        }
+    }
+    out error.NoSmbios
+}
+
+skill text_of(base, item, index) {
+    (index == 0) { out "" }
+    @at = firmware.read8(item, base, 1)
+    @current = 1
+    @text = ""
+    drum (4000) {
+        @code = firmware.read8(item, base, at)
+        at = at + 1
+        (code == 0) {
+            (current == index) { out text }
+            current = current + 1
+        }
+        (code > 0) {
+            (current == index) { text = str.add(text, net.printable(code)) }
+        }
+    }
+    out text
+}
+
+skill next_item(base, item) {
+    @at = firmware.read8(item, base, 1)
+    drum (8000) {
+        (firmware.read8(item, base, at) == 0) {
+            (firmware.read8(item, base, at + 1) == 0) { out firmware.add(item, at + 2) }
+        }
+        at = at + 1
+    }
+    out error.BadSmbios
+}
+
+skill field(base, item, offset) {
+    out text_of(base, item, firmware.read8(item, base, offset))
+}
+
+skill snippet() {
+    @base = firmware.guest_base()
+    @entry = find_smbios(base)
+    @item = firmware.read32(entry, base, 24)
+    @lines = []
+    @total = 0
+    drum (firmware.read16(entry, base, 28)) {
+        @kind = firmware.read8(item, base, 0)
+        (kind == 127) { leave }
+        (kind == 0) {
+            @vendor = field(base, item, 4)
+            @version = field(base, item, 5)
+            @date = field(base, item, 8)
+            lines = group.add(lines, "BIOS: {vendor} {version} от {date}")
+        }
+        (kind == 1) {
+            @maker = field(base, item, 4)
+            @product = field(base, item, 5)
+            @version = field(base, item, 6)
+            lines = group.add(lines, "компьютер: {maker} {product} ({version})")
+        }
+        (kind == 2) {
+            @maker = field(base, item, 4)
+            @product = field(base, item, 5)
+            lines = group.add(lines, "плата: {maker} {product}")
+        }
+        (kind == 4) {
+            @cpu_name = field(base, item, 16)
+            @top_speed = firmware.read16(item, base, 20)
+            @speed = firmware.read16(item, base, 22)
+            @cores = firmware.read8(item, base, 35)
+            @threads = firmware.read8(item, base, 37)
+            lines = group.add(lines, "процессор: {cpu_name}")
+            lines = group.add(lines, "  ядер {cores}, потоков {threads}, частота {speed} МГц, до {top_speed} МГц")
+        }
+        (kind == 17) {
+            @size = firmware.read16(item, base, 12)
+            (size > 0) {
+                (size < 32767) {
+                    total = total + size
+                    @slot = field(base, item, 16)
+                    @rate = firmware.read16(item, base, 21)
+                    @maker = field(base, item, 23)
+                    @part = field(base, item, 26)
+                    lines = group.add(lines, "память: {slot} — {size} МБ, {rate} МГц, {maker} {part}")
+                }
+            }
+        }
+        item = next_item(base, item)
+    }
+    lines = group.add(lines, "всего памяти: {total} МБ")
+    out str.join(lines, "\n")
+}

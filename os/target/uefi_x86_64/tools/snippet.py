@@ -3,7 +3,8 @@
 Кусок — тело навыка, который отдаёт текст через out:
     python3 tools/snippet.py 'out "привет с Acer"'
     python3 tools/snippet.py -f кусок.saltic
-Строки `use …` в начале куска уходят наверх программы.
+Строки `use …` в начале куска уходят наверх программы. Кусок со своими
+навыками объявляет `skill snippet()` сам — тогда он идёт в программу как есть.
 Компилятор — переменная SALTIC_COMPILER или полка bootstrap/.
 """
 import os
@@ -33,6 +34,9 @@ def program(snippet):
     for line in snippet.splitlines():
         (uses if line.startswith("use ") else body).append(line)
     head = ["use os.target.uefi_x86_64.reply"] + uses
+    if any(line.startswith("skill snippet()") for line in body):
+        inner = "\n".join(body)
+        return "\n".join(head) + f"\n\n{inner}\n\nprogram() {{\n    @said = snippet() rescue |err| {{ \"ошибка куска: {{err}}\" }}\n    reply.finish(said)\n    out none\n}}\n"
     inner = "\n".join("    " + line for line in body)
     return "\n".join(head) + f"\n\nskill snippet() {{\n{inner}\n}}\n\nprogram() {{\n    @said = snippet() rescue |err| {{ \"ошибка куска: {{err}}\" }}\n    reply.finish(said)\n    out none\n}}\n"
 

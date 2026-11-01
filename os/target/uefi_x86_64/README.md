@@ -32,6 +32,7 @@ Saltic на ноутбуке без Linux: программа собираетс
 | `tools/glyphs.py` | пересобрать `glyphs.saltic` из `os/fonts/spleen.saltic` |
 | `tools/shot.py` | снимок экрана Acer в PNG: `python3 tools/shot.py shot.png` (683 × 384, кусками по 1024 байта с повтором) |
 | `tools/snippet.py` | кусок Saltic на Acer за ~1,3 с: `python3 tools/snippet.py '@x = 2 + 2\nout "x = {x}"'` — оборачивает в программу, собирает (`SALTIC_COMPILER` или полка), заливает, запускает, печатает ответ |
+| `tools/snippets/` | готовые куски для `snippet.py -f`: `smbios.saltic` — BIOS, плата, процессор, планки памяти; `bgrt.saltic` — логотип из ACPI BGRT на экран |
 | `tools/upload.py` | залить программу агенту и, с `--run`, запустить: `python3 tools/upload.py visitor.efi --run`; куски по 1024 байта с подтверждением, сверка суммы |
 | `build.sh` | собирает `EFI/BOOT/BOOTX64.EFI` и папку образа флешки |
 | `run.sh` | запускает собранное в QEMU x86-64 с прошивкой OVMF; `--check` — без окна, жмёт клавишу и ждёт «Bye!» (так его зовёт `tests/run.sh uefi`) |
