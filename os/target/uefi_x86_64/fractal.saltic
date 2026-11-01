@@ -1,0 +1,95 @@
+use core.mem
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.graphics
+use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.reply
+use os.target.uefi_x86_64.remote
+
+ONE = 2048
+FOUR = 8192
+DEPTH = 96
+LEFT = -5325
+TOP = -2304
+STEP = 6
+STOPS = [
+    [9, 9, 11],
+    [49, 46, 129],
+    [79, 70, 229],
+    [20, 184, 166],
+    [245, 158, 11],
+    [255, 247, 237]
+]
+SCAN_ESCAPE = 23
+WAITS = 200000000
+PAUSE = 5000
+
+skill escape_time(cx, cy) {
+    @x = 0
+    @y = 0
+    drum (DEPTH) {
+        @xx = x * x / ONE
+        @yy = y * y / ONE
+        (xx > FOUR) { out beat }
+        (yy > FOUR) { out beat }
+        (xx + yy > FOUR) { out beat }
+        @xy = x * y / ONE
+        x = xx - yy + cx
+        y = xy * 2 + cy
+    }
+    out DEPTH
+}
+
+skill shade(screen, count) {
+    (count == DEPTH) { out graphics.color(screen, 9, 9, 11) }
+    @span = group.count(STOPS) - 1
+    @place = count * span * 256 / DEPTH
+    @index = place / 256
+    @part = place - index * 256
+    @low = group.get(STOPS, index)
+    @high = group.get(STOPS, index + 1)
+    @red = group.get(low, 0) + (group.get(high, 0) - group.get(low, 0)) * part / 256
+    @green = group.get(low, 1) + (group.get(high, 1) - group.get(low, 1)) * part / 256
+    @blue = group.get(low, 2) + (group.get(high, 2) - group.get(low, 2)) * part / 256
+    out graphics.color(screen, red, green, blue)
+}
+
+skill paint_row(screen, palette, row) {
+    @cy = TOP + row * STEP
+    @start = row * screen.stride * graphics.PIXEL_BYTES
+    drum (screen.width) {
+        @cx = LEFT + beat * STEP
+        mem.store32(screen.memory, start + beat * graphics.PIXEL_BYTES, group.get(palette, escape_time(cx, cy)))
+    }
+    out none
+}
+
+skill colors(screen) {
+    @palette = []
+    drum (DEPTH + 1) { palette = group.add(palette, shade(screen, beat)) }
+    out palette
+}
+
+skill wait_escape(base, link) {
+    drum (WAITS) {
+        remote.serve(link)
+        @key = uefi.poll_key(base, PAUSE)
+        (key.scan == SCAN_ESCAPE) { out none }
+    }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    @screen = graphics.open(base)
+    uefi.forget_keys(base)
+    @link = remote.open_remote()
+    @palette = colors(screen)
+    drum (screen.height) {
+        paint_row(screen, palette, beat)
+        remote.serve(link)
+    }
+    wait_escape(base, link)
+    reply.home("фрактал: {DEPTH} шагов на точку, Esc — назад")
+    out none
+}

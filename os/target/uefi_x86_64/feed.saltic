@@ -3,35 +3,55 @@ use core.group
 use os.target.uefi_x86_64.firmware
 use os.target.uefi_x86_64.uefi
 use os.target.uefi_x86_64.graphics
-use os.target.uefi_x86_64.lettering
 use os.target.uefi_x86_64.clock
 use os.target.uefi_x86_64.spider
+use os.uiengine.canvas
+use os.uiengine.shapes
+use os.uiengine.fonts
 
 MARGIN = 40
 BAR_SPACE = 64
 SHELF_SPACE = 84
-TOP = 96
+TOP = 92
 LINE_GAP = 4
-LOG_LIMIT = 150
+LOG_LIMIT = 110
 REPLY_INDENT = 24
 REPLY_LINES = 24
-CLOCK_WIDTH = 160
+CLOCK_WIDTH = 120
 BOOT_COPY_MEM = 352
+MASCOT_WIDTH = 200
+MASCOT_HEIGHT = 150
+MASCOT_SCALE = 4
+CODE_BLUE = canvas.Rgb { red = 37, green = 99, blue = 235 }
+ALARM_FILL = canvas.Rgb { red = 254, green = 226, blue = 226 }
+ALARM_INK = canvas.Rgb { red = 153, green = 27, blue = 27 }
 
 skill paper(screen) {
-    out graphics.color(screen, 250, 250, 250)
+    out canvas.paint(screen, canvas.PAPER)
 }
 
-skill ink(screen) {
-    out graphics.color(screen, 24, 24, 27)
+skill draw_header(agent, version, details) {
+    @screen = graphics.open(agent.card.base)
+    @heading = fonts.HEADING
+    @after = fonts.draw_text(screen, MARGIN, 24, "Saltic", canvas.ZINC_900, heading)
+    @label = "агент {version}"
+    @small = fonts.SMALL
+    @wide = fonts.measure(label, small) + 16
+    shapes.rounded(screen, after + 12, 26, wide, 20, 10, canvas.ZINC_100, canvas.PAPER)
+    fonts.draw_text(screen, after + 20, 26 + (20 - small.line) / 2, label, canvas.ZINC_900, small)
+    fonts.draw_text(screen, after + 24 + wide, 26, details, canvas.ZINC_500, fonts.REGULAR)
+    shapes.hairline(screen, MARGIN, 68, screen.width - MARGIN * 2, canvas.ZINC_200)
+    out draw_mascot(agent.card.base)
 }
 
-skill code_ink(screen) {
-    out graphics.color(screen, 37, 99, 235)
-}
-
-skill faint(screen) {
-    out graphics.color(screen, 113, 113, 122)
+skill draw_mascot(base) {
+    @screen = graphics.open(base)
+    @left = screen.width - MARGIN - MASCOT_WIDTH
+    shapes.shadow(screen, left, TOP, MASCOT_WIDTH, MASCOT_HEIGHT, 12, canvas.PAPER, 3)
+    shapes.framed_box(screen, left, TOP, MASCOT_WIDTH, MASCOT_HEIGHT, 12, canvas.Look { fill = canvas.WHITE, edge = canvas.ZINC_200, framed = yes }, canvas.PAPER)
+    spider.draw_at(base, left + (MASCOT_WIDTH - 40 * MASCOT_SCALE) / 2, TOP + 12, MASCOT_SCALE)
+    @caption = "паучок-скакун"
+    out fonts.draw_text(screen, left + (MASCOT_WIDTH - fonts.measure(caption, fonts.SMALL)) / 2, TOP + MASCOT_HEIGHT - 24, caption, canvas.ZINC_500, fonts.SMALL)
 }
 
 skill scroll(agent, screen, amount) {
@@ -44,16 +64,16 @@ skill scroll(agent, screen, amount) {
     @length = (limit - TOP + 8 - amount) * row_bytes
     firmware.call(base, firmware.pointer(services, base, BOOT_COPY_MEM), [upper, lower, firmware.number(length)])
     graphics.fill(screen, 0, limit - amount, screen.width, amount, paper(screen))
-    spider.draw(base)
+    draw_mascot(base)
     agent.cursor = agent.cursor - amount
     out none
 }
 
-skill next_row(agent, screen, face) {
+skill next_row(agent, screen, height) {
     @limit = screen.height - BAR_SPACE - 32 - SHELF_SPACE
-    (agent.cursor + face.height > limit) { scroll(agent, screen, agent.cursor + face.height - limit) }
+    (agent.cursor + height > limit) { scroll(agent, screen, agent.cursor + height - limit) }
     @y = agent.cursor
-    agent.cursor = agent.cursor + face.height + LINE_GAP
+    agent.cursor = agent.cursor + height + LINE_GAP
     out y
 }
 
@@ -69,14 +89,14 @@ skill show_command(agent, who, payload) {
     (agent.console == yes) { out none }
     (agent.lent == yes) { out none }
     @screen = graphics.open(agent.card.base)
-    @face = lettering.FACE_SMALL
+    @face = fonts.MEDIUM
+    @row = next_row(agent, screen, face.line)
     @moment_text = clock.clock_text(clock.local_time(uefi.now(agent.card.base)))
-    @bytes = text_bytes("{moment_text}  {who}  ", LOG_LIMIT)
+    @pen = fonts.draw_text(screen, MARGIN, row + 2, moment_text, canvas.ZINC_500, fonts.MONO)
+    pen = fonts.draw_text(screen, pen + 12, row + 1, who, canvas.ZINC_500, fonts.SMALL)
     @shown = group.count(payload)
     (shown > LOG_LIMIT) { shown = LOG_LIMIT }
-    bytes = group.concat(bytes, group.slice(payload, 0, shown))
-    lettering.paint_bytes(screen, face, MARGIN, next_row(agent, screen, face), bytes, faint(screen))
-    out none
+    out fonts.draw_bytes(screen, pen + 12, row, group.slice(payload, 0, shown), canvas.ZINC_900, face)
 }
 
 skill split_lines(bytes) {
@@ -104,25 +124,34 @@ skill show_lines(agent, bytes, indent, is_code) {
     (agent.console == yes) { out none }
     (agent.lent == yes) { out none }
     @screen = graphics.open(agent.card.base)
-    @color = ink(screen)
-    (is_code == yes) { color = code_ink(screen) }
-    @face = lettering.FACE_SMALL
+    @color = canvas.ZINC_900
+    @face = fonts.REGULAR
+    (is_code == yes) {
+        color = CODE_BLUE
+        face = fonts.MONO
+    }
     @lines = split_lines(bytes)
     @shown = group.count(lines)
     (shown > REPLY_LINES) { shown = REPLY_LINES }
     drum (shown) {
-        @row = next_row(agent, screen, face)
+        @row = next_row(agent, screen, face.line)
         @line = group.get(lines, beat)
         @width = group.count(line)
         (width > LOG_LIMIT) { width = LOG_LIMIT }
-        lettering.paint_bytes(screen, face, MARGIN + indent, row, group.slice(line, 0, width), color)
+        fonts.draw_bytes(screen, MARGIN + indent, row, group.slice(line, 0, width), color, face)
     }
     @hidden = group.count(lines) - shown
     (hidden > 0) {
-        @row = next_row(agent, screen, face)
-        lettering.paint_text(screen, face, MARGIN + indent, row, "... и ещё {hidden} строк", faint(screen))
+        @row = next_row(agent, screen, face.line)
+        fonts.draw_text(screen, MARGIN + indent, row, "… и ещё {hidden} строк", canvas.ZINC_500, fonts.REGULAR)
     }
     out none
+}
+
+skill print_big(agent, line_bytes) {
+    @screen = graphics.open(agent.card.base)
+    @face = fonts.HEADING
+    out fonts.draw_bytes(screen, MARGIN, next_row(agent, screen, face.line), line_bytes, canvas.ZINC_900, face)
 }
 
 skill draw_clock(agent) {
@@ -131,15 +160,35 @@ skill draw_clock(agent) {
     agent.shown_second = moment.second
     @screen = graphics.open(agent.card.base)
     @left = screen.width - MARGIN - CLOCK_WIDTH
-    graphics.fill(screen, left, 32, CLOCK_WIDTH, 32, paper(screen))
-    lettering.paint_text(screen, lettering.FACE_TITLE, left + 16, 32, clock.clock_text(moment), ink(screen))
+    graphics.fill(screen, left, 20, CLOCK_WIDTH, 32, paper(screen))
+    @shown = clock.clock_text(moment)
+    @face = fonts.HEADING
+    fonts.draw_text(screen, screen.width - MARGIN - fonts.measure(shown, face), 24, shown, canvas.ZINC_900, face)
     out agent
+}
+
+skill draw_progress(agent) {
+    @screen = graphics.open(agent.card.base)
+    @width = screen.width - MARGIN * 2
+    @top = screen.height - BAR_SPACE
+    graphics.fill(screen, 0, top - 24, screen.width, BAR_SPACE + 24, paper(screen))
+    @done = agent.received / 1024
+    @total = agent.expected / 1024
+    @percent = done * 100 / total
+    @label = "приём программы: {done} КБ из {total} КБ, {percent} %"
+    (agent.received == agent.expected) { label = "программа принята целиком: {total} КБ" }
+    fonts.draw_text(screen, MARGIN, top - 22, label, canvas.ZINC_500, fonts.SMALL)
+    shapes.rounded(screen, MARGIN, top, width, 8, 4, canvas.ZINC_100, canvas.PAPER)
+    @filled = width * percent / 100
+    (filled > 8) { shapes.rounded(screen, MARGIN, top, filled, 8, 4, canvas.ZINC_900, canvas.ZINC_100) }
+    out none
 }
 
 skill banner(base, message) {
     @screen = graphics.open(base)
-    @top = screen.height - BAR_SPACE - 40
-    graphics.fill(screen, 0, top, screen.width, 36, graphics.color(screen, 254, 226, 226))
-    lettering.paint_text(screen, lettering.FACE_TEXT, MARGIN, top + 6, message, graphics.color(screen, 153, 27, 27))
-    out none
+    @top = screen.height - BAR_SPACE - 44
+    graphics.fill(screen, 0, top - 2, screen.width, 40, paper(screen))
+    shapes.framed_box(screen, MARGIN, top, screen.width - 2 * MARGIN, 36, 8, canvas.Look { fill = ALARM_FILL, edge = ALARM_INK, framed = yes }, canvas.PAPER)
+    @face = fonts.MEDIUM
+    out fonts.draw_text(screen, MARGIN + 14, top + (36 - face.line) / 2, message, ALARM_INK, face)
 }

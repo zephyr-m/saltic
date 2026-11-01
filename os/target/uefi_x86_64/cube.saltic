@@ -1,0 +1,318 @@
+use core.num
+use core.mem
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.graphics
+use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.reply
+use os.target.uefi_x86_64.remote
+use os.uiengine.canvas
+use os.uiengine.fonts
+
+SINES = [0, 18, 36, 54, 71, 89, 107, 125, 143, 160, 178, 195, 213, 230, 248, 265, 282, 299, 316, 333, 350, 367, 384, 400, 416, 433, 449, 465, 481, 496, 512, 527, 543, 558, 573, 587, 602, 616, 630, 644, 658, 672, 685, 698, 711, 724, 737, 749, 761, 773, 784, 796, 807, 818, 828, 839, 849, 859, 868, 878, 887, 896, 904, 912, 920, 928, 935, 943, 949, 956, 962, 968, 974, 979, 984, 989, 994, 998, 1002, 1005, 1008, 1011, 1014, 1016, 1018, 1020, 1022, 1023, 1023, 1024, 1024, 1024, 1023, 1023, 1022, 1020, 1018, 1016, 1014, 1011, 1008, 1005, 1002, 998, 994, 989, 984, 979, 974, 968, 962, 956, 949, 943, 935, 928, 920, 912, 904, 896, 887, 878, 868, 859, 849, 839, 828, 818, 807, 796, 784, 773, 761, 749, 737, 724, 711, 698, 685, 672, 658, 644, 630, 616, 602, 587, 573, 558, 543, 527, 512, 496, 481, 465, 449, 433, 416, 400, 384, 367, 350, 333, 316, 299, 282, 265, 248, 230, 213, 195, 178, 160, 143, 125, 107, 89, 71, 54, 36, 18, 0, -18, -36, -54, -71, -89, -107, -125, -143, -160, -178, -195, -213, -230, -248, -265, -282, -299, -316, -333, -350, -367, -384, -400, -416, -433, -449, -465, -481, -496, -512, -527, -543, -558, -573, -587, -602, -616, -630, -644, -658, -672, -685, -698, -711, -724, -737, -749, -761, -773, -784, -796, -807, -818, -828, -839, -849, -859, -868, -878, -887, -896, -904, -912, -920, -928, -935, -943, -949, -956, -962, -968, -974, -979, -984, -989, -994, -998, -1002, -1005, -1008, -1011, -1014, -1016, -1018, -1020, -1022, -1023, -1023, -1024, -1024, -1024, -1023, -1023, -1022, -1020, -1018, -1016, -1014, -1011, -1008, -1005, -1002, -998, -994, -989, -984, -979, -974, -968, -962, -956, -949, -943, -935, -928, -920, -912, -904, -896, -887, -878, -868, -859, -849, -839, -828, -818, -807, -796, -784, -773, -761, -749, -737, -724, -711, -698, -685, -672, -658, -644, -630, -616, -602, -587, -573, -558, -543, -527, -512, -496, -481, -465, -449, -433, -416, -400, -384, -367, -350, -333, -316, -299, -282, -265, -248, -230, -213, -195, -178, -160, -143, -125, -107, -89, -71, -54, -36, -18]
+BOX = 480
+INNER = 400
+ROUND = 200
+SEGMENTS = 4
+QUARTER = [0, 22, 45, 68, 90]
+DISTANCE = 3000
+FOCAL = 400
+BUFFER = 1048576
+LIGHT = [-358, -563, -778]
+TINTS = [[231, 110, 80], [42, 157, 144], [99, 102, 241], [232, 196, 104], [244, 164, 98], [39, 71, 84]]
+SCAN_UP = 1
+SCAN_DOWN = 2
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+SCAN_ESCAPE = 23
+SPACE = 32
+FRAMES = 200000000
+PAUSE = 2000
+
+Vertex = Box {
+    x = 0,
+    y = 0,
+    z = 0
+}
+
+Mesh = Box {
+    places = [],
+    normals = [],
+    quads = [],
+    columns = 0
+}
+
+Spin = Box {
+    ax = 20,
+    ay = 30,
+    sx = 1,
+    sy = 2,
+    paused = no,
+    left = 0,
+    top = 0,
+    right = 480,
+    bottom = 480,
+    quit = no,
+    frames = 0
+}
+
+skill sine(angle) {
+    out group.get(SINES, num.mod(angle + 3600, 360))
+}
+
+skill cosine(angle) {
+    out sine(angle + 90)
+}
+
+skill turn(x, y, z, spin) {
+    @x1 = (x * cosine(spin.ay) + z * sine(spin.ay)) / 1024
+    @z1 = (z * cosine(spin.ay) - x * sine(spin.ay)) / 1024
+    @y2 = (y * cosine(spin.ax) - z1 * sine(spin.ax)) / 1024
+    @z2 = (y * sine(spin.ax) + z1 * cosine(spin.ax)) / 1024
+    out Vertex { x = x1, y = y2, z = z2 }
+}
+
+skill project(place, spin) {
+    @p = turn(place.x, place.y, place.z, spin)
+    @depth = p.z + DISTANCE
+    out Vertex { x = BOX / 2 + p.x * FOCAL / depth, y = BOX / 2 + p.y * FOCAL / depth, z = p.z }
+}
+
+skill side(angle_cos) {
+    (angle_cos < 0) { out -1 }
+    out 1
+}
+
+skill surface(phi, theta, sx, sy, sz) {
+    @ct = cosine(theta)
+    @nx = ct * cosine(phi) / 1024
+    @ny = ct * sine(phi) / 1024
+    @nz = sine(theta)
+    out [Vertex { x = INNER * sx + ROUND * nx / 1024, y = INNER * sy + ROUND * ny / 1024, z = INNER * sz + ROUND * nz / 1024 }, Vertex { x = nx, y = ny, z = nz }]
+}
+
+skill build_mesh() {
+    @places = []
+    @normals = []
+    @rows = 2 * SEGMENTS + 2
+    drum (rows) {
+        @row = beat
+        @sz = -1
+        @theta = 0
+        pick {
+            (row > SEGMENTS) {
+                sz = 1
+                theta = group.get(QUARTER, row - SEGMENTS - 1)
+            }
+            { theta = 0 - 90 + group.get(QUARTER, row) }
+        }
+        drum (4) {
+            @quadrant = beat
+            @sx = side(cosine(quadrant * 90 + 45))
+            @sy = side(sine(quadrant * 90 + 45))
+            drum (SEGMENTS + 1) {
+                @pair = surface(quadrant * 90 + group.get(QUARTER, beat), theta, sx, sy, sz)
+                places = group.add(places, group.get(pair, 0))
+                normals = group.add(normals, group.get(pair, 1))
+            }
+        }
+    }
+    @columns = 4 * (SEGMENTS + 1)
+    @quads = []
+    drum (rows - 1) {
+        @row = beat
+        drum (columns) {
+            @next = num.mod(beat + 1, columns)
+            quads = group.add(quads, [row * columns + beat, row * columns + next, (row + 1) * columns + next, (row + 1) * columns + beat])
+        }
+    }
+    @top = (rows - 1) * columns
+    quads = group.add(quads, [top + SEGMENTS, top + 2 * SEGMENTS + 1, top + 3 * SEGMENTS + 2, top + 4 * SEGMENTS + 3])
+    quads = group.add(quads, [3 * SEGMENTS + 2, 2 * SEGMENTS + 1, SEGMENTS, 4 * SEGMENTS + 3])
+    out Mesh { places = places, normals = normals, quads = quads, columns = columns }
+}
+
+skill fill_quad(buffer, points, color) {
+    @low = BOX
+    @high = 0
+    drum (points) {
+        (beat.y < low) { low = beat.y }
+        (beat.y > high) { high = beat.y }
+    }
+    (low < 0) { low = 0 }
+    (high > BOX - 1) { high = BOX - 1 }
+    drum (high - low + 1) {
+        @y = low + beat
+        @left = BOX
+        @right = -1
+        drum (4) {
+            @a = group.get(points, beat)
+            @b = group.get(points, num.mod(beat + 1, 4))
+            @inside = no
+            (a.y < b.y) {
+                (y > a.y - 1) {
+                    (y < b.y) { inside = yes }
+                }
+            }
+            (b.y < a.y) {
+                (y > b.y - 1) {
+                    (y < a.y) { inside = yes }
+                }
+            }
+            (inside == yes) {
+                @x = a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)
+                (x < left) { left = x }
+                (x > right) { right = x }
+            }
+        }
+        (left < 0) { left = 0 }
+        (right > BOX - 1) { right = BOX - 1 }
+        (right > left - 1) { graphics.fill(buffer, left, y, right - left + 1, 1, color) }
+    }
+    out none
+}
+
+skill quad_color(mesh, quad, spin) {
+    @nx = 0
+    @ny = 0
+    @nz = 0
+    drum (quad) {
+        @n = group.get(mesh.normals, beat)
+        nx = nx + n.x
+        ny = ny + n.y
+        nz = nz + n.z
+    }
+    @n = turn(nx / 4, ny / 4, nz / 4, spin)
+    (n.z > -1) { out none }
+    @dot = (n.x * group.get(LIGHT, 0) + n.y * group.get(LIGHT, 1) + n.z * group.get(LIGHT, 2)) / 1024
+    (dot < 0) { dot = 0 }
+    @light = 380 + 640 * dot / 1024
+    @face = dominant(nx, ny, nz)
+    @tint = group.get(TINTS, face)
+    out canvas.Rgb { red = group.get(tint, 0) * light / 1024, green = group.get(tint, 1) * light / 1024, blue = group.get(tint, 2) * light / 1024 }
+}
+
+skill magnitude(value) {
+    (value < 0) { out 0 - value }
+    out value
+}
+
+skill dominant(nx, ny, nz) {
+    @ax = magnitude(nx)
+    @ay = magnitude(ny)
+    @az = magnitude(nz)
+    (az > ax - 1) {
+        (az > ay - 1) {
+            (nz < 0) { out 0 }
+            out 1
+        }
+    }
+    (ax > ay - 1) {
+        (nx < 0) { out 2 }
+        out 3
+    }
+    (ny < 0) { out 4 }
+    out 5
+}
+
+skill render(buffer, mesh, spin) {
+    @points = []
+    drum (mesh.places) { points = group.add(points, project(beat, spin)) }
+    @left = BOX
+    @top = BOX
+    @right = 0
+    @bottom = 0
+    drum (points) {
+        (beat.x < left) { left = beat.x }
+        (beat.y < top) { top = beat.y }
+        (beat.x > right) { right = beat.x }
+        (beat.y > bottom) { bottom = beat.y }
+    }
+    (spin.left < left) { left = spin.left }
+    (spin.top < top) { top = spin.top }
+    (spin.right > right) { right = spin.right }
+    (spin.bottom > bottom) { bottom = spin.bottom }
+    (left < 0) { left = 0 }
+    (top < 0) { top = 0 }
+    (right > BOX - 1) { right = BOX - 1 }
+    (bottom > BOX - 1) { bottom = BOX - 1 }
+    graphics.fill(buffer, left, top, right - left + 1, bottom - top + 1, canvas.paint(buffer, canvas.PAPER))
+    drum (mesh.quads) {
+        @color = quad_color(mesh, beat, spin)
+        ((color == none) == no) {
+            @quad = []
+            drum (beat) { quad = group.add(quad, group.get(points, beat)) }
+            fill_quad(buffer, quad, canvas.paint(buffer, color))
+        }
+    }
+    @area = Vertex { x = left, y = top, z = right - left + 1 }
+    spin.left = BOX
+    spin.top = BOX
+    spin.right = 0
+    spin.bottom = 0
+    drum (points) {
+        (beat.x < spin.left) { spin.left = beat.x }
+        (beat.y < spin.top) { spin.top = beat.y }
+        (beat.x > spin.right) { spin.right = beat.x }
+        (beat.y > spin.bottom) { spin.bottom = beat.y }
+    }
+    out [area, bottom - top + 1]
+}
+
+skill blit(screen, buffer, left, top, area, rows) {
+    drum (rows) {
+        @row = area.y + beat
+        @from = (row * buffer.stride + area.x) * graphics.PIXEL_BYTES
+        @to = ((top + row) * screen.stride + left + area.x) * graphics.PIXEL_BYTES
+        drum (area.z) { mem.store32(screen.memory, to + beat * graphics.PIXEL_BYTES, mem.load32(buffer.memory, from + beat * graphics.PIXEL_BYTES)) }
+    }
+    out none
+}
+
+skill steer(spin, key) {
+    (key.ready == no) { out none }
+    (key.scan == SCAN_ESCAPE) { spin.quit = yes }
+    (key.scan == SCAN_RIGHT) { spin.sy = spin.sy + 1 }
+    (key.scan == SCAN_LEFT) { spin.sy = spin.sy - 1 }
+    (key.scan == SCAN_UP) { spin.sx = spin.sx + 1 }
+    (key.scan == SCAN_DOWN) { spin.sx = spin.sx - 1 }
+    (key.char == SPACE) { spin.paused = spin.paused == no }
+    out none
+}
+
+skill next_frame(screen, buffer, mesh, spin, base, link) {
+    @drawn = render(buffer, mesh, spin)
+    blit(screen, buffer, (screen.width - BOX) / 2, (screen.height - BOX) / 2 + 20, group.get(drawn, 0), group.get(drawn, 1))
+    remote.serve(link)
+    steer(spin, uefi.poll_key(base, PAUSE))
+    (spin.paused == no) {
+        spin.ax = num.mod(spin.ax + spin.sx + 360, 360)
+        spin.ay = num.mod(spin.ay + spin.sy + 360, 360)
+    }
+    spin.frames = spin.frames + 1
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    @screen = graphics.open(base)
+    uefi.forget_keys(base)
+    @link = remote.open_remote()
+    @place = firmware.add(firmware.arena(base), BUFFER)
+    @buffer = graphics.Screen { width = BOX, height = BOX, stride = BOX, format = screen.format, frame = place, memory = firmware.guest(place, base) }
+    graphics.fill(screen, 0, 0, screen.width, screen.height, canvas.paint(screen, canvas.PAPER))
+    fonts.draw_text(screen, 24, 18, "Скруглённый куб на Saltic", canvas.ZINC_900, fonts.HEADING)
+    fonts.draw_text(screen, 24, 48, "← → ↑ ↓ скорость, пробел пауза, Esc назад. Целые числа, таблица синусов, перспектива, свет.", canvas.ZINC_500, fonts.REGULAR)
+    @spin = Spin {}
+    @mesh = build_mesh()
+    graphics.fill(buffer, 0, 0, BOX, BOX, canvas.paint(buffer, canvas.PAPER))
+    drum (FRAMES) {
+        next_frame(screen, buffer, mesh, spin, base, link)
+        (spin.quit == yes) {
+            @frames = spin.frames
+            reply.home("куб: кадров {frames}")
+            out none
+        }
+    }
+    out none
+}

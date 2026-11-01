@@ -1,0 +1,261 @@
+use core.mem
+use core.num
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.graphics
+use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.reply
+use os.target.uefi_x86_64.remote
+
+ONE = 1024
+FAR = 40960
+REACH = 100000
+FLOOR = 0
+EYE = [0, 1300, -5200]
+LIGHT = [-461, 778, -481]
+SPHERES = [
+    [-1500, 900, 600, 900, 231, 110, 80, 25],
+    [300, 1000, 1400, 1000, 42, 157, 144, 25],
+    [1900, 750, 300, 750, 99, 102, 241, 25],
+    [-300, 420, -900, 420, 235, 235, 240, 80]
+]
+DEPTH = 2
+SCAN_ESCAPE = 23
+WAITS = 200000000
+PAUSE = 5000
+
+Ray = Box {
+    ox = 0,
+    oy = 0,
+    oz = 0,
+    dx = 0,
+    dy = 0,
+    dz = 0
+}
+
+Hit = Box {
+    t = 40960,
+    sphere = -1,
+    nx = 0,
+    ny = 0,
+    nz = 0
+}
+
+Shade = Box {
+    red = 0,
+    green = 0,
+    blue = 0
+}
+
+skill root(value) {
+    (value < 2) { out value }
+    @guess = value
+    @next = (guess + 1) / 2
+    drum (40) {
+        (next > guess - 1) { out guess }
+        guess = next
+        next = (value / guess + guess) / 2
+    }
+    out guess
+}
+
+skill normalized(x, y, z) {
+    @length = root(x * x + y * y + z * z)
+    (length < 1) { length = 1 }
+    out Ray { dx = x * ONE / length, dy = y * ONE / length, dz = z * ONE / length }
+}
+
+skill beyond(value, limit) {
+    (value > limit) { out yes }
+    (value < 0 - limit) { out yes }
+    out no
+}
+
+skill hit_sphere(ray, index) {
+    @s = group.get(SPHERES, index)
+    @ox = ray.ox - group.get(s, 0)
+    @oy = ray.oy - group.get(s, 1)
+    @oz = ray.oz - group.get(s, 2)
+    (beyond(ox, REACH)) { out FAR }
+    (beyond(oy, REACH)) { out FAR }
+    (beyond(oz, REACH)) { out FAR }
+    @radius = group.get(s, 3)
+    @b = (ox * ray.dx / 4 + oy * ray.dy / 4 + oz * ray.dz / 4) / 256
+    @qx = ox - b * ray.dx / ONE
+    @qy = oy - b * ray.dy / ONE
+    @qz = oz - b * ray.dz / ONE
+    (beyond(qx, radius)) { out FAR }
+    (beyond(qy, radius)) { out FAR }
+    (beyond(qz, radius)) { out FAR }
+    @disc = radius * radius - qx * qx - qy * qy - qz * qz
+    (disc < 0) { out FAR }
+    @spread = root(disc)
+    @t = 0 - b - spread
+    (t < 8) { t = 0 - b + spread }
+    (t < 8) { out FAR }
+    out t
+}
+
+skill nearest(ray) {
+    @best = Hit {}
+    drum (group.count(SPHERES)) {
+        @t = hit_sphere(ray, beat)
+        (t < best.t) {
+            best.t = t
+            best.sphere = beat
+        }
+    }
+    (ray.dy < 0) {
+        @t = (FLOOR - ray.oy) * ONE / ray.dy
+        (t > 8) {
+            (t < best.t) {
+                best.t = t
+                best.sphere = -1
+                best.nx = 0
+                best.ny = ONE
+                best.nz = 0
+                out best
+            }
+        }
+    }
+    (best.sphere > -1) {
+        @s = group.get(SPHERES, best.sphere)
+        @radius = group.get(s, 3)
+        best.nx = (ray.ox + ray.dx * best.t / ONE - group.get(s, 0)) * ONE / radius
+        best.ny = (ray.oy + ray.dy * best.t / ONE - group.get(s, 1)) * ONE / radius
+        best.nz = (ray.oz + ray.dz * best.t / ONE - group.get(s, 2)) * ONE / radius
+    }
+    out best
+}
+
+skill sky(ray) {
+    @up = ray.dy
+    (up < 0) { up = 0 }
+    out Shade { red = 250 - up * 70 / ONE, green = 250 - up * 50 / ONE, blue = 252 - up * 10 / ONE }
+}
+
+skill shadowed(px, py, pz) {
+    @probe = Ray { ox = px, oy = py, oz = pz, dx = group.get(LIGHT, 0), dy = group.get(LIGHT, 1), dz = group.get(LIGHT, 2) }
+    drum (group.count(SPHERES)) {
+        (hit_sphere(probe, beat) < FAR) { out yes }
+    }
+    out no
+}
+
+skill power(value, times) {
+    @result = value
+    drum (times) { result = result * result / ONE }
+    out result
+}
+
+skill trace(ray, depth) {
+    @hit = nearest(ray)
+    (hit.t == FAR) { out sky(ray) }
+    @px = ray.ox + ray.dx * hit.t / ONE
+    @py = ray.oy + ray.dy * hit.t / ONE
+    @pz = ray.oz + ray.dz * hit.t / ONE
+    @red = 0
+    @green = 0
+    @blue = 0
+    @mirror = 18
+    pick {
+        (hit.sphere < 0) {
+            @square = num.mod((px + 81920) / ONE + (pz + 81920) / ONE, 2)
+            red = 238
+            green = 238
+            blue = 242
+            (square == 1) {
+                red = 70
+                green = 70
+                blue = 82
+            }
+        }
+        {
+            @s = group.get(SPHERES, hit.sphere)
+            red = group.get(s, 4)
+            green = group.get(s, 5)
+            blue = group.get(s, 6)
+            mirror = group.get(s, 7)
+        }
+    }
+    @lx = group.get(LIGHT, 0)
+    @ly = group.get(LIGHT, 1)
+    @lz = group.get(LIGHT, 2)
+    @diffuse = (hit.nx * lx + hit.ny * ly + hit.nz * lz) / ONE
+    (diffuse < 0) { diffuse = 0 }
+    @lit = no
+    (diffuse > 0) { lit = shadowed(px + hit.nx / 64, py + hit.ny / 64, pz + hit.nz / 64) == no }
+    (lit == no) { diffuse = 0 }
+    @facing = (ray.dx * hit.nx + ray.dy * hit.ny + ray.dz * hit.nz) / ONE
+    @bent = normalized(ray.dx - 2 * facing * hit.nx / ONE, ray.dy - 2 * facing * hit.ny / ONE, ray.dz - 2 * facing * hit.nz / ONE)
+    @rx = bent.dx
+    @ry = bent.dy
+    @rz = bent.dz
+    @shine = 0
+    (lit == yes) {
+        @along = (rx * lx + ry * ly + rz * lz) / ONE
+        (along > 0) { shine = power(along, 5) * 230 / ONE }
+    }
+    @light = 260 + 760 * diffuse / ONE
+    red = red * light / ONE + shine
+    green = green * light / ONE + shine
+    blue = blue * light / ONE + shine
+    (depth > 0) {
+        @bounce = trace(Ray { ox = px + hit.nx / 64, oy = py + hit.ny / 64, oz = pz + hit.nz / 64, dx = rx, dy = ry, dz = rz }, depth - 1)
+        red = (red * (100 - mirror) + bounce.red * mirror) / 100
+        green = (green * (100 - mirror) + bounce.green * mirror) / 100
+        blue = (blue * (100 - mirror) + bounce.blue * mirror) / 100
+    }
+    out Shade { red = red, green = green, blue = blue }
+}
+
+skill clamp(value) {
+    (value > 255) { out 255 }
+    (value < 0) { out 0 }
+    out value
+}
+
+skill sample(quarter_x, quarter_y, quarter_height) {
+    @look = normalized(quarter_x * ONE / quarter_height, quarter_y * ONE / quarter_height - 180, 1500)
+    out trace(Ray { ox = group.get(EYE, 0), oy = group.get(EYE, 1), oz = group.get(EYE, 2), dx = look.dx, dy = look.dy, dz = look.dz }, DEPTH) rescue |err| { Shade { red = 245, green = 247, blue = 251 } }
+}
+
+skill blended(col, row, width, height) {
+    @x = col * 4 - width * 2
+    @y = height * 2 - row * 4
+    @first = sample(x - 1, y + 1, height * 4)
+    @second = sample(x + 1, y - 1, height * 4)
+    out Shade { red = (clamp(first.red) + clamp(second.red)) / 2, green = (clamp(first.green) + clamp(second.green)) / 2, blue = (clamp(first.blue) + clamp(second.blue)) / 2 }
+}
+
+skill trace_row(screen, row) {
+    @start = row * screen.stride * graphics.PIXEL_BYTES
+    drum (screen.width) {
+        @color = blended(beat, row, screen.width, screen.height)
+        mem.store32(screen.memory, start + beat * graphics.PIXEL_BYTES, graphics.color(screen, color.red, color.green, color.blue))
+    }
+    out none
+}
+
+skill wait_escape(base, link) {
+    drum (WAITS) {
+        remote.serve(link)
+        @key = uefi.poll_key(base, PAUSE)
+        (key.scan == SCAN_ESCAPE) { out none }
+    }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    @screen = graphics.open(base)
+    uefi.forget_keys(base)
+    @link = remote.open_remote()
+    drum (screen.height) {
+        trace_row(screen, beat)
+        remote.serve(link)
+    }
+    wait_escape(base, link)
+    reply.home("трассировка: {DEPTH} отражения на луч, Esc — назад")
+    out none
+}
