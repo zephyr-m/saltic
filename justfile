@@ -56,6 +56,12 @@ trace-elf file:
 bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic":
     bash bootstrap/refresh.sh "$1"
 
+global-check:
+    bash workbench/global-check.sh
+
+hosts:
+    bash workbench/hosts.sh
+
 test case="all":
     nix --extra-experimental-features "nix-command flakes" develop --command bash tests/run.sh "$1"
 

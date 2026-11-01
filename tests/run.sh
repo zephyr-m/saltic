@@ -21,6 +21,19 @@ cleanup() {
 
 trap cleanup EXIT
 
+# Хост, на котором исполняются тестовые программы: x86_64 — прямо на процессоре,
+# rv32i — под qemu-riscv32. Код RISC-V как результат (гость VM, цель трассера,
+# ELF машинного слоя) всегда исполняется в QEMU.
+host="${SALTIC_TEST_HOST:-rv32i}"
+
+run_built() {
+    if [[ "$host" == "x86_64" ]]; then
+        "$@"
+    else
+        qemu-riscv32 -B 0x100000000 "$@"
+    fi
+}
+
 build() {
     local name="$1"
     local source="$2"
@@ -29,7 +42,7 @@ build() {
 
     SALTIC_BUILD_DIR="$work/build/$name" \
     SALTIC_HEAP_BYTES="$heap_bytes" \
-    SALTIC_TARGET="${SALTIC_TARGET:-}" \
+    SALTIC_TARGET="${SALTIC_TARGET:-$host}" \
     bash bootstrap/build.sh "$source" "$output"
 }
 
@@ -45,11 +58,11 @@ build_checker() {
 
 test_checker() {
     build_checker
-    qemu-riscv32 -B 0x100000000 "$checker_elf" \
+    run_built "$checker_elf" \
         soul/canonical/main.saltic >"$work/checker/canonical.txt"
-    qemu-riscv32 -B 0x100000000 "$checker_elf" \
+    run_built "$checker_elf" \
         soul/canonical/errors.saltic >"$work/checker/errors.txt"
-    qemu-riscv32 -B 0x100000000 "$checker_elf" \
+    run_built "$checker_elf" \
         soul/canonical/support.saltic >>"$work/checker/errors.txt"
 
     test ! -s "$work/checker/canonical.txt"
@@ -67,7 +80,7 @@ test_vm() {
         tests/vm-guest.saltic \
         "$work/vm/guest.elf"
     build vm tests/vm.saltic "$work/vm/vm.elf" 536870912
-    qemu-riscv32 -B 0x100000000 "$work/vm/vm.elf" \
+    run_built "$work/vm/vm.elf" \
         "$work/vm/guest.elf" \
         "$work/vm/actual.txt"
     diff -u tests/expected/vm.txt "$work/vm/actual.txt"
@@ -77,10 +90,10 @@ test_vm() {
 test_fixed_types() {
     mkdir -p "$work/fixed-types"
     build_checker
-    qemu-riscv32 -B 0x100000000 "$checker_elf" \
+    run_built "$checker_elf" \
         soul/seed/tests/fixed.saltic \
         >"$work/fixed-types/valid-diagnostics.txt"
-    qemu-riscv32 -B 0x100000000 "$checker_elf" \
+    run_built "$checker_elf" \
         soul/seed/tests/fixed-errors.saltic \
         >"$work/fixed-types/errors.txt"
 
@@ -95,7 +108,7 @@ test_fixed_types() {
     build fixed-types \
         soul/seed/tests/fixed.saltic \
         "$work/fixed-types/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/fixed-types/program.elf" \
         >"$work/fixed-types/stdout.txt"
     diff -u \
@@ -107,10 +120,10 @@ test_fixed_types() {
 test_modules() {
     mkdir -p "$work/modules"
     build_checker
-    qemu-riscv32 -B 0x100000000 "$checker_elf" \
+    run_built "$checker_elf" \
         tests/fixtures/modules/main.saltic \
         >"$work/modules/main-diagnostics.txt"
-    qemu-riscv32 -B 0x100000000 "$checker_elf" \
+    run_built "$checker_elf" \
         tests/fixtures/modules/errors.saltic \
         >"$work/modules/errors.txt"
 
@@ -122,7 +135,7 @@ test_modules() {
     build modules \
         tests/fixtures/modules/main.saltic \
         "$work/modules/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/modules/program.elf" \
         >"$work/modules/stdout.txt"
     diff -u tests/expected/modules.txt "$work/modules/stdout.txt"
@@ -132,7 +145,7 @@ test_modules() {
 test_json_rpc() {
     mkdir -p "$work/json-rpc"
     build json-rpc tests/json-rpc.saltic "$work/json-rpc/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/json-rpc/program.elf" \
         >"$work/json-rpc/stdout.txt"
     diff -u tests/expected/json-rpc.txt "$work/json-rpc/stdout.txt"
@@ -146,12 +159,8 @@ test_tracer() {
     bash bootstrap/build.sh \
         tests/tracer.saltic \
         "$work/tracer/target.elf"
-    SALTIC_HEAP_BYTES=536870912 \
-    SALTIC_BUILD_DIR="$work/build/tracer" \
-    bash bootstrap/build.sh \
-        soul/craft/tracer.saltic \
-        "$work/tracer/tracer.elf"
-    qemu-riscv32 -B 0x100000000 \
+    build tracer soul/craft/tracer.saltic "$work/tracer/tracer.elf" 536870912
+    run_built \
         "$work/tracer/tracer.elf" \
         "$work/tracer/target.elf" \
         >"$work/tracer/stdout.txt"
@@ -170,7 +179,7 @@ test_diagnostics() {
     build diagnostics \
         tests/diagnostics.saltic \
         "$work/diagnostics/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/diagnostics/program.elf" \
         >"$work/diagnostics/stdout.txt"
     diff -u \
@@ -185,7 +194,7 @@ test_memory() {
         soul/seed/tests/memory.saltic \
         "$work/memory/program.elf" \
         1048576
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/memory/program.elf"
     echo "память: регионы освобождают мусор на куче 1 МБ"
 }
@@ -245,7 +254,7 @@ test_seed_contract() {
     build seed-contract \
         soul/seed/tests/contract.saltic \
         "$work/seed-contract/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/seed-contract/program.elf"
     echo "seed: единый контракт подтверждён"
 }
@@ -255,18 +264,17 @@ test_machine() {
     build machine \
         soul/seed/tests/machine.saltic \
         "$work/machine/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/machine/program.elf" \
         "$work/machine/ordinary.elf"
     test -s "$work/machine/ordinary.elf"
     chmod +x "$work/machine/ordinary.elf"
-    qemu-riscv32 -B 0x100000000 \
-        "$work/machine/ordinary.elf"
+    qemu-riscv32 -B 0x100000000 "$work/machine/ordinary.elf"
 
     build testing-failure \
         tests/fixtures/testing-failure.saltic \
         "$work/machine/testing-failure.elf"
-    if qemu-riscv32 -B 0x100000000 \
+    if run_built \
         "$work/machine/testing-failure.elf" \
         >"$work/machine/testing-failure.txt"; then
         echo "проверка: намеренно проваленный тест завершился успешно" >&2
@@ -286,7 +294,7 @@ test_vm_machine() {
     build vm-machine \
         soul/seed/tests/vm-machine.saltic \
         "$work/vm-machine/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/vm-machine/program.elf" \
         "$platform_elf"
     test -s "$platform_elf"
@@ -307,7 +315,7 @@ test_abi() {
     build abi \
         soul/seed/tests/abi.saltic \
         "$work/abi/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/abi/program.elf"
     echo "ABI: единый контракт подтверждён"
 }
@@ -327,7 +335,7 @@ test_jtml() {
     build jtml \
         tests/jtml.saltic \
         "$work/jtml/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/jtml/program.elf"
     echo "JTML: дерево, раскладка и ввод подтверждены"
 }
@@ -337,7 +345,7 @@ test_tasks() {
     build tasks \
         tests/tasks.saltic \
         "$work/tasks/program.elf"
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$work/tasks/program.elf"
     echo "tasks: модель и интерфейс подтверждены"
 }
@@ -368,7 +376,7 @@ test_closure() {
     test "$(<"$closure_work/output.txt")" = "pip:0"
     echo "closure: тот же ELF в Saltic VM, 100000 инструкций"
     build vm-elf tests/vm-elf.saltic "$closure_work/vm.elf" 4026531840
-    qemu-riscv32 -B 0x100000000 \
+    run_built \
         "$closure_work/vm.elf" \
         "$closure_work/canonical.elf" \
         "$closure_work/input.txt" \
@@ -427,7 +435,9 @@ if (( $# == 0 )); then
     set -- all
 fi
 
-if [[ "$1" == "all" ]]; then
+if [[ "$1" == "platforms" ]]; then
+    set -- qemu-virt uefi closure
+elif [[ "$1" == "all" ]]; then
     set -- \
         checker \
         vm \
@@ -442,10 +452,7 @@ if [[ "$1" == "all" ]]; then
         memory \
         native \
         jtml \
-        tasks \
-        qemu-virt \
-        uefi \
-        closure
+        tasks
 fi
 
 for name in "$@"; do

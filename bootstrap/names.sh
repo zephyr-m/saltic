@@ -35,7 +35,7 @@ saltic_source_hash() {
         | xargs sha256sum | sha256sum | cut -c1-16
 }
 
-# saltic_write_passport <бинарник> <запускается на> <выдаёт код для> <собран чем> <куча> <самосборка>
+# saltic_write_passport <бинарник> <запускается на> <выдаёт код для> <собран чем> <куча> <самосборка> [секунды самосборки]
 saltic_write_passport() {
     local binary="$1"
     local parent_sum
@@ -52,6 +52,11 @@ saltic_write_passport() {
 sha256 файла:     $(sha256sum "$binary" | cut -c1-16)
 дата:             $(date +%Y-%m-%d)
 EOF
+    if [[ -n "${7:-}" ]]; then
+        local cpu
+        cpu="$(grep -m1 '^model name' /proc/cpuinfo | sed 's/^[^:]*: *//')"
+        echo "время самосборки: $7 с, $cpu" >> "${binary%.elf}.txt"
+    fi
 }
 
 # Родной x86-64 компилятор свежий, если его паспорт ссылается на текущий

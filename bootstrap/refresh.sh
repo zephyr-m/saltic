@@ -68,7 +68,10 @@ stage "$work/stage-1/toolchain" rv32i "$work/stage-2/toolchain.elf"
 stage "$work/stage-1/toolchain" x86_64 "$work/stage-2/toolchain"
 
 echo "bootstrap refresh: stage-2 собирает stage-3 (rv32i)"
+started=$EPOCHREALTIME
 stage "$work/stage-2/toolchain" rv32i "$work/stage-3/toolchain.elf"
+self_build_seconds="$(LC_ALL=C awk "BEGIN { printf \"%.1f\", ${EPOCHREALTIME/,/.} - ${started/,/.} }")"
+echo "bootstrap refresh: новый компилятор собрал себя за $self_build_seconds с"
 
 echo "bootstrap refresh: проверяю fixed point"
 cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
@@ -84,7 +87,7 @@ else
     cp "$work/stage-3/toolchain.elf" "$compiler"
     chmod +x "$compiler"
     saltic_write_passport "$compiler" "rv32i, linux (qemu-riscv32 -B 0x100000000)" "rv32i, x86_64" \
-        "$previous" "$heap_bytes" "сходится на x86-64 (stage-2 = stage-3)"
+        "$previous" "$heap_bytes" "сходится на x86-64 (stage-2 = stage-3)" "$self_build_seconds"
     # stage-2 под x86_64 — перевод stage-2 rv32i, а он побайтово равен новому
     # компилятору: это и есть его родная версия.
     native_path="$(saltic_compiler_path x86_64 linux)"
