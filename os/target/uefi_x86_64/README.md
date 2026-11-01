@@ -20,11 +20,13 @@ Saltic на ноутбуке без Linux: программа собираетс
 | `files.saltic` | файлы через прошивку: все тома и диски (`volumes`, с `ConnectController` ко всем устройствам), каталоги, создание папок и файлов, `install` — записать принятую программу в `\EFI\BOOT\BOOTX64.EFI` на несъёмном томе |
 | `disk.saltic` | разметка диска с нуля: защитный MBR, GPT (две копии, CRC32 — прошивкой), раздел EFI 512 МБ, FAT32; сектора собираются чистыми навыками и проверены на Linux (`sgdisk -v`, `fsck.fat`, `mtools`) |
 | `spider.saltic` | маскот Saltic — паучок-скакун крупными пикселями справа под часами; маленькая программа для `upload … --run` рядом с агентом |
+| `clock.saltic`, `parse.saltic` | время (UTC+5, полночь, конец месяца) и разбор чисел из команд — вынесены из агента |
 | `visitor.saltic` | маленькая программа для проверки `upload`: печатает приветствие и возвращается к агенту |
 | `tools/listen.py` | «ухо» на проводе: печатает все кадры на интерфейсе (`sudo python3 tools/listen.py eno1`) |
 | `tools/talk.py` | сырой разговор без ARP: раз в секунду шлёт `ping N` и печатает ответы (`sudo python3 tools/talk.py eno1`) |
 | `tools/say.py` | одна команда агенту без root: `python3 tools/say.py info` (нужен адрес 10.0.0.1 на `eno1`) |
 | `tools/glyphs.py` | пересобрать `glyphs.saltic` из `os/fonts/spleen.saltic` |
+| `tools/shot.py` | снимок экрана Acer в PNG: `python3 tools/shot.py shot.png` (683 × 384, кусками по 1024 байта с повтором) |
 | `tools/upload.py` | залить программу агенту и, с `--run`, запустить: `python3 tools/upload.py visitor.efi --run`; куски по 1024 байта с подтверждением, сверка суммы |
 | `build.sh` | собирает `EFI/BOOT/BOOTX64.EFI` и папку образа флешки |
 | `run.sh` | запускает собранное в QEMU x86-64 с прошивкой OVMF; `--check` — без окна, жмёт клавишу и ждёт «Bye!» (так его зовёт `tests/run.sh uefi`) |

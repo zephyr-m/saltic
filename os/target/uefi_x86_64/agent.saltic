@@ -2,6 +2,7 @@ use io
 use core.num
 use core.str
 use core.group
+use core.mem
 use os.target.uefi_x86_64.firmware
 use os.target.uefi_x86_64.pci
 use os.target.uefi_x86_64.rtl8111
@@ -11,6 +12,8 @@ use os.target.uefi_x86_64.graphics
 use os.target.uefi_x86_64.lettering
 use os.target.uefi_x86_64.files
 use os.target.uefi_x86_64.disk
+use os.target.uefi_x86_64.clock
+use os.target.uefi_x86_64.parse
 
 PORT = 5555
 DATA_PORT = 5556
@@ -20,10 +23,8 @@ REPORT_EVERY = 32768
 BAR_HEIGHT = 16
 BAR_SPACE = 64
 MY_IP = [10, 0, 0, 2]
-MEMORY_DEFAULT = 16
-MEMORY_LIMIT = 64
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | time — дата и время"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | time — дата и время | shot — снимок экрана (забирает tools/shot.py; сбрасывает принятую программу)"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -41,14 +42,16 @@ Agent = Box {
     shown_second = -1,
     rounds = 0,
     failures = 0,
-    last_error = "нет"
+    last_error = "нет",
+    shot_bytes = 0
 }
 
 MARGIN = 40
+SHOT_CHUNK = 1024
+SHOT_HEADER = 46
+SHOT_PREFIX = "shot-part "
 LINE_GAP = 4
 LOG_LIMIT = 150
-ZONE_HOURS = 5
-MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 CLOCK_EVERY = 20000
 CLOCK_WIDTH = 160
 ERASE_WORD = "ERASE-ACER-DISK"
@@ -59,45 +62,9 @@ skill log(agent, message) {
     out none
 }
 
-skill parse_hex(text) {
-    (str.len(text) == 0) { out error.BadAddress }
-    (str.len(text) > 8) { out error.BadAddress }
-    @hi = 0
-    @lo = 0
-    drum (str.len(text)) {
-        @digit = num.hex_value(str.get(text, beat))
-        (digit < 0) { out error.BadAddress }
-        hi = hi * 16 + lo / 4096
-        lo = num.mod(lo, 4096) * 16 + digit
-    }
-    out firmware.Phys { hi = hi, lo = lo }
-}
-
-skill parse_count(text) {
-    @value = 0
-    drum (str.len(text)) {
-        @ch = str.get(text, beat)
-        (str.is_digit(ch) == no) { out MEMORY_DEFAULT }
-        value = value * 10 + num.digit(ch)
-    }
-    (value < 1) { out MEMORY_DEFAULT }
-    (value > MEMORY_LIMIT) { out MEMORY_LIMIT }
-    out value
-}
-
-skill parse_size(text) {
-    @value = 0
-    drum (str.len(text)) {
-        @ch = str.get(text, beat)
-        (str.is_digit(ch) == no) { out 0 }
-        value = value * 10 + num.digit(ch)
-    }
-    out value
-}
-
 skill begin_upload(agent, words) {
     (group.count(words) < 2) { out "как: upload <байт>" }
-    @size = parse_size(group.get(words, 1))
+    @size = parse.parse_size(group.get(words, 1))
     (size < 1) { out "плохой размер" }
     (size > UPLOAD_LIMIT) { out "слишком много: предел {UPLOAD_LIMIT} байт" }
     agent.expected = size
@@ -132,9 +99,9 @@ skill launch(agent) {
 
 skill memory_dump(agent, words) {
     (group.count(words) < 2) { out "как: mem <адрес hex> [байт]" }
-    @at = parse_hex(group.get(words, 1)) rescue |err| { out "плохой адрес: {err}" }
-    @count = MEMORY_DEFAULT
-    (group.count(words) > 2) { count = parse_count(group.get(words, 2)) }
+    @at = parse.parse_hex(group.get(words, 1)) rescue |err| { out "плохой адрес: {err}" }
+    @count = parse.MEMORY_DEFAULT
+    (group.count(words) > 2) { count = parse.parse_count(group.get(words, 2)) }
     @dump = []
     @row = ""
     drum (count) {
@@ -239,8 +206,8 @@ skill journal(agent, who, payload) {
     (agent.console == yes) { out none }
     @screen = graphics.open(agent.card.base)
     @face = lettering.FACE_SMALL
-    @clock = clock_text(local_time(uefi.now(agent.card.base)))
-    @prefix = "{clock}  {who}  "
+    @moment_text = clock.clock_text(clock.local_time(uefi.now(agent.card.base)))
+    @prefix = "{moment_text}  {who}  "
     @bytes = []
     drum (str.len(prefix)) { bytes = group.add(bytes, str.byte(prefix, beat)) }
     @shown = group.count(payload)
@@ -271,62 +238,22 @@ skill install_image(agent) {
     out "записал \\EFI\\BOOT\\BOOTX64.EFI на том SALTIC: {written} байт"
 }
 
-skill two(value) {
-    (value < 10) { out "0{value}" }
-    out "{value}"
-}
-
-skill local_time(moment) {
-    moment.hour = moment.hour + ZONE_HOURS
-    (moment.hour > 23) {
-        moment.hour = moment.hour - 24
-        moment.day = moment.day + 1
-        @days = group.get(MONTH_DAYS, moment.month - 1)
-        (moment.month == 2) {
-            (num.mod(moment.year, 4) == 0) { days = 29 }
-        }
-        (moment.day > days) {
-            moment.day = 1
-            moment.month = moment.month + 1
-            (moment.month > 12) {
-                moment.month = 1
-                moment.year = moment.year + 1
-            }
-        }
-    }
-    out moment
-}
-
-skill clock_text(moment) {
-    @hours = two(moment.hour)
-    @minutes = two(moment.minute)
-    @seconds = two(moment.second)
-    out "{hours}:{minutes}:{seconds}"
-}
-
-skill date_text(moment) {
-    @day = two(moment.day)
-    @month = two(moment.month)
-    @year = moment.year
-    out "{day}.{month}.{year}"
-}
-
 skill draw_clock(agent) {
-    @moment = local_time(uefi.now(agent.card.base))
+    @moment = clock.local_time(uefi.now(agent.card.base))
     (moment.second == agent.shown_second) { out agent }
     agent.shown_second = moment.second
     @screen = graphics.open(agent.card.base)
     @left = screen.width - MARGIN - CLOCK_WIDTH
     graphics.fill(screen, left, 32, CLOCK_WIDTH, 32, paper(screen))
-    lettering.paint_text(screen, lettering.FACE_TITLE, left + 16, 32, clock_text(moment), ink(screen))
+    lettering.paint_text(screen, lettering.FACE_TITLE, left + 16, 32, clock.clock_text(moment), ink(screen))
     out agent
 }
 
 skill time_reply(agent) {
-    @moment = local_time(uefi.now(agent.card.base))
-    @clock = clock_text(moment)
-    @date = date_text(moment)
-    out "{date} {clock} (UTC+5, по часам ноутбука)"
+    @moment = clock.local_time(uefi.now(agent.card.base))
+    @moment_text = clock.clock_text(moment)
+    @date = clock.date_text(moment)
+    out "{date} {moment_text} (UTC+5, по часам ноутбука)"
 }
 
 skill device_list(agent) {
@@ -349,14 +276,69 @@ skill execute(agent, text, payload) {
     (name == "clear") { out clear_screen(agent) }
     (name == "volumes") { out files.report(agent.card.base) }
     (name == "time") { out time_reply(agent) }
+    (name == "shot") { out take_shot(agent) }
     (name == "prepare-disk") { out prepare_disk(agent, words) }
     (name == "install") { out install_image(agent) }
     (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
     out "не знаю команду '{name}'. {HELP}"
 }
 
+skill take_shot(agent) {
+    @base = agent.card.base
+    @screen = graphics.open(base)
+    @width = screen.width / 2
+    @height = screen.height / 2
+    @arena = firmware.guest(agent.card.arena, base)
+    agent.expected = 0
+    agent.received = 0
+    @at = UPLOAD_OFFSET
+    @red = 2
+    @blue = 0
+    (screen.format == graphics.FORMAT_RGB) {
+        red = 0
+        blue = 2
+    }
+    drum (height) {
+        @line = beat * 2 * screen.stride * graphics.PIXEL_BYTES
+        drum (width) {
+            @pixel = line + beat * 2 * graphics.PIXEL_BYTES
+            mem.store8(arena, at, mem.load8(screen.memory, pixel + red))
+            mem.store8(arena, at + 1, mem.load8(screen.memory, pixel + 1))
+            mem.store8(arena, at + 2, mem.load8(screen.memory, pixel + blue))
+            at = at + 3
+        }
+    }
+    agent.shot_bytes = width * height * 3
+    @total = agent.shot_bytes
+    @chunks = (total + SHOT_CHUNK - 1) / SHOT_CHUNK
+    out "снимок {width} {height} {total} {chunks}"
+}
+
+skill send_chunk(agent, packet, index) {
+    @first = index * SHOT_CHUNK
+    @size = agent.shot_bytes - first
+    (size > SHOT_CHUNK) { size = SHOT_CHUNK }
+    (size < 1) { out none }
+    @header = net.udp_header(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, size + 4)
+    header = net.add16(net.add16(header, index / 65536), num.mod(index, 65536))
+    @arena = firmware.guest(agent.card.arena, agent.card.base)
+    drum (SHOT_HEADER) { mem.store8(arena, rtl8111.TX_BUFFER + beat, group.get(header, beat)) }
+    drum (size) { mem.store8(arena, rtl8111.TX_BUFFER + SHOT_HEADER + beat, mem.load8(arena, UPLOAD_OFFSET + first + beat)) }
+    @length = SHOT_HEADER + size
+    (length < net.FRAME_MINIMUM) {
+        drum (net.FRAME_MINIMUM - length) { mem.store8(arena, rtl8111.TX_BUFFER + length + beat, 0) }
+        length = net.FRAME_MINIMUM
+    }
+    rtl8111.send_prepared(agent.card, length)
+    out none
+}
+
 skill answer(agent, bytes) {
     @packet = net.udp(bytes)
+    (str.starts_with(packet.text, SHOT_PREFIX) == yes) {
+        send_chunk(agent, packet, parse.parse_size(str.slice(packet.text, str.len(SHOT_PREFIX), str.len(packet.text))))
+        out agent
+    }
     @who = net.ip_text(packet.from_ip)
     @command = packet.text
     log(agent, "command from {who}: {command}")
