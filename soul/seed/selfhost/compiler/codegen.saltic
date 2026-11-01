@@ -10,6 +10,7 @@ use selfhost.machine.instruction
 use selfhost.machine.layout
 use selfhost.machine.registers
 use selfhost.machine.word
+use selfhost.checker
 
 skill box_field_symbol(compiler, box_name, field_name) {
     @box = state.symbol_find(compiler.boxes, box_name)
@@ -88,7 +89,7 @@ skill compile_path(compiler, node) {
         }
     }
     (count > 2) {
-        @enum_name = resolve_symbol(compiler.enums, compiler.aliases, ast.path_prefix(parts), compiler.current_function.module)
+        @enum_name = resolve_symbol(compiler, compiler.enums, ast.path_prefix(parts))
         (str.len(enum_name) > 0) {
             @full_name = "{enum_name}."
             full_name = str.add(full_name, group.get(parts, count - 1))
@@ -101,7 +102,7 @@ skill compile_path(compiler, node) {
         compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.S0, registers.ZERO, slot)
     }
     (state.symbol_has(compiler.current_function.slots, name) == no) {
-        constant_name = resolve_symbol(compiler.constants, compiler.aliases, path_name, compiler.current_function.module)
+        constant_name = resolve_symbol(compiler, compiler.constants, path_name)
         constant = state.symbol_find(compiler.constants, constant_name)
         (str.len(constant.name) > 0) {
             (constant_literal(constant.node) == yes) {
@@ -214,10 +215,10 @@ skill immediate_operand(compiler, node) {
         @parts = ast.plain(node)
         @count = group.count(parts)
         (count > 2) {
-            (str.len(resolve_symbol(compiler.enums, compiler.aliases, ast.path_prefix(parts), compiler.current_function.module)) > 0) { out yes }
+            (str.len(resolve_symbol(compiler, compiler.enums, ast.path_prefix(parts))) > 0) { out yes }
         }
         (state.symbol_has(compiler.current_function.slots, group.get(parts, 1)) == no) {
-            @constant_name = resolve_symbol(compiler.constants, compiler.aliases, ast.path_text(parts), compiler.current_function.module)
+            @constant_name = resolve_symbol(compiler, compiler.constants, ast.path_text(parts))
             @constant = state.symbol_find(compiler.constants, constant_name)
             (str.len(constant.name) > 0) { out constant_literal(constant.node) }
         }
@@ -241,22 +242,11 @@ skill compile_rescue(compiler, node) {
     out compiler
 }
 
-skill box_has_skill(compiler, box_name, skill_name) {
-    @box = state.symbol_find(compiler.boxes, box_name)
-    drum (group.count(ast.plain(box.node)) - 2) {
-        @member = ast.part(box.node, beat + 2)
-        (ast.tag(member) == "subject-skill") {
-            (ast.part(member, 1) == skill_name) { out yes }
-        }
-    }
-    out no
-}
-
 skill infer_type(compiler, node) {
     @plain = ast.plain(node)
     @tag = group.get(plain, 0)
     (tag == "box-new") {
-        @box_name = resolve_symbol(compiler.boxes, compiler.aliases, group.get(plain, 1), compiler.current_function.module)
+        @box_name = resolve_symbol(compiler, compiler.boxes, group.get(plain, 1))
         out "box:{box_name}"
     }
     (tag == "template") { out "string" }
@@ -287,7 +277,7 @@ skill infer_type(compiler, node) {
                 (result_type == "group-add") { out "unknown" }
                 out result_type
             }
-            @box_name = resolve_symbol(compiler.boxes, compiler.aliases, full, compiler.current_function.module)
+            @box_name = resolve_symbol(compiler, compiler.boxes, full)
             (str.len(box_name) > 0) { out "box:{box_name}" }
         }
         out "unknown"
@@ -303,28 +293,22 @@ skill infer_type(compiler, node) {
     out "unknown"
 }
 
-skill resolve_symbol(symbols, aliases, name, module) {
+skill resolve_symbol(compiler, symbols, name) {
     (state.symbol_has(symbols, name) == yes) { out name }
-    @local = ast.qualified(module, name)
-    (state.symbol_has(symbols, local) == yes) { out local }
-    @head = ast.name_head(name)
-    @import = state.symbol_find(aliases, ast.alias_key(module, head))
-    (import.kind == "import") {
-        @candidate = str.add(import.text, ast.name_tail(name))
-        (state.symbol_has(symbols, candidate) == yes) { out candidate }
-    }
+    @resolved = checker.resolve(name, compiler.current_function.module, compiler.globals)
+    (state.symbol_has(symbols, resolved) == yes) { out resolved }
     out ""
 }
 
 skill call_name(compiler, callee) {
     @name = ast.path_text(callee)
-    @resolved = resolve_symbol(compiler.natives, compiler.aliases, name, compiler.current_function.module)
+    @resolved = resolve_symbol(compiler, compiler.natives, name)
     (str.len(resolved) > 0) { out resolved }
     out name
 }
 
 skill resolve_skill(compiler, path) {
-    out resolve_symbol(compiler.skills, compiler.aliases, ast.path_text(path), compiler.current_function.module)
+    out resolve_symbol(compiler, compiler.skills, ast.path_text(path))
 }
 
 skill call_arguments(node) {
@@ -569,12 +553,12 @@ skill compile_call(compiler, node) {
         compiler.machine = layout.emit_call(compiler.machine, memory_target)
         out compiler
     }
-    @resolved_box = resolve_symbol(compiler.boxes, compiler.aliases, name, compiler.current_function.module)
+    @resolved_box = resolve_symbol(compiler, compiler.boxes, name)
     (str.len(resolved_box) > 0) { out compile_box(compiler, resolved_box, []) }
     (group.count(callee) == 2) {
         @short_name = group.get(callee, 1)
         (str.len(compiler.current_function.subject) > 0) {
-            (box_has_skill(compiler, compiler.current_function.subject, short_name) == yes) {
+            (checker.box_has_skill(compiler.boxes, compiler.current_function.subject, short_name) == yes) {
                 @with_self = state.group_prepend(["path", "$self"], args)
                 compiler = compile_arguments(compiler, with_self)
                 @target = "{compiler.current_function.subject}."
@@ -591,7 +575,7 @@ skill compile_call(compiler, node) {
         (str.starts_with(receiver_type, "box:") == yes) {
             @box_name = str.slice(receiver_type, 4, str.len(receiver_type))
             @method = group.get(callee, 2)
-            (box_has_skill(compiler, box_name, method) == yes) {
+            (checker.box_has_skill(compiler.boxes, box_name, method) == yes) {
                 @with_receiver = state.group_prepend(receiver, args)
                 compiler = compile_arguments(compiler, with_receiver)
                 @target = "{box_name}."
@@ -670,7 +654,7 @@ skill compile_expression(compiler, node) {
     (tag == "call") { out compile_call(compiler, node) }
     (tag == "group") { out compile_group(compiler, state.group_slice(plain, 1, group.count(plain))) }
     (tag == "box-new") {
-        @box_name = resolve_symbol(compiler.boxes, compiler.aliases, group.get(plain, 1), compiler.current_function.module)
+        @box_name = resolve_symbol(compiler, compiler.boxes, group.get(plain, 1))
         out compile_box(compiler, box_name, state.group_slice(plain, 2, group.count(plain)))
     }
     (tag == "rescue") { out compile_rescue(compiler, node) }
