@@ -1,61 +1,65 @@
 # Seed — ядро языка Saltic
 
-Ядро закрыто для обычной разработки. Новая возможность, второй способ сделать то же самое и новая публичная граница сюда не добавляются. Меняется только ошибка в уже записанном контракте.
-
 `seed` — самохостящееся ядро: парсер, чекер, компилятор, виртуальная машина и
-машинный слой (кодировщик, раскладка, ELF-образ) написаны на самом Saltic.
+машинный слой написаны на самом Saltic. Эталон языка — `soul/canonical/`.
 
-## Публичные границы
+## Слои
 
-Программа на Saltic видит один язык и модули `seed`. Второй способ выразить ту же вещь не добавляется.
+Ядро делится на три слоя, каждый подключается по своему корню:
 
-Язык:
+- `core/` — то, что нужно любой программе: `core.str`, `core.group`,
+  `core.num`, `core.mem`, фиксированные значения `core.u8` … `core.usize`,
+  `core.bits32`, `core.address`, а также `core.cpu`, `core.time`,
+  `core.process`, `core.system`. Заготовки без содержимого: `bytes`, `crypto`,
+  `sync`, `resource`, `graphics`, `robot`.
+- `io.saltic` и `io/` — вывод (`use io`), файлы (`use io.file`), сеть
+  (`io.net`).
+- `selfhost/` — сам язык: `selfhost.parser`, `selfhost.checker`,
+  `selfhost.compiler`, `selfhost.vm` и всё, на чём они стоят.
 
-- `use`, `skill`, `program`, `out`, `Box`, `enum`, `drum`, `rescue`, `@`
-- значения `yes`, `no`, `none`
-- ошибка — значение, не отдельный режим; `rescue` подставляет запасной результат
-- одно имя вводится через `@`, дальнейшая запись идёт без `@`
+Корни `core`, `io` и `selfhost` загрузчик ищет в `soul/seed`, корень
+`canonical` — в `soul` (`selfhost/parser/loader.saltic`).
 
-Модули программы:
+## Язык
 
-- `seed.io` — вывод
-- `seed.file` — чтение и запись файлов
-- `seed.group`, `seed.str`, `seed.num` — группы, строки, числа
-- `seed.process` — завершение процесса
+- ключевые слова: `use`, `skill`, `program`, `out`, `Box`, `enum`, `drum`,
+  `pick`, `leave`, `rescue`, `native`;
+- значения `yes`, `no`, `none`; отрицания нет, только `== no`;
+- одно имя вводится через `@`, дальнейшая запись идёт без `@`;
+- ошибка — значение (`error.Имя`), не отдельный режим; `rescue` подставляет
+  запасной результат.
 
-Память программы — одна квота. Каждый вызов skill открывает регион: на выходе результат `out` копируется вызывающему, остальная память региона освобождается целиком. Нехватка памяти — ошибка `MemoryExhausted`, её ловит `rescue`. Сборщика мусора нет. Подробно — `docs/MEMORY-MODEL.md`.
+Память программы — одна квота. Каждый вызов skill открывает регион: на выходе
+результат `out` копируется вызывающему, остальная память региона
+освобождается целиком. Нехватка памяти — ошибка `MemoryExhausted`, её ловит
+`rescue`. Сборщика мусора нет. Подробно — `docs/MEMORY-MODEL.md`.
 
-Сборка канона одна: исходник → прямой ELF. Текст ассемблера, GNU `as`/`gcc` и JavaScript в эту цепочку не входят. Восстановление компилятора — файл `bootstrap/saltic-<версия>-compiler-rv32i-linux.elf` из Git, не сборка из `.s`.
+## Устройство `selfhost`
 
-Внутреннее ядро не является вторым языком для программ:
+- `parser` + `parser/{lexer,loader,syntax}` — текст в дерево, загрузка модулей;
+- `checker` + `checker/{names,signatures,rules,types,semantics}` — проверка;
+- `compiler` + `compiler/{codegen,state,constants}` — перевод в машинный код;
+  backend `compiler/backend/rv32i` и `compiler/backend/x86_64`
+  (`encoder`, `translator`, `image`, `platform`, `pe`, `uefi`);
+- `runtime/emit` + `runtime/emit/{memory,terminal}` — машинный runtime и
+  регионы памяти;
+- `machine/{instruction,codec,layout,image,profile}` — команды RV32I,
+  раскладка, ELF32-образ;
+- `vm` + `vm/{cpu,loader,state,syscalls,system}` — исполнение ELF внутри
+  Saltic;
+- `abi` — одно машинное слово, теги значений, номер ошибки в отдельном
+  регистре, 12-байтовый заголовок объекта;
+- `toolchain.saltic` — точка входа компилятора.
 
-- `parser`, `checker`, `compiler`, `runtime/emit.saltic` — перевод в машинный ELF
-- `runtime/emit/memory.saltic` — выделение памяти и регионы
-- `machine` — команды, раскладка, образ ELF
-- `vm` — исполнение ELF внутри Saltic
-- `abi` — одно машинное слово и номер ошибки в отдельном регистре
+## Цели и сборка
 
-Фиксированная точка текущего ядра, stage-2 и stage-3: `544d41aedd4d770066b6476d9c55ceb1c6f639a37f537cbf92e94adf49d62a8c`.
+Исходник собирается прямо в образ: ELF для `rv32i` (Linux и `qemu_virt`), ELF
+для `x86_64` Linux и PE32+ для `x86_64-uefi`. Текст ассемблера, GNU `as`/`gcc`
+и JavaScript в эту цепочку не входят.
 
-## Реальное состояние vs. план
+Восстановление компилятора — готовые файлы
+`bootstrap/saltic-<версия>-compiler-<проц>-<платформа>` из Git, не сборка
+из исходников. Рядом с каждым лежит паспорт `.txt`: версия, хеш исходников,
+чем собран и сходится ли самосборка.
 
-На карте `vision.mmd` часть сущностей отмечена **планируемыми**, а не
-существующими. Ниже — фактическое состояние на текущий момент.
-
-### Готово и проверяется `just test`
-
-- **парсер** — `parser.saltic` + `parser/{lexer,loader,syntax}`;
-- **чекер** — `checker.saltic` + `checker/{names,signatures,rules,types,semantics}`;
-- **компилятор** — `compiler.saltic` + `compiler/{codegen,state,constants}`,
-  backend `compiler/backend/rv32i`;
-- **runtime** — `runtime/emit.saltic` (машинный runtime) и `runtime/emit/memory.saltic` (регионы памяти);
-- **машина (пункт 5 аудита)** — `machine/{instruction,codec,layout,image,profile}`:
-  собственное кодирование 44 команд, раскладка, ELF32-образ. Закрыто
-  независимыми тестами (golden/immediate/patches/elf/scale).
-- **VM** — `vm.saltic` + `vm/{cpu,loader,state,syscalls,system}`.
-
-### Модель исполнения
-
-- ABI действует в compiler и runtime: fixed хранится raw-словом, ошибка
-  возвращается в `a1`, у объекта 12-байтовый заголовок.
-- Память устроена регионами на границах skill (`docs/MEMORY-MODEL.md`).
+Проверка ядра входит в общий прогон `just test` (`tests/run.sh`).
