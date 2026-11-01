@@ -1,6 +1,7 @@
 use core.group
 use os.target.uefi_x86_64.firmware
 use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.reply
 use os.uiengine
 use os.uiengine.demo.generated.buttons_jtml
 use os.uiengine.demo.generated.fields_jtml
@@ -13,6 +14,7 @@ use os.uiengine.demo.generated.dialog_jtml
 use os.uiengine.demo.generated.sheet_jtml
 use os.uiengine.demo.generated.drawer_jtml
 use os.uiengine.demo.generated.code_jtml
+use os.uiengine.demo.generated.closed_jtml
 
 PAGES = [buttons_jtml.JTML, fields_jtml.JTML, choices_jtml.JTML, display_jtml.JTML, navigation_jtml.JTML, data_jtml.JTML, menus_jtml.JTML, dialog_jtml.JTML, sheet_jtml.JTML, drawer_jtml.JTML, code_jtml.JTML]
 SCAN_UP = 1
@@ -26,6 +28,7 @@ DIGIT_ONE = 49
 DIGIT_NINE = 57
 STOP = -1
 TURNS = 100000
+DRAIN = 64
 
 skill next_page(index, key) {
     @count = group.count(PAGES)
@@ -42,17 +45,44 @@ skill next_page(index, key) {
     out index
 }
 
+Turn = Box {
+    index = 0,
+    scan = 0,
+    char = 0
+}
+
 skill turn(index) {
     uiengine.show(group.get(PAGES, index))
-    out next_page(index, uefi.wait_key(firmware.guest_base()))
+    @key = uefi.wait_key(firmware.guest_base())
+    out Turn { index = next_page(index, key), scan = key.scan, char = key.char }
+}
+
+skill drain_keys(base) {
+    @dropped = 0
+    drum (DRAIN) {
+        @key = uefi.poll_key(base)
+        (key.ready == no) { out dropped }
+        dropped = dropped + 1
+    }
+    out dropped
 }
 
 program() {
-    uefi.forget_keys(firmware.guest_base())
+    @base = firmware.guest_base()
+    uefi.forget_keys(base)
+    @dropped = drain_keys(base)
     @index = 0
+    @turns = 0
     drum (TURNS) {
-        index = turn(index)
-        (index == STOP) { out none }
+        @step = turn(index)
+        turns = turns + 1
+        (step.index == STOP) {
+            uiengine.show(closed_jtml.JTML)
+            @scan = step.scan
+            reply.finish("галерея: выход по клавише (скан-код {scan}), страниц показано {turns}, старых нажатий выброшено {dropped}")
+            out none
+        }
+        index = step.index
     }
     out none
 }

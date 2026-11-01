@@ -19,7 +19,7 @@ MONO = "Noto Sans Mono"
 FACES = [("regular14", SANS, 14, 400), ("medium14", SANS, 14, 500), ("semibold14", SANS, 14, 600), ("regular12", SANS, 12, 400), ("semibold18", SANS, 18, 600), ("mono13", MONO, 13, 400)]
 ROWS = 8
 LEVELS = 15
-EXTRA = [0x2014, 0x2013, 0x00AB, 0x00BB, 0x00D7, 0x2026, 0x00B0, 0x2116]
+EXTRA = [0x2014, 0x2013, 0x00AB, 0x00BB, 0x00D7, 0x2026, 0x00B0, 0x2116, 0x2190, 0x2191, 0x2192, 0x2193]
 
 
 def codes():
