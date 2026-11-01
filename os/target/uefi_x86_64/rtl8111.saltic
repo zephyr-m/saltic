@@ -1,6 +1,7 @@
 use io
 use core.num
 use core.str
+use core.group
 use os.target.uefi_x86_64.firmware
 
 VENDOR_REALTEK = 4332
@@ -10,13 +11,57 @@ PCI_BAR2 = 24
 PCI_BAR2_HIGH = 28
 COMMAND_MEMORY = 2
 COMMAND_BUS_MASTER = 4
+
+REGISTER_TX_RING = 32
+REGISTER_CHIP_COMMAND = 55
+REGISTER_TX_POLL = 56
+REGISTER_INTERRUPT_MASK = 60
+REGISTER_INTERRUPT_STATUS = 62
 REGISTER_TX_CONFIG = 64
+REGISTER_RX_CONFIG = 68
+REGISTER_CONFIG_LOCK = 80
 REGISTER_PHY_STATUS = 108
+REGISTER_RX_MAX_SIZE = 218
+REGISTER_RX_RING = 228
+REGISTER_TX_MAX_SIZE = 236
+
+CHIP_RESET = 16
+CHIP_RX_TX = 12
+CONFIG_UNLOCK = 192
+TX_POLL_NORMAL = 64
+RX_CONFIG_LOW = 59151
+TX_CONFIG_LOW = 1792
+TX_CONFIG_HIGH = 768
+RX_MAX_SIZE = 1536
+TX_MAX_SIZE = 59
+
 PHY_FULL_DUPLEX = 1
 PHY_LINK = 2
 PHY_10 = 4
 PHY_100 = 8
 PHY_1000 = 16
+
+DESCRIPTOR_OWN = 32768
+DESCRIPTOR_END = 16384
+DESCRIPTOR_FIRST_LAST = 12288
+DESCRIPTOR_BYTES = 16
+RX_COUNT = 4
+BUFFER_BYTES = 2048
+TX_RING = 0
+RX_RING = 256
+TX_BUFFER = 4096
+RX_BUFFERS = 8192
+
+PORT = 5555
+FRAME_MINIMUM = 60
+SEND_COUNT = 10
+
+Card = Box {
+    base = firmware.Phys {},
+    mmio = firmware.Phys {},
+    arena = firmware.Phys {},
+    mac = []
+}
 
 skill has_bit(value, bit) {
     out num.mod(value / bit, 2) == 1
@@ -31,9 +76,6 @@ skill enable(base, config) {
     @before = firmware.read16(config, base, PCI_COMMAND)
     @after = with_bit(with_bit(before, COMMAND_MEMORY), COMMAND_BUS_MASTER)
     firmware.write16(config, base, PCI_COMMAND, after)
-    @was = firmware.hex(before, 4)
-    @now = firmware.hex(firmware.read16(config, base, PCI_COMMAND), 4)
-    io.show("[2] PCI command: {was} -> {now}")
     out none
 }
 
@@ -46,17 +88,23 @@ skill registers(base, config) {
     out firmware.Phys { hi = low.hi, lo = low.lo - num.mod(low.lo, 16) }
 }
 
-skill mac_text(base, mmio) {
-    @text = firmware.hex(firmware.read8(mmio, base, 0), 2)
+skill read_mac(base, mmio) {
+    @bytes = []
+    drum (6) { bytes = group.add(bytes, firmware.read8(mmio, base, beat)) }
+    out bytes
+}
+
+skill mac_text(bytes) {
+    @text = firmware.hex(group.get(bytes, 0), 2)
     drum (5) {
-        @part = firmware.hex(firmware.read8(mmio, base, beat + 1), 2)
+        @part = firmware.hex(group.get(bytes, beat + 1), 2)
         text = "{text}:{part}"
     }
     out text
 }
 
 skill link_text(status) {
-    (has_bit(status, PHY_LINK) == no) { out "down (no cable?)" }
+    (has_bit(status, PHY_LINK) == no) { out "down" }
     @speed = "?"
     (has_bit(status, PHY_10) == yes) { speed = "10" }
     (has_bit(status, PHY_100) == yes) { speed = "100" }
@@ -66,30 +114,179 @@ skill link_text(status) {
     out "up, {speed} Mbit/s, {duplex} duplex"
 }
 
-skill run() {
+skill delay(card, count) {
+    drum (count) { firmware.read8(card.mmio, card.base, REGISTER_PHY_STATUS) }
+    out none
+}
+
+skill open() {
     @base = firmware.guest_base()
-    @space = firmware.ecam(base)
-    @config = firmware.find_device(base, space, VENDOR_REALTEK, MODEL_RTL8111)
-    @at = firmware.phys_text(config)
-    io.show("[1] found 10ec:8168, config space at {at}")
+    @config = firmware.find_device(base, firmware.ecam(base), VENDOR_REALTEK, MODEL_RTL8111)
     enable(base, config)
     @mmio = registers(base, config)
-    @window = firmware.phys_text(mmio)
-    io.show("[3] registers (BAR2) at {window}")
-    @mac = mac_text(base, mmio)
-    io.show("[4] MAC address: {mac}")
-    @tx = firmware.read32(mmio, base, REGISTER_TX_CONFIG)
-    @version = firmware.hex(tx.hi, 4)
-    io.show("[5] chip version (TxConfig high): {version}")
-    @status = firmware.read8(mmio, base, REGISTER_PHY_STATUS)
-    @link = link_text(status)
-    @raw = firmware.hex(status, 2)
-    io.show("[6] link: {link} (PHYstatus {raw})")
+    out Card { base = base, mmio = mmio, arena = firmware.arena(base), mac = read_mac(base, mmio) }
+}
+
+skill reset(card) {
+    firmware.write8(card.mmio, card.base, REGISTER_CHIP_COMMAND, CHIP_RESET)
+    drum (100000) {
+        (has_bit(firmware.read8(card.mmio, card.base, REGISTER_CHIP_COMMAND), CHIP_RESET) == no) { out none }
+    }
+    out error.ResetTimeout
+}
+
+skill descriptor(card, offset, flags, length, buffer) {
+    firmware.write16(card.arena, card.base, offset, length)
+    firmware.write16(card.arena, card.base, offset + 4, 0)
+    firmware.write16(card.arena, card.base, offset + 6, 0)
+    firmware.write_phys32(card.arena, card.base, offset + 8, firmware.add(card.arena, buffer))
+    firmware.write16(card.arena, card.base, offset + 12, 0)
+    firmware.write16(card.arena, card.base, offset + 14, 0)
+    firmware.write16(card.arena, card.base, offset + 2, flags)
+    out none
+}
+
+skill rx_flags(index) {
+    (index == RX_COUNT - 1) { out DESCRIPTOR_OWN + DESCRIPTOR_END }
+    out DESCRIPTOR_OWN
+}
+
+skill arm_rx(card, index) {
+    out descriptor(card, RX_RING + index * DESCRIPTOR_BYTES, rx_flags(index), BUFFER_BYTES, RX_BUFFERS + index * BUFFER_BYTES)
+}
+
+skill write_ring(card, register, offset) {
+    firmware.write_phys32(card.mmio, card.base, register, firmware.add(card.arena, offset))
+    firmware.write16(card.mmio, card.base, register + 4, 0)
+    firmware.write16(card.mmio, card.base, register + 6, 0)
+    out none
+}
+
+skill configure(card) {
+    reset(card)
+    firmware.write8(card.mmio, card.base, REGISTER_CONFIG_LOCK, CONFIG_UNLOCK)
+    firmware.write16(card.mmio, card.base, REGISTER_INTERRUPT_MASK, 0)
+    firmware.write16(card.mmio, card.base, REGISTER_INTERRUPT_STATUS, 65535)
+    drum (RX_COUNT) { arm_rx(card, beat) }
+    write_ring(card, REGISTER_TX_RING, TX_RING)
+    write_ring(card, REGISTER_RX_RING, RX_RING)
+    firmware.write16(card.mmio, card.base, REGISTER_RX_MAX_SIZE, RX_MAX_SIZE)
+    firmware.write8(card.mmio, card.base, REGISTER_TX_MAX_SIZE, TX_MAX_SIZE)
+    firmware.write8(card.mmio, card.base, REGISTER_CHIP_COMMAND, CHIP_RX_TX)
+    firmware.write16(card.mmio, card.base, REGISTER_RX_CONFIG, RX_CONFIG_LOW)
+    firmware.write16(card.mmio, card.base, REGISTER_RX_CONFIG + 2, 0)
+    firmware.write16(card.mmio, card.base, REGISTER_TX_CONFIG, TX_CONFIG_LOW)
+    firmware.write16(card.mmio, card.base, REGISTER_TX_CONFIG + 2, TX_CONFIG_HIGH)
+    firmware.write8(card.mmio, card.base, REGISTER_CONFIG_LOCK, 0)
+    out none
+}
+
+skill wait_link(card) {
+    drum (60) {
+        @status = firmware.read8(card.mmio, card.base, REGISTER_PHY_STATUS)
+        (has_bit(status, PHY_LINK) == yes) { out link_text(status) }
+        delay(card, 100000)
+    }
+    out error.NoLink
+}
+
+skill add16(bytes, value) {
+    out group.add(group.add(bytes, value / 256), num.mod(value, 256))
+}
+
+skill checksum(words) {
+    @total = 0
+    drum (words) { total = total + beat }
+    drum (4) { total = num.mod(total, 65536) + total / 65536 }
+    out 65535 - total
+}
+
+skill frame(card, text) {
+    @udp_length = 8 + str.len(text)
+    @ip_length = 20 + udp_length
+    @ip = [17664, ip_length, 1, 0, 16401, 0, 2560, 2, 65535, 65535]
+    @bytes = [255, 255, 255, 255, 255, 255]
+    drum (card.mac) { bytes = group.add(bytes, beat) }
+    bytes = add16(bytes, 2048)
+    drum (10) {
+        @word = group.get(ip, beat)
+        (beat == 5) { word = checksum(ip) }
+        bytes = add16(bytes, word)
+    }
+    bytes = add16(add16(add16(add16(bytes, PORT), PORT), udp_length), 0)
+    drum (str.len(text)) { bytes = group.add(bytes, str.byte(text, beat)) }
+    (group.count(bytes) < FRAME_MINIMUM) {
+        drum (FRAME_MINIMUM - group.count(bytes)) { bytes = group.add(bytes, 0) }
+    }
+    out bytes
+}
+
+skill send(card, text) {
+    @bytes = frame(card, text)
+    drum (group.count(bytes)) { firmware.write8(card.arena, card.base, TX_BUFFER + beat, group.get(bytes, beat)) }
+    descriptor(card, TX_RING, DESCRIPTOR_OWN + DESCRIPTOR_END + DESCRIPTOR_FIRST_LAST, group.count(bytes), TX_BUFFER)
+    firmware.write8(card.mmio, card.base, REGISTER_TX_POLL, TX_POLL_NORMAL)
+    drum (100000) {
+        (firmware.read16(card.arena, card.base, TX_RING + 2) < DESCRIPTOR_OWN) { out group.count(bytes) }
+    }
+    @owner = firmware.hex(firmware.read16(card.arena, card.base, TX_RING + 2), 4)
+    @command = firmware.hex(firmware.read8(card.mmio, card.base, REGISTER_CHIP_COMMAND), 2)
+    @status = firmware.hex(firmware.read16(card.mmio, card.base, REGISTER_INTERRUPT_STATUS), 4)
+    @poll = firmware.hex(firmware.read8(card.mmio, card.base, REGISTER_TX_POLL), 2)
+    @ring = firmware.phys_text(firmware.read32(card.mmio, card.base, REGISTER_TX_RING))
+    io.show("    tx stuck: descriptor high {owner}, ChipCmd {command}, IntrStatus {status}, TxPoll {poll}, TX ring reg {ring}")
+    out error.SendTimeout
+}
+
+skill show_rx(card, index) {
+    @buffer = RX_BUFFERS + index * BUFFER_BYTES
+    @length = num.mod(firmware.read16(card.arena, card.base, RX_RING + index * DESCRIPTOR_BYTES), 16384)
+    @from = []
+    drum (6) { from = group.add(from, firmware.read8(card.arena, card.base, buffer + 6 + beat)) }
+    @type = firmware.read8(card.arena, card.base, buffer + 12) * 256 + firmware.read8(card.arena, card.base, buffer + 13)
+    @sender = mac_text(from)
+    @kind = firmware.hex(type, 4)
+    io.show("    rx: {length} bytes from {sender}, type {kind}")
+    out none
+}
+
+skill poll_rx(card) {
+    @seen = 0
+    drum (RX_COUNT) {
+        (firmware.read16(card.arena, card.base, RX_RING + beat * DESCRIPTOR_BYTES + 2) < DESCRIPTOR_OWN) {
+            show_rx(card, beat)
+            arm_rx(card, beat)
+            seen = seen + 1
+        }
+    }
+    out seen
+}
+
+skill run() {
+    @card = open()
+    @mac = mac_text(card.mac)
+    @arena = firmware.phys_text(card.arena)
+    io.show("[1] card {mac}, DMA arena at {arena}")
+    configure(card)
+    io.show("[2] card reset and configured, rings armed")
+    io.show("[3] waiting for link...")
+    @link = wait_link(card)
+    io.show("[4] link {link}")
+    drum (SEND_COUNT) {
+        @number = beat + 1
+        @sent = send(card, "hello from Saltic #{number}")
+        io.show("[5] sent #{number}: {sent} bytes to 255.255.255.255:5555")
+        drum (10) {
+            poll_rx(card)
+            delay(card, 30000)
+        }
+    }
+    io.show("[6] done")
     out none
 }
 
 program() {
-    io.show("Saltic RTL8111 driver, step 1: find the card and read it")
+    io.show("Saltic RTL8111 driver, step 2: send UDP broadcast, show received frames")
     @done = run() rescue |err| {
         io.show("FAILED: ", err)
         none
