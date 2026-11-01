@@ -1,19 +1,38 @@
 use core.group
+use os.target.uefi_x86_64.graphics
 use os.uiengine.canvas
+use os.uiengine.shapes
 use os.uiengine.jtml
 use os.uiengine.components
+use os.uiengine.fonts
 
 GAP = 12
+FIELD_GAP = 6
+PANE_PADDING = 12
 
 skill is_block(tag) {
     (components.is_frame(tag) == yes) { out yes }
+    (tag == "field") { out yes }
+    (tag == "scroll") { out yes }
+    (tag == "resizable") { out yes }
     (tag == "column") { out yes }
     out tag == "row"
 }
 
 skill spacing(tag, props) {
     (components.is_frame(tag) == yes) { out canvas.Size { width = jtml.prop_amount(props, "padding", components.frame_padding(tag)), height = jtml.prop_amount(props, "gap", components.CARD_GAP) } }
+    (tag == "field") { out canvas.Size { height = FIELD_GAP } }
     out canvas.Size { width = jtml.prop_amount(props, "padding", 0), height = jtml.prop_amount(props, "gap", GAP) }
+}
+
+skill field_extra(props) {
+    @label = fonts.MEDIUM
+    @hint = fonts.SMALL
+    @extra = 0
+    ((jtml.prop_words(props, "label", "") == "") == no) { extra = extra + label.line + FIELD_GAP }
+    ((jtml.prop_words(props, "hint", "") == "") == no) { extra = extra + hint.line + FIELD_GAP }
+    ((jtml.prop_words(props, "error", "") == "") == no) { extra = extra + hint.line + FIELD_GAP }
+    out extra
 }
 
 skill measure_node(node) {
@@ -21,6 +40,7 @@ skill measure_node(node) {
     @props = jtml.props_of(node)
     (tag == "spacer") { out canvas.Size {} }
     (is_block(tag) == no) { out components.component_size(tag, props) }
+    (tag == "resizable") { out canvas.Size { width = jtml.prop_amount(props, "width", 480), height = jtml.prop_amount(props, "height", 200) } }
     @kids = jtml.prop_children(props)
     @space = spacing(tag, props)
     @across = 0
@@ -42,6 +62,8 @@ skill measure_node(node) {
     (gaps < 0) { gaps = 0 }
     (tag == "row") { across = across + gaps }
     ((tag == "row") == no) { along = along + gaps }
+    (tag == "field") { along = along + field_extra(props) }
+    (tag == "scroll") { out canvas.Size { width = across + 2 * PANE_PADDING, height = jtml.prop_amount(props, "height", 160) } }
     out canvas.Size { width = across + 2 * space.width, height = along + 2 * space.width }
 }
 
@@ -56,6 +78,8 @@ skill draw_node(screen, node, x, y, width, under) {
     @props = jtml.props_of(node)
     (tag == "spacer") { out 0 }
     (is_block(tag) == no) { out components.draw_component(screen, tag, props, x, y, width, under) }
+    (tag == "scroll") { out draw_scroll(screen, node, x, y, width, under) }
+    (tag == "resizable") { out draw_panes(screen, node, x, y, under) }
     @size = measure_node(node)
     @space = spacing(tag, props)
     @inner = under
@@ -63,6 +87,7 @@ skill draw_node(screen, node, x, y, width, under) {
     @pad = space.width
     (tag == "row") { out draw_row(screen, props, x + pad, y + pad, width - 2 * pad, space.height, inner) + 2 * pad }
     @cursor = y + pad
+    (tag == "field") { cursor = field_label(screen, props, x, cursor) }
     drum (jtml.prop_children(props)) {
         @child_width = width - 2 * pad
         (fills(beat) == no) {
@@ -71,7 +96,29 @@ skill draw_node(screen, node, x, y, width, under) {
         }
         cursor = cursor + draw_node(screen, beat, x + pad, cursor, child_width, inner) + space.height
     }
+    (tag == "field") { field_notes(screen, props, x, cursor) }
     out size.height
+}
+
+skill field_label(screen, props, x, y) {
+    @label = jtml.prop_words(props, "label", "")
+    (label == "") { out y }
+    @face = fonts.MEDIUM
+    fonts.draw_text(screen, x, y, label, canvas.ZINC_900, face)
+    out y + face.line + FIELD_GAP
+}
+
+skill field_notes(screen, props, x, y) {
+    @face = fonts.SMALL
+    @hint = jtml.prop_words(props, "hint", "")
+    @top = y
+    ((hint == "") == no) {
+        fonts.draw_text(screen, x, top, hint, canvas.ZINC_500, face)
+        top = top + face.line + FIELD_GAP
+    }
+    @error = jtml.prop_words(props, "error", "")
+    ((error == "") == no) { fonts.draw_text(screen, x, top, error, canvas.RED_500, face) }
+    out none
 }
 
 skill draw_row(screen, props, x, y, width, gap, under) {
@@ -98,4 +145,45 @@ skill draw_row(screen, props, x, y, width, gap, under) {
         pen = pen + child_width + gap
     }
     out tallest
+}
+
+skill draw_scroll(screen, node, x, y, width, under) {
+    @props = jtml.props_of(node)
+    @height = jtml.prop_amount(props, "height", 160)
+    shapes.framed_box(screen, x, y, width, height, 8, canvas.variant_look("outline"), under)
+    @cursor = y + PANE_PADDING
+    drum (jtml.prop_children(props)) { cursor = cursor + draw_node(screen, beat, x + PANE_PADDING, cursor, width - 3 * PANE_PADDING, canvas.WHITE) + GAP }
+    @content = cursor - y
+    (content > height) {
+        graphics.fill(screen, x, y + height, width, content - height, canvas.paint(screen, under))
+        shapes.hairline(screen, x + 8, y + height - 1, width - 16, canvas.ZINC_200)
+        graphics.fill(screen, x + 1, y + height - 2, width - 2, 1, canvas.paint(screen, canvas.WHITE))
+        @thumb = height * height / content
+        shapes.rounded(screen, x + width - 8, y + 4, 4, thumb - 8, 2, canvas.ZINC_200, canvas.WHITE)
+    }
+    out height
+}
+
+skill draw_panes(screen, node, x, y, under) {
+    @props = jtml.props_of(node)
+    @width = jtml.prop_amount(props, "width", 480)
+    @height = jtml.prop_amount(props, "height", 200)
+    shapes.framed_box(screen, x, y, width, height, 8, canvas.variant_look("outline"), under)
+    @sizes = jtml.prop(props, "sizes")
+    @kids = jtml.prop_children(props)
+    @pen = x
+    drum (group.count(kids)) {
+        @share = width / group.count(kids)
+        (beat < group.count(sizes.items)) {
+            @percent = group.get(sizes.items, beat)
+            share = width * percent.amount / 100
+        }
+        draw_node(screen, group.get(kids, beat), pen + PANE_PADDING, y + PANE_PADDING, share - 2 * PANE_PADDING, canvas.WHITE)
+        pen = pen + share
+        (beat < group.count(kids) - 1) {
+            graphics.fill(screen, pen, y + 1, 1, height - 2, canvas.paint(screen, canvas.ZINC_200))
+            shapes.framed_box(screen, pen - 5, y + height / 2 - 10, 11, 20, 3, canvas.Look { fill = canvas.ZINC_100, edge = canvas.ZINC_200, framed = yes }, canvas.WHITE)
+        }
+    }
+    out height
 }
