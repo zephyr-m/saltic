@@ -1,0 +1,55 @@
+use os.target.uefi_x86_64.firmware
+
+SYSTEM_CON_OUT = 64
+SYSTEM_BOOT_SERVICES = 96
+TEXT_QUERY_MODE = 24
+TEXT_SET_MODE = 32
+TEXT_MODE = 72
+BOOT_LOAD_IMAGE = 200
+BOOT_START_IMAGE = 208
+
+Console = Box {
+    columns = 0,
+    rows = 0
+}
+
+skill con_out(base) {
+    out firmware.pointer(firmware.system_table(), base, SYSTEM_CON_OUT)
+}
+
+skill boot_services(base) {
+    out firmware.pointer(firmware.system_table(), base, SYSTEM_BOOT_SERVICES)
+}
+
+skill query_mode(base, output, mode) {
+    @columns_at = firmware.scratch(base, 0)
+    @rows_at = firmware.scratch(base, 8)
+    @queried = firmware.call(base, firmware.pointer(output, base, TEXT_QUERY_MODE), [output, firmware.number(mode), columns_at, rows_at])
+    (queried.failed == yes) { out Console {} }
+    out Console { columns = firmware.read16(columns_at, base, 0), rows = firmware.read16(rows_at, base, 0) }
+}
+
+skill wide_console(base) {
+    @output = con_out(base)
+    @modes = firmware.read16(firmware.pointer(output, base, TEXT_MODE), base, 0)
+    @best = 0
+    @area = 0
+    drum (modes) {
+        @size = query_mode(base, output, beat)
+        (size.columns * size.rows > area) {
+            area = size.columns * size.rows
+            best = beat
+        }
+    }
+    firmware.call(base, firmware.pointer(output, base, TEXT_SET_MODE), [output, firmware.number(best)])
+    out query_mode(base, output, best)
+}
+
+skill start_image(base, image, size) {
+    @services = boot_services(base)
+    @handle_at = firmware.scratch(base, 16)
+    @loaded = firmware.call(base, firmware.pointer(services, base, BOOT_LOAD_IMAGE), [firmware.number(0), firmware.image_handle(), firmware.number(0), image, firmware.number(size), handle_at])
+    (loaded.failed == yes) { out loaded }
+    @child = firmware.pointer(handle_at, base, 0)
+    out firmware.call(base, firmware.pointer(services, base, BOOT_START_IMAGE), [child, firmware.number(0), firmware.number(0)])
+}

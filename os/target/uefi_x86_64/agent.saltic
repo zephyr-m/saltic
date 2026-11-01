@@ -2,11 +2,12 @@ use io
 use core.num
 use core.str
 use core.group
-use core.cpu
 use os.target.uefi_x86_64.firmware
 use os.target.uefi_x86_64.pci
 use os.target.uefi_x86_64.rtl8111
 use os.target.uefi_x86_64.net
+use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.graphics
 
 PORT = 5555
 DATA_PORT = 5556
@@ -17,7 +18,7 @@ MY_IP = [10, 0, 0, 2]
 MEMORY_DEFAULT = 16
 MEMORY_LIMIT = 64
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — графика: нарисовать проверочную картинку"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -89,11 +90,13 @@ skill upload_state(agent) {
 skill launch(agent) {
     (agent.expected == 0) { out "ничего не принято" }
     ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
-    @image = firmware.guest(firmware.add(agent.card.arena, UPLOAD_OFFSET), agent.card.base)
     @size = agent.expected
     io.show("run: starting uploaded image, {size} bytes")
-    @status = cpu.start_image(group.get(image, 0), group.get(image, 1), size)
-    io.show("run: image returned, status {status}")
+    @outcome = uefi.start_image(agent.card.base, firmware.add(agent.card.arena, UPLOAD_OFFSET), size)
+    @code = outcome.value.lo
+    @status = "{code}"
+    (outcome.failed == yes) { status = "ошибка прошивки {code}" }
+    io.show("run: image returned")
     rtl8111.configure(agent.card)
     rtl8111.wait_link(agent.card)
     io.show("run: card configured again, listening")
@@ -144,6 +147,24 @@ skill information(agent) {
     out "агент Saltic на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов"
 }
 
+skill draw_test(agent) {
+    @screen = graphics.open(agent.card.base)
+    @gray = graphics.color(screen, 161, 161, 170)
+    @left = (screen.width - 400) / 2
+    @top = (screen.height - 260) / 2
+    graphics.fill(screen, left - 4, top - 4, 408, 208, graphics.color(screen, 250, 250, 250))
+    graphics.fill(screen, left, top, 400, 200, gray)
+    graphics.fill(screen, left, top + 220, 120, 40, graphics.color(screen, 239, 68, 68))
+    graphics.fill(screen, left + 140, top + 220, 120, 40, graphics.color(screen, 34, 197, 94))
+    graphics.fill(screen, left + 280, top + 220, 120, 40, graphics.color(screen, 59, 130, 246))
+    @width = screen.width
+    @height = screen.height
+    @stride = screen.stride
+    @format = graphics.format_name(screen)
+    @frame = firmware.phys_text(screen.frame)
+    out "графика: {width} × {height}, формат {format}, строка {stride} пикселей, кадр по адресу {frame}\nнарисовал серый прямоугольник 400 × 200 и красный, зелёный, синий квадраты"
+}
+
 skill device_list(agent) {
     @base = agent.card.base
     out str.join(pci.device_lines(base, firmware.ecam(base)), "\n")
@@ -160,6 +181,7 @@ skill execute(agent, text) {
     (name == "upload") { out begin_upload(agent, words) }
     (name == "check") { out upload_state(agent) }
     (name == "run") { out launch(agent) }
+    (name == "screen") { out draw_test(agent) }
     out "не знаю команду '{name}'. {HELP}"
 }
 
@@ -231,9 +253,9 @@ skill serve(agent) {
 }
 
 skill run() {
-    @screen = cpu.wide_console()
-    @columns = screen / 65536
-    @rows = num.mod(screen, 65536)
+    @screen = uefi.wide_console(firmware.guest_base())
+    @columns = screen.columns
+    @rows = screen.rows
     io.show("Saltic agent: screen {columns} x {rows} characters")
     @card = rtl8111.open()
     @mac = net.mac_text(card.mac)

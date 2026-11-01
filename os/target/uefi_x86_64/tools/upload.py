@@ -58,7 +58,7 @@ print(f"upload: передано за {seconds:.1f} с, повторов {retrie
 state = ask("check")
 local_sum = sum(data) % 65536
 print(f"upload: агент: {state}; сумма здесь {local_sum}", flush=True)
-if not state.endswith(f"sum {local_sum}"):
+if state.split()[-1] != str(local_sum):
     print("upload: СУММЫ НЕ СОВПАЛИ", file=sys.stderr)
     sys.exit(1)
 if run:

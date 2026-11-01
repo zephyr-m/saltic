@@ -2,6 +2,7 @@ use core.cpu
 use core.mem
 use core.num
 use core.str
+use core.group
 
 PAGE = 65536
 ACPI20_GUID_LOW = 59505
@@ -10,10 +11,19 @@ ACPI20_GUID_DATA2 = 58609
 SIGNATURE_MC = 17229
 SIGNATURE_FG = 18246
 NO_DEVICE = 65535
+CALL_BLOCK = 32768
+CALL_SCRATCH = 33024
+CALL_RESULT = 96
+CALL_ARGUMENTS = 10
 
 Phys = Box {
     hi = 0,
     lo = 0
+}
+
+Answer = Box {
+    value = Phys {},
+    failed = no
 }
 
 Ecam = Box {
@@ -163,4 +173,39 @@ skill find_device(base, space, vendor, model) {
         }
     }
     out error.DeviceNotFound
+}
+
+skill image_handle() {
+    (cpu.firmware(10) > 0) { out error.ImageHandleAbove4G }
+    (cpu.firmware(11) > 0) { out error.ImageHandleAbove4G }
+    out Phys { hi = cpu.firmware(9), lo = cpu.firmware(8) }
+}
+
+skill number(value) {
+    out Phys { hi = value / PAGE, lo = num.mod(value, PAGE) }
+}
+
+skill write64(p, base, offset, value) {
+    write16(p, base, offset, value.lo)
+    write16(p, base, offset + 2, value.hi)
+    write16(p, base, offset + 4, 0)
+    out write16(p, base, offset + 6, 0)
+}
+
+skill scratch(base, offset) {
+    out add(arena(base), CALL_SCRATCH + offset)
+}
+
+skill call(base, function, arguments) {
+    @block = add(arena(base), CALL_BLOCK)
+    write64(block, base, 0, function)
+    write64(block, base, 8, number(group.count(arguments)))
+    drum (CALL_ARGUMENTS) {
+        @value = Phys {}
+        (beat < group.count(arguments)) { value = group.get(arguments, beat) }
+        write64(block, base, 16 + beat * 8, value)
+    }
+    @at = guest(block, base)
+    cpu.call(group.get(at, 0), group.get(at, 1))
+    out Answer { value = read32(block, base, CALL_RESULT), failed = read16(block, base, CALL_RESULT + 6) > 32767 }
 }
