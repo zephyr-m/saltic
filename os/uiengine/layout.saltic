@@ -1,6 +1,7 @@
 use core.str
 use core.num
 use core.group
+use os.target.uefi_x86_64.firmware
 use os.target.uefi_x86_64.graphics
 use os.uiengine.canvas
 use os.uiengine.shapes
@@ -72,7 +73,7 @@ skill measure_node(node) {
     ((tag == "row") == no) { along = along + gaps }
     (tag == "field") { along = along + field_extra(props) }
     (tag == "scroll") { out canvas.Size { width = across + 2 * PANE_PADDING, height = canvas.height_of(jtml.prop_words(props, "height", "md")) } }
-    out canvas.Size { width = across + 2 * space.width, height = along + 2 * space.width }
+    out canvas.Size { width = across + 2 * space.width, height = along + 2 * space.width + components.frame_header(tag) }
 }
 
 skill fills(node) {
@@ -91,10 +92,15 @@ skill draw_node(screen, node, x, y, width, under) {
     @size = measure_node(node)
     @space = spacing(tag, props)
     @inner = under
-    (components.is_frame(tag) == yes) { inner = components.draw_frame(screen, tag, x, y, width, size.height, under) }
+    @header = 0
+    (components.is_frame(tag) == yes) {
+        inner = components.draw_frame(screen, tag, x, y, width, size.height, under)
+        header = components.frame_header(tag)
+        (header > 0) { components.draw_title(screen, x, y, width, jtml.prop_words(props, "title", "")) }
+    }
     @pad = space.width
     (tag == "row") { out draw_row(screen, props, x + pad, y + pad, width - 2 * pad, space.height, inner) + 2 * pad }
-    @cursor = y + pad
+    @cursor = y + pad + header
     (tag == "field") { cursor = field_label(screen, props, x, cursor) }
     drum (jtml.prop_children(props)) {
         @child_width = width - 2 * pad
@@ -155,15 +161,28 @@ skill draw_row(screen, props, x, y, width, gap, under) {
     out tallest
 }
 
+skill scroll_content(props, width) {
+    @content = PANE_PADDING
+    drum (jtml.prop_children(props)) {
+        @size = measure_node(beat)
+        content = content + size.height + GAP
+    }
+    out content
+}
+
 skill draw_scroll(screen, node, x, y, width, under) {
     @props = jtml.props_of(node)
     @height = canvas.height_of(jtml.prop_words(props, "height", "md"))
     shapes.framed_box(screen, x, y, width, height, 8, canvas.variant_look("outline"), under)
+    @content = scroll_content(props, width)
+    @overflow = content - height
+    (overflow > screen.height - y - height) { overflow = screen.height - y - height }
+    @kept = firmware.Phys {}
+    (overflow > 0) { kept = shapes.keep_rows(screen, x, y + height, width, overflow) }
     @cursor = y + PANE_PADDING
     drum (jtml.prop_children(props)) { cursor = cursor + draw_node(screen, beat, x + PANE_PADDING, cursor, width - 3 * PANE_PADDING, canvas.WHITE) + GAP }
-    @content = cursor - y
-    (content > height) {
-        graphics.fill(screen, x, y + height, width, content - height, canvas.paint(screen, under))
+    (overflow > 0) {
+        shapes.put_back_rows(screen, kept, x, y + height, width, overflow)
         shapes.hairline(screen, x + 8, y + height - 1, width - 16, canvas.ZINC_200)
         graphics.fill(screen, x + 1, y + height - 2, width - 2, 1, canvas.paint(screen, canvas.WHITE))
         @thumb = height * height / content

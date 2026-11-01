@@ -1,11 +1,18 @@
 use core.num
 use core.mem
+use os.target.uefi_x86_64.firmware
 use os.target.uefi_x86_64.graphics
+use os.target.uefi_x86_64.uefi
 use os.uiengine.canvas
 
 SAMPLES = 4
 FULL = 16
 SHADOW_STEP = 8
+BOOT_ALLOCATE_POOL = 64
+BOOT_FREE_POOL = 72
+BOOT_COPY_MEM = 352
+LOADER_DATA = 2
+POOL_AT = 96
 
 skill coverage(column, row, radius) {
     @limit = 64 * radius * radius
@@ -127,4 +134,33 @@ skill stroke(screen, x0, y0, x1, y1, width, color, under) {
         }
     }
     out none
+}
+
+skill keep_rows(screen, x, y, width, rows) {
+    @base = firmware.guest_base()
+    @services = uefi.boot_services(base)
+    @row_bytes = width * graphics.PIXEL_BYTES
+    @at = firmware.scratch(base, POOL_AT)
+    @got = firmware.call(base, firmware.pointer(services, base, BOOT_ALLOCATE_POOL), [firmware.number(LOADER_DATA), firmware.number(row_bytes * rows), at])
+    (got.failed == yes) { out error.MemoryExhausted }
+    @pool = firmware.pointer(at, base, 0)
+    drum (rows) { copy_row(screen, services, firmware.add(pool, beat * row_bytes), x, y + beat, width, yes) }
+    out pool
+}
+
+skill put_back_rows(screen, pool, x, y, width, rows) {
+    @base = firmware.guest_base()
+    @services = uefi.boot_services(base)
+    @row_bytes = width * graphics.PIXEL_BYTES
+    drum (rows) { copy_row(screen, services, firmware.add(pool, beat * row_bytes), x, y + beat, width, no) }
+    out firmware.call(base, firmware.pointer(services, base, BOOT_FREE_POOL), [pool])
+}
+
+skill copy_row(screen, services, place, x, y, width, saving) {
+    @base = firmware.guest_base()
+    @pixel = firmware.add(screen.frame, (y * screen.stride + x) * graphics.PIXEL_BYTES)
+    @copy = firmware.pointer(services, base, BOOT_COPY_MEM)
+    @bytes = firmware.number(width * graphics.PIXEL_BYTES)
+    (saving == yes) { out firmware.call(base, copy, [place, pixel, bytes]) }
+    out firmware.call(base, copy, [pixel, place, bytes])
 }

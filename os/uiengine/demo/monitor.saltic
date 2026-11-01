@@ -1,0 +1,92 @@
+use core.str
+use core.num
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.pci
+
+SAMPLES = 8
+TURNS = 10000000
+HPET_LOW = 20552
+HPET_HIGH = 21573
+TABS = "[\"Кнопки\", \"Поля\", \"Выбор\", \"Показ\", \"Навигация\", \"Данные\", \"Меню\", \"Диалог\", \"Шторка\", \"Ящик\", \"Код\", \"Редактор\", \"Железо\"]"
+
+skill find_hpet(base) {
+    @xsdt = firmware.pointer(firmware.find_rsdp(base), base, 24)
+    drum ((firmware.read16(xsdt, base, 4) - 36) / 8) {
+        @table = firmware.pointer(xsdt, base, 36 + beat * 8)
+        (firmware.read16(table, base, 0) == HPET_LOW) {
+            (firmware.read16(table, base, 2) == HPET_HIGH) { out table }
+        }
+    }
+    out error.NoHpet
+}
+
+skill one_sample(hpet, base, kilohertz) {
+    @before = firmware.read32(hpet, base, 240)
+    @x = 0
+    drum (TURNS) { x = beat }
+    @after = firmware.read32(hpet, base, 240)
+    @ticks = (after.hi - before.hi) * 65536 + after.lo - before.lo
+    @micro = ticks * 10 / (kilohertz / 100)
+    (micro < 1) { out 0 }
+    out TURNS / micro
+}
+
+skill speeds(base) {
+    @hpet = firmware.read32(find_hpet(base), base, 44)
+    @period = firmware.read32(hpet, base, 4)
+    @kilohertz = 100000000 / ((period.hi * 65536 + period.lo) / 10000)
+    @found = []
+    drum (SAMPLES) { found = group.add(found, one_sample(hpet, base, kilohertz)) }
+    out found
+}
+
+skill quoted(words) {
+    out str.add(str.add("\"", words), "\"")
+}
+
+skill numbers(values) {
+    @parts = []
+    drum (values) { parts = group.add(parts, "{beat}") }
+    out str.add(str.add("[", str.join(parts, ", ")), "]")
+}
+
+skill device_row(line) {
+    @cells = str.split(line, "  ")
+    @parts = []
+    drum (cells) { parts = group.add(parts, quoted(beat)) }
+    drum (4 - group.count(cells)) { parts = group.add(parts, quoted("")) }
+    out str.add(str.add("[", str.join(parts, ", ")), "]")
+}
+
+skill count_class(lines, word) {
+    @count = 0
+    drum (lines) {
+        (str.contains(beat, word) == yes) { count = count + 1 }
+    }
+    out count
+}
+
+skill stat(label, value, delta, values) {
+    out "\{\"card\": \{\"children\": [\{\"stat\": \{\"width\": \"sm\", \"label\": {label}, \"value\": {value}, \"delta\": {delta}, \"values\": {values}\}\}]\}\}"
+}
+
+skill page(position) {
+    @base = firmware.guest_base()
+    @lines = pci.device_lines(base, firmware.ecam(base))
+    @measured = speeds(base)
+    @last = group.get(measured, SAMPLES - 1)
+    @total = group.count(lines)
+    @bridges = count_class(lines, "bridge")
+    @usb = count_class(lines, "USB")
+    @rows = []
+    drum (lines) { rows = group.add(rows, device_row(beat)) }
+    @table_rows = str.join(rows, ", ")
+    @speed = stat(quoted("Скорость цикла, млн оборотов/с"), quoted("{last}"), quoted("8 замеров по HPET"), numbers(measured))
+    @devices = stat(quoted("Устройств PCI"), quoted("{total}"), quoted("мостов {bridges}, USB {usb}"), "[]")
+    @position_text = "{position}"
+    @head = "\{\"row\": \{\"children\": [\{\"heading\": \{\"text\": \"Saltic UIEngine\"\}\}, \{\"badge\": \{\"variant\": \"secondary\", \"text\": \"{position_text} / 13\"\}\}, \{\"muted\": \{\"text\": \"живые данные Acer, собраны программой при запуске\"\}\}]\}\}"
+    @tabs = "\{\"tabs\": \{\"value\": 12, \"items\": {TABS}\}\}"
+    @table = "\{\"card\": \{\"children\": [\{\"title\": \{\"text\": \"Устройства PCI\"\}\}, \{\"scroll\": \{\"height\": \"lg\", \"children\": [\{\"table\": \{\"columns\": [\"Адрес\", \"ID\", \"Класс\", \"Название\"], \"rows\": [{table_rows}]\}\}]\}\}]\}\}"
+    out "\{\"column\": \{\"gap\": \"md\", \"children\": [{head}, {tabs}, \{\"row\": \{\"gap\": \"lg\", \"children\": [{speed}, {devices}]\}\}, {table}]\}\}"
+}

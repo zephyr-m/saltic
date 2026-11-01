@@ -18,7 +18,9 @@ program() {
 `app.jtml` лежит рядом с программой, `tools/bake.py путь/app.jtml` вшивает его
 в `generated/app_jtml.saltic`.
 
-Галерея всех компонентов — `demo.saltic`: одиннадцать страниц из `demo/pages/*.jtml`
+Галерея всех компонентов — `demo.saltic`: двенадцать страниц из `demo/pages/*.jtml`
+и тринадцатая «Железо» — её `demo/monitor.saltic` собирает при запуске из живых данных
+(устройства PCI, скорость цикла по HPET), склеивая текст JTML;
 (вшиваются `tools/bake.py demo/pages/*.jtml --into demo/generated`), листаются
 клавиатурой Acer: ← → или Tab, цифры 1–0, Esc — выход к агенту: галерея рисует экран «Галерея закрыта» и
 возвращает через `ExitData` причину выхода (скан-код, сколько страниц показано). Собрать с кучей
@@ -33,11 +35,11 @@ program() {
 | `jtml` | чтение JTML (`jtml/reader` — JSON) и свойства узла |
 | `layout` | блоки: `column`, `row`, `spacer`, `field`, `scroll`, `resizable` и рамки; размеры, `padding`, `gap` |
 | `canvas` | цвета zinc, `Look` вариантов (default, secondary, outline, destructive, ghost) |
-| `shapes` | сглаженные скругления, рамки, тени, линии любой толщины, затемнение |
+| `shapes` | сглаженные скругления, рамки, тени, линии любой толщины, затемнение, сохранение и возврат строк экрана (обрезка scroll area) |
 | `fonts` | набор текста полутонами; начертания `REGULAR`, `MEDIUM`, `SEMIBOLD` (14 px), `SMALL` (12), `HEADING` (18) в `fonts/generated/` |
 | `icons` | 25 иконок в духе lucide, 16 и 12 px, в `icons/generated/` |
 | `components` | компоненты по группам (теги JTML ниже) |
-| `demo` | галерея: десять страниц компонентов, листание клавиатурой |
+| `demo` | галерея: 13 страниц компонентов, листание клавиатурой; `monitor` — живая страница «Железо» |
 
 В JTML нет чисел раскладки — только токены дизайн-системы (`canvas`):
 
@@ -58,9 +60,9 @@ program() {
 - `display` — `heading`, `title`, `text`, `muted`, `small`, `kbd`, `badge`, `separator`, `progress`, `icon`, `alert`, `avatar`, `skeleton`, `aspect`, `spinner`, `empty`, `table`;
 - `navigation` — `tabs`, `breadcrumb`, `pagination`, `accordion`, `collapsible`, `item`, `sidebar`, `navigation-menu`;
 - `overlays` — `tooltip`, `menu` (dropdown и context menu), `menubar`, `command`;
-- `data` — `calendar`, `date-picker`, `chart` (bar, line, area), `data-table`, `carousel`;
-- `editor` — `code`: блок кода с подсветкой Saltic (Noto Sans Mono 13), номера строк, `title`, `highlight`, `start`;
-- рамки — `card`, `popover` (и hover card), `dialog` (и alert dialog), `sheet`, `drawer`, `toast`;
+- `data` — `calendar`, `date-picker`, `chart` (bar, line, area), `data-table`, `carousel`, `stat`, `sparkline`;
+- `editor` — `code`: блок кода с подсветкой Saltic (Noto Sans Mono 13), номера строк, `title`, `highlight`, `start`; `tree`: дерево файлов (`open`, `active`, вложенные `children`);
+- рамки — `card`, `popover` (и hover card), `dialog` (и alert dialog), `sheet`, `drawer`, `toast`, `window` (окно ОС с заголовком `title`);
   слой поверх страницы — свойство корня `"overlay"`: dialog и sheet и drawer затемняют страницу.
 
 Инструменты (`tools/`):
