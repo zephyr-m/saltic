@@ -1,6 +1,4 @@
-use io
 use core.num
-use core.str
 use core.group
 use os.target.uefi_x86_64.firmware
 
@@ -52,15 +50,6 @@ RX_RING = 256
 TX_BUFFER = 4096
 RX_BUFFERS = 8192
 
-PORT = 5555
-FRAME_MINIMUM = 60
-TYPE_IPV4 = 2048
-PROTOCOL_UDP = 17
-LISTEN_ROUNDS = 200000000
-BROADCAST_MAC = [255, 255, 255, 255, 255, 255]
-BROADCAST_IP = [65535, 65535]
-OWN_IP = [2560, 2]
-ASCII = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[?]^_`abcdefghijklmnopqrstuvwxyz?|?~"
 
 Card = Box {
     base = firmware.Phys {},
@@ -98,15 +87,6 @@ skill read_mac(base, mmio) {
     @bytes = []
     drum (6) { bytes = group.add(bytes, firmware.read8(mmio, base, beat)) }
     out bytes
-}
-
-skill mac_text(bytes) {
-    @text = firmware.hex(group.get(bytes, 0), 2)
-    drum (5) {
-        @part = firmware.hex(group.get(bytes, beat + 1), 2)
-        text = "{text}:{part}"
-    }
-    out text
 }
 
 skill link_text(status) {
@@ -196,36 +176,6 @@ skill wait_link(card) {
     out error.NoLink
 }
 
-skill add16(bytes, value) {
-    out group.add(group.add(bytes, value / 256), num.mod(value, 256))
-}
-
-skill checksum(words) {
-    @total = 0
-    drum (words) { total = total + beat }
-    drum (4) { total = num.mod(total, 65536) + total / 65536 }
-    out 65535 - total
-}
-
-skill frame(card, to_mac, to_ip, to_port, text) {
-    @udp_length = 8 + str.len(text)
-    @ip = [17664, 20 + udp_length, 1, 0, 16401, 0, group.get(OWN_IP, 0), group.get(OWN_IP, 1), group.get(to_ip, 0), group.get(to_ip, 1)]
-    @bytes = to_mac
-    drum (card.mac) { bytes = group.add(bytes, beat) }
-    bytes = add16(bytes, TYPE_IPV4)
-    drum (10) {
-        @word = group.get(ip, beat)
-        (beat == 5) { word = checksum(ip) }
-        bytes = add16(bytes, word)
-    }
-    bytes = add16(add16(add16(add16(bytes, PORT), to_port), udp_length), 0)
-    drum (str.len(text)) { bytes = group.add(bytes, str.byte(text, beat)) }
-    (group.count(bytes) < FRAME_MINIMUM) {
-        drum (FRAME_MINIMUM - group.count(bytes)) { bytes = group.add(bytes, 0) }
-    }
-    out bytes
-}
-
 skill send(card, bytes) {
     drum (group.count(bytes)) { firmware.write8(card.arena, card.base, TX_BUFFER + beat, group.get(bytes, beat)) }
     descriptor(card, TX_RING, DESCRIPTOR_OWN + DESCRIPTOR_END + DESCRIPTOR_FIRST_LAST, group.count(bytes), TX_BUFFER)
@@ -236,100 +186,23 @@ skill send(card, bytes) {
     out error.SendTimeout
 }
 
-skill rx_byte(card, buffer, offset) {
-    out firmware.read8(card.arena, card.base, buffer + offset)
+skill received(card, index) {
+    out firmware.read16(card.arena, card.base, RX_RING + index * DESCRIPTOR_BYTES + 2) < DESCRIPTOR_OWN
 }
 
-skill rx_word(card, buffer, offset) {
-    out rx_byte(card, buffer, offset) * 256 + rx_byte(card, buffer, offset + 1)
-}
-
-skill printable(code) {
-    (code < 32) { out "." }
-    (code > 126) { out "." }
-    out str.get(ASCII, code - 32)
-}
-
-skill ip_text(card, buffer, offset) {
-    @first = rx_byte(card, buffer, offset)
-    @text = "{first}"
-    drum (3) {
-        @part = rx_byte(card, buffer, offset + beat + 1)
-        text = "{text}.{part}"
-    }
-    out text
-}
-
-skill answer(card, buffer, length) {
-    @from_mac = []
-    drum (6) { from_mac = group.add(from_mac, rx_byte(card, buffer, 6 + beat)) }
-    @from_ip = [rx_word(card, buffer, 26), rx_word(card, buffer, 28)]
-    @from_port = rx_word(card, buffer, 34)
-    @size = rx_word(card, buffer, 38) - 8
-    (size > length - 42) { size = length - 42 }
-    @command = ""
-    drum (size) { command = str.add(command, printable(rx_byte(card, buffer, 42 + beat))) }
-    @who = ip_text(card, buffer, 26)
-    io.show("    command from {who}:{from_port}: {command}")
-    @sent = send(card, frame(card, from_mac, from_ip, from_port, "echo: {command}"))
-    io.show("    replied with {sent} bytes")
-    out none
-}
-
-skill handle_rx(card, index) {
+skill read_frame(card, index) {
     @buffer = RX_BUFFERS + index * BUFFER_BYTES
     @length = num.mod(firmware.read16(card.arena, card.base, RX_RING + index * DESCRIPTOR_BYTES), 16384)
-    @from = []
-    drum (6) { from = group.add(from, rx_byte(card, buffer, 6 + beat)) }
-    @type = rx_word(card, buffer, 12)
-    @sender = mac_text(from)
-    @kind = firmware.hex(type, 4)
-    io.show("rx: {length} bytes from {sender}, type {kind}")
-    (type == TYPE_IPV4) {
-        (rx_byte(card, buffer, 23) == PROTOCOL_UDP) {
-            (rx_word(card, buffer, 36) == PORT) { answer(card, buffer, length) }
-        }
-    }
-    out none
+    (length > BUFFER_BYTES) { length = BUFFER_BYTES }
+    @bytes = []
+    drum (length) { bytes = group.add(bytes, firmware.read8(card.arena, card.base, buffer + beat)) }
+    out bytes
 }
 
-skill poll_rx(card) {
-    @seen = 0
-    drum (RX_COUNT) {
-        (firmware.read16(card.arena, card.base, RX_RING + beat * DESCRIPTOR_BYTES + 2) < DESCRIPTOR_OWN) {
-            handle_rx(card, beat)
-            arm_rx(card, beat)
-            seen = seen + 1
-        }
-    }
-    out seen
+skill release(card, index) {
+    out arm_rx(card, index)
 }
 
-skill run() {
-    @card = open()
-    @mac = mac_text(card.mac)
-    @arena = firmware.phys_text(card.arena)
-    io.show("[1] card {mac}, DMA arena at {arena}")
-    configure(card)
-    io.show("[2] card reset and configured, rings armed")
-    io.show("[3] waiting for link...")
-    @link = wait_link(card)
-    io.show("[4] link {link}")
-    @sent = send(card, frame(card, BROADCAST_MAC, BROADCAST_IP, PORT, "hello from Saltic, listening on 10.0.0.2:5555"))
-    io.show("[5] announced myself ({sent} bytes), listening for UDP on port 5555")
-    drum (LISTEN_ROUNDS) { poll_rx(card) }
-    out none
-}
-
-program() {
-    io.show("Saltic RTL8111 driver, step 3: receive frames, answer UDP commands")
-    @done = run() rescue |err| {
-        io.show("FAILED: ", err)
-        none
-    }
-    io.show("")
-    io.show("This program never exits. Turn the laptop off when done.")
-    drum (200000000) {
-        @key = io.key()
-    }
+skill link(card) {
+    out link_text(firmware.read8(card.mmio, card.base, REGISTER_PHY_STATUS))
 }

@@ -8,9 +8,12 @@ Saltic на ноутбуке без Linux: программа собираетс
 | `hello.saltic` | первая программа: текст на экране и одно нажатие |
 | `firmware.saltic` | общая основа: физические адреса, чтение и запись памяти, таблицы UEFI и ACPI, ECAM, поиск устройства PCI |
 | `pci.saltic` | перечисление устройств PCI: системная таблица UEFI → ACPI RSDP → XSDT → MCFG → ECAM, обход всех шин; не выходит, пока ноутбук не выключат |
-| `rtl8111.saltic` | драйвер Ethernet Realtek RTL8111: найти карту, сбросить, кольца дескрипторов в арене, дождаться линка, объявить себя рассылкой, затем вечно слушать: печатать принятые кадры и отвечать `echo: <текст>` на UDP-команды порта 5555. QEMU эту карту не эмулирует — проверка только на железе |
+| `rtl8111.saltic` | драйвер Ethernet Realtek RTL8111: найти карту, сбросить, кольца дескрипторов в арене, дождаться линка; `send` кадра, `received`/`read_frame`/`release` для приёма. QEMU эту карту не эмулирует — проверка только на железе |
+| `net.saltic` | сеть на группах байтов: Ethernet, ARP (ответ «10.0.0.2 — это я»), IPv4 с контрольной суммой, UDP; проверяется на Linux |
+| `agent.saltic` | приёмник команд на 10.0.0.2:5555: `help`, `info`, `pci`, `mem <адрес> [байт]`, `echo <текст>`; отвечает на ARP, поэтому с ним говорит обычный UDP-сокет |
 | `tools/listen.py` | «ухо» на проводе: печатает все кадры на интерфейсе (`sudo python3 tools/listen.py eno1`) |
-| `tools/talk.py` | разговор с драйвером: раз в секунду шлёт `ping N` (10.0.0.1:5556 → 10.0.0.2:5555) и печатает ответы (`sudo python3 tools/talk.py eno1`) |
+| `tools/talk.py` | сырой разговор без ARP: раз в секунду шлёт `ping N` и печатает ответы (`sudo python3 tools/talk.py eno1`) |
+| `tools/say.py` | одна команда агенту без root: `python3 tools/say.py info` (нужен адрес 10.0.0.1 на `eno1`) |
 | `build.sh` | собирает `EFI/BOOT/BOOTX64.EFI` и папку образа флешки |
 | `run.sh` | запускает собранное в QEMU x86-64 с прошивкой OVMF; `--check` — без окна, жмёт клавишу и ждёт «Bye!» (так его зовёт `tests/run.sh uefi`) |
 
@@ -60,3 +63,10 @@ Qualcomm Atheros QCA9377 (`168c:0042`).
 ответил `echo: ping N` в ту же секунду — первый приёмник команд на Saltic.
 Сеть — два ноутбука, соединённых кабелем напрямую; на втором `eno1` без
 IP-адреса, поэтому оба скрипта работают через сырой сокет и `sudo`.
+
+Агент, 01.11.2026: на `eno1` профиль NetworkManager `saltic-wire` с адресом
+10.0.0.1/24 (`nmcli connection add type ethernet ifname eno1 con-name
+saltic-wire ipv4.method manual ipv4.addresses 10.0.0.1/24 ipv6.method
+link-local connection.autoconnect-priority 10`). Linux находит Acer по ARP,
+`tools/say.py` отвечают `help`, `info`, `pci` (19 устройств текстом) и `mem`
+(сырая память железа — конфигурация PCI и регистры карты).

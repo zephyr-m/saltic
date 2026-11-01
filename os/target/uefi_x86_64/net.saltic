@@ -1,0 +1,148 @@
+use core.num
+use core.str
+use core.group
+use os.target.uefi_x86_64.firmware
+
+TYPE_IPV4 = 2048
+TYPE_ARP = 2054
+PROTOCOL_UDP = 17
+ARP_REQUEST = 1
+ARP_REPLY = 2
+FRAME_MINIMUM = 60
+IP_HEADER_FIRST = 17664
+IP_TTL_UDP = 16401
+BROADCAST_MAC = [255, 255, 255, 255, 255, 255]
+ASCII = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[?]^_`abcdefghijklmnopqrstuvwxyz?|?~"
+
+Udp = Box {
+    from_mac = [],
+    from_ip = [],
+    from_port = 0,
+    to_port = 0,
+    text = ""
+}
+
+skill word(bytes, offset) {
+    out group.get(bytes, offset) * 256 + group.get(bytes, offset + 1)
+}
+
+skill add16(bytes, value) {
+    out group.add(group.add(bytes, value / 256), num.mod(value, 256))
+}
+
+skill ip_words(ip) {
+    out [group.get(ip, 0) * 256 + group.get(ip, 1), group.get(ip, 2) * 256 + group.get(ip, 3)]
+}
+
+skill checksum(words) {
+    @total = 0
+    drum (words) { total = total + beat }
+    drum (4) { total = num.mod(total, 65536) + total / 65536 }
+    out 65535 - total
+}
+
+skill pad(bytes) {
+    (group.count(bytes) < FRAME_MINIMUM) {
+        drum (FRAME_MINIMUM - group.count(bytes)) { bytes = group.add(bytes, 0) }
+    }
+    out bytes
+}
+
+skill printable(code) {
+    (code < 32) { out "." }
+    (code > 126) { out "." }
+    out str.get(ASCII, code - 32)
+}
+
+skill text_of(bytes, first, count) {
+    @text = ""
+    drum (count) { text = str.add(text, printable(group.get(bytes, first + beat))) }
+    out text
+}
+
+skill same_bytes(left, right) {
+    ((group.count(left) == group.count(right)) == no) { out no }
+    drum (group.count(left)) {
+        ((group.get(left, beat) == group.get(right, beat)) == no) { out no }
+    }
+    out yes
+}
+
+skill slice_bytes(bytes, first, count) {
+    out group.slice(bytes, first, first + count)
+}
+
+skill mac_text(bytes) {
+    @text = firmware.hex(group.get(bytes, 0), 2)
+    drum (5) {
+        @part = firmware.hex(group.get(bytes, beat + 1), 2)
+        text = "{text}:{part}"
+    }
+    out text
+}
+
+skill ip_text(ip) {
+    @first = group.get(ip, 0)
+    @text = "{first}"
+    drum (3) {
+        @part = group.get(ip, beat + 1)
+        text = "{text}.{part}"
+    }
+    out text
+}
+
+skill udp_frame(my_mac, my_ip, to_mac, to_ip, from_port, to_port, text) {
+    @udp_length = 8 + str.len(text)
+    @mine = ip_words(my_ip)
+    @theirs = ip_words(to_ip)
+    @header = [IP_HEADER_FIRST, 20 + udp_length, 1, 0, IP_TTL_UDP, 0, group.get(mine, 0), group.get(mine, 1), group.get(theirs, 0), group.get(theirs, 1)]
+    @bytes = group.concat(to_mac, my_mac)
+    bytes = add16(bytes, TYPE_IPV4)
+    drum (10) {
+        @value = group.get(header, beat)
+        (beat == 5) { value = checksum(header) }
+        bytes = add16(bytes, value)
+    }
+    bytes = add16(add16(add16(add16(bytes, from_port), to_port), udp_length), 0)
+    drum (str.len(text)) { bytes = group.add(bytes, str.byte(text, beat)) }
+    out pad(bytes)
+}
+
+skill is_arp_request_for(bytes, my_ip) {
+    (group.count(bytes) < 42) { out no }
+    ((word(bytes, 12) == TYPE_ARP) == no) { out no }
+    ((word(bytes, 20) == ARP_REQUEST) == no) { out no }
+    out same_bytes(slice_bytes(bytes, 38, 4), my_ip)
+}
+
+skill arp_reply(my_mac, my_ip, request) {
+    @asker_mac = slice_bytes(request, 22, 6)
+    @asker_ip = slice_bytes(request, 28, 4)
+    @bytes = group.concat(asker_mac, my_mac)
+    bytes = add16(bytes, TYPE_ARP)
+    bytes = add16(add16(bytes, 1), TYPE_IPV4)
+    bytes = add16(bytes, 1540)
+    bytes = add16(bytes, ARP_REPLY)
+    bytes = group.concat(group.concat(group.concat(group.concat(bytes, my_mac), my_ip), asker_mac), asker_ip)
+    out pad(bytes)
+}
+
+skill is_udp_to(bytes, port) {
+    (group.count(bytes) < 42) { out no }
+    ((word(bytes, 12) == TYPE_IPV4) == no) { out no }
+    ((group.get(bytes, 23) == PROTOCOL_UDP) == no) { out no }
+    out word(bytes, 36) == port
+}
+
+skill udp(bytes) {
+    @size = word(bytes, 38) - 8
+    (size > group.count(bytes) - 42) { size = group.count(bytes) - 42 }
+    (size < 0) { size = 0 }
+    out Udp {
+        from_mac = slice_bytes(bytes, 6, 6),
+        from_ip = slice_bytes(bytes, 26, 4),
+        from_port = word(bytes, 34),
+        to_port = word(bytes, 36),
+        text = text_of(bytes, 42, size)
+    }
+}

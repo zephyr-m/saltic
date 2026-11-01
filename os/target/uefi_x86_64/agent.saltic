@@ -1,0 +1,163 @@
+use io
+use core.num
+use core.str
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.pci
+use os.target.uefi_x86_64.rtl8111
+use os.target.uefi_x86_64.net
+
+PORT = 5555
+MY_IP = [10, 0, 0, 2]
+MEMORY_DEFAULT = 16
+MEMORY_LIMIT = 64
+LISTEN_ROUNDS = 200000000
+HELP = "commands: help | info | pci | mem <hex address> [bytes, up to 64] | echo <text>"
+
+Agent = Box {
+    card = rtl8111.Card {},
+    frames = 0,
+    commands = 0,
+    arp = 0
+}
+
+skill parse_hex(text) {
+    (str.len(text) == 0) { out error.BadAddress }
+    (str.len(text) > 8) { out error.BadAddress }
+    @hi = 0
+    @lo = 0
+    drum (str.len(text)) {
+        @digit = num.hex_value(str.get(text, beat))
+        (digit < 0) { out error.BadAddress }
+        hi = hi * 16 + lo / 4096
+        lo = num.mod(lo, 4096) * 16 + digit
+    }
+    out firmware.Phys { hi = hi, lo = lo }
+}
+
+skill parse_count(text) {
+    @value = 0
+    drum (str.len(text)) {
+        @ch = str.get(text, beat)
+        (str.is_digit(ch) == no) { out MEMORY_DEFAULT }
+        value = value * 10 + num.digit(ch)
+    }
+    (value < 1) { out MEMORY_DEFAULT }
+    (value > MEMORY_LIMIT) { out MEMORY_LIMIT }
+    out value
+}
+
+skill memory_dump(agent, words) {
+    (group.count(words) < 2) { out "usage: mem <hex address> [bytes]" }
+    @at = parse_hex(group.get(words, 1)) rescue |err| { out "bad address: {err}" }
+    @count = MEMORY_DEFAULT
+    (group.count(words) > 2) { count = parse_count(group.get(words, 2)) }
+    @dump = []
+    @row = ""
+    drum (count) {
+        (num.mod(beat, 16) == 0) {
+            (beat > 0) { dump = group.add(dump, row) }
+            @where = firmware.phys_text(firmware.add(at, beat))
+            row = "{where}:"
+        }
+        @value = firmware.hex(firmware.read8(at, agent.card.base, beat), 2)
+        row = "{row} {value}"
+    }
+    dump = group.add(dump, row)
+    out str.join(dump, "\n")
+}
+
+skill information(agent) {
+    @mac = net.mac_text(agent.card.mac)
+    @ip = net.ip_text(MY_IP)
+    @arena = firmware.phys_text(agent.card.arena)
+    @link = rtl8111.link(agent.card)
+    @frames = agent.frames
+    @commands = agent.commands
+    @arp = agent.arp
+    out "Saltic agent on Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp port 5555\nlink {link}\nDMA arena {arena}\nframes {frames}, commands {commands}, arp answers {arp}"
+}
+
+skill device_list(agent) {
+    @base = agent.card.base
+    out str.join(pci.device_lines(base, firmware.ecam(base)), "\n")
+}
+
+skill execute(agent, text) {
+    @words = str.split(text, " ")
+    @name = group.get(words, 0)
+    (name == "help") { out HELP }
+    (name == "info") { out information(agent) }
+    (name == "pci") { out device_list(agent) }
+    (name == "mem") { out memory_dump(agent, words) }
+    (name == "echo") { out str.slice(text, 4, str.len(text)) }
+    out "unknown command '{name}'. {HELP}"
+}
+
+skill answer(agent, bytes) {
+    @packet = net.udp(bytes)
+    @who = net.ip_text(packet.from_ip)
+    @command = packet.text
+    io.show("command from {who}: {command}")
+    @reply = execute(agent, command) rescue |err| { "error: {err}" }
+    @frame = net.udp_frame(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply)
+    @sent = rtl8111.send(agent.card, frame)
+    io.show("  replied {sent} bytes")
+    agent.commands = agent.commands + 1
+    out agent
+}
+
+skill handle(agent, bytes) {
+    agent.frames = agent.frames + 1
+    (net.is_arp_request_for(bytes, MY_IP) == yes) {
+        rtl8111.send(agent.card, net.arp_reply(agent.card.mac, MY_IP, bytes))
+        agent.arp = agent.arp + 1
+        @asker = net.ip_text(net.slice_bytes(bytes, 28, 4))
+        io.show("arp: told {asker} that 10.0.0.2 is us")
+        out agent
+    }
+    (net.is_udp_to(bytes, PORT) == yes) { out answer(agent, bytes) }
+    out agent
+}
+
+skill serve(agent) {
+    drum (LISTEN_ROUNDS) {
+        drum (rtl8111.RX_COUNT) {
+            (rtl8111.received(agent.card, beat) == yes) {
+                @bytes = rtl8111.read_frame(agent.card, beat)
+                rtl8111.release(agent.card, beat)
+                agent = handle(agent, bytes)
+            }
+        }
+    }
+    out agent
+}
+
+skill run() {
+    @card = rtl8111.open()
+    @mac = net.mac_text(card.mac)
+    io.show("[1] card {mac}")
+    rtl8111.configure(card)
+    io.show("[2] card configured, waiting for link...")
+    @link = rtl8111.wait_link(card)
+    io.show("[3] link {link}")
+    @hello = net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "Saltic agent is up on 10.0.0.2:5555, say help")
+    rtl8111.send(card, hello)
+    io.show("[4] listening on 10.0.0.2:5555 (arp + udp commands)")
+    io.show("")
+    serve(Agent { card = card })
+    out none
+}
+
+program() {
+    io.show("Saltic agent: commands over the network")
+    @done = run() rescue |err| {
+        io.show("FAILED: ", err)
+        none
+    }
+    io.show("")
+    io.show("This program never exits. Turn the laptop off when done.")
+    drum (200000000) {
+        @key = io.key()
+    }
+}
