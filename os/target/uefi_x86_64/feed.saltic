@@ -1,5 +1,6 @@
 use core.str
 use core.group
+use os.target.uefi_x86_64.firmware
 use os.target.uefi_x86_64.uefi
 use os.target.uefi_x86_64.graphics
 use os.target.uefi_x86_64.lettering
@@ -13,6 +14,7 @@ LINE_GAP = 4
 LOG_LIMIT = 150
 REPLY_INDENT = 24
 REPLY_LINES = 24
+BOOT_COPY_MEM = 352
 
 skill paper(screen) {
     out graphics.color(screen, 250, 250, 250)
@@ -22,16 +24,32 @@ skill ink(screen) {
     out graphics.color(screen, 24, 24, 27)
 }
 
+skill code_ink(screen) {
+    out graphics.color(screen, 37, 99, 235)
+}
+
 skill faint(screen) {
     out graphics.color(screen, 113, 113, 122)
 }
 
+skill scroll(agent, screen, amount) {
+    @base = agent.card.base
+    @services = uefi.boot_services(base)
+    @limit = screen.height - BAR_SPACE - 32
+    @row_bytes = screen.stride * graphics.PIXEL_BYTES
+    @upper = firmware.add(screen.frame, (TOP - 8) * row_bytes)
+    @lower = firmware.add(screen.frame, (TOP - 8 + amount) * row_bytes)
+    @length = (limit - TOP + 8 - amount) * row_bytes
+    firmware.call(base, firmware.pointer(services, base, BOOT_COPY_MEM), [upper, lower, firmware.number(length)])
+    graphics.fill(screen, 0, limit - amount, screen.width, amount, paper(screen))
+    spider.draw(base)
+    agent.cursor = agent.cursor - amount
+    out none
+}
+
 skill next_row(agent, screen, face) {
-    (agent.cursor + face.height > screen.height - BAR_SPACE - 32) {
-        graphics.fill(screen, 0, TOP - 8, screen.width, screen.height - TOP - BAR_SPACE - 24, paper(screen))
-        spider.draw(agent.card.base)
-        agent.cursor = TOP
-    }
+    @limit = screen.height - BAR_SPACE - 32
+    (agent.cursor + face.height > limit) { scroll(agent, screen, agent.cursor + face.height - limit) }
     @y = agent.cursor
     agent.cursor = agent.cursor + face.height + LINE_GAP
     out y
@@ -72,8 +90,18 @@ skill split_lines(bytes) {
 }
 
 skill show_reply(agent, bytes) {
+    out show_lines(agent, bytes, REPLY_INDENT, no)
+}
+
+skill show_code(agent, bytes) {
+    out show_lines(agent, bytes, REPLY_INDENT * 2, yes)
+}
+
+skill show_lines(agent, bytes, indent, is_code) {
     (agent.console == yes) { out none }
     @screen = graphics.open(agent.card.base)
+    @color = ink(screen)
+    (is_code == yes) { color = code_ink(screen) }
     @face = lettering.FACE_SMALL
     @lines = split_lines(bytes)
     @shown = group.count(lines)
@@ -83,12 +111,12 @@ skill show_reply(agent, bytes) {
         @line = group.get(lines, beat)
         @width = group.count(line)
         (width > LOG_LIMIT) { width = LOG_LIMIT }
-        lettering.paint_bytes(screen, face, MARGIN + REPLY_INDENT, row, group.slice(line, 0, width), ink(screen))
+        lettering.paint_bytes(screen, face, MARGIN + indent, row, group.slice(line, 0, width), color)
     }
     @hidden = group.count(lines) - shown
     (hidden > 0) {
         @row = next_row(agent, screen, face)
-        lettering.paint_text(screen, face, MARGIN + REPLY_INDENT, row, "... и ещё {hidden} строк", faint(screen))
+        lettering.paint_text(screen, face, MARGIN + indent, row, "... и ещё {hidden} строк", faint(screen))
     }
     out none
 }
