@@ -1,0 +1,263 @@
+use core.str
+use core.num
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.uefi
+use os.target.uefi_x86_64.net
+
+BOOT_CONNECT_CONTROLLER = 264
+BOOT_HANDLE_PROTOCOL = 152
+BOOT_LOCATE_HANDLE_BUFFER = 312
+ALL_HANDLES = 0
+BY_PROTOCOL = 2
+BLOCK_IO_GUID = [33, 91, 78, 150, 89, 100, 210, 17, 142, 57, 0, 160, 201, 105, 114, 59]
+BLOCK_MEDIA = 8
+MEDIA_REMOVABLE = 4
+MEDIA_PRESENT = 5
+MEDIA_PARTITION = 6
+MEDIA_BLOCK_SIZE = 12
+MEDIA_LAST_BLOCK = 24
+FILE_SYSTEM_GUID = [34, 91, 78, 150, 89, 100, 210, 17, 142, 57, 0, 160, 201, 105, 114, 59]
+FILE_SYSTEM_INFO_GUID = [147, 110, 87, 9, 63, 109, 210, 17, 142, 57, 0, 160, 201, 105, 114, 59]
+VOLUME_OPEN = 8
+FILE_OPEN = 8
+FILE_CLOSE = 16
+FILE_READ = 32
+FILE_WRITE = 40
+FILE_FLUSH = 88
+MODE_WRITE = 3
+CREATE_HIGH = 32768
+SALTIC_LABEL = "SALTIC"
+FILE_GET_INFO = 64
+MODE_READ = 1
+DIRECTORY = 16
+INFO_ATTRIBUTE = 72
+INFO_NAME = 80
+SYSTEM_VOLUME_SIZE = 16
+SYSTEM_FREE = 24
+SYSTEM_LABEL = 36
+SCRATCH_GUID = 0
+SCRATCH_COUNT = 16
+SCRATCH_POINTER = 24
+SCRATCH_SIZE = 56
+SCRATCH_NAME = 64
+SCRATCH_BUFFER = 1024
+BUFFER_BYTES = 4096
+ENTRY_LIMIT = 64
+
+skill write_guid(base, bytes) {
+    @at = firmware.scratch(base, SCRATCH_GUID)
+    drum (16) { firmware.write8(at, base, beat, group.get(bytes, beat)) }
+    out at
+}
+
+skill wide_name(base, name) {
+    @at = firmware.scratch(base, SCRATCH_NAME)
+    drum (str.len(name)) { firmware.write16(at, base, beat * 2, str.byte(name, beat)) }
+    firmware.write16(at, base, str.len(name) * 2, 0)
+    out at
+}
+
+skill read_wide(base, at, offset, limit) {
+    @name = ""
+    drum (limit) {
+        @code = firmware.read16(at, base, offset + beat * 2)
+        (code == 0) { out name }
+        name = str.add(name, net.printable(code))
+    }
+    out name
+}
+
+skill megabytes(base, at, offset) {
+    out firmware.read16(at, base, offset + 4) * 4096 + firmware.read16(at, base, offset + 2) / 16
+}
+
+skill handles_with(base, kind, guid) {
+    @services = uefi.boot_services(base)
+    @count_at = firmware.scratch(base, SCRATCH_COUNT)
+    @buffer_at = firmware.scratch(base, SCRATCH_POINTER)
+    @key = firmware.number(0)
+    (kind == BY_PROTOCOL) { key = write_guid(base, guid) }
+    @located = firmware.call(base, firmware.pointer(services, base, BOOT_LOCATE_HANDLE_BUFFER), [firmware.number(kind), key, firmware.number(0), count_at, buffer_at])
+    (located.failed == yes) { out [] }
+    @handles = firmware.pointer(buffer_at, base, 0)
+    @found = []
+    drum (firmware.read16(count_at, base, 0)) { found = group.add(found, firmware.pointer(handles, base, beat * 8)) }
+    out found
+}
+
+skill connect_all(base) {
+    @services = uefi.boot_services(base)
+    @everything = handles_with(base, ALL_HANDLES, [])
+    drum (everything) {
+        firmware.call(base, firmware.pointer(services, base, BOOT_CONNECT_CONTROLLER), [beat, firmware.number(0), firmware.number(0), firmware.number(1)])
+    }
+    out group.count(everything)
+}
+
+skill protocol_of(base, handle, guid) {
+    @services = uefi.boot_services(base)
+    @protocol_at = firmware.scratch(base, SCRATCH_POINTER)
+    @got = firmware.call(base, firmware.pointer(services, base, BOOT_HANDLE_PROTOCOL), [handle, write_guid(base, guid), protocol_at])
+    (got.failed == yes) { out error.NoProtocol }
+    out firmware.pointer(protocol_at, base, 0)
+}
+
+skill disk_line(base, index, handle) {
+    @device = protocol_of(base, handle, BLOCK_IO_GUID) rescue |err| { out "диск {index}: нет BlockIO" }
+    @media = firmware.pointer(device, base, BLOCK_MEDIA)
+    @block = firmware.read16(media, base, MEDIA_BLOCK_SIZE)
+    @blocks_hi = firmware.read16(media, base, MEDIA_LAST_BLOCK + 4)
+    @blocks_mid = firmware.read16(media, base, MEDIA_LAST_BLOCK + 2)
+    @size = (blocks_hi * 65536 + blocks_mid) * block / 16
+    @removable = "нет"
+    (firmware.read8(media, base, MEDIA_REMOVABLE) > 0) { removable = "да" }
+    @kind = "целый диск"
+    (firmware.read8(media, base, MEDIA_PARTITION) > 0) { kind = "раздел" }
+    @present = "есть"
+    (firmware.read8(media, base, MEDIA_PRESENT) == 0) { present = "нет носителя" }
+    out "  диск {index}: {kind}, около {size} МБ, блок {block} байт, съёмный {removable}, {present}"
+}
+
+skill file_systems(base) {
+    out handles_with(base, BY_PROTOCOL, FILE_SYSTEM_GUID)
+}
+
+
+skill open_root(base, handle) {
+    @volume = protocol_of(base, handle, FILE_SYSTEM_GUID)
+    @root_at = firmware.scratch(base, SCRATCH_POINTER)
+    @opened = firmware.call(base, firmware.pointer(volume, base, VOLUME_OPEN), [volume, root_at])
+    (opened.failed == yes) { out error.VolumeNotOpened }
+    out firmware.pointer(root_at, base, 0)
+}
+
+skill close_file(base, file) {
+    out firmware.call(base, firmware.pointer(file, base, FILE_CLOSE), [file])
+}
+
+skill volume_text(base, root) {
+    @size_at = firmware.scratch(base, SCRATCH_SIZE)
+    firmware.write64(size_at, base, 0, firmware.number(BUFFER_BYTES))
+    @buffer = firmware.scratch(base, SCRATCH_BUFFER)
+    @asked = firmware.call(base, firmware.pointer(root, base, FILE_GET_INFO), [root, write_guid(base, FILE_SYSTEM_INFO_GUID), size_at, buffer])
+    (asked.failed == yes) { out "сведений о томе нет" }
+    @label = read_wide(base, buffer, SYSTEM_LABEL, 32)
+    @size = megabytes(base, buffer, SYSTEM_VOLUME_SIZE)
+    @free = megabytes(base, buffer, SYSTEM_FREE)
+    out "метка '{label}', размер {size} МБ, свободно {free} МБ"
+}
+
+skill open_child(base, directory, name) {
+    @child_at = firmware.scratch(base, SCRATCH_POINTER)
+    @opened = firmware.call(base, firmware.pointer(directory, base, FILE_OPEN), [directory, child_at, wide_name(base, name), firmware.number(MODE_READ), firmware.number(0)])
+    (opened.failed == yes) { out error.NotFound }
+    out firmware.pointer(child_at, base, 0)
+}
+
+skill list_names(base, directory) {
+    @names = []
+    @size_at = firmware.scratch(base, SCRATCH_SIZE)
+    @buffer = firmware.scratch(base, SCRATCH_BUFFER)
+    drum (ENTRY_LIMIT) {
+        firmware.write64(size_at, base, 0, firmware.number(BUFFER_BYTES))
+        @read = firmware.call(base, firmware.pointer(directory, base, FILE_READ), [directory, size_at, buffer])
+        (read.failed == yes) { out names }
+        (firmware.read16(size_at, base, 0) == 0) { out names }
+        @name = read_wide(base, buffer, INFO_NAME, 128)
+        (num.mod(firmware.read16(buffer, base, INFO_ATTRIBUTE) / DIRECTORY, 2) == 1) { name = str.add(name, "/") }
+        ((name == "./") == no) {
+            ((name == "../") == no) { names = group.add(names, name) }
+        }
+    }
+    out names
+}
+
+skill folder_names(base, root, path) {
+    @folder = open_child(base, root, path) rescue |err| { out [] }
+    @names = list_names(base, folder)
+    close_file(base, folder)
+    out names
+}
+
+skill volume_report(base, index, handle) {
+    @lines = []
+    @root = open_root(base, handle) rescue |err| { out ["том {index}: не открылся ({err})"] }
+    @about = volume_text(base, root)
+    lines = group.add(lines, "том {index}: {about}")
+    @top = list_names(base, root)
+    lines = group.add(lines, str.add("  корень: ", str.join(top, " ")))
+    @efi = folder_names(base, root, "EFI")
+    (group.count(efi) > 0) {
+        lines = group.add(lines, str.add("  EFI: ", str.join(efi, " ")))
+        drum (efi) {
+            (str.ends_with(beat, "/") == yes) {
+                @inner = str.slice(beat, 0, str.len(beat) - 1)
+                @inside = folder_names(base, root, str.add("EFI\\", inner))
+                lines = group.add(lines, str.add("  EFI/{beat}", str.add(" ", str.join(inside, " "))))
+            }
+        }
+    }
+    close_file(base, root)
+    out lines
+}
+
+skill report(base) {
+    @connected = connect_all(base)
+    @disks = handles_with(base, BY_PROTOCOL, BLOCK_IO_GUID)
+    @disk_total = group.count(disks)
+    @lines = ["подключил драйверы к {connected} устройствам", "блочных устройств: {disk_total}"]
+    drum (group.count(disks)) { lines = group.add(lines, disk_line(base, beat, group.get(disks, beat))) }
+    @handles = file_systems(base)
+    @total = group.count(handles)
+    lines = group.add(lines, "файловых систем: {total}")
+    drum (group.count(handles)) { lines = group.concat(lines, volume_report(base, beat, group.get(handles, beat))) }
+    out str.join(lines, "\n")
+}
+
+skill create(base, directory, name, attributes) {
+    @child_at = firmware.scratch(base, SCRATCH_POINTER)
+    @opened = firmware.call_wide(base, firmware.pointer(directory, base, FILE_OPEN), [directory, child_at, wide_name(base, name), firmware.number(MODE_WRITE), firmware.number(attributes)], [firmware.Phys {}, firmware.Phys {}, firmware.Phys {}, firmware.Phys { hi = CREATE_HIGH }])
+    (opened.failed == yes) { out error.NotCreated }
+    out firmware.pointer(child_at, base, 0)
+}
+
+skill volume_label(base, root) {
+    @size_at = firmware.scratch(base, SCRATCH_SIZE)
+    firmware.write64(size_at, base, 0, firmware.number(BUFFER_BYTES))
+    @buffer = firmware.scratch(base, SCRATCH_BUFFER)
+    @asked = firmware.call(base, firmware.pointer(root, base, FILE_GET_INFO), [root, write_guid(base, FILE_SYSTEM_INFO_GUID), size_at, buffer])
+    (asked.failed == yes) { out "" }
+    out read_wide(base, buffer, SYSTEM_LABEL, 32)
+}
+
+skill fixed_volume(base, owner) {
+    @device = protocol_of(base, owner, BLOCK_IO_GUID) rescue |err| { out no }
+    @media = firmware.pointer(device, base, BLOCK_MEDIA)
+    out firmware.read8(media, base, MEDIA_REMOVABLE) == 0
+}
+
+skill saltic_root(base) {
+    drum (file_systems(base)) {
+        (fixed_volume(base, beat) == yes) { out open_root(base, beat) }
+    }
+    out error.NoSalticVolume
+}
+
+skill install(base, image, size) {
+    @root = saltic_root(base)
+    @efi = create(base, root, "EFI", DIRECTORY)
+    @boot = create(base, efi, "BOOT", DIRECTORY)
+    @file = create(base, boot, "BOOTX64.EFI", 0)
+    @size_at = firmware.scratch(base, SCRATCH_SIZE)
+    firmware.write64(size_at, base, 0, firmware.number(size))
+    @written = firmware.call(base, firmware.pointer(file, base, FILE_WRITE), [file, size_at, image])
+    (written.failed == yes) { out error.WriteFailed }
+    @count = firmware.read16(size_at, base, 0) + firmware.read16(size_at, base, 2) * 65536
+    firmware.call(base, firmware.pointer(file, base, FILE_FLUSH), [file])
+    close_file(base, file)
+    close_file(base, boot)
+    close_file(base, efi)
+    close_file(base, root)
+    out count
+}

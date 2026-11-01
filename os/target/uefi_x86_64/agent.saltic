@@ -9,6 +9,8 @@ use os.target.uefi_x86_64.net
 use os.target.uefi_x86_64.uefi
 use os.target.uefi_x86_64.graphics
 use os.target.uefi_x86_64.lettering
+use os.target.uefi_x86_64.files
+use os.target.uefi_x86_64.disk
 
 PORT = 5555
 DATA_PORT = 5556
@@ -19,7 +21,7 @@ MY_IP = [10, 0, 0, 2]
 MEMORY_DEFAULT = 16
 MEMORY_LIMIT = 64
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -36,6 +38,7 @@ Agent = Box {
 }
 
 MARGIN = 40
+ERASE_WORD = "ERASE-ACER-DISK"
 TOP = 96
 
 skill log(agent, message) {
@@ -207,6 +210,27 @@ skill print_line(agent, line_bytes) {
     out "напечатал строку {agent.line}"
 }
 
+skill prepare_disk(agent, words) {
+    @base = agent.card.base
+    @target = disk.find_target(base, files.handles_with(base, files.BY_PROTOCOL, files.BLOCK_IO_GUID), files.BLOCK_IO_GUID)
+    @size = target.megabytes
+    (group.count(words) < 2) { out "будет стёрт целый несъёмный диск, около {size} МБ. Чтобы стереть и разметить: prepare-disk {ERASE_WORD}" }
+    ((group.get(words, 1) == ERASE_WORD) == no) { out "кодовое слово не то, ничего не записано" }
+    log(agent, "disk: erasing {size} MB disk, writing GPT")
+    disk.write_table(base, target)
+    log(agent, "disk: writing FAT32")
+    disk.write_fat(base, target)
+    disk.reconnect(base, target)
+    out str.add("диск размечен: GPT, раздел EFI 512 МБ, FAT32 'SALTIC'\n", files.report(base))
+}
+
+skill install_image(agent) {
+    (agent.expected == 0) { out "сначала upload программы" }
+    ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
+    @written = files.install(agent.card.base, firmware.add(agent.card.arena, UPLOAD_OFFSET), agent.expected)
+    out "записал \\EFI\\BOOT\\BOOTX64.EFI на том SALTIC: {written} байт"
+}
+
 skill device_list(agent) {
     @base = agent.card.base
     out str.join(pci.device_lines(base, firmware.ecam(base)), "\n")
@@ -225,6 +249,9 @@ skill execute(agent, text, payload) {
     (name == "run") { out launch(agent) }
     (name == "screen") { out draw_test(agent) }
     (name == "clear") { out clear_screen(agent) }
+    (name == "volumes") { out files.report(agent.card.base) }
+    (name == "prepare-disk") { out prepare_disk(agent, words) }
+    (name == "install") { out install_image(agent) }
     (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
     out "не знаю команду '{name}'. {HELP}"
 }
