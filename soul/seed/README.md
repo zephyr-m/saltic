@@ -15,7 +15,7 @@
 - `io.saltic` и `io/` — вывод (`use io`), файлы (`use io.file`), сеть
   (`io.net`).
 - `selfhost/` — сам язык: `selfhost.parser`, `selfhost.checker`,
-  `selfhost.compiler`, `selfhost.vm` и всё, на чём они стоят.
+  `selfhost.compiler` и всё, на чём они стоят.
 
 Корни `core`, `io` и `selfhost` загрузчик ищет в `soul/seed`, корень
 `canonical` — в `soul` (`selfhost/parser/loader.saltic`).
@@ -48,8 +48,6 @@
 - `machine/{instruction,registers,codec,decoder,word,buffer,layout,image,profile}` —
   команды и регистры RV32I, кодирование и разбор команд, 32-битное слово,
   байтовый буфер, раскладка, ELF32-образ;
-- `vm` + `vm/{cpu,loader,state,syscalls,system}` — исполнение ELF внутри
-  Saltic;
 - `abi` — одно машинное слово, теги значений, номер ошибки в отдельном
   регистре, 12-байтовый заголовок объекта;
 - `toolchain.saltic` — точка входа компилятора.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Проверка всех поддерживаемых хостов перед релизом: тесты на x86-64 Linux
 # прямо на процессоре, затем qemu-virt (графика), x86-64 UEFI и rv32i Linux
-# (closure: канон в QEMU и в Saltic VM). rv32i Linux целиком проверяет
+# (closure: канон собирается и исполняется в QEMU). rv32i Linux целиком проверяет
 # global-check.sh. Полный лог: .cache/build/workbench/hosts.log
 source "$(dirname "$0")/../bootstrap/stamp.sh"
 saltic_stamp_output "$0" "$@"

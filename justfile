@@ -42,17 +42,6 @@ os-send command port="46321":
 qemu-graphics-check:
     bash os/target/qemu_virt/build-graphics.sh --check
 
-trace file="soul/canonical/main.saltic":
-    mkdir -p .cache/build/tracer
-    SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh "$1" .cache/build/tracer/target.elf
-    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf
-    qemu-riscv32 -B 0x100000000 .cache/build/tracer/tracer.elf .cache/build/tracer/target.elf
-
-trace-elf file:
-    mkdir -p .cache/build/tracer
-    SALTIC_HEAP_BYTES=536870912 SALTIC_BUILD_DIR=.cache/build/tracer/build bash bootstrap/build.sh soul/craft/tracer.saltic .cache/build/tracer/tracer.elf
-    qemu-riscv32 -B 0x100000000 .cache/build/tracer/tracer.elf "$1"
-
 bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic":
     bash bootstrap/refresh.sh "$1"
 

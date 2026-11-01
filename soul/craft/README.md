@@ -12,10 +12,6 @@
   `number`, `text`).
 - `protocols/data/json_rpc` — запросы, ответы и ошибки JSON-RPC поверх
   `json`. Проверяется `just test json-rpc`.
-- `tracer` — трассировщик: исполняет готовый ELF в собственной VM
-  (`selfhost.vm`) и печатает вызовы и возвраты сразу, не накапливая журнал в
-  памяти. Исходник трассируется командой `just trace путь.saltic`, готовый
-  образ — `just trace-elf путь.elf`. Проверяется `just test tracer`.
 
 ## Заготовки
 

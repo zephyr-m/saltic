@@ -72,21 +72,6 @@ test_checker() {
     echo "чекер: нативная проверка пройдена"
 }
 
-test_vm() {
-    mkdir -p "$work/vm"
-    SALTIC_HEAP_BYTES=65536 \
-    SALTIC_BUILD_DIR="$work/build/vm-guest" \
-    bash bootstrap/build.sh \
-        tests/vm-guest.saltic \
-        "$work/vm/guest.elf"
-    build vm tests/vm.saltic "$work/vm/vm.elf" 536870912
-    run_built "$work/vm/vm.elf" \
-        "$work/vm/guest.elf" \
-        "$work/vm/actual.txt"
-    diff -u tests/expected/vm.txt "$work/vm/actual.txt"
-    echo "VM: нативная проверка пройдена"
-}
-
 test_fixed_types() {
     mkdir -p "$work/fixed-types"
     build_checker
@@ -150,28 +135,6 @@ test_json_rpc() {
         >"$work/json-rpc/stdout.txt"
     diff -u tests/expected/json-rpc.txt "$work/json-rpc/stdout.txt"
     echo "json-rpc: ok"
-}
-
-test_tracer() {
-    mkdir -p "$work/tracer"
-    SALTIC_HEAP_BYTES=1048576 \
-    SALTIC_BUILD_DIR="$work/build/tracer" \
-    bash bootstrap/build.sh \
-        tests/tracer.saltic \
-        "$work/tracer/target.elf"
-    build tracer soul/craft/tracer.saltic "$work/tracer/tracer.elf" 536870912
-    run_built \
-        "$work/tracer/tracer.elf" \
-        "$work/tracer/target.elf" \
-        >"$work/tracer/stdout.txt"
-
-    sed -E \
-        -e "s|$work/tracer/target.elf|<target.elf>|" \
-        -e 's/0x[0-9a-f]{8} \(("[^"]*"|группа|объект)\)/<адрес> (\1)/g' \
-        "$work/tracer/stdout.txt" \
-        >"$work/tracer/normalized.txt"
-    diff -u tests/expected/tracer.txt "$work/tracer/normalized.txt"
-    echo "трассер: ок"
 }
 
 test_diagnostics() {
@@ -288,28 +251,6 @@ test_machine() {
     echo "машина: кодирование и образ подтверждены"
 }
 
-test_vm_machine() {
-    mkdir -p "$work/vm-machine"
-    local platform_elf="$work/vm-machine/platform.elf"
-    build vm-machine \
-        soul/seed/tests/vm-machine.saltic \
-        "$work/vm-machine/program.elf"
-    run_built \
-        "$work/vm-machine/program.elf" \
-        "$platform_elf"
-    test -s "$platform_elf"
-    env -u LD_LIBRARY_PATH timeout 10 qemu-system-riscv32 \
-        -machine virt -m 128M -display none -monitor none \
-        -serial file:"$work/vm-machine/qemu-serial.txt" \
-        -d in_asm,guest_errors \
-        -D "$work/vm-machine/qemu.log" \
-        -bios none \
-        -kernel "$platform_elf" \
-        </dev/null
-    test "$(<"$work/vm-machine/qemu-serial.txt")" = "AB"
-    echo "VM: общий профиль, machine mode и qemu-virt подтверждены"
-}
-
 test_abi() {
     mkdir -p "$work/abi"
     build abi \
@@ -374,48 +315,18 @@ test_closure() {
         soul/canonical/expected/output.txt \
         "$closure_work/stdout.txt"
     test "$(<"$closure_work/output.txt")" = "pip:0"
-    echo "closure: тот же ELF в Saltic VM, 100000 инструкций"
-    build vm-elf tests/vm-elf.saltic "$closure_work/vm.elf" 4026531840
-    run_built \
-        "$closure_work/vm.elf" \
-        "$closure_work/canonical.elf" \
-        "$closure_work/input.txt" \
-        "$closure_work/vm-report.txt"
-    local reason steps trap
-    {
-        IFS= read -r reason
-        IFS= read -r steps
-        IFS= read -r trap || true
-    } <"$closure_work/vm-report.txt"
-    case "$trap" in
-        *"недопустимая инструкция"*|*"ошибка доступа"*|*"некорректн"*)
-            echo "closure: VM остановилась с ошибкой: $trap" >&2
-            exit 1
-            ;;
-    esac
-    if [[ "$reason" == "exit" && -z "$trap" ]]; then
-        :
-    elif [[ "$reason" == "trap" && "$steps" == "100000" && "$trap" == "исчерпан лимит инструкций"* ]]; then
-        :
-    else
-        echo "closure: VM не подтвердила ELF: $reason $steps $trap" >&2
-        exit 1
-    fi
     echo "closure: ok"
 }
 
 run_case() {
     case "$1" in
         checker) test_checker ;;
-        vm) test_vm ;;
         fixed-types) test_fixed_types ;;
         modules) test_modules ;;
         json-rpc) test_json_rpc ;;
-        tracer) test_tracer ;;
         diagnostics) test_diagnostics ;;
         seed-contract) test_seed_contract ;;
         machine) test_machine ;;
-        vm-machine) test_vm_machine ;;
         abi) test_abi ;;
         memory) test_memory ;;
         native) test_native ;;
@@ -440,12 +351,9 @@ if [[ "$1" == "platforms" ]]; then
 elif [[ "$1" == "all" ]]; then
     set -- \
         checker \
-        vm \
-        vm-machine \
         fixed-types \
         modules \
         json-rpc \
-        tracer \
         diagnostics \
         seed-contract \
         machine \

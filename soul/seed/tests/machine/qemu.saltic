@@ -1,24 +1,9 @@
 use craft.testing
-use selfhost.machine.instruction
 use selfhost.machine.layout
 use selfhost.machine.image
 use selfhost.compiler
-use selfhost.compiler.backend.rv32i
-use selfhost.memory.model
-use selfhost.vm
-use selfhost.vm.state
-use selfhost.machine.registers
 use selfhost.machine.word
 use selfhost.machine.buffer
-
-skill make_image() {
-    @target = rv32i.host("_start")
-    target = rv32i.label(target, layout.Section.CODE, "_start")
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 0))
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, registers.A7, registers.ZERO, registers.ZERO, 93))
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ECALL, registers.ZERO, registers.ZERO, registers.ZERO, 0))
-    out rv32i.executable(target)
-}
 
 skill ordinary_program(heap_bytes) {
     @ast = ["program", ["entry", [], ["block", ["out", ["number", 7]]]]]
@@ -38,18 +23,6 @@ skill wide_heap_program() {
     out layout.resolve(target)
 }
 
-skill execute(output, limit) {
-    @options = state.Options {
-        load_address = 4096,
-        memory_size = model.DEFAULT_HEAP_BYTES + 1048576,
-        step_limit = limit,
-        program_name = "machine-codegen",
-        arguments = [],
-        files = []
-    }
-    out vm.run(buffer.chunks(output, state.PAGE_SIZE), options)
-}
-
 skill run(suite, output_path) {
     @ordinary = ordinary_program(64)
     @output = image.executable(ordinary)
@@ -64,16 +37,8 @@ skill run(suite, output_path) {
     suite = testing.test_equal(suite, "обычная программа: compiler heap", word.to_number(ordinary.bss_size), 64)
     suite = testing.test_equal(suite, "обычная программа: ELF magic", buffer.byte_at(output, 0), 127)
     suite = testing.test_yes(suite, "обычная программа: ELF содержит payload", output.length > 4096)
-    @result = execute(output, 96)
-    suite = testing.test_equal(suite, "обычная программа: нет trap", result.trap, "")
-    suite = testing.test_equal(suite, "обычная программа: завершилась через runtime", result.reason, "exit")
-    suite = testing.test_equal(suite, "обычная программа: успешный exit", result.exit_code, 0)
     @exhausted = exhausted_program()
-    @exhausted_result = execute(image.executable(exhausted), 96)
     suite = testing.test_equal(suite, "квота: маленький heap сохранён", word.to_number(exhausted.heap_size), 16)
-    suite = testing.test_equal(suite, "квота: исчерпание не повреждает VM", exhausted_result.trap, "")
-    suite = testing.test_equal(suite, "квота: исчерпание завершает программу", exhausted_result.reason, "exit")
-    suite = testing.test_equal(suite, "квота: исчерпание возвращается ошибкой program", exhausted_result.exit_code, 1)
     @wide = wide_heap_program()
     @wide_output = image.executable(wide)
     suite = testing.test_equal(suite, "широкая квота: decimal сохраняется", word.text(wide.heap_size), "4026531840")
@@ -82,25 +47,4 @@ skill run(suite, output_path) {
     suite = testing.test_yes(suite, "широкая квота: ELF не расплющивает BSS в файл", wide_output.length < 65536)
     image.write_buffer(output_path, output)
     out suite
-}
-
-program(output_path) {
-    @output = make_image()
-    @options = state.Options {
-        load_address = 4096,
-        memory_size = 262144,
-        step_limit = 8,
-        program_name = "seed-machine-qemu",
-        arguments = [],
-        files = []
-    }
-    @result = vm.run(buffer.chunks(output, state.PAGE_SIZE), options)
-    @suite = testing.test_new()
-    suite = testing.test_equal(suite, "QEMU ELF: собственная VM не получила trap", result.trap, "")
-    suite = testing.test_equal(suite, "QEMU ELF: собственная VM выполнила exit", result.reason, "exit")
-    suite = testing.test_equal(suite, "QEMU ELF: код завершения равен нулю", result.exit_code, 0)
-    suite = testing.test_equal(suite, "QEMU ELF: выполнены три команды", result.steps, 3)
-    @finish = testing.test_finish(suite)
-    image.write_buffer(output_path, output)
-    out finish
 }
