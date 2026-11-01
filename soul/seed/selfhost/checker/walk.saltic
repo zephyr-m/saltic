@@ -11,32 +11,23 @@ use selfhost.checker.lookup
 
 DRUM_MARKER = "$drum"
 
-Walked = Box {
-    diagnostics = [],
-    node = []
-}
-
-skill walked(node, diagnostics) {
-    out Walked { diagnostics = diagnostics, node = node }
-}
-
-skill issues(result) {
-    out result.diagnostics
-}
 
 skill check_expression(node, scope, globals, diagnostics) {
     @plain = ast.plain(node)
     @tag = group.get(plain, 0)
     (tag == "fraction-number") {
-        out walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.fraction_not_supported())))
+        out lookup.walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.fraction_not_supported())))
     }
     (tag == "wide-number") {
-        out walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.number_out_of_range())))
+        out lookup.walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.number_out_of_range())))
     }
     (tag == "template") {
+        @current = node
         drum ((group.count(plain) - 2) / 2) {
             @placeholder = group.get(plain, beat * 2 + 2)
-            diagnostics = issues(check_expression(placeholder, scope, globals, diagnostics))
+            @inner = check_expression(placeholder, scope, globals, diagnostics)
+            diagnostics = inner.diagnostics
+            current = ast.with_part(current, beat * 2 + 2, inner.node)
             @type = types.value_type(placeholder, scope, globals)
             @allowed = no
             (type == "string") { allowed = yes }
@@ -47,21 +38,23 @@ skill check_expression(node, scope, globals, diagnostics) {
                 diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(placeholder, errors.template_type(ast.path_text(placeholder), types.type_text(type))))
             }
         }
-        out walked(node, diagnostics)
+        out lookup.walked(current, diagnostics)
     }
     (tag == "enum-value") {
         @variant = names.find(globals, names.variant_key(group.get(plain, 1)))
         (str.len(variant.name) == 0) {
-            out walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_enum_variant(group.get(plain, 1)))))
+            out lookup.walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_enum_variant(group.get(plain, 1)))))
         }
-        out walked(node, diagnostics)
+        out lookup.walked(node, diagnostics)
     }
-    (tag == "path") { out walked(node, lookup.check_path(node, scope, globals, diagnostics)) }
+    (tag == "path") { out lookup.check_path(node, scope, globals, diagnostics) }
     (tag == "binary") {
         @left_node = group.get(plain, 2)
         @right_node = group.get(plain, 3)
-        diagnostics = issues(check_expression(left_node, scope, globals, diagnostics))
-        diagnostics = issues(check_expression(right_node, scope, globals, diagnostics))
+        @left_walked = check_expression(left_node, scope, globals, diagnostics)
+        @right_walked = check_expression(right_node, scope, globals, left_walked.diagnostics)
+        diagnostics = right_walked.diagnostics
+        @current = ast.with_part(ast.with_part(node, 2, left_walked.node), 3, right_walked.node)
         @operator = group.get(plain, 1)
         @numeric = no
         (operator == "+") { numeric = yes }
@@ -107,7 +100,7 @@ skill check_expression(node, scope, globals, diagnostics) {
                 }
             }
         }
-        out walked(node, diagnostics)
+        out lookup.walked(current, diagnostics)
     }
     (tag == "call") {
         @callee = ast.plain(ast.call_callee(node))
@@ -115,7 +108,7 @@ skill check_expression(node, scope, globals, diagnostics) {
             @part_count = group.count(callee)
             (part_count > 3) {
                 (names.has(scope.names, group.get(callee, 1)) == no) {
-                    out walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, lookup.long_call(callee))))
+                    out lookup.walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, lookup.long_call(callee))))
                 }
             }
         }
@@ -138,8 +131,15 @@ skill check_expression(node, scope, globals, diagnostics) {
                 }
             }
         }
+        @current = node
         (skip_callee == no) {
-            diagnostics = issues(check_expression(ast.call_callee(node), scope, globals, diagnostics))
+            @callee_walked = check_expression(ast.call_callee(node), scope, globals, diagnostics)
+            diagnostics = callee_walked.diagnostics
+            current = ast.with_part(current, 1, callee_walked.node)
+            (group.count(callee) == 2) {
+                @skill_name = names.resolve_name(group.get(callee, 1), scope.module, globals)
+                (str.len(skill_name) > 0) { current = ast.with_part(current, 1, ast.rebuild(ast.call_callee(node), names.path_from_text(skill_name))) }
+            }
         }
         @argument_count = ast.call_argument_count(node)
         drum (argument_count) {
@@ -151,7 +151,11 @@ skill check_expression(node, scope, globals, diagnostics) {
                     (rules.is_fraction(argument) == yes) { skip_argument = yes }
                 }
             }
-            (skip_argument == no) { diagnostics = issues(check_expression(argument, scope, globals, diagnostics)) }
+            (skip_argument == no) {
+                @argument_walked = check_expression(argument, scope, globals, diagnostics)
+                diagnostics = argument_walked.diagnostics
+                current = ast.with_part(current, beat + 2, argument_walked.node)
+            }
         }
         (fixed_call == no) {
             @callee_global = names.find(globals, full)
@@ -223,28 +227,34 @@ skill check_expression(node, scope, globals, diagnostics) {
                 }
             }
         }
-        out walked(node, diagnostics)
+        out lookup.walked(current, diagnostics)
     }
     (tag == "group") {
+        @current = node
         drum (group.count(plain) - 1) {
             diagnostics = lookup.check_fixed_escape(node, group.get(plain, beat + 1), "положить в группу", scope, globals, diagnostics)
-            diagnostics = issues(check_expression(group.get(plain, beat + 1), scope, globals, diagnostics))
+            @item_walked = check_expression(group.get(plain, beat + 1), scope, globals, diagnostics)
+            diagnostics = item_walked.diagnostics
+            current = ast.with_part(current, beat + 1, item_walked.node)
         }
-        out walked(node, diagnostics)
+        out lookup.walked(current, diagnostics)
     }
     (tag == "box-new") {
         @name = group.get(plain, 1)
         @long_box = names.long_reference(names.path_from_text(name), scope, globals)
-        (errors.is_ok(long_box) == no) { out walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, long_box))) }
+        (errors.is_ok(long_box) == no) { out lookup.walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, long_box))) }
         @resolved_box = names.resolve_name(name, scope.module, globals)
         @model = names.find(globals, resolved_box)
         (model.kind == "box") {
+            @current = ast.with_part(node, 1, resolved_box)
             @seen = []
             drum (group.count(plain) - 2) {
                 @override = group.get(plain, beat + 2)
                 @field_name = ast.part(override, 1)
                 @value = ast.part(override, 2)
-                diagnostics = issues(check_expression(value, scope, globals, diagnostics))
+                @value_walked = check_expression(value, scope, globals, diagnostics)
+                diagnostics = value_walked.diagnostics
+                current = ast.with_part(current, beat + 2, ast.with_part(override, 2, value_walked.node))
                 (names.has(seen, field_name) == yes) {
                     diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.duplicate_literal_field(field_name, name)))
                 }
@@ -264,19 +274,21 @@ skill check_expression(node, scope, globals, diagnostics) {
                     }
                 }
             }
-            out walked(node, diagnostics)
+            out lookup.walked(current, diagnostics)
         }
         diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_box(name)))
-        out walked(node, diagnostics)
+        out lookup.walked(node, diagnostics)
     }
     (tag == "rescue") {
-        diagnostics = issues(check_expression(group.get(plain, 1), scope, globals, diagnostics))
+        @value_walked = check_expression(group.get(plain, 1), scope, globals, diagnostics)
+        diagnostics = value_walked.diagnostics
         @child = names.Scope { names = scope.names, subject = scope.subject, module = scope.module }
         diagnostics = lookup.check_module_name(node, group.get(plain, 2), scope.module, globals, diagnostics)
         child.names = names.put(child.names, group.get(plain, 2), "variable", "error")
-        out walked(node, issues(check_block(group.get(plain, 3), child, globals, diagnostics)))
+        @block_walked = check_block(group.get(plain, 3), child, globals, diagnostics)
+        out lookup.walked(ast.with_part(ast.with_part(node, 1, value_walked.node), 3, block_walked.node), block_walked.diagnostics)
     }
-    out walked(node, diagnostics)
+    out lookup.walked(node, diagnostics)
 }
 
 skill check_statement(node, scope, globals, diagnostics) {
@@ -285,7 +297,9 @@ skill check_statement(node, scope, globals, diagnostics) {
     (tag == "var") {
         @name = group.get(plain, 1)
         @value = group.get(plain, 2)
-        diagnostics = issues(check_expression(value, scope, globals, diagnostics))
+        @value_walked = check_expression(value, scope, globals, diagnostics)
+        diagnostics = value_walked.diagnostics
+        @current = ast.with_part(node, 2, value_walked.node)
         (names.has(scope.names, name) == yes) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.duplicate_variable(name))) }
         (names.has(scope.names, name) == no) {
             (names.has(globals, name) == yes) {
@@ -296,12 +310,14 @@ skill check_statement(node, scope, globals, diagnostics) {
                 scope.names = names.put(scope.names, name, "variable", types.value_type(value, scope, globals))
             }
         }
-        out walked(node, diagnostics)
+        out lookup.walked(current, diagnostics)
     }
     (tag == "assign") {
         @name = group.get(plain, 1)
         @value = group.get(plain, 2)
-        diagnostics = issues(check_expression(value, scope, globals, diagnostics))
+        @value_walked = check_expression(value, scope, globals, diagnostics)
+        diagnostics = value_walked.diagnostics
+        @current = ast.with_part(node, 2, value_walked.node)
         (names.has(scope.names, name) == yes) {
             @old = names.find(scope.names, name)
             @value_type = types.value_type(value, scope, globals)
@@ -324,7 +340,7 @@ skill check_statement(node, scope, globals, diagnostics) {
             }
             (str.len(global.name) == 0) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.variable_not_declared(name))) }
         }
-        out walked(node, diagnostics)
+        out lookup.walked(current, diagnostics)
     }
     (tag == "field-assign") {
         @target = ast.plain(group.get(plain, 1))
@@ -333,9 +349,11 @@ skill check_statement(node, scope, globals, diagnostics) {
         drum (part_count - 2) {
             base_parts = group.add(base_parts, group.get(target, beat + 1))
         }
-        diagnostics = lookup.check_path(base_parts, scope, globals, diagnostics)
+        diagnostics = lookup.issues(lookup.check_path(base_parts, scope, globals, diagnostics))
         @value = group.get(plain, 2)
-        diagnostics = issues(check_expression(value, scope, globals, diagnostics))
+        @value_walked = check_expression(value, scope, globals, diagnostics)
+        diagnostics = value_walked.diagnostics
+        @current = ast.with_part(node, 2, value_walked.node)
         @base_type = types.path_type(base_parts, scope, globals)
         (str.starts_with(base_type, "box:") == yes) {
             @box_name = types.tail(base_type, 4)
@@ -352,54 +370,68 @@ skill check_statement(node, scope, globals, diagnostics) {
                 }
             }
         }
-        out walked(node, diagnostics)
+        out lookup.walked(current, diagnostics)
     }
     (tag == "out") {
         diagnostics = lookup.check_fixed_escape(node, group.get(plain, 1), "вернуть из навыка", scope, globals, diagnostics)
-        out walked(node, issues(check_expression(group.get(plain, 1), scope, globals, diagnostics)))
+        @value_walked = check_expression(group.get(plain, 1), scope, globals, diagnostics)
+        out lookup.walked(ast.with_part(node, 1, value_walked.node), value_walked.diagnostics)
     }
     (tag == "pick") {
         @count = group.count(plain)
+        @current = node
         drum (count - 1) {
             @choice = group.get(plain, beat + 1)
             @choice_plain = ast.plain(choice)
             @choice_tag = group.get(choice_plain, 0)
             @child = names.Scope { names = scope.names, subject = scope.subject, module = scope.module }
             (choice_tag == "if") {
-                diagnostics = issues(check_expression(group.get(choice_plain, 1), scope, globals, diagnostics))
-                diagnostics = issues(check_block(group.get(choice_plain, 2), child, globals, diagnostics))
+                @condition_walked = check_expression(group.get(choice_plain, 1), scope, globals, diagnostics)
+                @branch_walked = check_block(group.get(choice_plain, 2), child, globals, condition_walked.diagnostics)
+                diagnostics = branch_walked.diagnostics
+                current = ast.with_part(current, beat + 1, ast.with_part(ast.with_part(choice, 1, condition_walked.node), 2, branch_walked.node))
             }
             (choice_tag == "switch") { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(choice, errors.pick_branch_not_condition())) }
             (choice_tag == "otherwise") {
                 (beat + 2 < count) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(choice, errors.pick_default_not_last())) }
-                diagnostics = issues(check_block(group.get(choice_plain, 1), child, globals, diagnostics))
+                @otherwise_walked = check_block(group.get(choice_plain, 1), child, globals, diagnostics)
+                diagnostics = otherwise_walked.diagnostics
+                current = ast.with_part(current, beat + 1, ast.with_part(choice, 1, otherwise_walked.node))
             }
         }
-        out walked(node, diagnostics)
+        out lookup.walked(current, diagnostics)
     }
     (tag == "leave") {
-        (names.has(scope.names, DRUM_MARKER) == no) { out walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.leave_outside_drum()))) }
-        out walked(node, diagnostics)
+        (names.has(scope.names, DRUM_MARKER) == no) { out lookup.walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.leave_outside_drum()))) }
+        out lookup.walked(node, diagnostics)
     }
-    (tag == "expr") { out walked(node, issues(check_expression(group.get(plain, 1), scope, globals, diagnostics))) }
+    (tag == "expr") {
+        @value_walked = check_expression(group.get(plain, 1), scope, globals, diagnostics)
+        out lookup.walked(ast.with_part(node, 1, value_walked.node), value_walked.diagnostics)
+    }
     (tag == "if") {
-        diagnostics = issues(check_expression(group.get(plain, 1), scope, globals, diagnostics))
-        out walked(node, issues(check_block(group.get(plain, 2), names.Scope { names = scope.names, subject = scope.subject, module = scope.module }, globals, diagnostics)))
+        @condition_walked = check_expression(group.get(plain, 1), scope, globals, diagnostics)
+        @branch_walked = check_block(group.get(plain, 2), names.Scope { names = scope.names, subject = scope.subject, module = scope.module }, globals, condition_walked.diagnostics)
+        out lookup.walked(ast.with_part(ast.with_part(node, 1, condition_walked.node), 2, branch_walked.node), branch_walked.diagnostics)
     }
     (tag == "drum") {
         @count_node = group.get(plain, 1)
-        diagnostics = issues(check_expression(count_node, scope, globals, diagnostics))
+        @count_walked = check_expression(count_node, scope, globals, diagnostics)
+        diagnostics = count_walked.diagnostics
         @count_type = types.value_type(count_node, scope, globals)
         @drum_problem = rules.drum_count(count_type)
         (errors.is_ok(drum_problem) == no) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(count_node, drum_problem)) }
         @drum_scope = names.Scope { names = scope.names, subject = scope.subject, module = scope.module }
         drum_scope.names = names.put(drum_scope.names, ast.DRUM_BEAT, "variable", "unknown")
         drum_scope.names = names.put(drum_scope.names, DRUM_MARKER, "variable", "unknown")
-        out walked(node, issues(check_block(group.get(plain, 2), drum_scope, globals, diagnostics)))
+        @body_walked = check_block(group.get(plain, 2), drum_scope, globals, diagnostics)
+        out lookup.walked(ast.with_part(ast.with_part(node, 1, count_walked.node), 2, body_walked.node), body_walked.diagnostics)
     }
     (tag == "switch") {
         @subject_node = ast.switch_subject(node)
-        diagnostics = issues(check_expression(subject_node, scope, globals, diagnostics))
+        @subject_walked = check_expression(subject_node, scope, globals, diagnostics)
+        diagnostics = subject_walked.diagnostics
+        @current = ast.with_part(node, 1, subject_walked.node)
         @subject_type = types.value_type(subject_node, scope, globals)
         @seen = []
         drum (ast.switch_case_count(node)) {
@@ -424,19 +456,24 @@ skill check_statement(node, scope, globals, diagnostics) {
                     }
                 }
             }
-            diagnostics = issues(check_expression(ast.case_body(case_node), scope, globals, diagnostics))
+            @body_walked = check_expression(ast.case_body(case_node), scope, globals, diagnostics)
+            diagnostics = body_walked.diagnostics
+            current = ast.with_part(current, beat + 2, ast.with_part(case_node, 2, body_walked.node))
         }
-        out walked(node, diagnostics)
+        out lookup.walked(current, diagnostics)
     }
-    out walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_statement(tag))))
+    out lookup.walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_statement(tag))))
 }
 
 skill check_block(block, scope, globals, diagnostics) {
     @plain = ast.plain(block)
+    @current = block
     drum (group.count(plain) - 1) {
-        diagnostics = issues(check_statement(group.get(plain, beat + 1), scope, globals, diagnostics))
+        @statement_walked = check_statement(group.get(plain, beat + 1), scope, globals, diagnostics)
+        diagnostics = statement_walked.diagnostics
+        current = ast.with_part(current, beat + 1, statement_walked.node)
     }
-    out walked(block, diagnostics)
+    out lookup.walked(current, diagnostics)
 }
 
 skill check_params(params, globals, subject, module, body, diagnostics) {

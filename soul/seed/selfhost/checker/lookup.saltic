@@ -7,6 +7,19 @@ use selfhost.checker.names
 use selfhost.checker.types
 use selfhost.checker.rules
 
+Walked = Box {
+    diagnostics = [],
+    node = []
+}
+
+skill walked(node, diagnostics) {
+    out Walked { diagnostics = diagnostics, node = node }
+}
+
+skill issues(result) {
+    out result.diagnostics
+}
+
 skill long_call(callee) {
     @count = group.count(callee)
     @full = ast.path_text(callee)
@@ -51,41 +64,42 @@ skill check_path(node, scope, globals, diagnostics) {
     @name = group.get(parts, 1)
     @count = group.count(parts)
     @long = names.long_reference(node, scope, globals)
-    (errors.is_ok(long) == no) { out add_diagnostic(diagnostics, placed(node, long)) }
+    (errors.is_ok(long) == no) { out walked(node, add_diagnostic(diagnostics, placed(node, long))) }
     @resolved = names.resolve_path(node, scope, globals)
-    (str.len(resolved) > 0) { out diagnostics }
+    (str.len(resolved) > 0) { out walked(ast.rebuild(node, names.path_from_text(resolved)), diagnostics) }
     (count == 2) {
         @known = names.has(scope.names, name)
         (known == no) { known = names.has(globals, name) }
         (name == "error") { known = yes }
-        (known == no) { out add_diagnostic(diagnostics, placed(node, errors.unknown_name(name))) }
-        out diagnostics
+        (known == no) { out walked(node, add_diagnostic(diagnostics, placed(node, errors.unknown_name(name)))) }
+        out walked(node, diagnostics)
     }
-    (name == "error") { out diagnostics }
+    (name == "error") { out walked(node, diagnostics) }
     (name == "seed") {
-        (names.has(globals, "__seed__") == no) { out add_diagnostic(diagnostics, placed(node, errors.seed_not_imported())) }
+        (names.has(globals, "__seed__") == no) { out walked(node, add_diagnostic(diagnostics, placed(node, errors.seed_not_imported()))) }
         @full = ast.path_text(node)
-        (contract.is_known(full) == no) { out add_diagnostic(diagnostics, placed(node, errors.unknown_seed_operation(full))) }
-        out diagnostics
+        (contract.is_known(full) == no) { out walked(node, add_diagnostic(diagnostics, placed(node, errors.unknown_seed_operation(full)))) }
+        out walked(node, diagnostics)
     }
     @enum_name = names.resolve_name(ast.path_prefix(node), scope.module, globals)
     @enum_model = names.find(globals, enum_name)
     (enum_model.kind == "enum") {
         @variant = group.get(parts, count - 1)
-        (enum_has(globals, enum_name, variant) == no) { out add_diagnostic(diagnostics, placed(node, errors.enum_lacks_variant(enum_name, variant))) }
-        out diagnostics
+        (enum_has(globals, enum_name, variant) == no) { out walked(node, add_diagnostic(diagnostics, placed(node, errors.enum_lacks_variant(enum_name, variant)))) }
+        @full_variant = names.path_from_text(enum_name)
+        out walked(ast.rebuild(node, group.add(full_variant, variant)), diagnostics)
     }
     @import = names.find(globals, ast.alias_key(scope.module, name))
     (import.kind == "import") {
         (names.has(scope.names, name) == no) {
             @full = ast.path_text(node)
-            out add_diagnostic(diagnostics, placed(node, errors.unknown_name(full)))
+            out walked(node, add_diagnostic(diagnostics, placed(node, errors.unknown_name(full))))
         }
     }
     @global = names.find(globals, name)
     @base = names.find(scope.names, name)
     (str.len(base.name) == 0) { base = global }
-    (str.len(base.name) == 0) { out add_diagnostic(diagnostics, placed(node, errors.unknown_namespace(name))) }
+    (str.len(base.name) == 0) { out walked(node, add_diagnostic(diagnostics, placed(node, errors.unknown_namespace(name)))) }
     @type = base.type
     drum (count - 2) {
         @field_name = group.get(parts, beat + 2)
@@ -103,7 +117,7 @@ skill check_path(node, scope, globals, diagnostics) {
         }
         type = field.type
     }
-    out diagnostics
+    out walked(node, diagnostics)
 }
 
 skill check_module_name(node, name, module, globals, diagnostics) {

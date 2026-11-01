@@ -10,7 +10,8 @@ use selfhost.checker.walk
 
 Result = Box {
     diagnostics = [],
-    globals = []
+    globals = [],
+    tree = []
 }
 
 skill collect(program_ast) {
@@ -87,14 +88,28 @@ skill collect(program_ast) {
 
 skill check(program_ast) {
     @result = collect(program_ast)
+    @tree = [group.get(program_ast, 0)]
     drum (group.count(program_ast) - 1) {
         @item = group.get(program_ast, beat + 1)
         @tag = ast.tag(item)
         @module = ast.module_name(item)
         @first = group.count(result.diagnostics)
-        (tag == "const") { result.diagnostics = walk.issues(walk.check_expression(ast.part(item, 2), names.Scope { module = module }, result.globals, result.diagnostics)) }
-        (tag == "skill") { result.diagnostics = walk.issues(walk.check_params(ast.part(item, 2), result.globals, "", module, ast.part(item, 3), result.diagnostics)) }
-        (tag == "entry") { result.diagnostics = walk.issues(walk.check_params(ast.part(item, 1), result.globals, "", module, ast.part(item, 2), result.diagnostics)) }
+        @checked_item = item
+        (tag == "const") {
+            @value_walked = walk.check_expression(ast.part(item, 2), names.Scope { module = module }, result.globals, result.diagnostics)
+            result.diagnostics = value_walked.diagnostics
+            checked_item = ast.with_part(item, 2, value_walked.node)
+        }
+        (tag == "skill") {
+            @body_walked = walk.check_params(ast.part(item, 2), result.globals, "", module, ast.part(item, 3), result.diagnostics)
+            result.diagnostics = body_walked.diagnostics
+            checked_item = ast.with_part(item, 3, body_walked.node)
+        }
+        (tag == "entry") {
+            @body_walked = walk.check_params(ast.part(item, 1), result.globals, "", module, ast.part(item, 2), result.diagnostics)
+            result.diagnostics = body_walked.diagnostics
+            checked_item = ast.with_part(item, 2, body_walked.node)
+        }
         (tag == "box") {
             @seen_fields = []
             @seen_skills = []
@@ -109,7 +124,9 @@ skill check(program_ast) {
                     }
                     seen_fields = names.put(seen_fields, field_name, "field", "unknown")
                     result.diagnostics = lookup.check_fixed_escape(member, ast.part(member, 2), "положить в поле Box", names.Scope { module = module }, result.globals, result.diagnostics)
-                    result.diagnostics = walk.issues(walk.check_expression(ast.part(member, 2), names.Scope { module = module }, result.globals, result.diagnostics))
+                    @default_walked = walk.check_expression(ast.part(member, 2), names.Scope { module = module }, result.globals, result.diagnostics)
+                    result.diagnostics = default_walked.diagnostics
+                    checked_item = ast.with_part(checked_item, beat + 2, ast.with_part(member, 2, default_walked.node))
                 }
                 (member_tag == "subject-skill") {
                     @skill_name = ast.part(member, 1)
@@ -118,11 +135,15 @@ skill check(program_ast) {
                         result.diagnostics = lookup.add_diagnostic(result.diagnostics, errors.duplicate_box_skill(skill_name, box_name))
                     }
                     seen_skills = names.put(seen_skills, skill_name, "skill", "function")
-                    result.diagnostics = walk.issues(walk.check_params(ast.part(member, 2), result.globals, ast.qualified(module, ast.part(item, 1)), module, ast.part(member, 3), result.diagnostics))
+                    @method_walked = walk.check_params(ast.part(member, 2), result.globals, ast.qualified(module, ast.part(item, 1)), module, ast.part(member, 3), result.diagnostics)
+                    result.diagnostics = method_walked.diagnostics
+                    checked_item = ast.with_part(checked_item, beat + 2, ast.with_part(member, 3, method_walked.node))
                 }
             }
         }
         result.diagnostics = diagnostic.in_module(result.diagnostics, first, module)
+        tree = group.add(tree, checked_item)
     }
+    result.tree = tree
     out result
 }
