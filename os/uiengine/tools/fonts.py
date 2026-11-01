@@ -14,7 +14,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 TARGET = ROOT / "os/uiengine/fonts/generated"
-FACES = [("regular14", 14, 400), ("medium14", 14, 500), ("semibold14", 14, 600), ("regular12", 12, 400), ("semibold18", 18, 600)]
+SANS = "Noto Sans"
+MONO = "Noto Sans Mono"
+FACES = [("regular14", SANS, 14, 400), ("medium14", SANS, 14, 500), ("semibold14", SANS, 14, 600), ("regular12", SANS, 12, 400), ("semibold18", SANS, 18, 600), ("mono13", MONO, 13, 400)]
 ROWS = 8
 LEVELS = 15
 EXTRA = [0x2014, 0x2013, 0x00AB, 0x00BB, 0x00D7, 0x2026, 0x00B0, 0x2116]
@@ -476,9 +478,14 @@ skipped = {preview, str(weight)}
 words = [a for a in sys.argv[1:] if a.startswith("--") == False and a not in skipped]
 size = next((int(a) for a in words if a.isdigit()), 14)
 fonts = [a for a in words if a.isdigit() == False]
-font_path = fonts[0] if fonts else subprocess.run(["fc-match", "Noto Sans", "file"], capture_output=True, text=True).stdout.strip().removeprefix(":file=").replace("\\", "")
-font = Font(font_path)
-print(f"fonts: шрифт {Path(font_path).name}, {font.units} единиц на кегль", flush=True)
+
+
+def family_path(family):
+    return subprocess.run(["fc-match", family, "file"], capture_output=True, text=True).stdout.strip().removeprefix(":file=").replace("\\", "")
+
+
+font = Font(fonts[0] if fonts else family_path(SANS))
+loaded = {}
 
 
 def face(size, weight):
@@ -490,7 +497,11 @@ if preview:
     write_preview(preview, face(size, weight), size, "Сохранить Отмена Подробнее Удалить — Saltic 0123 «кнопка»")
     print(f"fonts: образец {preview}", flush=True)
     sys.exit(0)
-for name, face_size, face_weight in FACES:
+for name, family, face_size, face_weight in FACES:
+    if family not in loaded:
+        loaded[family] = Font(family_path(family))
+        print(f"fonts: шрифт {family} — {Path(family_path(family)).name}", flush=True)
+    font = loaded[family]
     glyphs = face(face_size, face_weight)
     ascent = round(font.ascent * face_size / font.units)
     line = round((font.ascent - font.descent) * face_size / font.units)

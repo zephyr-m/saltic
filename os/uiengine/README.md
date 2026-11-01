@@ -18,7 +18,7 @@ program() {
 `app.jtml` лежит рядом с программой, `tools/bake.py путь/app.jtml` вшивает его
 в `generated/app_jtml.saltic`.
 
-Галерея всех компонентов — `demo.saltic`: десять страниц из `demo/pages/*.jtml`
+Галерея всех компонентов — `demo.saltic`: одиннадцать страниц из `demo/pages/*.jtml`
 (вшиваются `tools/bake.py demo/pages/*.jtml --into demo/generated`), листаются
 клавиатурой Acer: ← → или Tab, цифры 1–0, Esc — выход к агенту. Собрать с кучей
 128 МБ и запустить через агента (`upload.py gallery.efi --run`).
@@ -41,12 +41,13 @@ program() {
 Теги JTML:
 
 - `buttons` — `button` (variant, icon, disabled), `toggle`, `toggle-group`, `button-group`;
-- `fields` — `input` (icon, action), `textarea`, `select`, `code` (input OTP), `combobox`, `label`;
+- `fields` — `input` (icon, action), `textarea`, `select`, `input-otp`, `combobox`, `label`;
 - `choices` — `checkbox`, `radio`, `switch`, `slider`;
 - `display` — `heading`, `title`, `text`, `muted`, `small`, `kbd`, `badge`, `separator`, `progress`, `icon`, `alert`, `avatar`, `skeleton`, `aspect`, `spinner`, `empty`, `table`;
 - `navigation` — `tabs`, `breadcrumb`, `pagination`, `accordion`, `collapsible`, `item`, `sidebar`, `navigation-menu`;
 - `overlays` — `tooltip`, `menu` (dropdown и context menu), `menubar`, `command`;
 - `data` — `calendar`, `date-picker`, `chart` (bar, line, area), `data-table`, `carousel`;
+- `editor` — `code`: блок кода с подсветкой Saltic (Noto Sans Mono 13), номера строк, `title`, `highlight`, `start`;
 - рамки — `card`, `popover` (и hover card), `dialog` (и alert dialog), `sheet`, `drawer`, `toast`;
   слой поверх страницы — свойство корня `"overlay"`: dialog и sheet и drawer затемняют страницу.
 
