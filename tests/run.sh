@@ -26,11 +26,13 @@ trap cleanup EXIT
 # ELF машинного слоя) всегда исполняется в QEMU.
 host="${SALTIC_TEST_HOST:-rv32i}"
 
+source tests/metrics.sh
+
 run_built() {
     if [[ "$host" == "x86_64" ]]; then
-        "$@"
+        measure run "$@"
     else
-        qemu-riscv32 -B 0x100000000 "$@"
+        measure run qemu-riscv32 -B 0x100000000 "$@"
     fi
 }
 
@@ -43,7 +45,7 @@ build() {
     SALTIC_BUILD_DIR="$work/build/$name" \
     SALTIC_HEAP_BYTES="$heap_bytes" \
     SALTIC_TARGET="${SALTIC_TARGET:-$host}" \
-    bash bootstrap/build.sh "$source" "$output"
+    measure build bash bootstrap/build.sh "$source" "$output"
 }
 
 checker_elf="$work/checker/checker.elf"
@@ -150,6 +152,20 @@ test_diagnostics() {
         tests/expected/diagnostics.txt \
         "$work/diagnostics/stdout.txt"
     echo "диагностика: всё согласовано"
+}
+
+test_groups() {
+    mkdir -p "$work/groups"
+    build groups \
+        tests/groups.saltic \
+        "$work/groups/program.elf"
+    run_built \
+        "$work/groups/program.elf" \
+        >"$work/groups/stdout.txt"
+    diff -u \
+        tests/expected/groups.txt \
+        "$work/groups/stdout.txt"
+    echo "группы: деревья от 33 элементов подтверждены"
 }
 
 test_memory() {
@@ -326,6 +342,7 @@ run_case() {
         modules) test_modules ;;
         json-rpc) test_json_rpc ;;
         diagnostics) test_diagnostics ;;
+        groups) test_groups ;;
         seed-contract) test_seed_contract ;;
         machine) test_machine ;;
         abi) test_abi ;;
@@ -356,6 +373,7 @@ elif [[ "$1" == "all" ]]; then
         modules \
         json-rpc \
         diagnostics \
+        groups \
         seed-contract \
         machine \
         abi \
@@ -366,5 +384,8 @@ elif [[ "$1" == "all" ]]; then
 fi
 
 for name in "$@"; do
+    metrics_begin "$name"
     run_case "$name"
+    metrics_end
 done
+metrics_report "$@" || echo "метрики: ⚠️ таблица не собралась, проверки это не затрагивает"

@@ -48,9 +48,12 @@ cp "$bootstrap_compiler" "$previous"
 # это перевод той же RV-программы, которую он выдал бы под rv32i, поэтому
 # x86-версия каждого поколения получается одной сборкой, без отдельного шага.
 # Сравниваются по-прежнему rv32i-байты stage-2 и stage-3.
+stage_time="$(type -P time || true)"
 stage() {
     local compiler="$1" target="$2" output="$3"
-    if ! "$compiler" "$source_path" "$output" "$heap_bytes" "$target" > "$output.log" 2>&1; then
+    local measured=()
+    [[ -n "$stage_time" ]] && measured=("$stage_time" -o "$output.time" -f "%M %U %S")
+    if ! "${measured[@]}" "$compiler" "$source_path" "$output" "$heap_bytes" "$target" > "$output.log" 2>&1; then
         grep -v "^warning" "$output.log" | tail -5 >&2
         exit 1
     fi
@@ -74,6 +77,10 @@ started=$EPOCHREALTIME
 stage "$work/stage-2/toolchain" rv32i "$work/stage-3/toolchain.elf"
 self_build_seconds="$(saltic_seconds_since "$started")"
 echo "bootstrap refresh: новый компилятор собрал себя за $self_build_seconds с"
+if [[ -f "$work/stage-3/toolchain.elf.time" ]]; then
+    read -r self_kb self_user self_sys <"$work/stage-3/toolchain.elf.time"
+    echo "bootstrap refresh: память самосборки $((self_kb / 1024)) МБ, процессор $(awk -v u="$self_user" -v s="$self_sys" 'BEGIN { printf "%.1f", u + s }') с"
+fi
 
 echo "bootstrap refresh: проверяю fixed point"
 cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
@@ -81,6 +88,16 @@ cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
 compiler="$(saltic_compiler_path rv32i linux .elf)"
 if cmp -s "$work/stage-3/toolchain.elf" "$compiler" && [[ -f "${compiler%.elf}.txt" ]]; then
     echo "bootstrap refresh: $(basename "$compiler") не изменился"
+    # Родная версия могла остаться переведённой (сбой прошлой самосборки):
+    # тогда её место занимает stage-2 этой самосборки, байт в байт та же.
+    native_path="$(saltic_compiler_path x86_64 linux)"
+    if cmp -s "$work/stage-2/toolchain" "$native_path" \
+        && ! grep -q "stage-2 самосборки" "$native_path.txt"; then
+        saltic_write_passport "$native_path" "x86_64, linux" "rv32i, x86_64" \
+            "$compiler" "$heap_bytes" "stage-2 самосборки на x86-64" "$native_seconds" сборки \
+            "$work/stage-2/toolchain.time"
+        echo "bootstrap refresh: паспорт $(basename "$native_path") обновлён"
+    fi
 else
     # Прежняя версия того же компилятора больше не нужна: новая заменяет её.
     for old in bootstrap/saltic-*-compiler-rv32i-linux.elf; do
@@ -89,7 +106,8 @@ else
     cp "$work/stage-3/toolchain.elf" "$compiler"
     chmod +x "$compiler"
     saltic_write_passport "$compiler" "rv32i, linux (qemu-riscv32 -B 0x100000000)" "rv32i, x86_64" \
-        "$previous" "$heap_bytes" "сходится на x86-64 (stage-2 = stage-3)" "$self_build_seconds"
+        "$previous" "$heap_bytes" "сходится на x86-64 (stage-2 = stage-3)" "$self_build_seconds" \
+        самосборки "$work/stage-3/toolchain.elf.time"
     # stage-2 под x86_64 — перевод stage-2 rv32i, а он побайтово равен новому
     # компилятору: это и есть его родная версия.
     native_path="$(saltic_compiler_path x86_64 linux)"
@@ -99,7 +117,8 @@ else
     cp "$work/stage-2/toolchain" "$native_path"
     chmod +x "$native_path"
     saltic_write_passport "$native_path" "x86_64, linux" "rv32i, x86_64" \
-        "$compiler" "$heap_bytes" "stage-2 самосборки на x86-64" "$native_seconds" сборки
+        "$compiler" "$heap_bytes" "stage-2 самосборки на x86-64" "$native_seconds" сборки \
+        "$work/stage-2/toolchain.time"
     echo "bootstrap refresh: $(basename "$compiler") обновлён"
 fi
 sha256sum "$compiler"

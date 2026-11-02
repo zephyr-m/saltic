@@ -40,7 +40,15 @@ saltic_seconds_since() {
     LC_ALL=C awk "BEGIN { printf \"%.1f\", ${EPOCHREALTIME/,/.} - ${1/,/.} }"
 }
 
-# saltic_write_passport <бинарник> <запускается на> <выдаёт код для> <собран чем> <куча> <самосборка> [секунды] [что заняло время: самосборки | сборки]
+# Объём исходников компилятора: «файлов, строк» по soul/seed/core и selfhost.
+saltic_source_volume() {
+    local files lines
+    files="$(find soul/seed/core soul/seed/selfhost -name '*.saltic' -type f | wc -l)"
+    lines="$(find soul/seed/core soul/seed/selfhost -name '*.saltic' -type f -print0 | xargs -0 cat | wc -l)"
+    echo "файлов $files, строк $lines (soul/seed/core, selfhost)"
+}
+
+# saltic_write_passport <бинарник> <запускается на> <выдаёт код для> <собран чем> <куча> <самосборка> [секунды] [что заняло время: самосборки | сборки] [замер GNU time: «%M %U %S»]
 saltic_write_passport() {
     local binary="$1"
     local parent_sum
@@ -55,8 +63,16 @@ saltic_write_passport() {
 самосборка:       $6
 куча:             $5 байт
 sha256 файла:     $(sha256sum "$binary" | cut -c1-16)
+размер:           $(stat -c %s "$binary") байт
+объём исходников: $(saltic_source_volume)
 дата:             $(date +%Y-%m-%d)
 EOF
+    if [[ -f "${9:-}" ]]; then
+        local peak_kb user_seconds system_seconds
+        read -r peak_kb user_seconds system_seconds <"$9"
+        echo "пик памяти:       $((peak_kb / 1024)) МБ" >> "${binary%.elf}.txt"
+        echo "процессор:        $(LC_ALL=C awk -v u="$user_seconds" -v s="$system_seconds" 'BEGIN { printf "%.1f", u + s }') с (user + sys)" >> "${binary%.elf}.txt"
+    fi
     if [[ -n "${7:-}" ]]; then
         local cpu
         cpu="$(grep -m1 '^model name' /proc/cpuinfo | sed 's/^[^:]*: *//')"

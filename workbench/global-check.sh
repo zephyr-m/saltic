@@ -9,25 +9,51 @@ source bootstrap/names.sh
 mkdir -p .cache/build/workbench
 prev=.cache/build/workbench/compiler-prev
 cp "$(saltic_bootstrap_compiler)" "$prev.elf"
-echo "== самосборка"
+# Смайлики к строкам вывода: ✅ прошло, ❌ упало, 🏁 итог, 🔑 отпечаток.
+decorate() {
+    sed -u -E \
+        -e '/метрики:/b' \
+        -e '/провалено [1-9]|error|FAIL|упал|ошибк|сохранены в|молча|вернулся из|намеренно|неизвестная/{s/^(\[[0-9:]+\] )?/\1❌ /;b}' \
+        -e '/итог:/{s/^(\[[0-9:]+\] )?/\1🏁 /;b}' \
+        -e '/^[0-9a-f]{64}/{s/^/🔑 /;b}' \
+        -e 's/^(\[[0-9:]+\] )?/\1✅ /'
+}
+echo "== 🔨 самосборка"
 bash bootstrap/refresh.sh 2>&1 | tee .cache/build/workbench/refresh.log \
-    | grep "^bootstrap refresh: \(saltic\|прове\|новый\)\|^[0-9a-f]\{64\}"
+    | grep "^bootstrap refresh: \(saltic\|прове\|новый\|памят\)\|^[0-9a-f]\{64\}" | decorate
+refresh_status=${PIPESTATUS[0]}
+if [[ "$refresh_status" != "0" ]]; then
+    echo "== 🚨 САМОСБОРКА УПАЛА (код $refresh_status), последние строки лога:"
+    tail -5 .cache/build/workbench/refresh.log
+    exit "$refresh_status"
+fi
 # Скорость: время самосборки против прошлого прогона.
 seconds="$(grep -o 'собрал себя за [0-9.]*' .cache/build/workbench/refresh.log | grep -o '[0-9.]*$')"
 last=.cache/build/workbench/self-build-seconds
-[[ -f "$last" ]] && echo "== время самосборки: было $(<"$last") с, стало $seconds с"
+[[ -f "$last" ]] && echo "== ⏱️ время самосборки: было $(<"$last") с, стало $seconds с"
 echo "$seconds" > "$last"
+memory="$(grep -o 'память самосборки [0-9]*' .cache/build/workbench/refresh.log | grep -o '[0-9]*$')"
+last_memory=.cache/build/workbench/self-build-memory
+if [[ -n "$memory" ]]; then
+    [[ -f "$last_memory" ]] && echo "== 🧠 память самосборки: было $(<"$last_memory") МБ, стало $memory МБ"
+    echo "$memory" > "$last_memory"
+fi
 compiler="$(saltic_bootstrap_compiler)"
-echo "== размер: было $(stat -c %s "$prev.elf"), стало $(stat -c %s "$compiler") байт"
-echo "== тесты (полный лог: .cache/build/workbench/global-check.log)"
-pattern='итог|проверка:|error|подтвержд|ок$|ok$|пройдена|^x86-64:|^uefi: образ грузится'
+echo "== 📦 размер: было $(stat -c %s "$prev.elf"), стало $(stat -c %s "$compiler") байт"
+echo "== 🧪 тесты (полный лог: .cache/build/workbench/global-check.log)"
+pattern='итог|проверка:|метрики:|error|подтвержд|ок$|ok$|пройдена|^x86-64:|^uefi: образ грузится'
 nix --extra-experimental-features "nix-command flakes" develop \
     --command bash tests/run.sh 2>&1 | tee .cache/build/workbench/global-check.log \
-    | grep --line-buffered -E "$pattern" | grep --line-buffered -v '\[ok\]'
+    | grep --line-buffered -E "$pattern" | grep --line-buffered -v '\[ok\]' | decorate
 tests_status=${PIPESTATUS[0]}
-echo "== упавших проверок: $(grep -c 'FAIL\]' .cache/build/workbench/global-check.log)"
+failed="$(grep -c 'FAIL\]' .cache/build/workbench/global-check.log)"
+if [[ "$failed" == "0" ]]; then
+    echo "== 🎉 упавших проверок: 0"
+else
+    echo "== 💥 упавших проверок: $failed"
+fi
 if [[ "$tests_status" != "0" ]]; then
-    echo "== ПРОГОН ОБОРВАЛСЯ (код $tests_status), последние строки лога:"
+    echo "== 🚨 ПРОГОН ОБОРВАЛСЯ (код $tests_status), последние строки лога:"
     grep -v '\[ok\]' .cache/build/workbench/global-check.log | tail -12
     exit "$tests_status"
 fi

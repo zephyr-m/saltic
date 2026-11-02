@@ -1,6 +1,24 @@
+-- group — группы: неизменяемые списки. add и get не меняют старую группу.
+-- До 32 элементов группа — плоская (все элементы подряд). С 33-го add делает
+-- её деревом: узлы по 32, последние до 32 элементов — в хвосте. add копирует
+-- не больше 32 элементов на уровень, а не всю группу; новая версия делит
+-- узлы со старой. Для кода снаружи дерево — обычная группа: count, get, drum.
+-- Дерево строит tree_add — его зовёт рантайм (rt_group_add), сам не звать.
+--
+-- count(group) -> число; get(group, index) -> элемент; add(group, value) -> группа
+-- contains(items, value) -> yes/no
+-- slice(items, start, end) -> группа; concat(left, right) -> группа
+-- tree_parts(group) -> [высота, корень, хвост] у дерева, [] у плоской
+-- tree_make(count, levels, root, tail) -> дерево из частей
+-- tree_add(items, value) -> группа на элемент длиннее (для рантайма)
+
+TREE_WIDTH = 32
+
 skill count(group) native
 skill get(group, index) native
 skill add(group, value) native
+skill tree_parts(group) native
+skill tree_make(count, levels, root, tail) native
 
 skill contains(items, value) {
     drum (items) {
@@ -19,4 +37,55 @@ skill concat(left, right) {
     @result = left
     drum (right) { result = add(result, beat) }
     out result
+}
+
+skill tree_span(levels) {
+    @found = 1
+    drum (levels) { found = found * TREE_WIDTH }
+    out found
+}
+
+skill tree_replaced(items, index, value) {
+    @found = []
+    drum (count(items)) {
+        pick {
+            (beat == index) { found = add(found, value) }
+            { found = add(found, get(items, beat)) }
+        }
+    }
+    out found
+}
+
+skill tree_path(level, leaf) {
+    (level == 1) { out leaf }
+    out [tree_path(level - 1, leaf)]
+}
+
+skill tree_push_leaf(level, parent, leaf, offset) {
+    @slot = offset / tree_span(level - 1) - offset / tree_span(level) * TREE_WIDTH
+    (level == 2) { out add(parent, leaf) }
+    (slot < count(parent)) { out tree_replaced(parent, slot, tree_push_leaf(level - 1, get(parent, slot), leaf, offset)) }
+    out add(parent, tree_path(level - 1, leaf))
+}
+
+skill tree_from_flat(items) {
+    @built = slice(items, 0, TREE_WIDTH)
+    drum (count(items) - TREE_WIDTH) { built = add(built, get(items, TREE_WIDTH + beat)) }
+    out built
+}
+
+skill tree_add(items, value) {
+    @parts = tree_parts(items)
+    (count(parts) == 0) {
+        (count(items) > TREE_WIDTH) { out add(tree_from_flat(items), value) }
+        out tree_make(TREE_WIDTH + 1, 2, [items], [value])
+    }
+    @levels = get(parts, 0)
+    @root = get(parts, 1)
+    @tail = get(parts, 2)
+    @total = count(items)
+    (count(tail) < TREE_WIDTH) { out tree_make(total + 1, levels, root, add(tail, value)) }
+    @offset = total - count(tail)
+    (offset == tree_span(levels)) { out tree_make(total + 1, levels + 1, [root, tree_path(levels, tail)], [value]) }
+    out tree_make(total + 1, levels, tree_push_leaf(levels, root, tail, offset), [value])
 }
