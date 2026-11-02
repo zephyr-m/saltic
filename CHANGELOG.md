@@ -81,7 +81,7 @@
 
 ### Без гола
 
-- Аудит согласованности и DRY: `docs/history/2026-11-02-audit.md`; в PLAN —
+- Аудит согласованности и DRY: `docs/fable/2026-11-02-audit.md`; в PLAN —
   имена навыков ядра и остальные пункты до заморозки.
 - `docs/DATA-TYPES.md` — типы данных Saltic среди 10 языков;
   `docs/ORIGIN.md`, `docs/PROGRAM-SIZES.md`, черновик `docs/TESTING.md`.
