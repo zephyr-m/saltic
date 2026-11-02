@@ -1,106 +1,59 @@
+-- buffer — растущий буфер байтов машинного кода: куски core.bytes по
+-- CHUNK_SIZE байтов в группе chunks, последний кусок заполняется. Байт
+-- занимает ровно байт. Буфер меняется на месте, как Box; навыки отдают его же.
+--
+-- Buffer — Box: chunks, used (байтов в последнем куске), length
+-- empty() -> пустой буфер
+-- append_byte, append_u16, append_word, append_text, append_zeroes,
+--   append_buffer — дописать в конец; ByteOutsideRange, ValueOutsideRange
+-- byte_at(target, offset) -> байт; set_byte, set_word — переписать на месте
+-- chunk_count(target) -> число кусков
+-- chunks(target, chunk_size) -> группа групп чисел по chunk_size байтов
+-- whole(target) -> буфер core.bytes ровно на length байтов (для записи в файл)
+
 use core.str
 use core.group
 use core.num
+use core.bytes
 use selfhost.machine.codec
 
-Cell = Box {
-    value = 0
-}
-
-CHUNK_SIZE = 256
-
-Chunk = Box {
-    cells = [],
-    used = 0
-}
+CHUNK_SIZE = 4096
 
 Buffer = Box {
     chunks = [],
-    tail = Chunk {},
+    used = 0,
     length = 0
 }
 
-skill fresh_chunk() {
-    out Chunk { cells = [
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-        Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {}, Cell {},
-    ] }
-}
-
 skill empty() {
-    out Buffer { tail = fresh_chunk() }
-}
-
-skill prepare_tail(target) {
-    (group.count(target.tail.cells) == 0) { target.tail = fresh_chunk() }
-    (target.tail.used == CHUNK_SIZE) {
-        target.chunks = group.add(target.chunks, target.tail)
-        target.tail = fresh_chunk()
-    }
-    out target
+    out Buffer {}
 }
 
 skill chunk_count(target) {
-    @count = group.count(target.chunks)
-    (target.tail.used > 0) { count = count + 1 }
-    out count
+    out group.count(target.chunks)
 }
 
-skill chunk_at(target, index) {
-    (index < 0) { out error.BufferOutsideRange }
-    @complete = group.count(target.chunks)
-    (index < complete) { out group.get(target.chunks, index) }
-    (index == complete) {
-        (target.tail.used > 0) { out target.tail }
-    }
-    out error.BufferOutsideRange
-}
-
-skill cell_at(target, offset) {
+skill chunk_of(target, offset) {
     (offset < 0) { out error.BufferOutsideRange }
     (offset > target.length - 1) { out error.BufferOutsideRange }
-    @chunk_index = offset / CHUNK_SIZE
-    @cell_index = num.mod(offset, CHUNK_SIZE)
-    @chunk = chunk_at(target, chunk_index)
-    out group.get(chunk.cells, cell_index)
+    out group.get(target.chunks, offset / CHUNK_SIZE)
 }
 
 skill append_byte(target, value) {
     (codec.valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
-    target = prepare_tail(target)
-    @cell = group.get(target.tail.cells, target.tail.used)
-    cell.value = value
-    target.tail.used = target.tail.used + 1
+    @count = group.count(target.chunks)
+    (count == 0) {
+        target.chunks = group.add(target.chunks, bytes.make(CHUNK_SIZE))
+        target.used = 0
+        count = 1
+    }
+    (target.used == CHUNK_SIZE) {
+        target.chunks = group.add(target.chunks, bytes.make(CHUNK_SIZE))
+        target.used = 0
+        count = count + 1
+    }
+    bytes.store(group.get(target.chunks, count - 1), target.used, value)
+    target.used = target.used + 1
     target.length = target.length + 1
     out target
 }
@@ -119,14 +72,14 @@ skill append_word(target, value) {
 }
 
 skill byte_at(target, offset) {
-    @cell = cell_at(target, offset)
-    out cell.value
+    @chunk = chunk_of(target, offset)
+    out bytes.load(chunk, num.mod(offset, CHUNK_SIZE))
 }
 
 skill set_byte(target, offset, value) {
     (codec.valid_unsigned(value, 8) == no) { out error.ByteOutsideRange }
-    @cell = cell_at(target, offset)
-    cell.value = value
+    @chunk = chunk_of(target, offset)
+    bytes.store(chunk, num.mod(offset, CHUNK_SIZE), value)
     out target
 }
 
@@ -144,19 +97,20 @@ skill append_zeroes(target, count) {
 }
 
 skill append_buffer(target, source) {
-    drum (chunk_count(source)) {
-        @source_chunk = chunk_at(source, beat)
-        drum (source_chunk.used) {
-            @cell = group.get(source_chunk.cells, beat)
-            target = append_byte(target, cell.value)
-        }
-    }
+    drum (source.length) { target = append_byte(target, byte_at(source, beat)) }
     out target
 }
 
-skill file_chunks(target) {
-    @result = target.chunks
-    (target.tail.used > 0) { result = group.add(result, target.tail) }
+skill whole(target) {
+    @result = bytes.make(target.length)
+    @offset = 0
+    drum (target.chunks) {
+        @size = CHUNK_SIZE
+        (target.length - offset < size) { size = target.length - offset }
+        @chunk = beat
+        drum (size) { bytes.store(result, offset + beat, bytes.load(chunk, beat)) }
+        offset = offset + size
+    }
     out result
 }
 
