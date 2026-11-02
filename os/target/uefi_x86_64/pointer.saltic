@@ -1,0 +1,65 @@
+use core.group
+use os.target.uefi_x86_64.firmware
+use os.target.uefi_x86_64.files
+
+SIMPLE = [135, 140, 135, 49, 117, 11, 213, 17, 154, 79, 0, 144, 39, 63, 193, 77]
+GET_STATE = 8
+MODE = 24
+STATE_AT = 200
+PIXELS_PER_MM = 18
+
+Mouse = Box {
+    devices = [],
+    resolutions = [],
+    x = 683,
+    y = 384,
+    held = no,
+    clicked = no
+}
+
+skill signed32(value) {
+    (value.hi > 32767) { out (value.hi - 65536) * 65536 + value.lo }
+    out value.hi * 65536 + value.lo
+}
+
+skill open_mouse(base) {
+    files.connect_all(base)
+    @devices = []
+    @resolutions = []
+    drum (files.handles_with(base, files.BY_PROTOCOL, SIMPLE)) {
+        @device = files.protocol_of(base, beat, SIMPLE)
+        firmware.call(base, firmware.pointer(device, base, 0), [device, firmware.number(1)])
+        @mode = firmware.pointer(device, base, MODE)
+        @resolution = signed32(firmware.read32(mode, base, 0))
+        (resolution < 1) { resolution = 1 }
+        devices = group.add(devices, device)
+        resolutions = group.add(resolutions, resolution)
+    }
+    out Mouse { devices = devices, resolutions = resolutions }
+}
+
+skill poll_mouse(base, mouse, width, height) {
+    @state = firmware.scratch(base, STATE_AT)
+    @was = mouse.held
+    @pressed = no
+    drum (group.count(mouse.devices)) {
+        @device = group.get(mouse.devices, beat)
+        @got = firmware.call(base, firmware.pointer(device, base, GET_STATE), [device, state])
+        (got.failed == no) {
+            @resolution = group.get(mouse.resolutions, beat)
+            mouse.x = mouse.x + signed32(firmware.read32(state, base, 0)) * PIXELS_PER_MM / resolution
+            mouse.y = mouse.y + signed32(firmware.read32(state, base, 4)) * PIXELS_PER_MM / resolution
+            pressed = firmware.read8(state, base, 12) > 0
+            mouse.held = pressed
+        }
+    }
+    (mouse.x < 0) { mouse.x = 0 }
+    (mouse.y < 0) { mouse.y = 0 }
+    (mouse.x > width - 12) { mouse.x = width - 12 }
+    (mouse.y > height - 18) { mouse.y = height - 18 }
+    mouse.clicked = no
+    (pressed == yes) {
+        (was == no) { mouse.clicked = yes }
+    }
+    out mouse
+}
