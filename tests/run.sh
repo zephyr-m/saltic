@@ -168,6 +168,20 @@ test_groups() {
     echo "группы: деревья от 33 элементов подтверждены"
 }
 
+test_bytes() {
+    mkdir -p "$work/bytes"
+    build bytes \
+        tests/bytes.saltic \
+        "$work/bytes/program.elf"
+    run_built \
+        "$work/bytes/program.elf" \
+        >"$work/bytes/stdout.txt"
+    diff -u \
+        tests/expected/bytes.txt \
+        "$work/bytes/stdout.txt"
+    echo "буфер байтов: нули, запись на месте, ошибки по имени подтверждены"
+}
+
 test_memory() {
     mkdir -p "$work/memory"
     build memory \
@@ -343,6 +357,7 @@ run_case() {
         json-rpc) test_json_rpc ;;
         diagnostics) test_diagnostics ;;
         groups) test_groups ;;
+        bytes) test_bytes ;;
         seed-contract) test_seed_contract ;;
         machine) test_machine ;;
         abi) test_abi ;;
@@ -374,6 +389,7 @@ elif [[ "$1" == "all" ]]; then
         json-rpc \
         diagnostics \
         groups \
+        bytes \
         seed-contract \
         machine \
         abi \
