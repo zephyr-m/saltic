@@ -6,7 +6,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$root"
 
-source="${1:-os/target/uefi_x86_64/hello.saltic}"
+source="${1:-os/target/uefi_x86_64/programs/hello.saltic}"
 work="${SALTIC_UEFI_DIR:-.cache/build/uefi_x86_64}"
 image="$work/image"
 mkdir -p "$image/EFI/BOOT"

@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 SOURCE = ROOT / "os/fonts/spleen.saltic"
-TARGET = ROOT / "os/target/uefi_x86_64/glyphs.saltic"
+TARGET = ROOT / "os/target/uefi_x86_64/screen/glyphs.saltic"
 SIZES = [("8X16", 8, 16), ("12X24", 12, 24), ("16X32", 16, 32)]
 
 text = SOURCE.read_text()
