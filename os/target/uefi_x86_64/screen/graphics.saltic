@@ -1,3 +1,20 @@
+-- graphics — кадровый буфер прошивки (GOP) и задний буфер с дельтой.
+-- Пиксель — 32 бита, адрес — (y * stride + x) * 4 от memory. Задний буфер —
+-- такой же Screen в обычной памяти: всё рисуется в него, а present копирует
+-- в видеопамять только изменившиеся куски строк (CopyMem прошивки). Запись в
+-- видеопамять в разы дороже записи в ОЗУ, и экран не мигает.
+--
+-- Screen — ширина, высота, stride, формат, frame (Phys), memory (для core.mem)
+-- open(base) -> Screen видеопамяти; NoGraphics
+-- color(screen, red, green, blue) -> пиксель
+-- fill(screen, x, y, width, height, value) — прямоугольник
+-- format_name(screen) -> текст
+-- Frames — front (видеопамять), back (рисовать сюда), last (что сейчас на экране)
+-- open_frames(base) -> Frames; MemoryExhausted
+-- present(frames) -> текст «строк N, пикселей M» — показать дельту
+-- close_frames(frames) — вернуть буферы прошивке (перед выходом)
+-- Буферы берутся в окне программы (uefi.pages_in_window): ниже базы их не видно.
+
 use core.mem
 use core.group
 use os.target.uefi_x86_64.platform.firmware
@@ -15,6 +32,8 @@ INFO_STRIDE = 32
 FORMAT_RGB = 0
 FORMAT_BGR = 1
 PIXEL_BYTES = 4
+PAGE_BYTES = 4096
+BOOT_COPY_MEM = 352
 
 Screen = Box {
     width = 0,
@@ -63,4 +82,69 @@ skill format_name(screen) {
     (screen.format == FORMAT_RGB) { out "RGB" }
     (screen.format == FORMAT_BGR) { out "BGR" }
     out "особый ({screen.format})"
+}
+
+Frames = Box {
+    front = Screen {},
+    back = Screen {},
+    last = Screen {},
+    pages = 0
+}
+
+skill buffer_pages(front) {
+    out (front.stride * front.height * PIXEL_BYTES + PAGE_BYTES - 1) / PAGE_BYTES
+}
+
+skill buffer_like(base, front) {
+    @place = uefi.pages_in_window(base, buffer_pages(front))
+    out Screen { width = front.width, height = front.height, stride = front.stride, format = front.format, frame = place, memory = firmware.guest(place, base) }
+}
+
+skill copy_span(base, to, from, y, left, count) {
+    @offset = (y * to.stride + left) * PIXEL_BYTES
+    @copy = firmware.pointer(uefi.boot_services(base), base, BOOT_COPY_MEM)
+    out firmware.call(base, copy, [firmware.add(to.frame, offset), firmware.add(from.frame, offset), firmware.number(count * PIXEL_BYTES)])
+}
+
+skill open_frames(base) {
+    @front = open(base)
+    @frames = Frames { front = front, back = buffer_like(base, front), last = buffer_like(base, front), pages = buffer_pages(front) }
+    drum (front.height) { copy_span(base, frames.last, front, beat, 0, front.width) }
+    drum (front.height) { copy_span(base, frames.back, front, beat, 0, front.width) }
+    out frames
+}
+
+skill present(frames) {
+    @base = firmware.guest_base()
+    @back = frames.back
+    @last = frames.last
+    @rows = 0
+    @pixels = 0
+    drum (back.height) {
+        @y = beat
+        @start = y * back.stride * PIXEL_BYTES
+        @first = -1
+        @final = -1
+        drum (back.width) {
+            @at = start + beat * PIXEL_BYTES
+            ((mem.load32(back.memory, at) == mem.load32(last.memory, at)) == no) {
+                (first < 0) { first = beat }
+                final = beat
+            }
+        }
+        (first > -1) {
+            @count = final - first + 1
+            copy_span(base, frames.front, back, y, first, count)
+            copy_span(base, last, back, y, first, count)
+            rows = rows + 1
+            pixels = pixels + count
+        }
+    }
+    out "строк {rows}, пикселей {pixels}"
+}
+
+skill close_frames(frames) {
+    @base = firmware.guest_base()
+    uefi.free_pages(base, frames.back.frame, frames.pages)
+    out uefi.free_pages(base, frames.last.frame, frames.pages)
 }
