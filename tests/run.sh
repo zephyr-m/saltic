@@ -60,15 +60,16 @@ test_checker() {
     build_checker
     run_built "$checker_elf" \
         soul/canonical/main.saltic >"$work/checker/canonical.txt"
-    run_built "$checker_elf" \
-        soul/canonical/errors.saltic >"$work/checker/errors.txt"
-    run_built "$checker_elf" \
-        soul/canonical/support.saltic >>"$work/checker/errors.txt"
-
     test ! -s "$work/checker/canonical.txt"
-    diff -u \
-        soul/canonical/expected/errors.txt \
-        "$work/checker/errors.txt"
+
+    local case name
+    for case in soul/canonical/errors/*.saltic; do
+        name="$(basename "$case" .saltic)"
+        run_built "$checker_elf" "$case" >"$work/checker/errors-$name.txt"
+        diff -u \
+            "soul/canonical/expected/errors/$name.txt" \
+            "$work/checker/errors-$name.txt"
+    done
     echo "чекер: нативная проверка пройдена"
 }
 

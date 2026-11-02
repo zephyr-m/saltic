@@ -39,9 +39,17 @@ done
 
 "$W/stage-1" tests/checker.saltic "$W/checker.bin" $HEAP x86_64 > /dev/null 2>&1
 chmod +x "$W/checker.bin"
-{ "$W/checker.bin" soul/canonical/errors.saltic; "$W/checker.bin" soul/canonical/support.saltic; } > "$W/errors.txt"
+errors_same=yes
+for case in soul/canonical/errors/*.saltic; do
+    name="$(basename "$case" .saltic)"
+    "$W/checker.bin" "$case" > "$W/errors-$name.txt"
+    if ! diff -q "soul/canonical/expected/errors/$name.txt" "$W/errors-$name.txt" > /dev/null; then
+        echo "    случай $name различается"
+        errors_same=no
+    fi
+done
 "$W/checker.bin" soul/canonical/main.saltic > "$W/canonical.txt"
-if diff -q soul/canonical/expected/errors.txt "$W/errors.txt" > /dev/null && test ! -s "$W/canonical.txt"; then
+if [[ "$errors_same" == yes ]] && test ! -s "$W/canonical.txt"; then
     echo "ошибки канона: совпадают"
 else
     echo "ошибки канона: РАЗЛИЧАЮТСЯ"
