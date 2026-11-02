@@ -15,6 +15,9 @@
 --
 -- Ракурс камеры сохраняется в \SALTIC\WIRE.TXT при каждом изменении и
 -- поднимается при следующем открытии.
+-- Точки после проекции — в арене программы, в двух банках (этот кадр и
+-- прошлый): за кадр ни одной новой группы, иначе вечный цикл копил бы их
+-- в регионе program() и через ~10 минут кончалась бы куча.
 -- Справа сверху — табличка: выбор, камера, высота и поворот выбранной фигуры,
 -- кадры в секунду; её место помечено «навсегда», фигуры её не задевают.
 --
@@ -47,6 +50,9 @@ START_TILT = 343
 VIEW_NOTE = "WIRE.TXT"
 FRAME_PAUSE = 8000
 ROOM_MARK = 268435000
+CACHE_AT = 262144
+BIAS = 1048576
+WORD = 4
 PANEL_WIDTH = 330
 PANEL_LINES = 5
 PANEL_LINE = 18
@@ -61,6 +67,13 @@ TAB = 9
 SPACE = 32
 FRAMES = 200000000
 CLOCK_EVERY = 16
+
+Cache = Box {
+    memory = [],
+    total = 0,
+    bank = 0,
+    ready = no
+}
 
 Scene = Box {
     turn = START_TURN,
@@ -78,7 +91,11 @@ Scene = Box {
     rate = 0
 }
 
-skill project(screen, shape, scene) {
+skill spot(cache, bank, shape, index) {
+    out ((bank * cache.total + shape.slot + index) * 3) * WORD
+}
+
+skill project(screen, shape, scene, cache, bank) {
     @c0 = solids.fine_cosine(shape.yaw)
     @s0 = solids.fine_sine(shape.yaw)
     @c3 = solids.fine_cosine(shape.roll)
@@ -87,7 +104,7 @@ skill project(screen, shape, scene) {
     @s1 = solids.sine(scene.turn)
     @c2 = solids.cosine(scene.tilt)
     @s2 = solids.sine(scene.tilt)
-    @found = []
+    @index = 0
     drum (shape.points) {
         @lx = group.get(beat, 0)
         @ly = group.get(beat, 1)
@@ -101,9 +118,13 @@ skill project(screen, shape, scene) {
         @z1 = (x * s1 + z * c1) / solids.ONE
         @y2 = (y * c2 - z1 * s2) / solids.ONE
         @z2 = (y * s2 + z1 * c2) / solids.ONE + DISTANCE
-        found = group.add(found, [screen.width / 2 + x1 * FOCAL / z2, screen.height / 2 - y2 * FOCAL / z2, z2])
+        @at = spot(cache, bank, shape, index)
+        mem.store32(cache.memory, at, screen.width / 2 + x1 * FOCAL / z2 + BIAS)
+        mem.store32(cache.memory, at + WORD, screen.height / 2 - y2 * FOCAL / z2 + BIAS)
+        mem.store32(cache.memory, at + 2 * WORD, z2)
+        index = index + 1
     }
-    out found
+    out none
 }
 
 skill shade(shades, depth) {
@@ -144,11 +165,7 @@ skill plot(screen, stamps, x, y, value, mark) {
     out mem.store32(screen.memory, at, value)
 }
 
-skill wire_line(screen, stamps, from, to, value, mark) {
-    @x = group.get(from, 0)
-    @y = group.get(from, 1)
-    @x_end = group.get(to, 0)
-    @y_end = group.get(to, 1)
+skill wire_line(screen, stamps, x, y, x_end, y_end, value, mark) {
     @dx = solids.magnitude(x_end - x)
     @dy = 0 - solids.magnitude(y_end - y)
     @sx = 1
@@ -173,14 +190,13 @@ skill wire_line(screen, stamps, from, to, value, mark) {
     out none
 }
 
-skill draw_edges(screen, stamps, shape, points, value, shades, mark) {
-    (group.count(points) == 0) { out none }
+skill draw_edges(screen, stamps, shape, cache, bank, value, shades, mark) {
     drum (shape.edges) {
-        @from = group.get(points, group.get(beat, 0))
-        @to = group.get(points, group.get(beat, 1))
+        @from = spot(cache, bank, shape, group.get(beat, 0))
+        @to = spot(cache, bank, shape, group.get(beat, 1))
         @ink = value
-        (value < 0) { ink = shade(shades, (group.get(from, 2) + group.get(to, 2)) / 2) }
-        wire_line(screen, stamps, from, to, ink, mark)
+        (value < 0) { ink = shade(shades, (mem.load32(cache.memory, from + 2 * WORD) + mem.load32(cache.memory, to + 2 * WORD)) / 2) }
+        wire_line(screen, stamps, mem.load32(cache.memory, from) - BIAS, mem.load32(cache.memory, from + WORD) - BIAS, mem.load32(cache.memory, to) - BIAS, mem.load32(cache.memory, to + WORD) - BIAS, ink, mark)
     }
     out none
 }
@@ -191,19 +207,20 @@ skill clear_stamps(stamps) {
     out firmware.call(base, set, [stamps.frame, firmware.number(stamps.stride * stamps.height * graphics.PIXEL_BYTES), firmware.number(0)])
 }
 
-skill scene_frame(screen, stamps, shapes, scene, shades, chosen_ink, background) {
+skill scene_frame(screen, stamps, shapes, scene, shades, chosen_ink, background, cache) {
     (scene.moved == yes) {
         graphics.fill(screen, 0, 0, screen.width, screen.height, background)
         clear_stamps(stamps)
-        drum (shapes) { beat.shown = [] }
         @walls = group.get(shapes, 0)
-        walls.shown = project(screen, walls, scene)
-        draw_edges(screen, stamps, walls, walls.shown, -1, shades, ROOM_MARK)
+        project(screen, walls, scene, cache, 0)
+        draw_edges(screen, stamps, walls, cache, 0, -1, shades, ROOM_MARK)
+        cache.ready = no
         scene.panel = ""
         scene.moved = no
     }
     scene.stamp = scene.stamp + 1
-    @fresh = []
+    @fresh = cache.bank
+    @old = 1 - fresh
     drum (group.count(shapes) - 1) {
         @index = beat + 1
         @shape = group.get(shapes, index)
@@ -211,18 +228,26 @@ skill scene_frame(screen, stamps, shapes, scene, shades, chosen_ink, background)
             shape.yaw = shape.yaw + shape.yaw_speed
             shape.roll = shape.roll + shape.roll_speed
         }
-        @points = project(screen, shape, scene)
-        fresh = group.add(fresh, points)
+        project(screen, shape, scene, cache, fresh)
         @ink = -1
         (index == scene.chosen + 1) { ink = chosen_ink }
-        draw_edges(screen, stamps, shape, points, ink, shades, scene.stamp)
+        draw_edges(screen, stamps, shape, cache, fresh, ink, shades, scene.stamp)
     }
-    drum (group.count(shapes) - 1) {
-        @shape = group.get(shapes, beat + 1)
-        draw_edges(screen, stamps, shape, shape.shown, background, shades, 0 - scene.stamp)
-        shape.shown = group.get(fresh, beat)
+    (cache.ready == yes) {
+        drum (group.count(shapes) - 1) { draw_edges(screen, stamps, group.get(shapes, beat + 1), cache, old, background, shades, 0 - scene.stamp) }
     }
+    cache.bank = old
+    cache.ready = yes
     out none
+}
+
+skill make_cache(base, shapes) {
+    @total = 0
+    drum (shapes) {
+        beat.slot = total
+        total = total + group.count(beat.points)
+    }
+    out Cache { memory = firmware.guest(firmware.add(firmware.arena(base), CACHE_AT), base), total = total }
 }
 
 skill load_view(base, scene) {
@@ -361,36 +386,56 @@ skill listen(link, shapes, scene) {
     out none
 }
 
+Stage = Box {
+    base = [],
+    screen = graphics.Screen {},
+    stamps = graphics.Screen {},
+    shapes = [],
+    scene = Scene {},
+    shades = [],
+    chosen_ink = 0,
+    background = 0,
+    ink = 0,
+    cache = Cache {},
+    link = none
+}
+
+skill tick(stage) {
+    @screen = stage.screen
+    @scene = stage.scene
+    @shapes = stage.shapes
+    scene_frame(screen, stage.stamps, shapes, scene, stage.shades, stage.chosen_ink, stage.background, stage.cache)
+    draw_panel(screen, stage.stamps, shapes, scene, stage.background, stage.ink, stage.chosen_ink)
+    save_view(stage.base, scene)
+    @link = stage.link
+    (count_rate(stage.base, scene) == yes) {
+        ((link == none) == no) { remote.tell(link, state_text(shapes, scene)) }
+    }
+    ((link == none) == no) { listen(link, shapes, scene) }
+    @key = uefi.poll_key(stage.base, FRAME_PAUSE)
+    (key.scan == SCAN_ESCAPE) { out yes }
+    @action = key_action(key)
+    ((action == "") == no) { act(shapes, scene, action) }
+    out no
+}
+
 program() {
     @base = firmware.guest_base()
     uefi.forget_keys(base)
     @screen = graphics.open(base)
     @stamps = graphics.buffer_like(base, screen)
-    @background = graphics.color(screen, 12, 16, 28)
-    @chosen_ink = graphics.color(screen, group.get(MUSTARD, 0), group.get(MUSTARD, 1), group.get(MUSTARD, 2))
-    @shades = make_shades(screen)
     @shapes = solids.build_shapes()
     @scene = Scene { chosen = group.count(shapes) - 2 }
     load_view(base, scene)
-    @ink = graphics.color(screen, 150, 170, 190)
     @link = remote.open_remote() rescue |err| { none }
     ((link == none) == no) { remote.own(link, stamps.frame, graphics.buffer_pages(screen)) }
+    @stage = Stage { base = base, screen = screen, stamps = stamps, shapes = shapes, scene = scene, shades = make_shades(screen), chosen_ink = graphics.color(screen, group.get(MUSTARD, 0), group.get(MUSTARD, 1), group.get(MUSTARD, 2)), background = graphics.color(screen, 12, 16, 28), ink = graphics.color(screen, 150, 170, 190), cache = make_cache(base, shapes), link = link }
     drum (FRAMES) {
-        scene_frame(screen, stamps, shapes, scene, shades, chosen_ink, background)
-        draw_panel(screen, stamps, shapes, scene, background, ink, chosen_ink)
-        save_view(base, scene)
-        (count_rate(base, scene) == yes) {
-            ((link == none) == no) { remote.tell(link, state_text(shapes, scene)) }
-        }
-        ((link == none) == no) { listen(link, shapes, scene) }
-        @key = uefi.poll_key(base, FRAME_PAUSE)
-        (key.scan == SCAN_ESCAPE) {
+        (tick(stage) == yes) {
             uefi.free_pages(base, stamps.frame, graphics.buffer_pages(screen))
             reply.home(state_text(shapes, scene))
             out none
         }
-        @action = key_action(key)
-        ((action == "") == no) { act(shapes, scene, action) }
     }
     out none
 }
