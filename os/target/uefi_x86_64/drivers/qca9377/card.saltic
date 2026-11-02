@@ -1,0 +1,117 @@
+-- card — регистры QCA9377: пробуждение, прерывания, ожидание загрузчика.
+-- Всё состояние — в Card: bar — окно регистров, base — guest_base, arena —
+-- наша память под кольца и буферы, счётчики колец. Адреса — как у QCA6174
+-- в ath10k (hw.c, pci.c).
+--
+-- Card — состояние карты: окна, счётчики CE0/CE1/CE7, начало писем
+-- say(text) -> text — печать "wifi: …" на экран
+-- stall(chip, microseconds) — пауза через Stall прошивки
+-- put(chip, offset, value) — 32 бита в регистр, value — обычное число
+-- hex32(chip, offset) -> текст регистра, 8 цифр
+-- with_bit / without_bit(value, bit) -> число, bit — степень двойки
+-- change_low(chip, offset, low) — заменить младшие 16 бит регистра
+-- wake(chip) -> опросов; WakeTimeout
+-- interrupts_off / interrupts_on(chip) — погасить и очистить / включить INTx
+-- wait_loader(chip) -> текст индикатора; TargetNotReady
+-- quiet(chip) — прерывания и bus master выключить: карта больше не тронет память
+
+use io
+use core.num
+use os.target.uefi_x86_64.platform.firmware
+
+RTC_STATE = 524288
+SOC_WAKE = 524292
+RTC_ON = 3
+INTR_ENABLE = 237576
+INTR_CLEAR = 237588
+INTR_FIRMWARE = 1024
+INTR_CE_ALL = 522240
+FW_INDICATOR = 237608
+COMMAND_MEMORY = 2
+BOOT_SERVICES = 96
+BOOT_STALL = 248
+
+Card = Box {
+    base = firmware.Phys {},
+    config = firmware.Phys {},
+    bar = firmware.Phys {},
+    arena = firmware.Phys {},
+    send_at = 0,
+    receive_at = 0,
+    letters_from = 0,
+    diag_send = 0,
+    diag_receive = 0
+}
+
+skill say(text) {
+    io.show("wifi: {text}")
+    out text
+}
+
+skill stall(chip, microseconds) {
+    @services = firmware.pointer(firmware.system_table(), chip.base, BOOT_SERVICES)
+    out firmware.call(chip.base, firmware.pointer(services, chip.base, BOOT_STALL), [firmware.number(microseconds)])
+}
+
+skill put(chip, offset, value) {
+    out firmware.write_phys32(chip.bar, chip.base, offset, firmware.number(value))
+}
+
+skill hex32(chip, offset) {
+    out firmware.phys_text(firmware.read32(chip.bar, chip.base, offset))
+}
+
+skill with_bit(value, bit) {
+    out value - num.mod(value / bit, 2) * bit + bit
+}
+
+skill without_bit(value, bit) {
+    out value - num.mod(value / bit, 2) * bit
+}
+
+skill change_low(chip, offset, low) {
+    @value = firmware.read32(chip.bar, chip.base, offset)
+    out firmware.write_phys32(chip.bar, chip.base, offset, firmware.Phys { hi = value.hi, lo = low })
+}
+
+skill wake(chip) {
+    put(chip, SOC_WAKE, 1)
+    @polls = 0
+    drum (100000) {
+        (num.mod(firmware.read16(chip.bar, chip.base, RTC_STATE), 8) == RTC_ON) { out polls }
+        polls = polls + 1
+    }
+    out error.WakeTimeout
+}
+
+skill interrupts_off(chip) {
+    put(chip, INTR_ENABLE, 0)
+    put(chip, INTR_CLEAR, INTR_FIRMWARE + INTR_CE_ALL)
+    out firmware.read16(chip.bar, chip.base, INTR_ENABLE)
+}
+
+skill interrupts_on(chip) {
+    put(chip, INTR_ENABLE, INTR_FIRMWARE + INTR_CE_ALL)
+    out firmware.read16(chip.bar, chip.base, INTR_ENABLE)
+}
+
+skill wait_loader(chip) {
+    @indicator = firmware.read32(chip.bar, chip.base, FW_INDICATOR)
+    @waited = 0
+    drum (300) {
+        (num.mod(indicator.lo, 4) > 0) {
+            @shown = firmware.phys_text(indicator)
+            out "{shown} за {waited}0 мс"
+        }
+        interrupts_on(chip)
+        stall(chip, 10000)
+        waited = waited + 1
+        indicator = firmware.read32(chip.bar, chip.base, FW_INDICATOR)
+    }
+    out error.TargetNotReady
+}
+
+skill quiet(chip) {
+    interrupts_off(chip)
+    out firmware.write16(chip.config, chip.base, 4, COMMAND_MEMORY)
+}

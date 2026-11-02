@@ -1,0 +1,113 @@
+-- rings — копирующие движки (CE): кольца дескрипторов в нашей памяти.
+-- Дескриптор — 8 байт: адрес 32, длина 16, флаги 16. Отправка — сдвинуть
+-- индекс записи; приём — карта сама вписывает длину в дескриптор. Наши кольца
+-- по 16 мест (CE7 — 2). Где что лежит в арене — константы *_RING, *_BUFFERS.
+--
+-- descriptor(ring, base, index, buffer, length, flags) — записать дескриптор
+-- prepare(chip) — CE0 (отправка), CE1 (приём), CE7 (память карты); -> индекс CE0
+-- event_rings(chip) — CE2 (события WMI) с 8 буферами и CE3 (команды WMI)
+-- send(chip, buffer, length, flags) -> buffer; CE0, ждёт, пока карта заберёт; SendTimeout
+-- expect(chip, buffer) — подложить буфер в CE1 под ответ
+-- arrived(chip, slot) -> байт в слоте CE1, 0 — пока пусто
+-- at(chip, offset) -> Phys места в арене
+-- event_slot(chip, index) -> байт в слоте CE2, 0 — пока пусто
+
+use core.num
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+
+CE0 = 214016
+CE1 = 215040
+CE2 = 216064
+CE3 = 217088
+CE7 = 221184
+ENTRIES = 16
+DIAG_ENTRIES = 2
+SEND_LARGEST = 256
+DIAG_LARGEST = 2048
+SOURCE_RING = 4096
+DESTINATION_RING = 8192
+DIAG_SOURCE = 20480
+DIAG_DESTINATION = 24576
+EVENT_RING = 40960
+COMMAND_RING = 41984
+EVENT_BUFFERS = 57344
+EVENT_SLOTS = 8
+BUFFER_BYTES = 2048
+
+skill descriptor(ring, base, index, buffer, length, flags) {
+    @slot = firmware.add(ring, index * 8)
+    firmware.write_phys32(slot, base, 0, buffer)
+    firmware.write16(slot, base, 4, length)
+    out firmware.write16(slot, base, 6, flags)
+}
+
+skill at(chip, offset) {
+    out firmware.add(chip.arena, offset)
+}
+
+skill ring_out(chip, engine, ring, entries, largest) {
+    firmware.write_phys32(chip.bar, chip.base, engine, ring)
+    card.put(chip, engine + 4, entries)
+    @control = firmware.read32(chip.bar, chip.base, engine + 16)
+    firmware.write_phys32(chip.bar, chip.base, engine + 16, firmware.Phys { hi = card.without_bit(control.hi, 1), lo = largest })
+    card.put(chip, engine + 76, entries)
+    out firmware.read16(chip.bar, chip.base, engine + 60)
+}
+
+skill ring_in(chip, engine, ring, entries) {
+    firmware.write_phys32(chip.bar, chip.base, engine + 8, ring)
+    card.put(chip, engine + 12, entries)
+    @control = firmware.read32(chip.bar, chip.base, engine + 16)
+    firmware.write_phys32(chip.bar, chip.base, engine + 16, firmware.Phys { hi = card.without_bit(control.hi, 2), lo = control.lo })
+    card.put(chip, engine + 80, entries)
+    out firmware.read16(chip.bar, chip.base, engine + 64)
+}
+
+skill prepare(chip) {
+    @sending = ring_out(chip, CE0, at(chip, SOURCE_RING), ENTRIES, SEND_LARGEST)
+    chip.receive_at = ring_in(chip, CE1, at(chip, DESTINATION_RING), ENTRIES)
+    ring_out(chip, CE7, at(chip, DIAG_SOURCE), DIAG_ENTRIES, DIAG_LARGEST)
+    ring_in(chip, CE7, at(chip, DIAG_DESTINATION), DIAG_ENTRIES)
+    chip.send_at = sending
+    chip.diag_send = 0
+    chip.diag_receive = 0
+    out sending
+}
+
+skill event_rings(chip) {
+    ring_in(chip, CE2, at(chip, EVENT_RING), ENTRIES)
+    ring_out(chip, CE3, at(chip, COMMAND_RING), ENTRIES, DIAG_LARGEST)
+    drum (EVENT_SLOTS) {
+        @buffer = at(chip, EVENT_BUFFERS + beat * BUFFER_BYTES)
+        firmware.write_phys32(buffer, chip.base, 0, firmware.Phys {})
+        descriptor(at(chip, EVENT_RING), chip.base, beat, buffer, 0, 0)
+    }
+    out card.put(chip, CE2 + 64, EVENT_SLOTS)
+}
+
+skill send(chip, buffer, length, flags) {
+    descriptor(at(chip, SOURCE_RING), chip.base, num.mod(chip.send_at, ENTRIES), buffer, length, flags)
+    chip.send_at = chip.send_at + 1
+    @target = num.mod(chip.send_at, ENTRIES)
+    card.put(chip, CE0 + 60, target)
+    drum (20000) {
+        (firmware.read16(chip.bar, chip.base, CE0 + 68) == target) { out buffer }
+        card.stall(chip, 50)
+    }
+    out error.SendTimeout
+}
+
+skill expect(chip, buffer) {
+    descriptor(at(chip, DESTINATION_RING), chip.base, num.mod(chip.receive_at, ENTRIES), buffer, 0, 0)
+    chip.receive_at = chip.receive_at + 1
+    out card.put(chip, CE1 + 64, num.mod(chip.receive_at, ENTRIES))
+}
+
+skill arrived(chip, slot) {
+    out firmware.read16(at(chip, DESTINATION_RING + num.mod(slot, ENTRIES) * 8), chip.base, 4)
+}
+
+skill event_slot(chip, index) {
+    out firmware.read16(at(chip, EVENT_RING + index * 8), chip.base, 4)
+}

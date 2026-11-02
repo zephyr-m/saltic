@@ -1,0 +1,111 @@
+-- boot — загрузка прошивки по порядку ath10k_core_start: настройки в host
+-- interest, данные платы, OTP, прошивка через CE7, старт, первое письмо READY.
+-- data — посылка в памяти (tools/wifi_pack.py): плата с 0, OTP с 8192,
+-- сегменты прошивки по таблице SEGMENTS. OTP отвечает 3 — это норма:
+-- у firmware-6 бит IGNORE_OTP_RESULT.
+--
+-- settle(chip, data) -> текст — версия, настройки, плата, OTP
+-- launch(chip, data) -> текст — прошивка, BMI_DONE, READY; запоминает начало писем
+
+use core.num
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.rings
+use os.target.uefi_x86_64.drivers.qca9377.diag
+use os.target.uefi_x86_64.drivers.qca9377.bmi
+
+HI_APP = 4196352
+HI_OPTION = 4196368
+HI_BE = 4196420
+HI_BOARD = 4196436
+HI_BOARD_READY = 4196440
+HI_BOARD_EXT = 4196524
+HI_UART_EXT = 4196540
+HI_SWAP = 4196612
+HTC_VERSION = 2
+OPTION_BITS = 8712
+DEVICE_ID = 66
+PATCH_ADDRESS = 4660
+BOARD_BYTES = 8124
+OTP_AT = 8192
+OTP_BYTES = 24193
+APP_START = 656384
+SEGMENTS = [[9961472, 32768, 23624], [4277456, 56392, 10544], [4288000, 66936, 33704], [9985536, 100640, 565464], [683008, 666104, 67444], [656384, 733548, 26273]]
+LETTERS = 49152
+LETTER_SLOTS = 4
+
+skill or16(a, b) {
+    @result = 0
+    @bit = 1
+    drum (16) {
+        (num.mod(a / bit, 2) + num.mod(b / bit, 2) > 0) { result = result + bit }
+        bit = bit * 2
+    }
+    out result
+}
+
+skill settle(chip, data) {
+    @version = bmi.target_info(chip)
+    card.say("E. GET_TARGET_INFO: version {version} (05020001 = QCA9377 hw1.1)")
+    card.say("F. configure target: HTC version, mode, byte order, device id")
+    bmi.write32(chip, HI_APP, firmware.number(HTC_VERSION))
+    @option = bmi.read32(chip, HI_OPTION)
+    bmi.write32(chip, HI_OPTION, firmware.Phys { hi = option.hi, lo = or16(option.lo, OPTION_BITS) })
+    bmi.write32(chip, HI_BE, firmware.Phys {})
+    bmi.write32(chip, HI_SWAP, firmware.Phys {})
+    bmi.write32(chip, HI_UART_EXT, firmware.number(DEVICE_ID))
+    @option_after = firmware.phys_text(bmi.read32(chip, HI_OPTION))
+    card.say("   option flag {option_after} (2208 = 1 device, AP mode, MAC from OTP)")
+    @extended = firmware.phys_text(bmi.read32(chip, HI_BOARD_EXT))
+    @board = bmi.read32(chip, HI_BOARD)
+    @board_text = firmware.phys_text(board)
+    card.say("G. board data: card wants it at {board_text}, ext area {extended} (0 = none)")
+    bmi.write_memory(chip, board.hi * 65536 + board.lo, data, BOARD_BYTES, "board")
+    bmi.write32(chip, HI_BOARD_READY, firmware.number(1))
+    card.say("H. OTP: small helper program, tunes the radio for this board")
+    bmi.stream_start(chip, PATCH_ADDRESS)
+    bmi.stream_data(chip, firmware.add(data, OTP_AT), OTP_BYTES, "otp")
+    bmi.stream_start(chip, 0)
+    card.say("I. EXECUTE otp at 0x1234 ...")
+    @result = firmware.phys_text(bmi.execute(chip, PATCH_ADDRESS, 0))
+    card.say("   otp answered {result} (3 is fine: this firmware ignores the OTP result)")
+    out "версия {version}, option {option_after}, плата по {board_text}, ext {extended}, OTP ответил {result}"
+}
+
+skill launch(chip, data) {
+    card.say("J. firmware: 6 segments, 727 KB, the card pulls them by DMA through CE7")
+    @sent = 0
+    drum (SEGMENTS) { sent = sent + diag.segment(chip, data, beat, beat + 1, sent) }
+    card.say("   firmware: {sent} bytes, done")
+    card.say("K. SET_APP_START 0xa0400: where the firmware begins")
+    bmi.command(chip, bmi.BMI_SET_APP_START, APP_START)
+    card.say("L. 4 empty buffers into CE1 for the firmware's letters")
+    chip.letters_from = chip.receive_at
+    drum (LETTER_SLOTS) {
+        @buffer = rings.at(chip, LETTERS + beat * rings.BUFFER_BYTES)
+        firmware.write_phys32(buffer, chip.base, 8, firmware.Phys {})
+        rings.expect(chip, buffer)
+    }
+    card.say("O. rings CE2 (WMI events to us) and CE3 (WMI commands to the card)")
+    rings.event_rings(chip)
+    card.say("M. BMI_DONE: the loader hands the card over to the firmware")
+    bmi.done(chip)
+    card.say("N. waiting up to 5 s for READY ...")
+    @got = 0
+    @waited = 0
+    drum (500) {
+        got = rings.arrived(chip, chip.letters_from)
+        (got > 0) { leave }
+        card.stall(chip, 10000)
+        waited = waited + 1
+    }
+    @indicator = card.hex32(chip, card.FW_INDICATOR)
+    (got == 0) { out card.say("   nothing came; firmware indicator {indicator}") }
+    @letter = rings.at(chip, LETTERS)
+    @message = firmware.read16(letter, chip.base, 8)
+    @credits = firmware.read16(letter, chip.base, 10)
+    @credit_size = firmware.read16(letter, chip.base, 12)
+    @endpoints = firmware.read8(letter, chip.base, 14)
+    card.say("   letter after {waited}0 ms: message {message} (1 = READY), {credits} credits x {credit_size} bytes, {endpoints} endpoints")
+    out "READY за {waited}0 мс: сообщение {message}, кредитов {credits} по {credit_size}, endpoints {endpoints}"
+}

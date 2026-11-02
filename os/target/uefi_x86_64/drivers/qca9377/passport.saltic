@@ -1,0 +1,86 @@
+-- passport — разбор SERVICE_READY (WMI TLV, событие 1) по полям.
+-- Событие: HTC 8 байт, WMI id 4 байта, дальше TLV: длина 16, тег 16, значение.
+-- Теги: 32 — паспорт, 33 — регуляторные данные, 16 — карта служб,
+-- 18 — запросы памяти (у нашей прошивки пусто — память ей не нужна).
+--
+-- describe(chip, event, size) -> текст; на экран — по строке на поле
+
+use core.str
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+
+TAG_SERVICES = 16
+TAG_MEMORY = 18
+TAG_PASSPORT = 32
+TAG_REGULATORY = 33
+
+skill field(chip, value, offset) {
+    @word = firmware.read32(value, chip.base, offset)
+    (word.hi == 0) { out "{word.lo}" }
+    @shown = firmware.phys_text(word)
+    out "0x{shown}"
+}
+
+skill passport(chip, value) {
+    @build = field(chip, value, 0)
+    @abi = field(chip, value, 4)
+    @phy = field(chip, value, 28)
+    @chains = field(chip, value, 36)
+    @ht = field(chip, value, 40)
+    @vht = field(chip, value, 44)
+    @low = field(chip, value, 52)
+    @high = field(chip, value, 56)
+    @memory = field(chip, value, 72)
+    @scan = field(chip, value, 76)
+    card.say("   passport: build {build}, abi {abi}, phy caps {phy}, antennas (rf chains) {chains}")
+    card.say("   HT (802.11n) caps {ht}, VHT (802.11ac) caps {vht}, tx power {low}..{high}")
+    card.say("   firmware asks us for {memory} memory chunk(s); scan up to {scan} channels")
+    out "паспорт: сборка {build}, abi {abi}, phy {phy}, антенн {chains}, HT {ht}, VHT {vht}, мощность {low}..{high}, просит памяти: {memory}, каналов скана {scan}"
+}
+
+skill regulatory(chip, value) {
+    @domain = field(chip, value, 0)
+    @low2 = field(chip, value, 20)
+    @high2 = field(chip, value, 24)
+    @low5 = field(chip, value, 28)
+    @high5 = field(chip, value, 32)
+    card.say("   regulatory: eeprom domain {domain}, 2.4 GHz {low2}..{high2} MHz, 5 GHz {low5}..{high5} MHz")
+    out "регион: домен {domain}, 2,4 ГГц {low2}..{high2} МГц, 5 ГГц {low5}..{high5} МГц"
+}
+
+skill memory_requests(chip, value, length) {
+    @listed = ""
+    @offset = 0
+    drum (16) {
+        (offset + 4 > length) { leave }
+        @inner = firmware.read16(value, chip.base, offset)
+        @id = field(chip, value, offset + 4)
+        @unit = field(chip, value, offset + 8)
+        @units = field(chip, value, offset + 16)
+        card.say("   memory request: id {id}, unit {unit} bytes, units {units}")
+        listed = "{listed}\n    запрос памяти: id {id}, единица {unit} байт, единиц {units}"
+        offset = offset + 4 + inner
+    }
+    (str.len(listed) == 0) { listed = " (пусто)" }
+    out "запросы памяти:{listed}"
+}
+
+skill describe(chip, event, size) {
+    @told = ""
+    @offset = 12
+    drum (16) {
+        (offset + 4 > size) { leave }
+        @length = firmware.read16(event, chip.base, offset)
+        @tag = firmware.read16(event, chip.base, offset + 2)
+        @value = firmware.add(event, offset + 4)
+        card.say("   TLV tag {tag}, {length} bytes")
+        @part = "TLV тег {tag}, {length} байт"
+        (tag == TAG_PASSPORT) { part = passport(chip, value) }
+        (tag == TAG_REGULATORY) { part = regulatory(chip, value) }
+        (tag == TAG_SERVICES) { part = "карта служб: {length} байт" }
+        (tag == TAG_MEMORY) { part = memory_requests(chip, value, length) }
+        told = "{told}\n  {part}"
+        offset = offset + 4 + length
+    }
+    out told
+}

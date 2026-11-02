@@ -1,0 +1,136 @@
+-- bmi — команды загрузчика карты (Bootloader Messaging Interface).
+-- Запрос кладётся в REQUEST и уходит в CE0, ответ (если есть) приходит в
+-- RESPONSE через CE1. Флаги отправки 0xfffc — так шлёт ath10k.
+-- Данные — кусками: WRITE_MEMORY по 244 байта, LZ_DATA по 248.
+--
+-- exchange(chip, length, answer) -> байт ответа; AnswerTimeout
+-- target_info(chip) -> текст версии (05020001 — QCA9377 hw1.1)
+-- read32(chip, address) -> Phys
+-- write32(chip, address, value) — value — Phys
+-- write_memory(chip, address, data, length, label) — с прогрессом на экране
+-- stream_start(chip, address) / stream_data(chip, data, length, label) — LZ-поток (OTP)
+-- execute(chip, address, parameter) -> Phys результата
+-- command(chip, id, value) — команда из двух слов без ответа (SET_APP_START)
+-- done(chip) — BMI_DONE: загрузчик отдаёт карту прошивке
+
+use core.num
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.rings
+
+REQUEST = 12288
+RESPONSE = 16384
+SEND_FLAGS = 65532
+WRITE_CHUNK = 244
+LZ_CHUNK = 248
+BMI_DONE = 1
+BMI_READ = 2
+BMI_WRITE = 3
+BMI_EXECUTE = 4
+BMI_SET_APP_START = 5
+BMI_TARGET_INFO = 8
+BMI_LZ_START = 13
+BMI_LZ_DATA = 14
+
+skill word_at(chip, offset, value) {
+    out firmware.write_phys32(rings.at(chip, REQUEST), chip.base, offset, firmware.number(value))
+}
+
+skill exchange(chip, length, answer) {
+    @slot = chip.receive_at
+    (answer > 0) { rings.expect(chip, rings.at(chip, RESPONSE)) }
+    rings.send(chip, rings.at(chip, REQUEST), length, SEND_FLAGS)
+    (answer == 0) { out 0 }
+    drum (20000) {
+        @got = rings.arrived(chip, slot)
+        (got > 0) { out got }
+        card.stall(chip, 50)
+    }
+    out error.AnswerTimeout
+}
+
+skill target_info(chip) {
+    word_at(chip, 0, BMI_TARGET_INFO)
+    exchange(chip, 4, 12)
+    out firmware.phys_text(firmware.read32(rings.at(chip, RESPONSE), chip.base, 4))
+}
+
+skill read32(chip, address) {
+    word_at(chip, 0, BMI_READ)
+    word_at(chip, 4, address)
+    word_at(chip, 8, 4)
+    exchange(chip, 12, 4)
+    out firmware.read32(rings.at(chip, RESPONSE), chip.base, 0)
+}
+
+skill write32(chip, address, value) {
+    word_at(chip, 0, BMI_WRITE)
+    word_at(chip, 4, address)
+    word_at(chip, 8, 4)
+    firmware.write_phys32(rings.at(chip, REQUEST), chip.base, 12, value)
+    out exchange(chip, 16, 0)
+}
+
+skill copy_in(chip, from, offset, length) {
+    @request = rings.at(chip, REQUEST)
+    drum ((length + 3) / 4) { firmware.write_phys32(request, chip.base, offset + beat * 4, firmware.Phys {}) }
+    drum (length / 2) { firmware.write16(request, chip.base, offset + beat * 2, firmware.read16(from, chip.base, beat * 2)) }
+    (num.mod(length, 2) == 1) { firmware.write8(request, chip.base, offset + length - 1, firmware.read8(from, chip.base, length - 1)) }
+    out (length + 3) / 4 * 4
+}
+
+skill write_memory(chip, address, data, length, label) {
+    @done = 0
+    drum ((length + WRITE_CHUNK - 1) / WRITE_CHUNK) {
+        @size = length - done
+        (size > WRITE_CHUNK) { size = WRITE_CHUNK }
+        word_at(chip, 0, BMI_WRITE)
+        word_at(chip, 4, address + done)
+        @padded = copy_in(chip, firmware.add(data, done), 12, size)
+        word_at(chip, 8, padded)
+        exchange(chip, 12 + padded, 0)
+        done = done + size
+        (num.mod(beat, 8) == 7) { card.say("   {label}: {done} of {length} bytes") }
+    }
+    out card.say("   {label}: {done} of {length} bytes, done")
+}
+
+skill stream_start(chip, address) {
+    word_at(chip, 0, BMI_LZ_START)
+    word_at(chip, 4, address)
+    out exchange(chip, 8, 0)
+}
+
+skill stream_data(chip, data, length, label) {
+    @done = 0
+    drum ((length + LZ_CHUNK - 1) / LZ_CHUNK) {
+        @size = length - done
+        (size > LZ_CHUNK) { size = LZ_CHUNK }
+        word_at(chip, 0, BMI_LZ_DATA)
+        @padded = copy_in(chip, firmware.add(data, done), 8, size)
+        word_at(chip, 4, padded)
+        exchange(chip, 8 + padded, 0)
+        done = done + size
+        (num.mod(beat, 16) == 15) { card.say("   {label}: {done} of {length} bytes") }
+    }
+    out card.say("   {label}: {done} of {length} bytes, done")
+}
+
+skill execute(chip, address, parameter) {
+    word_at(chip, 0, BMI_EXECUTE)
+    word_at(chip, 4, address)
+    word_at(chip, 8, parameter)
+    exchange(chip, 12, 4)
+    out firmware.read32(rings.at(chip, RESPONSE), chip.base, 0)
+}
+
+skill command(chip, id, value) {
+    word_at(chip, 0, id)
+    word_at(chip, 4, value)
+    out exchange(chip, 8, 0)
+}
+
+skill done(chip) {
+    word_at(chip, 0, BMI_DONE)
+    out exchange(chip, 4, 0)
+}

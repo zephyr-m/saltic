@@ -1,0 +1,81 @@
+-- qca9377 — драйвер Wi-Fi Qualcomm Atheros QCA9377 (Acer E5-575G), по ath10k.
+-- Сейчас умеет: поднять карту, залить прошивку, открыть канал WMI и прочитать
+-- паспорт (SERVICE_READY). Порядок вызова: open → start → load → talk → quiet.
+-- Каждый шаг печатает ход на экран ("wifi: …"). Карта после работы — quiet,
+-- иначе она может писать в нашу память по DMA. Данные — посылка
+-- tools/wifi_pack.py, приложенная к программе (snippet.py, SNIPPET_DATA).
+--
+-- Card — состояние карты (из card)
+-- open() -> Card; DeviceNotFound
+-- start(chip) -> текст — холодный и тёплый сброс, init_config, BMI открыт
+-- load(chip, data) -> текст — настройки, плата, OTP, прошивка, READY
+-- talk(chip) -> текст — канал WMI, события, разбор SERVICE_READY
+-- quiet(chip) — прерывания и bus master карты выключить
+--
+-- Внутри: card (регистры), rings (кольца CE), reset, diag (память карты через
+-- CE7), bmi (команды загрузчика), boot (загрузка), htc (каналы), passport.
+
+use core.num
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.rings
+use os.target.uefi_x86_64.drivers.qca9377.reset
+use os.target.uefi_x86_64.drivers.qca9377.diag
+use os.target.uefi_x86_64.drivers.qca9377.boot
+use os.target.uefi_x86_64.drivers.qca9377.htc
+use os.target.uefi_x86_64.drivers.qca9377.passport
+
+VENDOR_QUALCOMM = 5772
+MODEL_QCA9377 = 66
+CORE_CTRL = 237568
+CPU_INTR = 8192
+
+skill open() {
+    @base = firmware.guest_base()
+    @config = firmware.find_device(base, firmware.ecam(base), VENDOR_QUALCOMM, MODEL_QCA9377)
+    @bar = firmware.read32(config, base, 16)
+    bar.lo = bar.lo - num.mod(bar.lo, 16)
+    out card.Card { base = base, config = config, bar = bar, arena = firmware.arena(base) }
+}
+
+skill start(chip) {
+    card.say("A. cold reset: the card restarts, its ROM loader wakes up")
+    @ready = reset.cold(chip)
+    card.say("   loader ready, indicator {ready}")
+    card.say("B. warm reset + rings: CE0 sends to the card, CE1 receives, CE7 reaches its memory")
+    @warm = reset.warm(chip)
+    card.say("   {warm}")
+    card.say("C. init_config: tell the loader our ring layout, set EARLY_CFG_DONE")
+    @configured = diag.configure(chip)
+    card.say("   {configured}")
+    rings.prepare(chip)
+    @control = firmware.read32(chip.bar, chip.base, CORE_CTRL)
+    card.change_low(chip, CORE_CTRL, card.with_bit(control.lo, CPU_INTR))
+    card.say("D. poke the card CPU: BMI is open")
+    out "сброс: {ready}; тёплый: {warm}; {configured}"
+}
+
+skill load(chip, data) {
+    @settled = boot.settle(chip, data)
+    @launched = boot.launch(chip, data)
+    out "{settled}\n{launched}"
+}
+
+skill talk(chip) {
+    @channel = htc.connect(chip)
+    @listed = htc.events(chip)
+    @told = ""
+    drum (rings.EVENT_SLOTS) {
+        @event = htc.event_at(chip, beat)
+        (firmware.read16(event, chip.base, 8) == 1) {
+            card.say("S. reading SERVICE_READY field by field")
+            told = passport.describe(chip, event, htc.event_bytes(chip, beat))
+        }
+    }
+    out "{channel}\n{listed}\nSERVICE_READY:{told}"
+}
+
+skill quiet(chip) {
+    card.quiet(chip)
+    out card.say("card is quiet again (interrupts off, bus master off)")
+}

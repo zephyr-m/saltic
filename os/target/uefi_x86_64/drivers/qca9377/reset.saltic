@@ -1,0 +1,60 @@
+-- reset — холодный и тёплый сброс, как ath10k_pci_qca6174_chip_reset.
+-- Холодный: бит 0 в SOC_GLOBAL_RESET, паузы по 20 мс, потом ждать загрузчик.
+-- Тёплый: перезапуск процессора карты (0x40) и копирующих движков (0x1) в
+-- SOC_RESET_CONTROL, между ними — кольца заново. Перед холодным: bus master,
+-- ASPM выкл. (иначе загрузчик молчит), прерывания погашены и включены (INTx).
+--
+-- cold(chip) -> текст индикатора загрузчика; TargetNotReady
+-- warm(chip) -> текст двух ожиданий загрузчика
+
+use core.num
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.rings
+
+GLOBAL_RESET = 524296
+SOC_RESET = 2048
+LF_TIMER = 2128
+CPU_WARM = 64
+ENGINES_RESET = 1
+LF_ENABLE = 4
+COMMAND_MEMORY_MASTER = 6
+LINK_CONTROL = 128
+
+skill cold(chip) {
+    firmware.write16(chip.config, chip.base, 4, COMMAND_MEMORY_MASTER)
+    @link = firmware.read16(chip.config, chip.base, LINK_CONTROL)
+    firmware.write16(chip.config, chip.base, LINK_CONTROL, link - num.mod(link, 4))
+    card.wake(chip)
+    card.interrupts_off(chip)
+    card.interrupts_on(chip)
+    card.put(chip, GLOBAL_RESET, 1)
+    card.stall(chip, 20000)
+    card.put(chip, GLOBAL_RESET, 0)
+    card.stall(chip, 20000)
+    out card.wait_loader(chip)
+}
+
+skill restart_cpu(chip) {
+    card.put(chip, card.FW_INDICATOR, 0)
+    @control = firmware.read32(chip.bar, chip.base, SOC_RESET)
+    out card.change_low(chip, SOC_RESET, card.with_bit(control.lo, CPU_WARM))
+}
+
+skill warm(chip) {
+    card.interrupts_off(chip)
+    card.stall(chip, 20000)
+    restart_cpu(chip)
+    rings.prepare(chip)
+    @first = card.wait_loader(chip)
+    @timer = firmware.read32(chip.bar, chip.base, LF_TIMER)
+    card.change_low(chip, LF_TIMER, card.without_bit(timer.lo, LF_ENABLE))
+    @control = firmware.read32(chip.bar, chip.base, SOC_RESET)
+    card.change_low(chip, SOC_RESET, card.with_bit(control.lo, ENGINES_RESET))
+    card.stall(chip, 10000)
+    card.change_low(chip, SOC_RESET, card.without_bit(control.lo, ENGINES_RESET))
+    restart_cpu(chip)
+    rings.prepare(chip)
+    @second = card.wait_loader(chip)
+    out "{first}, потом {second}"
+}

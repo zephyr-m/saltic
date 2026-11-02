@@ -1,0 +1,137 @@
+-- diag — память карты через диагностическое кольцо CE7: карта сама копирует
+-- по DMA между своей памятью и нашей. Адрес памяти карты для CE:
+-- (CORE_CTRL & 0x7ff) << 21 | (≥ 0x100000 ? 0x100000) | (адрес & 0xfffff);
+-- дальше 0x500000 — через окно FW_RAM_CONFIG (по 1 МБ), потом вернуть 4.
+--
+-- copy(chip, from, to, length) -> байт; DiagTimeout
+-- read(chip, address) -> Phys; address — Phys адреса карты
+-- write(chip, address, value) — value — Phys
+-- configure(chip) -> текст; NoPcieState — init_config ath10k: раскладка колец,
+--     карта служб, L1 выкл., early_alloc, EARLY_CFG_DONE (без него загрузчик молчит)
+-- segment(chip, data, row, index, sent) -> байт — кусок прошивки [адрес, смещение, длина]
+
+use core.num
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.rings
+
+CORE_CTRL = 237568
+FW_RAM_CONFIG = 237592
+DRAM_WINDOW = 4
+WINDOW = 1048576
+DIRECT_LIMIT = 5242880
+BUFFER = 28672
+CHUNK = 2048
+FIRMWARE_BYTES = 727053
+HOST_INTEREST = 4196352
+HI_FLAG2 = 204
+HI_INTERCONNECT = 248
+HI_EARLY_ALLOC = 256
+EARLY_CFG_DONE = 16
+EALLOC_MAGIC = 28042
+IRAM_BANKS = 9
+PIPES = [[0, 2, 32, 256, 0, 0], [1, 1, 32, 2048, 0, 0], [2, 1, 64, 2048, 0, 0], [3, 2, 32, 2048, 0, 0], [4, 2, 256, 256, 0, 0], [5, 1, 32, 512, 0, 0], [6, 3, 32, 4096, 0, 0]]
+SERVICES = [[260, 2, 3], [260, 1, 2], [258, 2, 3], [258, 1, 2], [257, 2, 3], [257, 1, 2], [259, 2, 3], [259, 1, 2], [256, 2, 3], [256, 1, 2], [1, 2, 0], [1, 1, 1], [65024, 2, 0], [65024, 1, 1], [768, 2, 4], [768, 1, 5], [0, 0, 0]]
+
+skill engine_address(chip, address) {
+    @control = firmware.read16(chip.bar, chip.base, CORE_CTRL)
+    @high = num.mod(control, 2048) * 32 + num.mod(address.hi, 16)
+    (address.hi > 15) { high = high + 16 }
+    out firmware.Phys { hi = high, lo = address.lo }
+}
+
+skill copy(chip, from, to, length) {
+    @slot = num.mod(chip.diag_receive, rings.DIAG_ENTRIES)
+    rings.descriptor(rings.at(chip, rings.DIAG_DESTINATION), chip.base, slot, to, 0, 0)
+    chip.diag_receive = chip.diag_receive + 1
+    card.put(chip, rings.CE7 + 64, num.mod(chip.diag_receive, rings.DIAG_ENTRIES))
+    rings.descriptor(rings.at(chip, rings.DIAG_SOURCE), chip.base, num.mod(chip.diag_send, rings.DIAG_ENTRIES), from, length, 0)
+    chip.diag_send = chip.diag_send + 1
+    card.put(chip, rings.CE7 + 60, num.mod(chip.diag_send, rings.DIAG_ENTRIES))
+    drum (1000) {
+        @got = firmware.read16(rings.at(chip, rings.DIAG_DESTINATION + slot * 8), chip.base, 4)
+        (got > 0) { out got }
+        card.stall(chip, 100)
+    }
+    out error.DiagTimeout
+}
+
+skill read(chip, address) {
+    copy(chip, engine_address(chip, address), rings.at(chip, BUFFER), 4)
+    out firmware.read32(rings.at(chip, BUFFER), chip.base, 0)
+}
+
+skill write(chip, address, value) {
+    firmware.write_phys32(rings.at(chip, BUFFER), chip.base, 0, value)
+    out copy(chip, rings.at(chip, BUFFER), engine_address(chip, address), 4)
+}
+
+skill write_rows(chip, address, rows) {
+    @offset = 0
+    drum (rows) {
+        @row = beat
+        drum (row) {
+            firmware.write_phys32(rings.at(chip, BUFFER), chip.base, offset, firmware.number(beat))
+            offset = offset + 4
+        }
+    }
+    out copy(chip, rings.at(chip, BUFFER), engine_address(chip, address), offset)
+}
+
+skill host_item(offset) {
+    out firmware.add(firmware.number(0), HOST_INTEREST + offset)
+}
+
+skill configure(chip) {
+    @state = read(chip, host_item(HI_INTERCONNECT))
+    (firmware.phys_text(state) == "00000000") { out error.NoPcieState }
+    @state_text = firmware.phys_text(state)
+    card.say("   pcie_state in card memory at {state_text}")
+    write_rows(chip, read(chip, state), PIPES)
+    write_rows(chip, read(chip, firmware.add(state, 4)), SERVICES)
+    @flags = read(chip, firmware.add(state, 32))
+    write(chip, firmware.add(state, 32), firmware.Phys { hi = flags.hi, lo = card.without_bit(flags.lo, 1) })
+    @early = read(chip, host_item(HI_EARLY_ALLOC))
+    write(chip, host_item(HI_EARLY_ALLOC), firmware.Phys { hi = EALLOC_MAGIC, lo = early.lo - num.mod(early.lo, 16) + IRAM_BANKS })
+    @flag2 = read(chip, host_item(HI_FLAG2))
+    write(chip, host_item(HI_FLAG2), firmware.Phys { hi = flag2.hi, lo = card.with_bit(flag2.lo, EARLY_CFG_DONE) })
+    @after = firmware.phys_text(read(chip, host_item(HI_FLAG2)))
+    out "flag2 {after}"
+}
+
+skill stream(chip, from, address, length, sent) {
+    @done = 0
+    drum ((length + CHUNK - 1) / CHUNK) {
+        @size = length - done
+        (size > CHUNK) { size = CHUNK }
+        @target = firmware.add(firmware.number(0), address + done)
+        copy(chip, firmware.add(from, done), engine_address(chip, target), size)
+        done = done + size
+        @total = sent + done
+        (num.mod(beat, 32) == 31) { card.say("   firmware: {total} of {FIRMWARE_BYTES} bytes") }
+    }
+    out done
+}
+
+skill segment(chip, data, row, index, sent) {
+    @address = group.get(row, 0)
+    @from = firmware.add(data, group.get(row, 1))
+    @length = group.get(row, 2)
+    @where = firmware.hex(address, 8)
+    card.say("J{index}. segment {index}/6 -> card address {where}, {length} bytes")
+    (address < DIRECT_LIMIT) { out stream(chip, from, address, length, sent) }
+    @window = num.mod(address / WINDOW, 16)
+    card.put(chip, FW_RAM_CONFIG, window)
+    @inside = num.mod(address, WINDOW)
+    @first = length
+    (inside + length > WINDOW) { first = WINDOW - inside }
+    @done = stream(chip, from, address, first, sent)
+    (first < length) {
+        card.say("   crossing a 1 MB window: window {window} -> next")
+        card.put(chip, FW_RAM_CONFIG, window + 1)
+        done = done + stream(chip, firmware.add(from, first), address - inside + WINDOW, length - first, sent + first)
+    }
+    card.put(chip, FW_RAM_CONFIG, DRAM_WINDOW)
+    out done
+}

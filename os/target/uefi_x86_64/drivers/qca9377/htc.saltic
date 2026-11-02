@@ -1,0 +1,86 @@
+-- htc — почта между нами и прошивкой: каналы (endpoints) со службами.
+-- Письмо HTC: заголовок 8 байт (канал, флаги, длина, номер), в канале 0 первые
+-- 2 байта тела — номер сообщения. Канал WMI: команды — CE3, события — CE2.
+-- Письма канала 0 приходят в CE1, в 4 буфера с начала писем (boot.launch).
+--
+-- connect(chip) -> текст — CONNECT_SERVICE для WMI, SETUP_COMPLETE_EX
+-- events(chip) -> текст — список событий WMI в 8 буферах CE2
+-- event_at(chip, index) -> Phys события; event_bytes(chip, index) -> байт
+
+use core.num
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.rings
+use os.target.uefi_x86_64.drivers.qca9377.boot
+
+FRAME = 45056
+SERVICE_WMI = 256
+WMI_CREDITS = 2
+MSG_CONNECT = 2
+MSG_SETUP_COMPLETE_EX = 5
+
+skill control(chip, payload_length) {
+    @frame = rings.at(chip, FRAME)
+    firmware.write_phys32(frame, chip.base, 0, firmware.Phys { hi = payload_length, lo = 0 })
+    firmware.write_phys32(frame, chip.base, 4, firmware.Phys {})
+    out rings.send(chip, frame, 8 + payload_length, 0)
+}
+
+skill next_letter(chip) {
+    @index = chip.receive_at - chip.letters_from
+    drum (300) {
+        (rings.arrived(chip, chip.receive_at) > 0) {
+            (index > boot.LETTER_SLOTS - 1) { out error.OutOfLetterBuffers }
+            chip.receive_at = chip.receive_at + 1
+            out rings.at(chip, boot.LETTERS + index * rings.BUFFER_BYTES)
+        }
+        card.stall(chip, 10000)
+    }
+    out error.NoLetter
+}
+
+skill connect(chip) {
+    chip.receive_at = chip.letters_from + 1
+    card.say("P. CONNECT_SERVICE: open a channel for WMI (service 0x0100), give it 2 credits")
+    @frame = rings.at(chip, FRAME)
+    firmware.write_phys32(frame, chip.base, 8, firmware.Phys { hi = SERVICE_WMI, lo = MSG_CONNECT })
+    firmware.write_phys32(frame, chip.base, 12, firmware.Phys { hi = 0, lo = WMI_CREDITS * 256 })
+    control(chip, 8)
+    @answer = next_letter(chip)
+    @message = firmware.read16(answer, chip.base, 8)
+    @status = firmware.read8(answer, chip.base, 12)
+    @endpoint = firmware.read8(answer, chip.base, 13)
+    @largest = firmware.read16(answer, chip.base, 14)
+    card.say("   answer: message {message} (3 = CONNECT_RESP), status {status} (0 = ok), channel {endpoint}, letters up to {largest} bytes")
+    card.say("Q. SETUP_COMPLETE_EX: channels are open, go")
+    firmware.write_phys32(frame, chip.base, 8, firmware.Phys { hi = 0, lo = MSG_SETUP_COMPLETE_EX })
+    firmware.write_phys32(frame, chip.base, 12, firmware.Phys {})
+    firmware.write_phys32(frame, chip.base, 16, firmware.Phys {})
+    control(chip, 11)
+    out "канал WMI: статус {status}, номер {endpoint}, письма до {largest} байт"
+}
+
+skill event_at(chip, index) {
+    out rings.at(chip, rings.EVENT_BUFFERS + index * rings.BUFFER_BYTES)
+}
+
+skill event_bytes(chip, index) {
+    out rings.event_slot(chip, index)
+}
+
+skill events(chip) {
+    card.say("R. collecting WMI events from the 8 CE2 buffers for 1 s ...")
+    card.stall(chip, 1000000)
+    @list = ""
+    drum (rings.EVENT_SLOTS) {
+        @got = event_bytes(chip, beat)
+        (got > 0) {
+            @event = event_at(chip, beat)
+            @channel = firmware.read8(event, chip.base, 0)
+            @id = firmware.hex(firmware.read16(event, chip.base, 8), 4)
+            card.say("   event {beat}: {got} bytes, channel {channel}, WMI id {id}")
+            list = "{list}\n  событие {beat}: {got} байт, канал {channel}, WMI id {id}"
+        }
+    }
+    out "события WMI:{list}"
+}
