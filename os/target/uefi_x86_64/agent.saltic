@@ -23,7 +23,7 @@ use os.target.uefi_x86_64.reply
 use os.target.uefi_x86_64.programs
 use os.target.uefi_x86_64.shelf
 
-VERSION = 9
+VERSION = 10
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -64,7 +64,8 @@ Agent = Box {
     bay = firmware.Phys {},
     names = [],
     chosen = 0,
-    limit = ARENA_LIMIT
+    limit = ARENA_LIMIT,
+    linked = no
 }
 
 COUNTDOWN = 5
@@ -114,7 +115,8 @@ skill launch(agent) {
     (outcome.failed == yes) { status = "ошибка прошивки {code}" }
     log(agent, "run: image returned")
     rtl8111.configure(agent.card)
-    rtl8111.wait_link(agent.card)
+    rtl8111.wait_link(agent.card) rescue |err| { none }
+    agent.linked = has_link(agent.card)
     log(agent, "run: card configured again, listening")
     (outcome.failed == no) {
         (code == reply.HOME) { clear_screen(agent) }
@@ -415,6 +417,29 @@ skill handle(agent, bytes) {
     out agent
 }
 
+skill has_link(card) {
+    out rtl8111.has_bit(rtl8111.status(card), rtl8111.PHY_LINK)
+}
+
+skill greet(card) {
+    rtl8111.send(card, net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic {VERSION} слушает 10.0.0.2:5555, скажи help"))
+    out none
+}
+
+skill watch_link(agent) {
+    @now = has_link(agent.card)
+    (now == agent.linked) { out none }
+    agent.linked = now
+    (now == yes) {
+        log(agent, "link: cable is back, listening")
+        greet(agent.card)
+        out none
+    }
+    log(agent, "link: cable lost, waiting")
+    feed.banner(agent.card.base, "нет связи по кабелю — агент работает и ждёт")
+    out none
+}
+
 skill tick(agent) {
     drum (rtl8111.RX_COUNT) {
         (rtl8111.received(agent.card, beat) == yes) {
@@ -427,6 +452,7 @@ skill tick(agent) {
     (num.mod(agent.rounds, KEY_EVERY) == 0) { press(agent, uefi.poll_key(agent.card.base, 0)) }
     (agent.rounds == CLOCK_EVERY) {
         agent.rounds = 0
+        watch_link(agent)
         (agent.console == no) {
             (agent.lent == no) { feed.draw_clock(agent) }
         }
@@ -436,6 +462,7 @@ skill tick(agent) {
 
 skill last_cry(card, message) {
     feed.banner(card.base, message)
+    (has_link(card) == no) { out none }
     rtl8111.send(card, net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, message))
     out none
 }
@@ -467,10 +494,10 @@ skill run() {
     io.show("[1] card {mac}")
     rtl8111.configure(card)
     io.show("[2] card configured, waiting for link...")
-    @link = rtl8111.wait_link(card)
+    @link = rtl8111.wait_link(card) rescue |err| { "none yet: agent keeps running and waits for the cable" }
     io.show("[3] link {link}")
-    @hello = net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic {VERSION} слушает 10.0.0.2:5555, скажи help")
-    rtl8111.send(card, hello)
+    @linked = has_link(card)
+    (linked == yes) { greet(card) }
     io.show("[4] listening on 10.0.0.2:5555 (arp + udp commands)")
     io.show("")
     @bay = firmware.add(card.arena, UPLOAD_OFFSET)
@@ -482,7 +509,7 @@ skill run() {
     }
     @where = firmware.phys_text(bay)
     io.show("[5] upload bay {where}, limit {limit} bytes")
-    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = limit }
+    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = limit, linked = linked }
     clear_screen(agent)
     serve(agent) rescue |err| {
         last_cry(card, "агент остановился: {err}")
