@@ -1,0 +1,225 @@
+-- solids — фигуры сцены wire: многогранники, шар, комната-сетка, крестик-центр.
+-- Фигура — точки (своя система координат, ×1024), рёбра (пары номеров),
+-- место в комнате, повороты (в 1/16°) и их скорости. У правильных
+-- многогранников рёбра находятся сами: соединяются ближайшие вершины.
+-- Синусы — таблица на 360° (×1024), fine_* — сглаженные между градусами.
+--
+-- Shape — фигура
+-- build_shapes() -> группа: комната, 8 фигур, центр (последний)
+-- sine / cosine(градусы) -> ×1024; fine_sine / fine_cosine(1/16°) -> ×1024
+-- magnitude(value) -> модуль числа
+
+use core.num
+use core.group
+
+SINES = [0, 18, 36, 54, 71, 89, 107, 125, 143, 160, 178, 195, 213, 230, 248, 265, 282, 299, 316, 333, 350, 367, 384, 400, 416, 433, 449, 465, 481, 496, 512, 527, 543, 558, 573, 587, 602, 616, 630, 644, 658, 672, 685, 698, 711, 724, 737, 749, 761, 773, 784, 796, 807, 818, 828, 839, 849, 859, 868, 878, 887, 896, 904, 912, 920, 928, 935, 943, 949, 956, 962, 968, 974, 979, 984, 989, 994, 998, 1002, 1005, 1008, 1011, 1014, 1016, 1018, 1020, 1022, 1023, 1023, 1024, 1024, 1024, 1023, 1023, 1022, 1020, 1018, 1016, 1014, 1011, 1008, 1005, 1002, 998, 994, 989, 984, 979, 974, 968, 962, 956, 949, 943, 935, 928, 920, 912, 904, 896, 887, 878, 868, 859, 849, 839, 828, 818, 807, 796, 784, 773, 761, 749, 737, 724, 711, 698, 685, 672, 658, 644, 630, 616, 602, 587, 573, 558, 543, 527, 512, 496, 481, 465, 449, 433, 416, 400, 384, 367, 350, 333, 316, 299, 282, 265, 248, 230, 213, 195, 178, 160, 143, 125, 107, 89, 71, 54, 36, 18, 0, -18, -36, -54, -71, -89, -107, -125, -143, -160, -178, -195, -213, -230, -248, -265, -282, -299, -316, -333, -350, -367, -384, -400, -416, -433, -449, -465, -481, -496, -512, -527, -543, -558, -573, -587, -602, -616, -630, -644, -658, -672, -685, -698, -711, -724, -737, -749, -761, -773, -784, -796, -807, -818, -828, -839, -849, -859, -868, -878, -887, -896, -904, -912, -920, -928, -935, -943, -949, -956, -962, -968, -974, -979, -984, -989, -994, -998, -1002, -1005, -1008, -1011, -1014, -1016, -1018, -1020, -1022, -1023, -1023, -1024, -1024, -1024, -1023, -1023, -1022, -1020, -1018, -1016, -1014, -1011, -1008, -1005, -1002, -998, -994, -989, -984, -979, -974, -968, -962, -956, -949, -943, -935, -928, -920, -912, -904, -896, -887, -878, -868, -859, -849, -839, -828, -818, -807, -796, -784, -773, -761, -749, -737, -724, -711, -698, -685, -672, -658, -644, -630, -616, -602, -587, -573, -558, -543, -527, -512, -496, -481, -465, -449, -433, -416, -400, -384, -367, -350, -333, -316, -299, -282, -265, -248, -230, -213, -195, -178, -160, -143, -125, -107, -89, -71, -54, -36, -18]
+ONE = 1024
+FINE = 16
+GOLDEN = 1657
+INVERSE_GOLDEN = 633
+ROOM = 4000
+FLOOR = -1200
+CEILING = 2400
+PIVOT = 600
+CELL = 800
+ROW = 600
+RINGS = 5
+SLICES = 12
+STEP = 30
+CROSS = 300
+
+Shape = Box {
+    name = "",
+    points = [],
+    edges = [],
+    x = 0,
+    y = 0,
+    z = 0,
+    yaw = 0,
+    roll = 0,
+    yaw_speed = 0,
+    roll_speed = 0,
+    shown = []
+}
+
+skill magnitude(value) {
+    (value < 0) { out 0 - value }
+    out value
+}
+
+skill sine(angle) {
+    out group.get(SINES, num.mod(angle + 3600, 360))
+}
+
+skill cosine(angle) {
+    out sine(angle + 90)
+}
+
+skill fine_sine(fine) {
+    @whole = num.mod(fine + 360 * FINE * 8, 360 * FINE)
+    @degree = whole / FINE
+    @part = whole - degree * FINE
+    @low = sine(degree)
+    out low + (sine(degree + 1) - low) * part / FINE
+}
+
+skill fine_cosine(fine) {
+    out fine_sine(fine + 90 * FINE)
+}
+
+skill scaled(rows, size) {
+    @found = []
+    drum (rows) { found = group.add(found, [group.get(beat, 0) * size / ONE, group.get(beat, 1) * size / ONE, group.get(beat, 2) * size / ONE]) }
+    out found
+}
+
+skill apart(left, right) {
+    @dx = group.get(left, 0) - group.get(right, 0)
+    @dy = group.get(left, 1) - group.get(right, 1)
+    @dz = group.get(left, 2) - group.get(right, 2)
+    out (dx * dx + dy * dy + dz * dz) / 64
+}
+
+skill nearest_edges(points) {
+    @shortest = -1
+    drum (group.count(points)) {
+        @first = beat
+        drum (group.count(points) - first - 1) {
+            @far = apart(group.get(points, first), group.get(points, first + beat + 1))
+            pick {
+                (shortest < 0) { shortest = far }
+                (far < shortest) { shortest = far }
+                { }
+            }
+        }
+    }
+    @edges = []
+    drum (group.count(points)) {
+        @first = beat
+        drum (group.count(points) - first - 1) {
+            @second = first + beat + 1
+            (apart(group.get(points, first), group.get(points, second)) * 10 < shortest * 11) { edges = group.add(edges, [first, second]) }
+        }
+    }
+    out edges
+}
+
+skill solid(name, rows, size, place, speeds) {
+    @points = scaled(rows, size)
+    out Shape { name = name, points = points, edges = nearest_edges(points), x = group.get(place, 0), y = group.get(place, 1), z = group.get(place, 2), yaw_speed = group.get(speeds, 0), roll_speed = group.get(speeds, 1) }
+}
+
+skill tetrahedron() {
+    out [[ONE, ONE, ONE], [ONE, 0 - ONE, 0 - ONE], [0 - ONE, ONE, 0 - ONE], [0 - ONE, 0 - ONE, ONE]]
+}
+
+skill octahedron() {
+    out [[ONE, 0, 0], [0 - ONE, 0, 0], [0, ONE, 0], [0, 0 - ONE, 0], [0, 0, ONE], [0, 0, 0 - ONE]]
+}
+
+skill icosahedron() {
+    @found = []
+    drum ([[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        @a = group.get(beat, 0) * ONE
+        @b = group.get(beat, 1) * GOLDEN
+        found = group.add(group.add(group.add(found, [0, a, b]), [a, b, 0]), [b, 0, a])
+    }
+    out found
+}
+
+skill dodecahedron() {
+    @found = []
+    drum ([[1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1], [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1]]) { found = group.add(found, [group.get(beat, 0) * ONE, group.get(beat, 1) * ONE, group.get(beat, 2) * ONE]) }
+    drum ([[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        @a = group.get(beat, 0) * INVERSE_GOLDEN
+        @b = group.get(beat, 1) * GOLDEN
+        found = group.add(group.add(group.add(found, [0, a, b]), [a, b, 0]), [b, 0, a])
+    }
+    out found
+}
+
+skill pyramid(size, place, speeds) {
+    @half = size / 2
+    @points = [[half, 0 - half, half], [half, 0 - half, 0 - half], [0 - half, 0 - half, 0 - half], [0 - half, 0 - half, half], [0, size, 0]]
+    @edges = [[0, 1], [1, 2], [2, 3], [3, 0], [0, 4], [1, 4], [2, 4], [3, 4]]
+    out Shape { name = "пирамида", points = points, edges = edges, x = group.get(place, 0), y = group.get(place, 1), z = group.get(place, 2), yaw_speed = group.get(speeds, 0), roll_speed = group.get(speeds, 1) }
+}
+
+skill prism(size, place, speeds) {
+    @points = []
+    drum (6) { points = group.add(points, [size * cosine(beat * 60) / ONE, size, size * sine(beat * 60) / ONE]) }
+    drum (6) { points = group.add(points, [size * cosine(beat * 60) / ONE, 0 - size, size * sine(beat * 60) / ONE]) }
+    @edges = []
+    drum (6) { edges = group.add(group.add(group.add(edges, [beat, num.mod(beat + 1, 6)]), [beat + 6, num.mod(beat + 1, 6) + 6]), [beat, beat + 6]) }
+    out Shape { name = "призма", points = points, edges = edges, x = group.get(place, 0), y = group.get(place, 1), z = group.get(place, 2), yaw_speed = group.get(speeds, 0), roll_speed = group.get(speeds, 1) }
+}
+
+skill sphere(size, place, speeds) {
+    @points = [[0, size, 0]]
+    drum (RINGS) {
+        @ring = (beat + 1) * STEP
+        @up = size * cosine(ring) / ONE
+        @wide = size * sine(ring) / ONE
+        drum (SLICES) { points = group.add(points, [wide * cosine(beat * STEP) / ONE, up, wide * sine(beat * STEP) / ONE]) }
+    }
+    points = group.add(points, [0, 0 - size, 0])
+    @bottom = RINGS * SLICES + 1
+    @edges = []
+    drum (RINGS) {
+        @ring = beat
+        drum (SLICES) {
+            @here = 1 + ring * SLICES + beat
+            edges = group.add(edges, [here, 1 + ring * SLICES + num.mod(beat + 1, SLICES)])
+            (ring == 0) { edges = group.add(edges, [0, here]) }
+            (ring < RINGS - 1) { edges = group.add(edges, [here, here + SLICES]) }
+            (ring == RINGS - 1) { edges = group.add(edges, [here, bottom]) }
+        }
+    }
+    out Shape { name = "шар", points = points, edges = edges, x = group.get(place, 0), y = group.get(place, 1), z = group.get(place, 2), yaw_speed = group.get(speeds, 0), roll_speed = group.get(speeds, 1) }
+}
+
+skill segments(name, pairs) {
+    @points = []
+    @edges = []
+    drum (pairs) {
+        points = group.add(group.add(points, group.get(beat, 0)), group.get(beat, 1))
+        edges = group.add(edges, [group.count(points) - 2, group.count(points) - 1])
+    }
+    out Shape { name = name, points = points, edges = edges }
+}
+
+skill room() {
+    @pairs = []
+    drum (ROOM * 2 / CELL + 1) {
+        @at = 0 - ROOM + beat * CELL
+        pairs = group.add(pairs, [[at, FLOOR, 0 - ROOM], [at, FLOOR, ROOM]])
+        pairs = group.add(pairs, [[0 - ROOM, FLOOR, at], [ROOM, FLOOR, at]])
+        pairs = group.add(pairs, [[at, FLOOR, ROOM], [at, CEILING, ROOM]])
+        pairs = group.add(pairs, [[0 - ROOM, FLOOR, at], [0 - ROOM, CEILING, at]])
+    }
+    drum ((CEILING - FLOOR) / ROW) {
+        @height = FLOOR + (beat + 1) * ROW
+        pairs = group.add(pairs, [[0 - ROOM, height, ROOM], [ROOM, height, ROOM]])
+        pairs = group.add(pairs, [[0 - ROOM, height, 0 - ROOM], [0 - ROOM, height, ROOM]])
+    }
+    out segments("комната", pairs)
+}
+
+skill center_mark() {
+    @mark = segments("центр", [[[0 - CROSS, 0, 0], [CROSS, 0, 0]], [[0, 0 - CROSS, 0], [0, CROSS, 0]], [[0, 0, 0 - CROSS], [0, 0, CROSS]], [[0, 0, 0], [0, FLOOR - PIVOT, 0]]])
+    mark.y = PIVOT
+    out mark
+}
+
+skill build_shapes() {
+    @shapes = [room()]
+    shapes = group.add(shapes, solid("октаэдр", octahedron(), 700, [-1600, -200, -1200], [6, 2]))
+    shapes = group.add(shapes, sphere(900, [1400, -300, 900], [3, 1]))
+    shapes = group.add(shapes, solid("тетраэдр", tetrahedron(), 520, [-2600, -500, 2300], [10, 4]))
+    shapes = group.add(shapes, solid("икосаэдр", icosahedron(), 420, [200, 900, 2600], [4, 7]))
+    shapes = group.add(shapes, solid("додекаэдр", dodecahedron(), 420, [2700, 0, -1900], [5, 3]))
+    shapes = group.add(shapes, pyramid(800, [-300, -800, -2700], [8, 0]))
+    shapes = group.add(shapes, prism(420, [2900, -700, 2700], [2, 5]))
+    shapes = group.add(shapes, solid("малый тетраэдр", tetrahedron(), 220, [-3000, 1500, -800], [14, 9]))
+    out group.add(shapes, center_mark())
+}

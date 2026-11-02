@@ -1,0 +1,396 @@
+-- wire — каркасная 3D-сцена: комната (пол и две стены сетками), в ней
+-- многогранники разного размера, каждый вращается сам со своей скоростью
+-- вокруг двух осей; крестик-центр с «верёвочкой» до пола. Один цвет — цвет
+-- шара, яркость по глубине; выбранное — горчичное. Дельта без мерцания:
+-- карта отметок (по числу на пиксель) — сначала рисуются новые линии всех
+-- фигур с отметкой кадра, потом по старым линиям гаснут только пиксели без
+-- неё; горящий пиксель не трогается. Комната помечена «навсегда», фигуры её не
+-- трогают. При движении камеры — полная перерисовка.
+-- Углы — в 1/16°, синус
+-- сглаживается между градусами, поэтому медленное вращение плавное.
+-- Клавиши: Tab — выбор фигуры или центра. Фигура: ←→ повернуть, ↑↓ выше и
+-- ниже. Центр: ←→ облёт камеры, ↑↓ наклон, оба на 360°. Пробел — пауза,
+-- Esc — выход.
+-- По сети: wire tab | left | right | up | down | pause; state, quit, shot.
+--
+-- Ракурс камеры сохраняется в \SALTIC\WIRE.TXT при каждом изменении и
+-- поднимается при следующем открытии.
+-- Справа сверху — табличка: выбор, камера, высота и поворот выбранной фигуры,
+-- кадры в секунду; её место помечено «навсегда», фигуры её не задевают.
+--
+-- program() — сцена до Esc или quit; фигуры — в wire/solids
+
+use core.str
+use core.num
+use core.mem
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.remote
+use os.target.uefi_x86_64.programs.wire.solids
+use os.target.uefi_x86_64.screen.lettering
+use os.target.uefi_x86_64.storage.notes
+use os.target.uefi_x86_64.platform.parse
+
+DISTANCE = 20000
+FOCAL = 2500
+NEAR = 14000
+FAR = 26000
+TINT = [90, 210, 230]
+MUSTARD = [225, 173, 1]
+TURN_STEP = 5
+LIFT_STEP = 100
+START_TURN = 320
+START_TILT = 343
+VIEW_NOTE = "WIRE.TXT"
+FRAME_PAUSE = 8000
+ROOM_MARK = 268435000
+PANEL_WIDTH = 330
+PANEL_LINES = 5
+PANEL_LINE = 18
+PANEL_MARGIN = 12
+BOOT_SET_MEM = 360
+SCAN_UP = 1
+SCAN_DOWN = 2
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+SCAN_ESCAPE = 23
+TAB = 9
+SPACE = 32
+FRAMES = 200000000
+CLOCK_EVERY = 16
+
+Scene = Box {
+    turn = START_TURN,
+    tilt = START_TILT,
+    chosen = 0,
+    frozen = no,
+    moved = yes,
+    stamp = 0,
+    keep_view = no,
+    panel = "",
+    quit = no,
+    frames = 0,
+    second = -1,
+    counted = 0,
+    rate = 0
+}
+
+skill project(screen, shape, scene) {
+    @c0 = solids.fine_cosine(shape.yaw)
+    @s0 = solids.fine_sine(shape.yaw)
+    @c3 = solids.fine_cosine(shape.roll)
+    @s3 = solids.fine_sine(shape.roll)
+    @c1 = solids.cosine(scene.turn)
+    @s1 = solids.sine(scene.turn)
+    @c2 = solids.cosine(scene.tilt)
+    @s2 = solids.sine(scene.tilt)
+    @found = []
+    drum (shape.points) {
+        @lx = group.get(beat, 0)
+        @ly = group.get(beat, 1)
+        @lz = group.get(beat, 2)
+        @ry = (ly * c3 - lz * s3) / solids.ONE
+        @rz = (ly * s3 + lz * c3) / solids.ONE
+        @x = (lx * c0 - rz * s0) / solids.ONE + shape.x
+        @y = ry + shape.y - solids.PIVOT
+        @z = (lx * s0 + rz * c0) / solids.ONE + shape.z
+        @x1 = (x * c1 - z * s1) / solids.ONE
+        @z1 = (x * s1 + z * c1) / solids.ONE
+        @y2 = (y * c2 - z1 * s2) / solids.ONE
+        @z2 = (y * s2 + z1 * c2) / solids.ONE + DISTANCE
+        found = group.add(found, [screen.width / 2 + x1 * FOCAL / z2, screen.height / 2 - y2 * FOCAL / z2, z2])
+    }
+    out found
+}
+
+skill shade(shades, depth) {
+    @level = (depth - NEAR) * 16 / (FAR - NEAR)
+    (level < 0) { level = 0 }
+    (level > 15) { level = 15 }
+    out group.get(shades, level)
+}
+
+skill make_shades(screen) {
+    @shades = []
+    drum (16) {
+        @bright = 220 - beat * 11
+        shades = group.add(shades, graphics.color(screen, group.get(TINT, 0) * bright / 256, group.get(TINT, 1) * bright / 256, group.get(TINT, 2) * bright / 256))
+    }
+    out shades
+}
+
+skill plot(screen, stamps, x, y, value, mark) {
+    (x < 0) { out none }
+    (y < 0) { out none }
+    (x > screen.width - 1) { out none }
+    (y > screen.height - 1) { out none }
+    @at = (y * screen.stride + x) * graphics.PIXEL_BYTES
+    @was = mem.load32(stamps.memory, at)
+    (mark == ROOM_MARK) {
+        mem.store32(stamps.memory, at, ROOM_MARK)
+        out mem.store32(screen.memory, at, value)
+    }
+    (was == ROOM_MARK) { out none }
+    (mark > 0) {
+        mem.store32(stamps.memory, at, mark)
+        out mem.store32(screen.memory, at, value)
+    }
+    (was == 0 - mark) { out none }
+    (was == 0) { out none }
+    mem.store32(stamps.memory, at, 0)
+    out mem.store32(screen.memory, at, value)
+}
+
+skill wire_line(screen, stamps, from, to, value, mark) {
+    @x = group.get(from, 0)
+    @y = group.get(from, 1)
+    @x_end = group.get(to, 0)
+    @y_end = group.get(to, 1)
+    @dx = solids.magnitude(x_end - x)
+    @dy = 0 - solids.magnitude(y_end - y)
+    @sx = 1
+    (x_end < x) { sx = -1 }
+    @sy = 1
+    (y_end < y) { sy = -1 }
+    @fault = dx + dy
+    @steps = dx
+    (0 - dy > steps) { steps = 0 - dy }
+    drum (steps + 1) {
+        plot(screen, stamps, x, y, value, mark)
+        @twice = fault * 2
+        (twice > dy - 1) {
+            fault = fault + dy
+            x = x + sx
+        }
+        (twice < dx + 1) {
+            fault = fault + dx
+            y = y + sy
+        }
+    }
+    out none
+}
+
+skill draw_edges(screen, stamps, shape, points, value, shades, mark) {
+    (group.count(points) == 0) { out none }
+    drum (shape.edges) {
+        @from = group.get(points, group.get(beat, 0))
+        @to = group.get(points, group.get(beat, 1))
+        @ink = value
+        (value < 0) { ink = shade(shades, (group.get(from, 2) + group.get(to, 2)) / 2) }
+        wire_line(screen, stamps, from, to, ink, mark)
+    }
+    out none
+}
+
+skill clear_stamps(stamps) {
+    @base = firmware.guest_base()
+    @set = firmware.pointer(uefi.boot_services(base), base, BOOT_SET_MEM)
+    out firmware.call(base, set, [stamps.frame, firmware.number(stamps.stride * stamps.height * graphics.PIXEL_BYTES), firmware.number(0)])
+}
+
+skill scene_frame(screen, stamps, shapes, scene, shades, chosen_ink, background) {
+    (scene.moved == yes) {
+        graphics.fill(screen, 0, 0, screen.width, screen.height, background)
+        clear_stamps(stamps)
+        drum (shapes) { beat.shown = [] }
+        @walls = group.get(shapes, 0)
+        walls.shown = project(screen, walls, scene)
+        draw_edges(screen, stamps, walls, walls.shown, -1, shades, ROOM_MARK)
+        scene.panel = ""
+        scene.moved = no
+    }
+    scene.stamp = scene.stamp + 1
+    @fresh = []
+    drum (group.count(shapes) - 1) {
+        @index = beat + 1
+        @shape = group.get(shapes, index)
+        (scene.frozen == no) {
+            shape.yaw = shape.yaw + shape.yaw_speed
+            shape.roll = shape.roll + shape.roll_speed
+        }
+        @points = project(screen, shape, scene)
+        fresh = group.add(fresh, points)
+        @ink = -1
+        (index == scene.chosen + 1) { ink = chosen_ink }
+        draw_edges(screen, stamps, shape, points, ink, shades, scene.stamp)
+    }
+    drum (group.count(shapes) - 1) {
+        @shape = group.get(shapes, beat + 1)
+        draw_edges(screen, stamps, shape, shape.shown, background, shades, 0 - scene.stamp)
+        shape.shown = group.get(fresh, beat)
+    }
+    out none
+}
+
+skill load_view(base, scene) {
+    @saved = notes.load_note(base, VIEW_NOTE) rescue |err| { "" }
+    @words = str.split(saved, " ")
+    (group.count(words) < 2) { out no }
+    scene.turn = num.mod(parse.parse_size(group.get(words, 0)), 360)
+    scene.tilt = num.mod(parse.parse_size(str.slice(group.get(words, 1), 0, 3)), 360)
+    out yes
+}
+
+skill save_view(base, scene) {
+    (scene.keep_view == no) { out none }
+    scene.keep_view = no
+    @turn = scene.turn
+    @tilt = scene.tilt
+    notes.save_note(base, VIEW_NOTE, "{turn} {tilt}") rescue |err| { none }
+    out none
+}
+
+skill panel_lines(shapes, scene) {
+    @chosen = group.get(shapes, scene.chosen + 1)
+    @name = chosen.name
+    @turn = scene.turn
+    @tilt = scene.tilt
+    @rate = scene.rate
+    @found = ["выбрано: {name}", "камера: облёт {turn}, наклон {tilt}"]
+    pick {
+        (scene.chosen == group.count(shapes) - 2) { found = group.add(found, "стрелки двигают камеру") }
+        {
+            @height = chosen.y
+            @turned = num.mod(chosen.yaw / solids.FINE + 36000, 360)
+            found = group.add(found, "высота {height}, поворот {turned}")
+        }
+    }
+    found = group.add(found, "кадров в секунду {rate}")
+    (scene.frozen == yes) { found = group.add(found, "пауза") }
+    out found
+}
+
+skill draw_panel(screen, stamps, shapes, scene, background, ink, chosen_ink) {
+    @lines = panel_lines(shapes, scene)
+    @joined = str.join(lines, "|")
+    (joined == scene.panel) { out none }
+    scene.panel = joined
+    @left = screen.width - PANEL_WIDTH
+    @height = PANEL_LINES * PANEL_LINE + PANEL_MARGIN
+    graphics.fill(screen, left, 0, PANEL_WIDTH, height, background)
+    drum (height) {
+        @row = beat * screen.stride
+        drum (PANEL_WIDTH) { mem.store32(stamps.memory, (row + left + beat) * graphics.PIXEL_BYTES, ROOM_MARK) }
+    }
+    drum (group.count(lines)) {
+        @color = ink
+        (beat == 0) { color = chosen_ink }
+        lettering.paint_text(screen, lettering.FACE_SMALL, left + PANEL_MARGIN, PANEL_MARGIN + beat * PANEL_LINE, group.get(lines, beat), color)
+    }
+    out none
+}
+
+skill act(shapes, scene, action) {
+    (action == "pause") {
+        scene.frozen = scene.frozen == no
+        out yes
+    }
+    (scene.frozen == yes) { out no }
+    @last = group.count(shapes) - 2
+    (action == "tab") { scene.chosen = num.mod(scene.chosen + 1, last + 1) }
+    @shape = group.get(shapes, scene.chosen + 1)
+    pick {
+        (scene.chosen == last) {
+            scene.moved = yes
+            scene.keep_view = yes
+            (action == "left") { scene.turn = num.mod(scene.turn + 360 - TURN_STEP, 360) }
+            (action == "right") { scene.turn = num.mod(scene.turn + TURN_STEP, 360) }
+            (action == "up") { scene.tilt = num.mod(scene.tilt + TURN_STEP, 360) }
+            (action == "down") { scene.tilt = num.mod(scene.tilt + 360 - TURN_STEP, 360) }
+        }
+        {
+            (action == "left") { shape.yaw = shape.yaw - TURN_STEP * solids.FINE }
+            (action == "right") { shape.yaw = shape.yaw + TURN_STEP * solids.FINE }
+            (action == "up") { shape.y = shape.y + LIFT_STEP }
+            (action == "down") { shape.y = shape.y - LIFT_STEP }
+        }
+    }
+    out yes
+}
+
+skill key_action(key) {
+    (key.char == TAB) { out "tab" }
+    (key.char == SPACE) { out "pause" }
+    (key.scan == SCAN_LEFT) { out "left" }
+    (key.scan == SCAN_RIGHT) { out "right" }
+    (key.scan == SCAN_UP) { out "up" }
+    (key.scan == SCAN_DOWN) { out "down" }
+    out ""
+}
+
+skill count_rate(base, scene) {
+    scene.frames = scene.frames + 1
+    scene.counted = scene.counted + 1
+    (num.mod(scene.frames, CLOCK_EVERY) > 0) { out no }
+    @moment = uefi.now(base)
+    (moment.second == scene.second) { out no }
+    (scene.second > -1) { scene.rate = scene.counted }
+    scene.second = moment.second
+    scene.counted = 0
+    out yes
+}
+
+skill state_text(shapes, scene) {
+    @chosen = group.get(shapes, scene.chosen + 1)
+    @name = chosen.name
+    @frozen = ""
+    (scene.frozen == yes) { frozen = " (пауза)" }
+    @edges = 0
+    drum (shapes) { edges = edges + group.count(beat.edges) }
+    @figures = group.count(shapes) - 2
+    @turn = scene.turn
+    @tilt = scene.tilt
+    @rate = scene.rate
+    out "каркас{frozen}: {figures} фигур, {edges} рёбер; выбрано: {name}; камера — облёт {turn}°, наклон {tilt}°; кадров в секунду {rate}"
+}
+
+skill listen(link, shapes, scene) {
+    drum (remote.serve(link)) {
+        @packet = beat
+        (str.starts_with(packet.text, "wire") == yes) {
+            @words = str.split(packet.text, " ")
+            @action = ""
+            (group.count(words) > 1) { action = group.get(words, 1) }
+            act(shapes, scene, action)
+            remote.reply_text(link, packet, state_text(shapes, scene))
+        }
+    }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    uefi.forget_keys(base)
+    @screen = graphics.open(base)
+    @stamps = graphics.buffer_like(base, screen)
+    @background = graphics.color(screen, 12, 16, 28)
+    @chosen_ink = graphics.color(screen, group.get(MUSTARD, 0), group.get(MUSTARD, 1), group.get(MUSTARD, 2))
+    @shades = make_shades(screen)
+    @shapes = solids.build_shapes()
+    @scene = Scene { chosen = group.count(shapes) - 2 }
+    load_view(base, scene)
+    @ink = graphics.color(screen, 150, 170, 190)
+    @link = remote.open_remote() rescue |err| { none }
+    ((link == none) == no) { remote.own(link, stamps.frame, graphics.buffer_pages(screen)) }
+    drum (FRAMES) {
+        scene_frame(screen, stamps, shapes, scene, shades, chosen_ink, background)
+        draw_panel(screen, stamps, shapes, scene, background, ink, chosen_ink)
+        save_view(base, scene)
+        (count_rate(base, scene) == yes) {
+            ((link == none) == no) { remote.tell(link, state_text(shapes, scene)) }
+        }
+        ((link == none) == no) { listen(link, shapes, scene) }
+        @key = uefi.poll_key(base, FRAME_PAUSE)
+        (key.scan == SCAN_ESCAPE) {
+            uefi.free_pages(base, stamps.frame, graphics.buffer_pages(screen))
+            reply.home(state_text(shapes, scene))
+            out none
+        }
+        @action = key_action(key)
+        ((action == "") == no) { act(shapes, scene, action) }
+    }
+    out none
+}
