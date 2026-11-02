@@ -1,17 +1,37 @@
+-- remote — сеть для программ, пока агент ждёт их возвращения: программа раз
+-- в кадр зовёт serve. Общий протокол, который remote ведёт сам за любую
+-- программу (порт 5555, команды текстом):
+--   quit  — выйти на главный экран агента (reply.home), из любой программы
+--   state — ответить текстом, который программа сообщила о себе через tell
+--   shot  — снимок экрана (tools/shot.py)
+-- Остальные пакеты UDP на 5555 отдаются программе — у неё свои команды.
+--
+-- Remote — карта, состояние программы текстом, байты последнего снимка
+-- open_remote() -> Remote; без кабеля — NoLink
+-- serve(remote) -> группа пакетов Udp для программы
+-- tell(remote, text) — сообщить своё состояние (отвечает на state)
+-- reply_text(remote, packet, text) — ответить отправителю
+-- send_to(remote, packet, port, text_bytes) — ответить на другой порт
+-- answer(remote, bytes) -> пакет или none — разбор одного кадра (для serve)
+
 use core.str
 use core.group
 use os.target.uefi_x86_64.drivers.rtl8111
 use os.target.uefi_x86_64.network.net
 use os.target.uefi_x86_64.network.shot
 use os.target.uefi_x86_64.platform.parse
+use os.target.uefi_x86_64.network.reply
 
 MY_IP = [10, 0, 0, 2]
 PORT = 5555
 PART = "shot-part "
 
+QUIET_STATE = "программа не рассказала о себе (нет remote.tell)"
+
 Remote = Box {
     card = rtl8111.Card {},
-    shot_bytes = 0
+    shot_bytes = 0,
+    state = ""
 }
 
 skill open_remote() {
@@ -41,6 +61,17 @@ skill answer(remote, bytes) {
         reply_text(remote, packet, shot.caption(remote.card, remote.shot_bytes))
         out none
     }
+    (packet.text == "state") {
+        @told = remote.state
+        (str.len(told) == 0) { told = QUIET_STATE }
+        reply_text(remote, packet, told)
+        out none
+    }
+    (packet.text == "quit") {
+        reply_text(remote, packet, "выхожу на главный экран")
+        reply.home("вышла по команде quit")
+        out none
+    }
     out packet
 }
 
@@ -59,4 +90,9 @@ skill serve(remote) {
 
 skill send_to(remote, packet, port, text_bytes) {
     out rtl8111.send(remote.card, net.udp_frame_bytes(remote.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, port, text_bytes))
+}
+
+skill tell(remote, text) {
+    remote.state = text
+    out none
 }

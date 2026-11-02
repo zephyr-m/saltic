@@ -23,7 +23,7 @@ use os.target.uefi_x86_64.network.reply
 use os.target.uefi_x86_64.agent.programs
 use os.target.uefi_x86_64.agent.shelf
 
-VERSION = 10
+VERSION = 11
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -38,7 +38,7 @@ UPLOAD_PAGES = 8192
 REPORT_EVERY = 32768
 MY_IP = [10, 0, 0, 2]
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран (после run экран у программы, лента молчит до clear) | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | usb — устройства USB | camera — что умеет камера | code <текст> — показать кусок кода | keep <имя> — сохранить принятую программу на диск, она появится в панели (Enter — открыть) | time — дата и время | reboot — перезагрузить ноутбук | shot — снимок экрана (забирает tools/shot.py)"
+HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран (после run экран у программы, лента молчит до clear) | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | usb — устройства USB | camera — что умеет камера | code <текст> — показать кусок кода | keep <имя> — сохранить принятую программу на диск, она появится в панели (Enter — открыть) | open <имя> — открыть программу из панели (ответ сразу, программа — следом) | state — где я и что вокруг текстом; в программе: state, quit (выйти), shot | time — дата и время | reboot — перезагрузить ноутбук | shot — снимок экрана (забирает tools/shot.py)"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -65,7 +65,8 @@ Agent = Box {
     names = [],
     chosen = 0,
     limit = ARENA_LIMIT,
-    linked = no
+    linked = no,
+    opening = ""
 }
 
 COUNTDOWN = 5
@@ -217,6 +218,28 @@ skill keep_program(agent, words) {
     out "сохранил {name}: {written} байт в \\SALTIC\\BIN"
 }
 
+skill home_state(agent) {
+    @shelf_list = str.join(agent.names, ", ")
+    @chosen = "нет"
+    (group.count(agent.names) > 0) { chosen = group.get(agent.names, agent.chosen) }
+    @link = link_russian(rtl8111.status(agent.card))
+    out "главный экран агента {VERSION}; программы в панели: {shelf_list}; выбрана: {chosen}; линк: {link}"
+}
+
+skill open_by_word(agent, words) {
+    (group.count(words) < 2) { out "как: open <имя>" }
+    @wanted = str.upper(group.get(words, 1))
+    drum (group.count(agent.names)) {
+        (group.get(agent.names, beat) == wanted) {
+            agent.chosen = beat
+            agent.opening = wanted
+            out "открываю {wanted}"
+        }
+    }
+    @known = str.join(agent.names, ", ")
+    out "нет программы {wanted} в панели; есть: {known}"
+}
+
 skill open_program(agent) {
     (group.count(agent.names) == 0) { out none }
     @name = group.get(agent.names, agent.chosen)
@@ -302,6 +325,8 @@ skill execute(agent, text, payload) {
     (name == "usb") { out usb.report(agent.card.base) }
     (name == "code") { out show_code(agent, payload) }
     (name == "keep") { out keep_program(agent, words) }
+    (name == "open") { out open_by_word(agent, words) }
+    (name == "state") { out home_state(agent) }
     (name == "camera") { out camera.report(agent.card.base) }
     (name == "protocols") { out usb.protocols(agent.card.base, words) }
     (name == "time") { out time_reply(agent) }
@@ -361,6 +386,10 @@ skill answer(agent, bytes) {
     @sent = rtl8111.send(agent.card, frame)
     log(agent, "  replied {sent} bytes")
     agent.commands = agent.commands + 1
+    ((agent.opening == "") == no) {
+        agent.opening = ""
+        open_program(agent) rescue |err| { feed.show_reply(agent, feed.text_bytes("не открылась: {err}", 200)) }
+    }
     (agent.restart == yes) {
         countdown(agent, COUNTDOWN)
         uefi.restart(agent.card.base)
