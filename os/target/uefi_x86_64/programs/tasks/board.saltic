@@ -1,0 +1,154 @@
+-- board — модель доски задач: три колонки, задачи с номерами, выбор и «в руке».
+-- Номер задачи — её место в списке, с 1; колонки 0 «Надо», 1 «Делаю», 2 «Готово».
+-- Доска меняется на месте (Box), навыки отдают текст ответа или yes/no.
+--
+-- Board — names, columns, selected (номер выбранной, 0 — нет), holding
+-- starting_board() -> Board — наши настоящие задачи
+-- column_word(word) -> 0..2, -1 — не колонка; понимает цифры, рус. и англ.
+-- put_task(desk, column, name) -> номер
+-- shift_task(desk, number, column) -> yes/no
+-- tasks_in(desk, column) -> группа номеров
+-- choose(desk, scan) -> yes, если что-то поменялось; стрелки (пустые колонки
+--     перепрыгивает), держа задачу — перенос
+-- grab(desk) — Enter: взять или положить выбранную
+-- board_text(desk) -> текст для ответа по сети
+
+use core.str
+use core.group
+
+COLUMN_NAMES = ["Надо", "Делаю", "Готово"]
+SCAN_UP = 1
+SCAN_DOWN = 2
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+STARTING = [
+    [0, "Агент 11: глухота RTL8111"],
+    [0, "Wi-Fi: WMI_INIT и MAC-адрес"],
+    [0, "Wi-Fi: поиск сетей"],
+    [0, "Баг имён модулей и локальных"],
+    [0, "Битовые операции у чисел"],
+    [0, "64-битные и дробные числа"],
+    [0, "Шапки во всех файлах"],
+    [1, "Доска задач на Acer"],
+    [2, "Комментарии -- в шапке"],
+    [2, "Wi-Fi: прошивка и паспорт"],
+    [2, "Раскладка uefi_x86_64"],
+    [2, "Агент 10: жизнь без кабеля"],
+]
+
+Board = Box {
+    names = [],
+    columns = [],
+    selected = 1,
+    holding = no
+}
+
+skill starting_board() {
+    @desk = Board {}
+    drum (STARTING) { put_task(desk, group.get(beat, 0), group.get(beat, 1)) }
+    out desk
+}
+
+skill column_word(word) {
+    @low = str.lower(word)
+    (low == "0") { out 0 }
+    (low == "1") { out 1 }
+    (low == "2") { out 2 }
+    (low == "надо") { out 0 }
+    (low == "делаю") { out 1 }
+    (low == "готово") { out 2 }
+    (low == "todo") { out 0 }
+    (low == "doing") { out 1 }
+    (low == "done") { out 2 }
+    out -1
+}
+
+skill put_task(desk, column, name) {
+    desk.names = group.add(desk.names, name)
+    desk.columns = group.add(desk.columns, column)
+    out group.count(desk.names)
+}
+
+skill shift_task(desk, number, column) {
+    (number < 1) { out no }
+    (number > group.count(desk.columns)) { out no }
+    (column < 0) { out no }
+    (column > 2) { out no }
+    @changed = []
+    drum (group.count(desk.columns)) {
+        pick {
+            (beat + 1 == number) { changed = group.add(changed, column) }
+            { changed = group.add(changed, group.get(desk.columns, beat)) }
+        }
+    }
+    desk.columns = changed
+    out yes
+}
+
+skill tasks_in(desk, column) {
+    @found = []
+    drum (group.count(desk.columns)) {
+        (group.get(desk.columns, beat) == column) { found = group.add(found, beat + 1) }
+    }
+    out found
+}
+
+skill place_of(found, number) {
+    drum (group.count(found)) {
+        (group.get(found, beat) == number) { out beat }
+    }
+    out -1
+}
+
+skill choose(desk, scan) {
+    (group.count(desk.names) == 0) { out no }
+    @column = group.get(desk.columns, desk.selected - 1)
+    @here = tasks_in(desk, column)
+    @place = place_of(here, desk.selected)
+    (scan == SCAN_UP) {
+        (place > 0) { desk.selected = group.get(here, place - 1) }
+        out yes
+    }
+    (scan == SCAN_DOWN) {
+        (place < group.count(here) - 1) { desk.selected = group.get(here, place + 1) }
+        out yes
+    }
+    @aim = column
+    (scan == SCAN_RIGHT) { aim = column + 1 }
+    (scan == SCAN_LEFT) { aim = column - 1 }
+    (aim == column) { out no }
+    (aim < 0) { out no }
+    (aim > 2) { out no }
+    (desk.holding == yes) { out shift_task(desk, desk.selected, aim) }
+    @there = tasks_in(desk, aim)
+    (group.count(there) == 0) {
+        aim = aim + (aim - column)
+        (aim < 0) { out no }
+        (aim > 2) { out no }
+        there = tasks_in(desk, aim)
+        (group.count(there) == 0) { out no }
+    }
+    @row = place
+    (row > group.count(there) - 1) { row = group.count(there) - 1 }
+    desk.selected = group.get(there, row)
+    out yes
+}
+
+skill grab(desk) {
+    desk.holding = desk.holding == no
+    out yes
+}
+
+skill board_text(desk) {
+    @told = ""
+    drum (3) {
+        @column = beat
+        @title = group.get(COLUMN_NAMES, column)
+        told = "{told}{title}:\n"
+        drum (tasks_in(desk, column)) {
+            @name = group.get(desk.names, beat - 1)
+            told = "{told}  {beat}. {name}\n"
+        }
+    }
+    out told
+}

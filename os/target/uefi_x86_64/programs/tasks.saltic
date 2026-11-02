@@ -1,0 +1,134 @@
+-- tasks — доска задач Saltic на Acer: «Надо → Делаю → Готово», на UIEngine.
+-- Клавиши: стрелки — выбор, Enter — взять и положить, Esc — на главный экран.
+-- По сети (порт 5555, пока программа открыта): `tools/say.py tasks …` —
+-- list, add <текст>, move <номер> <колонка>; колонка — 0..2, надо/делаю/готово.
+-- Ответ на команду — что сделано и вся доска текстом; state — то же без
+-- действия, quit — выход (общие команды remote). Открыть — `open tasks`.
+-- Доска хранится в \SALTIC\TASKS.TXT и переживает перезагрузку.
+--
+-- program() — доска; без кабеля работает только с клавиатуры
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.platform.parse
+use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.remote
+use os.uiengine
+use os.target.uefi_x86_64.programs.tasks.board
+use os.target.uefi_x86_64.programs.tasks.view
+use os.target.uefi_x86_64.programs.tasks.store
+
+SCAN_ESCAPE = 23
+ENTER = 13
+LOOPS = 200000000
+PAUSE = 2000
+PREFIX = "tasks"
+
+Session = Box {
+    quit = no,
+    note = "доска открыта"
+}
+
+skill state_text(desk, session) {
+    @note = session.note
+    @chosen = desk.selected
+    @hand = ""
+    (desk.holding == yes) { hand = ", в руке" }
+    @listed = board.board_text(desk)
+    out "доска задач: {note}; выбрана №{chosen}{hand}\n{listed}"
+}
+
+skill redraw(link, desk, session) {
+    ((link == none) == no) { remote.tell(link, state_text(desk, session)) }
+    out uiengine.show(view.board_jtml(desk, session.note))
+}
+
+skill command(desk, session, words) {
+    @parts = str.split(words, " ")
+    (group.count(parts) < 2) { out board.board_text(desk) }
+    @verb = group.get(parts, 1)
+    (verb == "list") { out board.board_text(desk) }
+    (verb == "add") {
+        @name = str.slice(words, str.len("tasks add "), str.len(words))
+        (str.len(name) == 0) { out "как: tasks add <текст>" }
+        @number = board.put_task(desk, 0, name)
+        session.note = "Claude добавила №{number}"
+        out "добавлена №{number}: {name}"
+    }
+    (verb == "move") {
+        (group.count(parts) < 4) { out "как: tasks move <номер> <надо|делаю|готово>" }
+        @number = parse.parse_size(group.get(parts, 2))
+        @column = board.column_word(group.get(parts, 3))
+        (board.shift_task(desk, number, column) == no) { out "нет такой задачи или колонки" }
+        @where = group.get(board.COLUMN_NAMES, column)
+        desk.selected = number
+        session.note = "Claude: №{number} в «{where}»"
+        out "№{number} теперь в «{where}»"
+    }
+    out "команды: tasks list | tasks add <текст> | tasks move <номер> <колонка>"
+}
+
+skill listen(link, desk, session) {
+    @changed = no
+    drum (remote.serve(link)) {
+        @packet = beat
+        (str.starts_with(packet.text, PREFIX) == yes) {
+            @before = board.board_text(desk)
+            @said = command(desk, session, packet.text)
+            @after = state_text(desk, session)
+            remote.reply_text(link, packet, "{said}\n\n{after}")
+            ((board.board_text(desk) == before) == no) { changed = yes }
+        }
+    }
+    out changed
+}
+
+skill press(base, desk, session) {
+    @key = uefi.poll_key(base, PAUSE)
+    (key.scan == SCAN_ESCAPE) {
+        session.quit = yes
+        out no
+    }
+    (key.char == ENTER) {
+        board.grab(desk)
+        @held = desk.selected
+        session.note = "в руке №{held}"
+        (desk.holding == no) { session.note = "положила" }
+        out yes
+    }
+    (key.scan == 0) { out no }
+    out board.choose(desk, key.scan)
+}
+
+skill tick(base, link, desk, session) {
+    @changed = press(base, desk, session)
+    @heard = no
+    ((link == none) == no) { heard = listen(link, desk, session) }
+    (heard == yes) { changed = yes }
+    (changed == no) { out none }
+    redraw(link, desk, session)
+    store.save_desk(base, desk) rescue |err| { session.note = "не сохранила: {err}" }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    uefi.forget_keys(base)
+    @desk = store.load_desk(base) rescue |err| { board.starting_board() }
+    @session = Session {}
+    redraw(none, desk, session)
+    @link = remote.open_remote() rescue |err| { none }
+    (link == none) { session.note = "без сети" }
+    redraw(link, desk, session)
+    drum (LOOPS) {
+        tick(base, link, desk, session)
+        (session.quit == yes) {
+            @total = group.count(desk.names)
+            reply.home("Задачи: {total} на доске")
+            out none
+        }
+    }
+    out none
+}

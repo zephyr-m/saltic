@@ -1,0 +1,102 @@
+-- store — доска на диске Acer: \SALTIC\TASKS.TXT, по строке на задачу:
+-- «колонка|текст» (колонка — цифра 0..2). Пишется целиком заново; старый
+-- файл сначала удаляется. Нет файла — доска начинается с наших задач.
+--
+-- load_desk(base) -> Board; нет файла — starting_board
+-- save_desk(base, desk) -> байт записано; WriteFailed
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.utf8
+use os.target.uefi_x86_64.storage.files
+use os.target.uefi_x86_64.programs.tasks.board
+
+FOLDER = "SALTIC"
+FILE_NAME = "TASKS.TXT"
+FILE_DELETE = 24
+MODE_READ_WRITE = 3
+BUFFER = 131072
+LIMIT = 32768
+LINE_END = 10
+BAR = 124
+ZERO = 48
+
+skill desk_buffer(base) {
+    out firmware.add(firmware.arena(base), BUFFER)
+}
+
+skill desk_bytes(desk) {
+    @found = []
+    drum (group.count(desk.names)) {
+        found = group.add(found, ZERO + group.get(desk.columns, beat))
+        found = group.add(found, BAR)
+        found = group.concat(found, utf8.encode(group.get(desk.names, beat)))
+        found = group.add(found, LINE_END)
+    }
+    out found
+}
+
+skill drop_old(base, folder) {
+    @child_at = firmware.scratch(base, files.SCRATCH_POINTER)
+    @opened = firmware.call(base, firmware.pointer(folder, base, files.FILE_OPEN), [folder, child_at, files.wide_name(base, FILE_NAME), firmware.number(MODE_READ_WRITE), firmware.number(0)])
+    (opened.failed == yes) { out none }
+    @old = firmware.pointer(child_at, base, 0)
+    out firmware.call(base, firmware.pointer(old, base, FILE_DELETE), [old])
+}
+
+skill save_desk(base, desk) {
+    @written = desk_bytes(desk)
+    @buffer = desk_buffer(base)
+    drum (group.count(written)) { firmware.write8(buffer, base, beat, group.get(written, beat)) }
+    @root = files.saltic_root(base)
+    @folder = files.create(base, root, FOLDER, files.DIRECTORY)
+    drop_old(base, folder)
+    @file = files.create(base, folder, FILE_NAME, 0)
+    @size_at = firmware.scratch(base, files.SCRATCH_SIZE)
+    firmware.write64(size_at, base, 0, firmware.number(group.count(written)))
+    @done = firmware.call(base, firmware.pointer(file, base, files.FILE_WRITE), [file, size_at, buffer])
+    firmware.call(base, firmware.pointer(file, base, files.FILE_FLUSH), [file])
+    files.close_file(base, file)
+    files.close_file(base, folder)
+    files.close_file(base, root)
+    (done.failed == yes) { out error.WriteFailed }
+    out group.count(written)
+}
+
+skill stored_bytes(base) {
+    @root = files.saltic_root(base)
+    @file = files.open_child(base, root, "SALTIC\\TASKS.TXT") rescue |err| {
+        files.close_file(base, root)
+        out []
+    }
+    @buffer = desk_buffer(base)
+    @size_at = firmware.scratch(base, files.SCRATCH_SIZE)
+    firmware.write64(size_at, base, 0, firmware.number(LIMIT))
+    @asked = firmware.call(base, firmware.pointer(file, base, files.FILE_READ), [file, size_at, buffer])
+    files.close_file(base, file)
+    files.close_file(base, root)
+    (asked.failed == yes) { out [] }
+    @size = firmware.read16(size_at, base, 0)
+    @found = []
+    drum (size) { found = group.add(found, firmware.read8(buffer, base, beat)) }
+    out found
+}
+
+skill load_desk(base) {
+    @stored = stored_bytes(base)
+    (group.count(stored) == 0) { out board.starting_board() }
+    @desk = board.Board {}
+    @start = 0
+    drum (group.count(stored)) {
+        (group.get(stored, beat) == LINE_END) {
+            (beat - start > 2) {
+                @column = group.get(stored, start) - ZERO
+                board.put_task(desk, column, utf8.decode(stored, start + 2, beat - start - 2))
+            }
+            start = beat + 1
+        }
+    }
+    (group.count(desk.names) == 0) { out board.starting_board() }
+    out desk
+}
