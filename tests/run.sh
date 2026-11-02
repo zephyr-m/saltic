@@ -220,7 +220,7 @@ test_native() {
         tests/fixtures/imports.saltic \
         "$work/native/imports" \
         67108864
-    test "$("$work/native/imports")" = "$(printf 'длина: 6\nпусто: yes\nстрок: 3\nфайл прочитан: yes')"
+    test "$("$work/native/imports")" = "$(printf 'длина: 6\nпусто: yes\nстрок: 3\nфайл прочитан: yes\nбайт 259: ByteOutsideRange')"
     SALTIC_TARGET=x86_64 build native-big-numbers \
         tests/fixtures/big-numbers.saltic \
         "$work/native/big-numbers" \
