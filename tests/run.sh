@@ -216,6 +216,31 @@ test_dict() {
     echo "словарь: запись на месте, UnknownKey, вложенный навык, рост таблицы — одинаково под rv32i и x86_64"
 }
 
+test_platform() {
+    mkdir -p "$work/platform"
+    local target host_run
+    for target in rv32i x86_64; do
+        SALTIC_TARGET=$target build platform-$target tests/platform.saltic "$work/platform/$target"
+        SALTIC_TARGET=$target build uncaught-$target tests/fixtures/uncaught.saltic "$work/platform/uncaught-$target"
+        SALTIC_TARGET=$target build needs-args-$target tests/fixtures/needs-args.saltic "$work/platform/needs-args-$target"
+        if [[ "$target" == rv32i ]]; then host_run=(qemu-riscv32 -B 0x100000000); else host_run=(); fi
+        "${host_run[@]}" "$work/platform/$target" >"$work/platform/$target.txt"
+        diff -u tests/expected/platform.txt "$work/platform/$target.txt"
+        if "${host_run[@]}" "$work/platform/uncaught-$target" >"$work/platform/uncaught-$target.txt"; then
+            echo "платформа: непойманная ошибка не стала кодом выхода ($target)" >&2
+            return 1
+        fi
+        test "$(<"$work/platform/uncaught-$target.txt")" = "$(printf 'до ошибки\nошибка: Boom')"
+        if "${host_run[@]}" "$work/platform/needs-args-$target" >"$work/platform/needs-args-$target.txt"; then
+            echo "платформа: нехватка аргументов не стала кодом выхода ($target)" >&2
+            return 1
+        fi
+        test "$(<"$work/platform/needs-args-$target.txt")" = "нужно 2 аргументов"
+        test "$("${host_run[@]}" "$work/platform/needs-args-$target" раз два)" = "раз два"
+    done
+    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются — одинаково под rv32i и x86_64"
+}
+
 test_memory() {
     mkdir -p "$work/memory"
     build memory \
@@ -398,6 +423,7 @@ run_case() {
         machine) test_machine ;;
         abi) test_abi ;;
         memory) test_memory ;;
+        platform) test_platform ;;
         native) test_native ;;
         qemu-virt) test_qemu_virt ;;
         uefi) test_uefi ;;
@@ -432,6 +458,7 @@ elif [[ "$1" == "all" ]]; then
         machine \
         abi \
         memory \
+        platform \
         native \
         jtml \
         tasks

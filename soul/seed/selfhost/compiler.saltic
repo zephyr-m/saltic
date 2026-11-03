@@ -1,26 +1,26 @@
 -- compiler — собирает проверенный AST в машину (state.State.machine) через
--- исполнителя договора backend; сейчас исполнитель один — rv32i.Executor.
+-- исполнителя договора машины (backend) и платформу (platform): оба — Box
+-- с методами, выбирает цель (toolchain).
 -- Порядок внутри: collect_top_level → header → start → навыки → константы →
--- рантайм (обычный или common) → хранилище констант → finish_data.
+-- рантайм → платформа → хранилище констант → finish_data.
 -- heap_bytes — слово word (b0…b3), кратное model.ALIGNMENT и не меньше
 -- model.MINIMUM_HEAP_BYTES; иначе ValueOutsideRange.
 --
 -- valid_heap_size(heap_bytes) -> yes/no
--- compile_state_with_options(ast, heap_bytes, common, far_calls) -> State;
---     ValueOutsideRange. common = yes — общий рантайм (emit_runtime_common),
---     far_calls — дальние вызовы исполнителя
--- compile_state_with_heap / compile_common_state_with_heap(ast, heap_bytes) -> State
--- compile_machine_with_heap / compile_machine_common_with_heap(ast, heap_bytes) -> machine
--- compile_machine_far_with_heap(ast, heap_bytes, common) -> machine с far_calls
+-- compile_state(ast, heap_bytes, executor, platform) -> State; ValueOutsideRange
+-- compile_machine(ast, heap_bytes, executor, platform) -> machine исполнителя
+-- compile_machine_with_heap(ast, heap_bytes) -> machine RV32I для Linux
+--     (rv32i.Executor + linux.Linux, ближние вызовы) — для тестов
 --
--- Дети: state, constants, functions, codegen, backend (договор; исполнитель и
---     рантайм RV32I — в backend/rv32i).
+-- Дети: state, constants, functions, codegen, backend (договор машины;
+--     исполнитель и рантайм RV32I — в backend/rv32i), platform (договор платформы).
 
 use io
 use selfhost.compiler.state
 use selfhost.compiler.constants
 use selfhost.compiler.backend.rv32i
 use selfhost.compiler.backend.rv32i.runtime
+use selfhost.compiler.platform.linux
 use selfhost.memory.model
 use core.num
 use selfhost.machine.word
@@ -35,42 +35,28 @@ skill valid_heap_size(heap_bytes) {
     out yes
 }
 
-skill compile_state_with_options(ast, heap_bytes, common, far_calls) {
+skill compile_state(ast, heap_bytes, executor, platform) {
     (valid_heap_size(heap_bytes) == no) { out error.ValueOutsideRange }
-    @compiler = state.State { ast = ast, heap_bytes = heap_bytes, executor = rv32i.Executor { far_calls = far_calls } }
+    @compiler = state.State { ast = ast, heap_bytes = heap_bytes, executor = executor }
     compiler = state.collect_top_level(compiler)
     compiler = state.header(compiler)
     compiler = state.start(compiler)
     compiler = functions.compile_functions(compiler)
     compiler = functions.compile_constants(compiler)
-    (common == no) { compiler = runtime.append_runtime(compiler) }
-    (common == yes) { compiler = runtime.append_runtime_common(compiler) }
+    compiler = runtime.append_runtime(compiler)
+    compiler = platform.append(compiler)
     compiler = constants.emit_storage(compiler)
     compiler = state.finish_data(compiler)
     out compiler
 }
 
-skill compile_state_with_heap(ast, heap_bytes) {
-    out compile_state_with_options(ast, heap_bytes, no, no)
-}
-
-skill compile_common_state_with_heap(ast, heap_bytes) {
-    out compile_state_with_options(ast, heap_bytes, yes, no)
+skill compile_machine(ast, heap_bytes, executor, platform) {
+    @compiler = compile_state(ast, heap_bytes, executor, platform)
+    out compiler.machine
 }
 
 skill compile_machine_with_heap(ast, heap_bytes) {
-    @compiler = compile_state_with_heap(ast, heap_bytes)
-    out compiler.machine
-}
-
-skill compile_machine_common_with_heap(ast, heap_bytes) {
-    @compiler = compile_common_state_with_heap(ast, heap_bytes)
-    out compiler.machine
-}
-
-skill compile_machine_far_with_heap(ast, heap_bytes, common) {
-    @compiler = compile_state_with_options(ast, heap_bytes, common, yes)
-    out compiler.machine
+    out compile_machine(ast, heap_bytes, rv32i.Executor {}, linux.Linux {})
 }
 
 program() {

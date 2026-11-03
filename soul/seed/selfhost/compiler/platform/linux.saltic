@@ -1,0 +1,306 @@
+-- linux — платформа Linux на вызовах ядра (executor.syscall с номерами
+-- core.system): write, exit, key (сырой режим tty через ioctl termios, read),
+-- file_read / file_write (openat, read / write, close; чтение до 1 МиБ);
+-- now, wait, firmware, call — NotSupported. Одна на оба исполнителя: rv32i
+-- (ecall) и перевод x86_64 (заглушка переводит номера); родной x86-64 даст те
+-- же метки своими подпрограммами syscall. Команды — методами compiler.executor
+-- (договор backend), регистры — его роли. Ошибка файла — метка FILE_ERROR (File).
+--
+-- Linux { name } — платформа: append(compiler) -> compiler, все метки договора
+-- emit_write / emit_exit(compiler) — rt_platform_write / rt_platform_exit
+-- emit_key(compiler) — rt_platform_key: до 8 байт, имена клавиш; Ctrl-C — выход 130;
+--     emit_terminal_mode / emit_name_branches / emit_name_results / emit_key_bytes — части;
+--     key_label / text_label(name) -> метки; append_key_data(compiler) — тексты имён
+-- emit_file_read / emit_file_write / emit_file_error(compiler) — файлы
+
+use core.group
+use core.system
+use selfhost.abi
+use selfhost.compiler.backend
+use selfhost.compiler.platform
+use selfhost.compiler.backend.rv32i.runtime.terminal
+
+FILE_ERROR = "rt_platform_file_error"
+
+STDIN = 0
+TERMINAL_GET = 21505
+TERMINAL_SET = 21506
+TERMIOS_WORDS = 9
+TERMIOS_LOCAL_FLAGS = 12
+TERMIOS_CONTROL = 17
+CONTROL_TIME = 5
+CONTROL_MIN = 6
+RAW_LOCAL_MASK = -12
+KEY_BUFFER_BYTES = 8
+INTERRUPT_BYTE = 3
+INTERRUPT_EXIT = 130
+
+FRAME_BYTES = 128
+SAVED_TERMIOS = 16
+RAW_TERMIOS = 56
+KEY_BUFFER = 96
+KEY_COUNT = 104
+KEY_TERMINAL = 108
+KEY_OBJECT = 112
+RETURN_ADDRESS = 124
+
+SINGLE_KEYS = [27, 13, 10, 127, 8, 9]
+SINGLE_NAMES = ["escape", "enter", "enter", "backspace", "backspace", "tab"]
+ARROW_KEYS = [65, 66, 67, 68]
+ARROW_NAMES = ["up", "down", "right", "left"]
+KEY_NAMES = ["escape", "enter", "backspace", "tab", "up", "down", "right", "left"]
+
+UNSUPPORTED = ["now", "wait", "firmware", "call"]
+
+Linux = Box {
+    name = "linux"
+
+    skill append(compiler) {
+        compiler = emit_write(compiler)
+        compiler = emit_exit(compiler)
+        compiler = emit_file_read(compiler)
+        compiler = emit_file_write(compiler)
+        compiler = emit_file_error(compiler)
+        compiler = emit_key(compiler)
+        compiler = append_key_data(compiler)
+        out platform.append_unsupported(compiler, UNSUPPORTED)
+    }
+}
+
+skill emit_write(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.WRITE)
+    compiler = executor.syscall(compiler, system.SYSCALL_WRITE)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
+}
+
+skill emit_exit(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.EXIT)
+    out executor.syscall(compiler, system.SYSCALL_EXIT)
+}
+
+skill emit_file_read(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.FILE_READ)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 28)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.load_immediate(compiler, backend.VALUE, -100)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG3, 0)
+    compiler = executor.syscall(compiler, system.SYSCALL_OPENAT)
+    compiler = executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 24)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 1048581)
+    compiler = executor.call(compiler, "rt_alloc")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 20)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 24)
+    compiler = executor.load(compiler, backend.ERROR, backend.STACK, 20)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.ERROR, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 1048576)
+    compiler = executor.syscall(compiler, system.SYSCALL_READ)
+    compiler = executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 20)
+    compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.add(compiler, backend.SCRATCH1, backend.SCRATCH0, backend.VALUE)
+    compiler = executor.store_byte_zero(compiler, backend.SCRATCH1, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 24)
+    compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 20)
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 28)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 32)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
+}
+
+skill emit_file_write(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.FILE_WRITE)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 28)
+    compiler = executor.store(compiler, backend.ERROR, backend.STACK, 24)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.load_immediate(compiler, backend.VALUE, -100)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 577)
+    compiler = executor.load_immediate(compiler, backend.ARG3, 420)
+    compiler = executor.syscall(compiler, system.SYSCALL_OPENAT)
+    compiler = executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 20)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 24)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.ARG2, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 20)
+    compiler = executor.syscall(compiler, system.SYSCALL_WRITE)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 20)
+    compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 28)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 32)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
+}
+
+skill emit_file_error(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, FILE_ERROR)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_FILE)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 28)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 32)
+    out executor.ret(compiler)
+}
+
+skill emit_terminal_mode(compiler, request, offset) {
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.VALUE, STDIN)
+    compiler = executor.load_immediate(compiler, backend.ERROR, request)
+    compiler = executor.add_immediate(compiler, backend.ARG2, backend.STACK, offset)
+    out executor.syscall(compiler, system.SYSCALL_IOCTL)
+}
+
+skill key_label(name) {
+    out ".L_key_name_{name}"
+}
+
+skill text_label(name) {
+    out "rt_key_text_{name}"
+}
+
+skill emit_name_branches(compiler, bytes, names, value) {
+    @executor = compiler.executor
+    drum (group.count(bytes)) {
+        compiler = executor.load_immediate(compiler, backend.SCRATCH2, group.get(bytes, beat))
+        compiler = executor.branch_equal(compiler, value, backend.SCRATCH2, key_label(group.get(names, beat)))
+    }
+    out compiler
+}
+
+skill emit_name_results(compiler) {
+    drum (KEY_NAMES) {
+        compiler = emit_name_result(compiler, beat)
+    }
+    out emit_name_result(compiler, "none")
+}
+
+skill emit_name_result(compiler, name) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, key_label(name))
+    compiler = executor.load_address(compiler, backend.VALUE, text_label(name), 0)
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    out executor.jump(compiler, ".L_key_done")
+}
+skill emit_key_bytes(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, ".L_key_bytes")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, KEY_COUNT)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, 5)
+    compiler = executor.call(compiler, "rt_alloc")
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, KEY_OBJECT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, KEY_COUNT)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 0)
+    compiler = executor.label(compiler, ".L_key_copy")
+    compiler = executor.branch_greater_equal(compiler, backend.SCRATCH2, backend.SCRATCH1, ".L_key_copied")
+    compiler = executor.add(compiler, backend.SCRATCH3, backend.STACK, backend.SCRATCH2)
+    compiler = executor.load_byte(compiler, backend.SCRATCH4, backend.SCRATCH3, KEY_BUFFER)
+    compiler = executor.add(compiler, backend.SCRATCH5, backend.VALUE, backend.SCRATCH2)
+    compiler = executor.store_byte(compiler, backend.SCRATCH4, backend.SCRATCH5, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
+    compiler = executor.jump(compiler, ".L_key_copy")
+    compiler = executor.label(compiler, ".L_key_copied")
+    compiler = executor.add(compiler, backend.SCRATCH5, backend.VALUE, backend.SCRATCH1)
+    compiler = executor.store_byte_zero(compiler, backend.SCRATCH5, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    out executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+}
+
+skill emit_key(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.KEY)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - FRAME_BYTES)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, RETURN_ADDRESS)
+    compiler = executor.store_zero(compiler, backend.STACK, KEY_TERMINAL)
+
+    compiler = emit_terminal_mode(compiler, TERMINAL_GET, SAVED_TERMIOS)
+    compiler = executor.branch_negative(compiler, backend.VALUE, ".L_key_read")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, KEY_TERMINAL)
+    drum (TERMIOS_WORDS) {
+        compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, SAVED_TERMIOS + beat * 4)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + beat * 4)
+    }
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, RAW_LOCAL_MASK)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
+    compiler = executor.store_byte(compiler, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_MIN)
+    compiler = executor.store_byte_zero(compiler, backend.STACK, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_TIME)
+    compiler = emit_terminal_mode(compiler, TERMINAL_SET, RAW_TERMIOS)
+
+    compiler = executor.label(compiler, ".L_key_read")
+    compiler = executor.load_immediate(compiler, backend.VALUE, STDIN)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.STACK, KEY_BUFFER)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 1)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, KEY_TERMINAL)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_key_size")
+    compiler = executor.load_immediate(compiler, backend.ARG2, KEY_BUFFER_BYTES)
+    compiler = executor.label(compiler, ".L_key_size")
+    compiler = executor.syscall(compiler, system.SYSCALL_READ)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, KEY_COUNT)
+
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, KEY_TERMINAL)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_key_restored")
+    compiler = emit_terminal_mode(compiler, TERMINAL_SET, SAVED_TERMIOS)
+    compiler = executor.label(compiler, ".L_key_restored")
+
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, KEY_COUNT)
+    compiler = executor.branch_not_positive(compiler, backend.SCRATCH0, key_label("none"))
+    compiler = executor.load_byte(compiler, backend.SCRATCH1, backend.STACK, KEY_BUFFER)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, INTERRUPT_BYTE)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, ".L_key_live")
+    compiler = executor.load_immediate(compiler, backend.VALUE, INTERRUPT_EXIT)
+    compiler = executor.syscall(compiler, system.SYSCALL_EXIT)
+    compiler = executor.label(compiler, ".L_key_live")
+
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 1)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH2, ".L_key_sequence")
+    compiler = emit_name_branches(compiler, SINGLE_KEYS, SINGLE_NAMES, backend.SCRATCH1)
+    compiler = executor.jump(compiler, ".L_key_bytes")
+
+    compiler = executor.label(compiler, ".L_key_sequence")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 3)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH2, ".L_key_bytes")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 27)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, ".L_key_bytes")
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.STACK, KEY_BUFFER + 1)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 91)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH3, backend.SCRATCH2, ".L_key_bytes")
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.STACK, KEY_BUFFER + 2)
+    compiler = emit_name_branches(compiler, ARROW_KEYS, ARROW_NAMES, backend.SCRATCH3)
+
+    compiler = emit_key_bytes(compiler)
+    compiler = executor.jump(compiler, ".L_key_done")
+    compiler = emit_name_results(compiler)
+
+    compiler = executor.label(compiler, ".L_key_done")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, RETURN_ADDRESS)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, FRAME_BYTES)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
+}
+
+skill append_key_data(compiler) {
+    drum (KEY_NAMES) {
+        compiler = terminal.append_text(compiler, text_label(beat), beat)
+    }
+    out terminal.append_text(compiler, text_label("none"), "")
+}

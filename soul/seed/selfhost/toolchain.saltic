@@ -10,6 +10,8 @@
 --
 -- build(source_path, output_path, heap_text, target) -> none;
 --     ParseFailed, CheckFailed, ValueOutsideRange, UnknownTarget, WriteFailed
+-- build_machine(ast, heap_size, far_calls, firmware) -> машина RV32I: исполнитель
+--     rv32i.Executor и платформа linux.Linux или stub.Uefi
 -- write_native(ast, heap_size, output_path, firmware) -> none; WriteFailed
 -- show(problem) / toolchain_show_diagnostics(diagnostics) — печать
 
@@ -19,6 +21,9 @@ use io
 use selfhost.parser
 use selfhost.checker
 use selfhost.compiler
+use selfhost.compiler.backend.rv32i
+use selfhost.compiler.platform.linux
+use selfhost.compiler.backend.x86_64_translation.stub
 use selfhost.compiler.backend.rv32i.machine.image
 use selfhost.compiler.backend.x86_64_translation
 use selfhost.machine.word
@@ -34,14 +39,20 @@ skill toolchain_show_diagnostics(diagnostics) {
     out none
 }
 
+skill build_machine(ast, heap_size, far_calls, firmware) {
+    @executor = rv32i.Executor { far_calls = far_calls }
+    (firmware == yes) { out compiler.compile_machine(ast, heap_size, executor, stub.Uefi {}) }
+    out compiler.compile_machine(ast, heap_size, executor, linux.Linux {})
+}
+
 skill write_native(ast, heap_size, output_path, firmware) {
-    @machine = compiler.compile_machine_with_heap(ast, heap_size)
+    @machine = build_machine(ast, heap_size, no, firmware)
     io.show("toolchain: перевожу в x86-64 ", output_path)
     pick {
         (firmware == yes) {
             x86_64_translation.write_uefi(output_path, machine) rescue |failure| {
                 show(errors.near_calls_failed())
-                @far = compiler.compile_machine_far_with_heap(ast, heap_size, no)
+                @far = build_machine(ast, heap_size, yes, yes)
                 x86_64_translation.write_uefi(output_path, far) rescue |again| {
                     show(errors.far_calls_failed())
                     out error.WriteFailed
@@ -52,7 +63,7 @@ skill write_native(ast, heap_size, output_path, firmware) {
         {
             x86_64_translation.write(output_path, machine) rescue |failure| {
                 show(errors.near_calls_failed())
-                @far = compiler.compile_machine_far_with_heap(ast, heap_size, no)
+                @far = build_machine(ast, heap_size, yes, no)
                 x86_64_translation.write(output_path, far) rescue |again| {
                     show(errors.far_calls_failed())
                     out error.WriteFailed
@@ -85,11 +96,11 @@ skill build(source_path, output_path, heap_text, target) {
     (target == "x86_64") { out write_native(checked.tree, heap_size, output_path, no) }
     (target == "x86_64-uefi") { out write_native(checked.tree, heap_size, output_path, yes) }
     ((target == "rv32i") == no) { out error.UnknownTarget }
-    @machine = compiler.compile_machine_with_heap(checked.tree, heap_size)
+    @machine = build_machine(checked.tree, heap_size, no, no)
     io.show("toolchain: пишу ", output_path)
     image.write(output_path, machine) rescue |failure| {
         show(errors.near_calls_failed())
-        @far = compiler.compile_machine_far_with_heap(checked.tree, heap_size, no)
+        @far = build_machine(checked.tree, heap_size, yes, no)
         image.write(output_path, far) rescue |again| {
             show(errors.far_calls_failed())
             out error.WriteFailed
