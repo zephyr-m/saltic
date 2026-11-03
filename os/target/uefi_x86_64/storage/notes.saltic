@@ -1,25 +1,29 @@
 -- notes — маленькие текстовые файлы программ в \SALTIC: сохранить текст
--- под именем и прочитать его обратно (UTF-8, до 32 КБ). Файл пишется целиком
--- заново, старый сначала удаляется. Буфер — в арене программы со смещения
--- 131072, программа не должна занимать это место сама.
+-- под именем и прочитать его обратно (UTF-8, до размера участка "notes",
+-- 32 КБ). Файл пишется целиком заново, старый сначала удаляется. Буфер —
+-- участок арены "notes" из arena_map.
 --
--- save_note(base, name, text) -> байт записано; WriteFailed
+-- save_note(base, name, text) -> байт записано; NoteTooBig, WriteFailed
 -- load_note(base, name) -> текст; нет файла — ""
 
 use core.str
 use core.group
 use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.arena_map
 use os.target.uefi_x86_64.platform.utf8
 use os.target.uefi_x86_64.storage.files
 
 FOLDER = "SALTIC"
 FILE_DELETE = 24
 MODE_READ_WRITE = 3
-NOTE_BUFFER = 131072
-NOTE_LIMIT = 32768
 
 skill note_buffer(base) {
-    out firmware.add(firmware.arena(base), NOTE_BUFFER)
+    out firmware.region(base, "notes")
+}
+
+skill note_limit() {
+    @room = arena_map.region("notes")
+    out room.bytes
 }
 
 skill drop_note(base, folder, name) {
@@ -32,6 +36,7 @@ skill drop_note(base, folder, name) {
 
 skill save_note(base, name, text) {
     @written = utf8.encode(text)
+    (group.count(written) > note_limit()) { out error.NoteTooBig }
     @buffer = note_buffer(base)
     drum (group.count(written)) { firmware.write8(buffer, base, beat, group.get(written, beat)) }
     @root = files.saltic_root(base)
@@ -57,7 +62,7 @@ skill load_note(base, name) {
     }
     @buffer = note_buffer(base)
     @size_at = firmware.scratch(base, files.SCRATCH_SIZE)
-    firmware.write64(size_at, base, 0, firmware.number(NOTE_LIMIT))
+    firmware.write64(size_at, base, 0, firmware.number(note_limit()))
     @asked = firmware.call(base, firmware.pointer(file, base, files.FILE_READ), [file, size_at, buffer])
     files.close_file(base, file)
     files.close_file(base, root)

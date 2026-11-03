@@ -23,7 +23,8 @@
 -- draw_progress(agent) — полоса приёма, если экран наш
 -- tick(agent) — один круг: кадры, клавиши раз в KEY_EVERY, часы раз в CLOCK_EVERY
 -- survive(agent) — tick с перехватом сбоя / serve(agent) — вечный цикл
--- run() — открыть карту, линк, bay (страницы ниже 4 ГБ или арена), serve
+-- run() — открыть карту, линк, проверить arena_map, bay (страницы ниже
+--     4 ГБ; нет страниц — приём программ закрыт, limit = 0), serve
 -- program() — вход: run с баннером при сбое, затем вечное ожидание
 
 use io
@@ -32,6 +33,7 @@ use core.str
 use core.group
 use core.mem
 use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.arena_map
 use os.target.uefi_x86_64.platform.pci
 use os.target.uefi_x86_64.drivers.rtl8111
 use os.target.uefi_x86_64.network.net
@@ -59,9 +61,7 @@ SCAN_LEFT = 4
 REPLY_LIMIT = 1400
 PORT = 5555
 DATA_PORT = 5556
-UPLOAD_OFFSET = 65536
 UPLOAD_LIMIT = 33554432
-ARENA_LIMIT = 1966080
 UPLOAD_PAGES = 8192
 REPORT_EVERY = 32768
 MY_IP = [10, 0, 0, 2]
@@ -92,7 +92,7 @@ Agent = Box {
     bay = firmware.Phys {},
     names = [],
     chosen = 0,
-    limit = ARENA_LIMIT,
+    limit = 0,
     linked = no,
     opening = ""
 }
@@ -112,6 +112,7 @@ skill begin_upload(agent, words) {
     (group.count(words) < 2) { out "как: upload <байт>" }
     @size = parse.parse_size(group.get(words, 1))
     (size < 1) { out "плохой размер" }
+    (agent.limit == 0) { out "некуда принимать: прошивка не дала страниц ниже 4 ГБ" }
     (size > agent.limit) {
         @limit = agent.limit
         out "слишком много: предел {limit} байт"
@@ -187,7 +188,7 @@ skill link_russian(status) {
 skill information(agent) {
     @mac = net.mac_text(agent.card.mac)
     @ip = net.ip_text(MY_IP)
-    @arena = firmware.phys_text(agent.card.arena)
+    @arena = firmware.phys_text(firmware.arena(agent.card.base))
     @bay = firmware.phys_text(agent.bay)
     @limit = agent.limit
     @link = link_russian(rtl8111.status(agent.card))
@@ -360,7 +361,8 @@ skill execute(agent, text, payload) {
     (name == "time") { out time_reply(agent) }
     (name == "reboot") { out restart_later(agent) }
     (name == "shot") {
-        agent.shot_bytes = shot.capture(agent.card)
+        @taken = shot.capture(agent.card) rescue |err| { out "снимок не сделан: {err} (участок shot — половина экрана 1366 × 768)" }
+        agent.shot_bytes = taken
         out shot.caption(agent.card, agent.shot_bytes)
     }
     (name == "prepare-disk") { out prepare_disk(agent, words) }
@@ -556,16 +558,19 @@ skill run() {
     @linked = has_link(card)
     (linked == yes) { greet(card) }
     io.show("[4] listening on 10.0.0.2:5555 (arp + udp commands)")
+    @regions = arena_map.check()
+    @arena_used = arena_map.used()
+    io.show("[5] arena map: {regions} regions, {arena_used} bytes, no overlap")
     io.show("")
-    @bay = firmware.add(card.arena, UPLOAD_OFFSET)
-    @limit = ARENA_LIMIT
-    @pages = uefi.pages_below_4g(card.base, UPLOAD_PAGES) rescue |err| { bay }
-    ((firmware.phys_text(pages) == firmware.phys_text(bay)) == no) {
+    @bay = firmware.Phys {}
+    @limit = 0
+    @pages = uefi.pages_below_4g(card.base, UPLOAD_PAGES) rescue |err| { firmware.Phys {} }
+    (pages.hi + pages.lo > 0) {
         bay = pages
         limit = UPLOAD_LIMIT
     }
     @where = firmware.phys_text(bay)
-    io.show("[5] upload bay {where}, limit {limit} bytes")
+    io.show("[6] upload bay {where}, limit {limit} bytes (0 = no pages, upload closed)")
     @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = limit, linked = linked }
     clear_screen(agent)
     serve(agent) rescue |err| {

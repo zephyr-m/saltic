@@ -1,7 +1,8 @@
 -- disk — разметка несъёмного диска: GPT с одним разделом EFI (512 МБ от
 -- сектора 2048) и пустая FAT32 с меткой SALTIC. Стирает диск!
 -- Сектор 512 байт; LBA и 32/64-битные поля — firmware.Phys { hi, lo },
--- little-endian. Работа через Block IO прошивки, буферы — в firmware.arena.
+-- little-endian. Работа через Block IO прошивки, буферы — участки арены
+-- "disk_zero" (128 нулевых секторов) и "disk_work" (сектор + таблица GPT).
 -- Порядок: find_target → write_table → write_fat → reconnect.
 --
 -- Target { handle, device, media, last, megabytes } — выбранный диск
@@ -15,7 +16,8 @@
 -- find_target(base, handles, guid) -> Target: единственный целый несъёмный
 --     диск больше 10 ГБ; NoInternalDisk, SeveralInternalDisks
 -- files_protocol(base, handle, guid) -> Phys протокола; NoProtocol
--- place(base, offset, bytes) / place_zeros(base, offset, count) -> Phys в арене
+-- place(base, at, bytes) / place_zeros(base, at, count) -> at — байты или нули по Phys
+-- work(base) -> Phys участка "disk_work"
 -- blocks(base, target, kind, lba, count, buffer); BlockIoFailed
 -- write_bytes_at(base, target, lba, bytes) / zero_range(base, target, first, count)
 -- crc(base, at, size) -> Phys CRC32 прошивки
@@ -171,8 +173,6 @@ skill data_start() {
     out RESERVED_SECTORS + FAT_SECTORS * 2
 }
 
-ARENA_ZERO = 1310720
-ARENA_WORK = 1376256
 ZERO_SECTORS = 128
 BOOT_CONNECT = 264
 BOOT_DISCONNECT = 272
@@ -227,10 +227,13 @@ skill files_protocol(base, handle, guid) {
     out firmware.pointer(at, base, 0)
 }
 
-skill place(base, offset, bytes) {
-    @at = firmware.add(firmware.arena(base), offset)
+skill place(base, at, bytes) {
     drum (group.count(bytes)) { firmware.write8(at, base, beat, group.get(bytes, beat)) }
     out at
+}
+
+skill work(base) {
+    out firmware.region(base, "disk_work")
 }
 
 skill blocks(base, target, kind, lba, count, buffer) {
@@ -239,14 +242,13 @@ skill blocks(base, target, kind, lba, count, buffer) {
     out none
 }
 
-skill place_zeros(base, offset, count) {
-    @at = firmware.add(firmware.arena(base), offset)
+skill place_zeros(base, at, count) {
     drum (count) { firmware.write8(at, base, beat, 0) }
     out at
 }
 
 skill write_bytes_at(base, target, lba, bytes) {
-    out blocks(base, target, BLOCK_WRITE, lba, group.count(bytes) / SECTOR, place(base, ARENA_WORK, bytes))
+    out blocks(base, target, BLOCK_WRITE, lba, group.count(bytes) / SECTOR, place(base, work(base), bytes))
 }
 
 skill crc(base, at, size) {
@@ -257,7 +259,7 @@ skill crc(base, at, size) {
 }
 
 skill zero_range(base, target, first, count) {
-    @zero = place_zeros(base, ARENA_ZERO, ZERO_SECTORS * SECTOR)
+    @zero = place_zeros(base, firmware.region(base, "disk_zero"), ZERO_SECTORS * SECTOR)
     @done = 0
     drum (count / ZERO_SECTORS + 1) {
         @chunk = count - done
@@ -271,7 +273,7 @@ skill zero_range(base, target, first, count) {
 }
 
 skill write_header(base, target, own, other, entries_at, entries_crc) {
-    @at = place(base, ARENA_WORK, gpt_header(own, other, entries_at, target.last, entries_crc))
+    @at = place(base, work(base), gpt_header(own, other, entries_at, target.last, entries_crc))
     @sum = crc(base, at, 92)
     firmware.write16(at, base, 16, sum.lo)
     firmware.write16(at, base, 18, sum.hi)
@@ -280,8 +282,9 @@ skill write_header(base, target, own, other, entries_at, entries_crc) {
 
 skill write_table(base, target) {
     write_bytes_at(base, target, firmware.number(0), protective_mbr(target.last))
-    place_zeros(base, ARENA_WORK + SECTOR, ENTRY_COUNT * ENTRY_BYTES)
-    @entries = place(base, ARENA_WORK + SECTOR, esp_entry())
+    @table = firmware.add(work(base), SECTOR)
+    place_zeros(base, table, ENTRY_COUNT * ENTRY_BYTES)
+    @entries = place(base, table, esp_entry())
     @entries_crc = crc(base, entries, ENTRY_COUNT * ENTRY_BYTES)
     blocks(base, target, BLOCK_WRITE, firmware.number(2), ENTRY_SECTORS, entries)
     blocks(base, target, BLOCK_WRITE, minus(target.last, 32), ENTRY_SECTORS, entries)
