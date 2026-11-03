@@ -40,6 +40,21 @@ saltic_seconds_since() {
     LC_ALL=C awk "BEGIN { printf \"%.1f\", ${EPOCHREALTIME/,/.} - ${1/,/.} }"
 }
 
+# saltic_timed <файл замера> <команда…> — выполнить команду и записать в файл
+# «пик памяти в КБ, user, sys» (GNU time); без GNU time — просто выполнить.
+saltic_timed() {
+    local measured="$1"
+    shift
+    local gnu_time
+    gnu_time="$(type -P time || true)"
+    rm -f "$measured"
+    if [[ -n "$gnu_time" ]]; then
+        "$gnu_time" -o "$measured" -f "%M %U %S" "$@"
+    else
+        "$@"
+    fi
+}
+
 # Объём исходников компилятора: «файлов, строк» по soul/seed/core и selfhost.
 saltic_source_volume() {
     local files lines
@@ -107,12 +122,14 @@ saltic_native_compiler() {
         SALTIC_HEAP_BYTES=4026531840 \
         SALTIC_TARGET=x86_64 \
         SALTIC_NATIVE=0 \
+        saltic_timed .cache/build/bootstrap-native.time \
         bash bootstrap/build.sh soul/seed/selfhost/toolchain.saltic "$native" > .cache/build/bootstrap-native.log 2>&1 || {
             grep -v "^warning" .cache/build/bootstrap-native.log | tail -5 >&2
             return 1
         }
         saltic_write_passport "$native" "x86_64, linux" "rv32i, x86_64" \
-            "$compiler" 4026531840 "переведён из $(basename "$compiler")" "$(saltic_seconds_since "$started")" сборки
+            "$compiler" 4026531840 "переведён из $(basename "$compiler")" "$(saltic_seconds_since "$started")" сборки \
+            .cache/build/bootstrap-native.time
     fi
     echo "$native"
 }
@@ -137,13 +154,15 @@ saltic_qemu_virt_compiler() {
     done
     mkdir -p .cache/build
     local started=$EPOCHREALTIME
-    "$native" os/target/qemu_virt/toolchain.saltic "$toolchain" 536870912 rv32i \
+    saltic_timed .cache/build/bootstrap-qemu_virt.time \
+        "$native" os/target/qemu_virt/toolchain.saltic "$toolchain" 536870912 rv32i \
         > .cache/build/bootstrap-qemu_virt.log 2>&1 || {
         grep -v "^warning" .cache/build/bootstrap-qemu_virt.log | tail -5 >&2
         return 1
     }
     chmod +x "$toolchain"
     saltic_write_passport "$toolchain" "rv32i, linux (qemu-riscv32 -B 0x100000000)" \
-        "rv32i, qemu-virt (голое железо)" "$native" 536870912 "собран родным компилятором" "$(saltic_seconds_since "$started")" сборки
+        "rv32i, qemu-virt (голое железо)" "$native" 536870912 "собран родным компилятором" "$(saltic_seconds_since "$started")" сборки \
+        .cache/build/bootstrap-qemu_virt.time
     echo "$toolchain"
 }
