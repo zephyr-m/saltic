@@ -492,7 +492,10 @@ RTL8111 (`10ec:8168`) → свой стек (ARP, IPv4, UDP) → приёмни�
     `path`, `locations`) и вход `parse`; методы становятся навыками с
     парсером в параметре и раскладываются по папке `parser/syntax/`:
     `cursor` (at, is, expect, fail), `expressions`, `statements`,
-    `declarations`. Язык не меняется, самосборка проверит.
+    `declarations`. Язык не меняется, самосборка проверит. **Сделано
+    03.11.2026:** `parser/syntax/{cursor, literals, grammar, declarations}`;
+    выражения и инструкции в одном модуле `grammar` — грамматика
+    рекурсивна, а циклический `use` запрещён.
   - `os/apps/colony/colony.saltic` — 513.
   - не считаются: `os/fonts/spleen.saltic` (данные шрифта),
     `.archive/` (архив)

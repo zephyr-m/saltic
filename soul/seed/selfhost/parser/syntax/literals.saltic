@@ -1,0 +1,96 @@
+-- literals — листья выражений: числа, шаблоны строк, приоритет операторов.
+-- Составные выражения (вызов, Box, бинарные, rescue) рекурсивны вместе с
+-- инструкциями и живут в grammar; здесь — то, что не зовёт разбор снова.
+--
+-- number_literal(parser, token, sign, digits, next) -> Read number / wide-number / fraction-number
+-- template(parser, token, start) -> Read template; ошибка bad_template_name
+-- precedence(kind) -> 1 сравнение, 2 + -, 3 * /, 0 не оператор
+-- placeholder_path(name) -> ["path", …] или [] для плохого имени в "{…}"
+-- number_value(text) -> число; number_is_wide(text) -> answer (не влезает в 29 бит)
+
+use core.str
+use core.group
+use core.num
+use selfhost.errors
+use selfhost.parser.lexer
+use selfhost.parser.syntax.cursor
+
+skill number_literal(parser, token, sign, digits, next) {
+    @text = str.add(sign, digits)
+    (str.contains(digits, ".") == yes) { out cursor.ok("fraction-number", cursor.loc(["fraction-number", text], token, parser.locations), next) }
+    (number_is_wide(digits) == yes) { out cursor.ok("wide-number", cursor.loc(["wide-number", text], token, parser.locations), next) }
+    @value = number_value(digits)
+    (sign == "-") { value = 0 - value }
+    out cursor.ok("number", cursor.loc(["number", value], token, parser.locations), next)
+}
+
+skill template(parser, token, start) {
+    @datum = ["template"]
+    drum (group.count(token.parts)) {
+        @part = group.get(token.parts, beat)
+        pick {
+            (beat - beat / 2 * 2 == 0) { datum = group.add(datum, part) }
+            {
+                @segments = placeholder_path(part)
+                (group.count(segments) == 0) { out cursor.fail_with(parser, start, errors.bad_template_name(part)) }
+                datum = group.add(datum, cursor.loc(segments, token, parser.locations))
+            }
+        }
+    }
+    out cursor.ok("template", cursor.loc(datum, token, parser.locations), start + 1)
+}
+
+skill precedence(kind) {
+    (kind == lexer.TokenKind.EQ) { out 1 }
+    (kind == lexer.TokenKind.GT) { out 1 }
+    (kind == lexer.TokenKind.LT) { out 1 }
+    (kind == lexer.TokenKind.PLUS) { out 2 }
+    (kind == lexer.TokenKind.MINUS) { out 2 }
+    (kind == lexer.TokenKind.STAR) { out 3 }
+    (kind == lexer.TokenKind.SLASH) { out 3 }
+    out 0
+}
+
+skill placeholder_path(name) {
+    (str.len(name) == 0) { out [] }
+    (str.starts_with(name, ".") == yes) { out [] }
+    (str.ends_with(name, ".") == yes) { out [] }
+    (str.contains(name, "..") == yes) { out [] }
+    out group.concat(["path"], str.split(name, "."))
+}
+
+skill number_value(text) {
+    @whole = 0
+    @fraction = 0
+    @scale = 1
+    @after_dot = no
+    drum (str.len(text)) {
+        @ch = str.get(text, beat)
+        (ch == ".") { after_dot = yes }
+        (str.is_digit(ch) == yes) {
+            pick {
+                (after_dot == no) { whole = whole * 10 + num.digit(ch) }
+                {
+                    fraction = fraction * 10 + num.digit(ch)
+                    scale = scale * 10
+                }
+            }
+        }
+    }
+    out whole + fraction / scale
+}
+
+skill number_is_wide(text) {
+    (str.contains(text, ".") == yes) { out no }
+    @length = str.len(text)
+    (length > 9) { out yes }
+    (length < 9) { out no }
+    @limit = "268435455"
+    drum (9) {
+        @actual = num.digit(str.get(text, beat))
+        @maximum = num.digit(str.get(limit, beat))
+        (actual > maximum) { out yes }
+        (actual < maximum) { out no }
+    }
+    out no
+}

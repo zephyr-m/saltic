@@ -1,0 +1,148 @@
+-- cursor — шаги разбора по токенам: чтение, проверка, ошибки, узлы, путь.
+-- parser — данные syntax.Parser { tokens, path, locations }; index — номер
+-- токена. Каждый шаг отдаёт Read: узел, номер следующего токена и
+-- диагностики (непустые — разбор остановлен).
+--
+-- Cursor = Box { tokens, index } — внутренний курсор path_at
+-- Node = Box { datum, tag }; Read = Box { node, next, diagnostics }
+-- at(parser, index) -> токен; is(parser, index, kind) -> answer
+-- skip_lines(parser, index) -> номер первого токена после переводов строки
+-- fail_with(parser, index, problem) / fail(parser, index, expected) -> Read с ошибкой
+-- expect(parser, index, kind, message) -> Read "token" или ошибка
+-- path_at(parser, start, with_locations) -> Read "path" (a.b.c)
+-- loc(datum, token, locations) / make_node(tag, datum) / ok(tag, datum, next)
+-- append_tail(head, tail, start) -> head + tail[start…]
+
+use core.group
+use selfhost.ast
+use selfhost.diagnostic
+use selfhost.errors
+use selfhost.parser.lexer
+
+Cursor = Box {
+    tokens = none,
+    index = 0
+
+    skill at(offset) {
+        out lexer.token_buffer_at(tokens, index + offset)
+    }
+
+    skill peek() {
+        @token = at(0)
+        out token
+    }
+
+    skill is(kind) {
+        @token = peek()
+        out token.kind == kind
+    }
+
+    skill is_at(offset, kind) {
+        @token = at(offset)
+        out token.kind == kind
+    }
+
+    skill next() {
+        @cursor = Cursor()
+        cursor.tokens = tokens
+        cursor.index = index + 1
+        out cursor
+    }
+
+    skill move(count) {
+        @cursor = Cursor()
+        cursor.tokens = tokens
+        cursor.index = index + count
+        out cursor
+    }
+}
+
+Node = Box {
+    datum = [],
+    tag = ""
+}
+
+Read = Box {
+    node = Node {},
+    next = 0,
+    diagnostics = []
+}
+
+skill at(parser, index) {
+    out lexer.token_buffer_at(parser.tokens, index)
+}
+
+skill is(parser, index, kind) {
+    @token = at(parser, index)
+    out token.kind == kind
+}
+
+skill skip_lines(parser, index) {
+    @next = index
+    @count = lexer.token_buffer_count(parser.tokens)
+    drum (count) {
+        (next == count) { out next }
+        (is(parser, next, lexer.TokenKind.NEWLINE) == no) { out next }
+        next = next + 1
+    }
+    out next
+}
+
+skill fail_with(parser, index, problem) {
+    @token = at(parser, index)
+    out Read {
+        node = make_node("", []),
+        next = index,
+        diagnostics = [diagnostic.place(problem, parser.path, token.line, token.col)]
+    }
+}
+
+skill fail(parser, index, expected) {
+    @token = at(parser, index)
+    out fail_with(parser, index, errors.unexpected_token(expected, lexer.describe(token)))
+}
+
+skill expect(parser, index, kind, message) {
+    @token = at(parser, index)
+    (is(parser, index, kind) == yes) { out ok("token", [token.value], index + 1) }
+    out fail(parser, index, message)
+}
+
+skill path_at(parser, start, with_locations) {
+    @cursor = Cursor()
+    cursor.tokens = parser.tokens
+    cursor.index = start
+    (cursor.is(lexer.TokenKind.IDENT) == no) { out fail(parser, cursor.index, "ожидался идентификатор") }
+    @token = cursor.peek()
+    @parts = ["path", token.value]
+    cursor = cursor.next()
+    @count = lexer.token_buffer_count(parser.tokens)
+    drum (count) {
+        ((cursor.index + 1 < count) == no) { leave }
+        (cursor.is(lexer.TokenKind.DOT) == no) { leave }
+        (cursor.is_at(1, lexer.TokenKind.IDENT) == no) { leave }
+        @part_token = cursor.at(1)
+        parts = group.add(parts, part_token.value)
+        cursor = cursor.move(2)
+    }
+    out ok("path", loc(parts, token, with_locations), cursor.index)
+}
+
+skill loc(datum, token, locations) {
+    (locations == yes) { out ast.located(datum, token.line, token.col) }
+    out datum
+}
+
+skill make_node(tag, datum) {
+    out Node { datum = datum, tag = tag }
+}
+
+skill ok(tag, datum, next) {
+    out Read { node = make_node(tag, datum), next = next, diagnostics = [] }
+}
+
+skill append_tail(head, tail, start) {
+    @count = group.count(tail)
+    (start > count) { out head }
+    out group.concat(head, group.slice(tail, start, count))
+}
