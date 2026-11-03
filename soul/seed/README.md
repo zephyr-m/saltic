@@ -49,7 +49,8 @@
   `compiler/backend/x86_64_translation` (`encoder`, `translator`, `image`,
   `platform`, `pe`, `uefi`);
 - `compiler/backend/rv32i/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
-  машинный runtime на ассемблере RV32I: арифметика, Box и группы, строки,
+  машинный runtime `rt_*` на договоре машины (роли и операции `compiler/backend`,
+  общий для исполнителей): арифметика, Box и группы, строки,
   фиксированные типы, прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
 - `compiler/backend/rv32i/machine/{instruction,registers,codec,decoder,buffer,layout,image,profile}` —
   команды и регистры RV32I, кодирование и разбор команд, байтовый буфер,

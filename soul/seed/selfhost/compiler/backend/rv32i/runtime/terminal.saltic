@@ -3,8 +3,8 @@
 -- Каждый навык берёт и отдаёт compiler. rt_io_key отдаёт строку: имя клавиши
 -- (escape, enter, backspace, tab, up, down, right, left), "" при пустом вводе
 -- или сами байты; Ctrl-C завершает программу с кодом 130.
+-- Команды — методами compiler.executor (договор backend), регистры — его роли.
 --
--- emit_syscall(compiler, number) — ecall с номером в a7
 -- emit_terminal_mode(compiler, request, offset) — ioctl над termios на стеке
 -- key_label / text_label(name) -> метки имени клавиши
 -- emit_name_branches / emit_name_results / emit_key_bytes(compiler) — части rt_io_key
@@ -16,11 +16,9 @@
 use core.str
 use core.group
 use selfhost.abi
-use selfhost.compiler.backend.rv32i.machine.instruction
-use selfhost.compiler.backend.rv32i.machine.layout
-use selfhost.compiler.backend.rv32i.assembler
 use core.system
-use selfhost.compiler.backend.rv32i.machine.registers
+use selfhost.compiler.backend
+use selfhost.machine.word
 
 STDIN = 0
 STDOUT = 1
@@ -52,16 +50,12 @@ SINGLE_NAMES = ["escape", "enter", "enter", "backspace", "backspace", "tab"]
 ARROW_KEYS = [65, 66, 67, 68]
 ARROW_NAMES = ["up", "down", "right", "left"]
 
-skill emit_syscall(compiler, number) {
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A7, registers.ZERO, registers.ZERO, number)
-    out assembler.emit_op(compiler, instruction.Kind.ECALL, registers.ZERO, registers.ZERO, registers.ZERO, 0)
-}
-
 skill emit_terminal_mode(compiler, request, offset) {
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, STDIN)
-    compiler.machine = layout.emit_load_immediate(compiler.machine, registers.A1, request)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.SP, registers.ZERO, offset)
-    out emit_syscall(compiler, system.SYSCALL_IOCTL)
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.VALUE, STDIN)
+    compiler = executor.load_immediate(compiler, backend.ERROR, request)
+    compiler = executor.add_immediate(compiler, backend.ARG2, backend.STACK, offset)
+    out executor.syscall(compiler, system.SYSCALL_IOCTL)
 }
 
 skill key_label(name) {
@@ -73,153 +67,160 @@ skill text_label(name) {
 }
 
 skill emit_name_branches(compiler, bytes, names, value) {
+    @executor = compiler.executor
     drum (group.count(bytes)) {
-        compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, group.get(bytes, beat))
-        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, value, registers.T2, key_label(group.get(names, beat)))
+        compiler = executor.load_immediate(compiler, backend.SCRATCH2, group.get(bytes, beat))
+        compiler = executor.branch_equal(compiler, value, backend.SCRATCH2, key_label(group.get(names, beat)))
     }
     out compiler
 }
 
 skill emit_name_results(compiler) {
+    @executor = compiler.executor
     @names = ["escape", "enter", "backspace", "tab", "up", "down", "right", "left", "none"]
     drum (names) {
-        compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, key_label(beat))
-        compiler.machine = layout.emit_relative_address(compiler.machine, registers.A0, text_label(beat), 0)
-        compiler = assembler.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_STRING)
-        compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_key_done")
+        compiler = executor.label(compiler, key_label(beat))
+        compiler = executor.load_address(compiler, backend.VALUE, text_label(beat), 0)
+        compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+        compiler = executor.jump(compiler, ".L_key_done")
     }
     out compiler
 }
 
 skill emit_key_bytes(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_bytes")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.SP, registers.ZERO, KEY_COUNT)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.A0, registers.ZERO, 5)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.A0, KEY_OBJECT)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.OBJECT_KIND_STRING)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T0, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.SP, registers.ZERO, KEY_COUNT)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T1, abi.OBJECT_PAYLOAD_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_copy")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.T2, registers.T1, ".L_key_copied")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T3, registers.SP, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LBU, registers.T4, registers.T3, registers.ZERO, KEY_BUFFER)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T5, registers.A0, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, registers.T5, registers.T4, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.T2, registers.ZERO, 1)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_key_copy")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_copied")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T5, registers.A0, registers.T1, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, registers.T5, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    out assembler.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_STRING)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, ".L_key_bytes")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, KEY_COUNT)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, 5)
+    compiler = executor.call(compiler, "rt_alloc")
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, KEY_OBJECT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, KEY_COUNT)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 0)
+    compiler = executor.label(compiler, ".L_key_copy")
+    compiler = executor.branch_greater_equal(compiler, backend.SCRATCH2, backend.SCRATCH1, ".L_key_copied")
+    compiler = executor.add(compiler, backend.SCRATCH3, backend.STACK, backend.SCRATCH2)
+    compiler = executor.load_byte(compiler, backend.SCRATCH4, backend.SCRATCH3, KEY_BUFFER)
+    compiler = executor.add(compiler, backend.SCRATCH5, backend.VALUE, backend.SCRATCH2)
+    compiler = executor.store_byte(compiler, backend.SCRATCH4, backend.SCRATCH5, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
+    compiler = executor.jump(compiler, ".L_key_copy")
+    compiler = executor.label(compiler, ".L_key_copied")
+    compiler = executor.add(compiler, backend.SCRATCH5, backend.VALUE, backend.SCRATCH1)
+    compiler = executor.store_byte_zero(compiler, backend.SCRATCH5, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    out executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
 }
 
 skill emit_key(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_io_key")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - FRAME_BYTES)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, RETURN_ADDRESS)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.ZERO, KEY_TERMINAL)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_io_key")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - FRAME_BYTES)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, RETURN_ADDRESS)
+    compiler = executor.store_zero(compiler, backend.STACK, KEY_TERMINAL)
 
     compiler = emit_terminal_mode(compiler, TERMINAL_GET, SAVED_TERMIOS)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, registers.A0, registers.ZERO, ".L_key_read")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.T0, KEY_TERMINAL)
+    compiler = executor.branch_negative(compiler, backend.VALUE, ".L_key_read")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, KEY_TERMINAL)
     drum (TERMIOS_WORDS) {
-        compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.SP, registers.ZERO, SAVED_TERMIOS + beat * 4)
-        compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.T0, RAW_TERMIOS + beat * 4)
+        compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, SAVED_TERMIOS + beat * 4)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + beat * 4)
     }
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.SP, registers.ZERO, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.T0, registers.ZERO, RAW_LOCAL_MASK)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.T0, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, registers.SP, registers.T0, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_MIN)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, registers.SP, registers.ZERO, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_TIME)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, RAW_LOCAL_MASK)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
+    compiler = executor.store_byte(compiler, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_MIN)
+    compiler = executor.store_byte_zero(compiler, backend.STACK, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_TIME)
     compiler = emit_terminal_mode(compiler, TERMINAL_SET, RAW_TERMIOS)
 
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_read")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, STDIN)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.SP, registers.ZERO, KEY_BUFFER)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.SP, registers.ZERO, KEY_TERMINAL)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T0, registers.ZERO, ".L_key_size")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, KEY_BUFFER_BYTES)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_size")
-    compiler = emit_syscall(compiler, system.SYSCALL_READ)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.A0, KEY_COUNT)
+    compiler = executor.label(compiler, ".L_key_read")
+    compiler = executor.load_immediate(compiler, backend.VALUE, STDIN)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.STACK, KEY_BUFFER)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 1)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, KEY_TERMINAL)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_key_size")
+    compiler = executor.load_immediate(compiler, backend.ARG2, KEY_BUFFER_BYTES)
+    compiler = executor.label(compiler, ".L_key_size")
+    compiler = executor.syscall(compiler, system.SYSCALL_READ)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, KEY_COUNT)
 
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.SP, registers.ZERO, KEY_TERMINAL)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T0, registers.ZERO, ".L_key_restored")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, KEY_TERMINAL)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_key_restored")
     compiler = emit_terminal_mode(compiler, TERMINAL_SET, SAVED_TERMIOS)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_restored")
+    compiler = executor.label(compiler, ".L_key_restored")
 
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.SP, registers.ZERO, KEY_COUNT)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.ZERO, registers.T0, key_label("none"))
-    compiler = assembler.emit_op(compiler, instruction.Kind.LBU, registers.T1, registers.SP, registers.ZERO, KEY_BUFFER)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, INTERRUPT_BYTE)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T1, registers.T2, ".L_key_live")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, INTERRUPT_EXIT)
-    compiler = emit_syscall(compiler, system.SYSCALL_EXIT)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_live")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, KEY_COUNT)
+    compiler = executor.branch_not_positive(compiler, backend.SCRATCH0, key_label("none"))
+    compiler = executor.load_byte(compiler, backend.SCRATCH1, backend.STACK, KEY_BUFFER)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, INTERRUPT_BYTE)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, ".L_key_live")
+    compiler = executor.load_immediate(compiler, backend.VALUE, INTERRUPT_EXIT)
+    compiler = executor.syscall(compiler, system.SYSCALL_EXIT)
+    compiler = executor.label(compiler, ".L_key_live")
 
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, 1)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T0, registers.T2, ".L_key_sequence")
-    compiler = emit_name_branches(compiler, SINGLE_KEYS, SINGLE_NAMES, registers.T1)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_key_bytes")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 1)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH2, ".L_key_sequence")
+    compiler = emit_name_branches(compiler, SINGLE_KEYS, SINGLE_NAMES, backend.SCRATCH1)
+    compiler = executor.jump(compiler, ".L_key_bytes")
 
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_sequence")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, 3)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T0, registers.T2, ".L_key_bytes")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, 27)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T1, registers.T2, ".L_key_bytes")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LBU, registers.T3, registers.SP, registers.ZERO, KEY_BUFFER + 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, 91)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T3, registers.T2, ".L_key_bytes")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LBU, registers.T3, registers.SP, registers.ZERO, KEY_BUFFER + 2)
-    compiler = emit_name_branches(compiler, ARROW_KEYS, ARROW_NAMES, registers.T3)
+    compiler = executor.label(compiler, ".L_key_sequence")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 3)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH2, ".L_key_bytes")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 27)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, ".L_key_bytes")
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.STACK, KEY_BUFFER + 1)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 91)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH3, backend.SCRATCH2, ".L_key_bytes")
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.STACK, KEY_BUFFER + 2)
+    compiler = emit_name_branches(compiler, ARROW_KEYS, ARROW_NAMES, backend.SCRATCH3)
 
     compiler = emit_key_bytes(compiler)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_key_done")
+    compiler = executor.jump(compiler, ".L_key_done")
     compiler = emit_name_results(compiler)
 
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_key_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.SP, registers.ZERO, RETURN_ADDRESS)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, FRAME_BYTES)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = executor.label(compiler, ".L_key_done")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, RETURN_ADDRESS)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, FRAME_BYTES)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
 }
 
 skill emit_clear(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_io_clear")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, STDOUT)
-    compiler.machine = layout.emit_relative_address(compiler.machine, registers.A1, "rt_clear_sequence", 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, group.count(CLEAR_SEQUENCE))
-    compiler = emit_syscall(compiler, system.SYSCALL_WRITE)
-    compiler = assembler.load_immediate(compiler, registers.A0, abi.NONE)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_io_clear")
+    compiler = executor.load_immediate(compiler, backend.VALUE, STDOUT)
+    compiler = executor.load_address(compiler, backend.ERROR, "rt_clear_sequence", 0)
+    compiler = executor.load_immediate(compiler, backend.ARG2, group.count(CLEAR_SEQUENCE))
+    compiler = executor.syscall(compiler, system.SYSCALL_WRITE)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
 }
 
 skill append_text(compiler, label, text) {
-    compiler.machine = layout.align_section(compiler.machine, layout.Section.RODATA, 8)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.RODATA, label)
-    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(abi.OBJECT_KIND_STRING))
-    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(str.len(text) + 5))
-    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(abi.OBJECT_FLAG_STATIC))
-    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(str.len(text)))
-    compiler.machine = layout.append_section_text(compiler.machine, layout.Section.RODATA, text, yes)
+    @executor = compiler.executor
+    compiler = executor.align(compiler, backend.RODATA, 8)
+    compiler = executor.data_label(compiler, backend.RODATA, label)
+    compiler = executor.data_word(compiler, backend.RODATA, word.from_number(abi.OBJECT_KIND_STRING))
+    compiler = executor.data_word(compiler, backend.RODATA, word.from_number(str.len(text) + 5))
+    compiler = executor.data_word(compiler, backend.RODATA, word.from_number(abi.OBJECT_FLAG_STATIC))
+    compiler = executor.data_word(compiler, backend.RODATA, word.from_number(str.len(text)))
+    compiler = executor.data_text(compiler, backend.RODATA, text)
     out compiler
 }
 
 skill append_data(compiler) {
+    @executor = compiler.executor
     drum (["escape", "enter", "backspace", "tab", "up", "down", "right", "left"]) {
         compiler = append_text(compiler, text_label(beat), beat)
     }
     compiler = append_text(compiler, text_label("none"), "")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.RODATA, "rt_clear_sequence")
+    compiler = executor.data_label(compiler, backend.RODATA, "rt_clear_sequence")
     drum (CLEAR_SEQUENCE) {
-        compiler.machine = layout.append_section_byte(compiler.machine, layout.Section.RODATA, beat)
+        compiler = executor.data_byte(compiler, backend.RODATA, beat)
     }
     out compiler
 }

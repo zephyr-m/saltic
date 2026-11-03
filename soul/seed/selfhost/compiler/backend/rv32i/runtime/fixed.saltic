@@ -1,10 +1,13 @@
 -- fixed — рантайм фиксированных целых u8/u16/u32/i32: арифметика с
 -- проверкой переполнения, сравнения, память, печать, преобразование.
 -- Каждый навык берёт и отдаёт compiler, определяя метку rt_fixed_* в коде.
--- Значения — сырые 32 бита в a0/a1 без тега; тип — в a6 (abi.FIXED_*),
--- целевой тип convert — в a7. Результат проходит через rt_fixed_new, который
--- режет по ширине и даёт rt_fixed_overflow (ERROR_FIXED_INTEGER_OVERFLOW).
--- Метки .L_equal_yes/no, .L_less_yes — общие с numbers.
+-- Команды — методами compiler.executor (договор backend), регистры — его роли.
+-- Значения — сырые 32 бита в VALUE/ERROR без тега; тип — в FIXED_SOURCE_KIND
+-- (abi.FIXED_*), целевой тип convert — в FIXED_TARGET_KIND. Результат проходит
+-- через rt_fixed_new, который режет по ширине и даёт rt_fixed_overflow
+-- (ERROR_FIXED_INTEGER_OVERFLOW). Ответы yes/no — метками numbers.EQUAL_YES /
+-- EQUAL_NO / LESS_YES. rt_fixed_mem_load32 / store32 проваливаются в
+-- rt_fixed_mem_load / store — внутри одного навыка.
 --
 -- emit_fixed_overflow / emit_fixed_overflow_restore(compiler) — ошибка
 --     (restore — с откатом кадра 16 байт)
@@ -14,425 +17,441 @@
 -- emit_fixed_and / emit_fixed_or / emit_fixed_xor / emit_fixed_not(compiler)
 -- emit_fixed_shift_left / emit_fixed_shift_right(compiler)
 -- emit_fixed_convert(compiler) — rt_fixed_convert между типами
--- emit_fixed_mem_load / _load8 / _load16 / _load32(compiler) — чтение по адресу
--- emit_fixed_mem_store / _store8 / _store16 / _store32(compiler) — запись
+-- emit_fixed_mem_load / _load8 / _load16(compiler) — чтение по адресу (load даёт
+--     и rt_fixed_mem_load32); emit_fixed_mem_store / _store8 / _store16(compiler) — запись
 -- emit_fixed_show(compiler) — rt_fixed_show: десятичный текст через rt_show
 
 use selfhost.abi
-use selfhost.compiler.backend.rv32i.machine.instruction
-use selfhost.compiler.backend.rv32i.machine.layout
-use selfhost.compiler.backend.rv32i.assembler
-use selfhost.compiler.backend.rv32i.machine.registers
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.runtime.numbers
+use selfhost.machine.word
+
+I32_SIGN_WORD = word.from_bytes(0, 0, 0, 128)
+I32_MAX_WORD = word.from_bytes(255, 255, 255, 127)
 
 skill emit_fixed_overflow_restore(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_overflow_restore")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.ERROR_FIXED_INTEGER_OVERFLOW)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.SP, registers.ZERO, 12)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 16)
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_overflow_restore")
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_FIXED_INTEGER_OVERFLOW)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 12)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 16)
+    out executor.ret(compiler)
 }
 
 skill emit_fixed_overflow(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_overflow")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.ERROR_FIXED_INTEGER_OVERFLOW)
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_overflow")
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_FIXED_INTEGER_OVERFLOW)
+    out executor.ret(compiler)
 }
 
 skill emit_fixed_equal(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_equal")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A0, registers.A1, ".L_equal_yes")
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_equal_no")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_equal")
+    compiler = executor.branch_equal(compiler, backend.VALUE, backend.ERROR, numbers.EQUAL_YES)
+    compiler = executor.jump(compiler, numbers.EQUAL_NO)
     out compiler
 }
 
 skill emit_fixed_less(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_less")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, abi.FIXED_I32)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A6, registers.T3, ".L_fixed_less_signed")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.A0, registers.A1, ".L_less_yes")
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_equal_no")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_less_signed")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, registers.A0, registers.A1, ".L_less_yes")
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_equal_no")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_less")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, abi.FIXED_I32)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH3, ".L_fixed_less_signed")
+    compiler = executor.branch_less_unsigned(compiler, backend.VALUE, backend.ERROR, numbers.LESS_YES)
+    compiler = executor.jump(compiler, numbers.EQUAL_NO)
+    compiler = executor.label(compiler, ".L_fixed_less_signed")
+    compiler = executor.branch_less(compiler, backend.VALUE, backend.ERROR, numbers.LESS_YES)
+    compiler = executor.jump(compiler, numbers.EQUAL_NO)
     out compiler
 }
 
 skill emit_fixed_greater(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_greater")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.A0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.A1, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.A2, registers.ZERO, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_less")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_greater")
+    compiler = executor.move(compiler, backend.ARG2, backend.VALUE)
+    compiler = executor.move(compiler, backend.VALUE, backend.ERROR)
+    compiler = executor.move(compiler, backend.ERROR, backend.ARG2)
+    compiler = executor.jump(compiler, "rt_fixed_less")
     out compiler
 }
 
 skill emit_fixed_new(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_new")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.FIXED_U8)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A6, registers.T0, ".L_fixed_check_u8")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.FIXED_U16)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A6, registers.T0, ".L_fixed_check_u16")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    compiler = assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_check_u8")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SRLI, registers.T0, registers.A0, registers.ZERO, 8)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T0, registers.ZERO, "rt_fixed_overflow")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    compiler = assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_check_u16")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SRLI, registers.T0, registers.A0, registers.ZERO, 16)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T0, registers.ZERO, "rt_fixed_overflow")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_new")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_U8)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u8")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_U16)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u16")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_fixed_check_u8")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.VALUE, 8)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, "rt_fixed_overflow")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_fixed_check_u16")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.VALUE, 16)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, "rt_fixed_overflow")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
 }
 
 skill emit_fixed_mem_load8(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_mem_load8")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, abi.FIXED_U8)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_mem_load")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_mem_load8")
+    compiler = executor.load_immediate(compiler, backend.ARG2, abi.FIXED_U8)
+    compiler = executor.jump(compiler, "rt_fixed_mem_load")
     out compiler
 }
 
 skill emit_fixed_mem_load16(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_mem_load16")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, abi.FIXED_U16)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_mem_load")
-    out compiler
-}
-
-skill emit_fixed_mem_load32(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_mem_load32")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, abi.FIXED_U32)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_mem_load16")
+    compiler = executor.load_immediate(compiler, backend.ARG2, abi.FIXED_U16)
+    compiler = executor.jump(compiler, "rt_fixed_mem_load")
     out compiler
 }
 
 skill emit_fixed_mem_load(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_mem_load")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T0, registers.A0, registers.A1, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, abi.FIXED_U8)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A2, registers.T1, ".L_fixed_mem_load8")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, abi.FIXED_U16)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A2, registers.T1, ".L_fixed_mem_load16")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.T0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    compiler = assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mem_load8")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LBU, registers.A0, registers.T0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    compiler = assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mem_load16")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LHU, registers.A0, registers.T0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    compiler = assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_mem_load32")
+    compiler = executor.load_immediate(compiler, backend.ARG2, abi.FIXED_U32)
+    compiler = executor.label(compiler, "rt_fixed_mem_load")
+    compiler = executor.add(compiler, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.FIXED_U8)
+    compiler = executor.branch_equal(compiler, backend.ARG2, backend.SCRATCH1, ".L_fixed_mem_load8")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.FIXED_U16)
+    compiler = executor.branch_equal(compiler, backend.ARG2, backend.SCRATCH1, ".L_fixed_mem_load16")
+    compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH0, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_fixed_mem_load8")
+    compiler = executor.load_byte(compiler, backend.VALUE, backend.SCRATCH0, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_fixed_mem_load16")
+    compiler = executor.load_half(compiler, backend.VALUE, backend.SCRATCH0, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.ret(compiler)
     out compiler
 }
 
 skill emit_fixed_mem_store8(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_mem_store8")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, 1)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_mem_store")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_mem_store8")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, 1)
+    compiler = executor.jump(compiler, "rt_fixed_mem_store")
     out compiler
 }
 
 skill emit_fixed_mem_store16(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_mem_store16")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, 2)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_mem_store")
-    out compiler
-}
-
-skill emit_fixed_mem_store32(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_mem_store32")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, 3)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_mem_store16")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, 2)
+    compiler = executor.jump(compiler, "rt_fixed_mem_store")
     out compiler
 }
 
 skill emit_fixed_mem_store(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_mem_store")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T0, registers.A0, registers.A1, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, 1)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T3, registers.T1, ".L_fixed_mem_store8")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, 2)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T3, registers.T1, ".L_fixed_mem_store16")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.A2, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_fixed_mem_store_done")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mem_store8")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, registers.T0, registers.A2, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_fixed_mem_store_done")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mem_store16")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SH, registers.ZERO, registers.T0, registers.A2, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mem_store_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, abi.NONE)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_mem_store32")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, 3)
+    compiler = executor.label(compiler, "rt_fixed_mem_store")
+    compiler = executor.add(compiler, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 1)
+    compiler = executor.branch_equal(compiler, backend.SCRATCH3, backend.SCRATCH1, ".L_fixed_mem_store8")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 2)
+    compiler = executor.branch_equal(compiler, backend.SCRATCH3, backend.SCRATCH1, ".L_fixed_mem_store16")
+    compiler = executor.store(compiler, backend.ARG2, backend.SCRATCH0, 0)
+    compiler = executor.jump(compiler, ".L_fixed_mem_store_done")
+    compiler = executor.label(compiler, ".L_fixed_mem_store8")
+    compiler = executor.store_byte(compiler, backend.ARG2, backend.SCRATCH0, 0)
+    compiler = executor.jump(compiler, ".L_fixed_mem_store_done")
+    compiler = executor.label(compiler, ".L_fixed_mem_store16")
+    compiler = executor.store_half(compiler, backend.ARG2, backend.SCRATCH0, 0)
+    compiler = executor.label(compiler, ".L_fixed_mem_store_done")
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
 }
 
 skill emit_fixed_show(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_show")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, -64)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, 60)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.A0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, abi.FIXED_I32)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A6, registers.T3, ".L_fixed_text_digits")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.T0, registers.ZERO, ".L_fixed_text_digits")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T0, registers.ZERO, registers.T0, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_text_digits")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_text_digit")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T4, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T5, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T6, registers.ZERO, registers.ZERO, 32)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A3, registers.T0, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_text_div10")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SRLI, registers.A4, registers.A3, registers.ZERO, 31)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLLI, registers.A3, registers.A3, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLLI, registers.T5, registers.T5, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.OR, registers.T5, registers.T5, registers.A4, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLLI, registers.T4, registers.T4, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A4, registers.ZERO, registers.ZERO, 10)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.T5, registers.A4, ".L_fixed_text_div10_next")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T5, registers.T5, registers.ZERO, -10)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ORI, registers.T4, registers.T4, registers.ZERO, 1)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_text_div10_next")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T6, registers.T6, registers.ZERO, -1)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T6, registers.ZERO, ".L_fixed_text_div10")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T5, registers.T5, registers.ZERO, 48)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.A4, registers.SP, registers.T3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, registers.A4, registers.T5, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.T3, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.T4, registers.ZERO, 0)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T0, registers.ZERO, ".L_fixed_text_digit")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T4, registers.T3, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.T3, 56)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.T2, 52)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.T4, 48)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.T4, registers.ZERO, 5)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T3, registers.SP, registers.ZERO, 56)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.SP, registers.ZERO, 52)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T4, registers.SP, registers.ZERO, 48)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T5, registers.ZERO, registers.ZERO, abi.OBJECT_KIND_STRING)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T5, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T4, abi.OBJECT_PAYLOAD_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T5, registers.ZERO, registers.ZERO, 0)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T2, registers.ZERO, ".L_fixed_text_copy")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T6, registers.ZERO, registers.ZERO, 45)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, registers.A0, registers.T6, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T5, registers.ZERO, registers.ZERO, 1)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_text_copy")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T3, registers.ZERO, ".L_fixed_text_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.T3, registers.ZERO, -1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T6, registers.SP, registers.T3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LBU, registers.T6, registers.T6, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.A3, registers.A0, registers.T5, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, registers.A3, registers.T6, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T5, registers.T5, registers.ZERO, 1)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_fixed_text_copy")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_text_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.A3, registers.A0, registers.T4, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, registers.A3, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_STRING)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_show")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.SP, registers.ZERO, 60)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 64)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_show")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -64)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 60)
+    compiler = executor.move(compiler, backend.SCRATCH0, backend.VALUE)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, abi.FIXED_I32)
+    compiler = executor.branch_not_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH3, ".L_fixed_text_digits")
+    compiler = executor.branch_not_negative(compiler, backend.SCRATCH0, ".L_fixed_text_digits")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 1)
+    compiler = executor.negate(compiler, backend.SCRATCH0, backend.SCRATCH0)
+    compiler = executor.label(compiler, ".L_fixed_text_digits")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, 0)
+    compiler = executor.label(compiler, ".L_fixed_text_digit")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH5, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH6, 32)
+    compiler = executor.move(compiler, backend.ARG3, backend.SCRATCH0)
+    compiler = executor.label(compiler, ".L_fixed_text_div10")
+    compiler = executor.shift_right_unsigned(compiler, backend.ARG4, backend.ARG3, 31)
+    compiler = executor.shift_left(compiler, backend.ARG3, backend.ARG3, 1)
+    compiler = executor.shift_left(compiler, backend.SCRATCH5, backend.SCRATCH5, 1)
+    compiler = executor.or(compiler, backend.SCRATCH5, backend.SCRATCH5, backend.ARG4)
+    compiler = executor.shift_left(compiler, backend.SCRATCH4, backend.SCRATCH4, 1)
+    compiler = executor.load_immediate(compiler, backend.ARG4, 10)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH5, backend.ARG4, ".L_fixed_text_div10_next")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, -10)
+    compiler = executor.or_immediate(compiler, backend.SCRATCH4, backend.SCRATCH4, 1)
+    compiler = executor.label(compiler, ".L_fixed_text_div10_next")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH6, backend.SCRATCH6, -1)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH6, ".L_fixed_text_div10")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, 48)
+    compiler = executor.add(compiler, backend.ARG4, backend.STACK, backend.SCRATCH3)
+    compiler = executor.store_byte(compiler, backend.SCRATCH5, backend.ARG4, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, 1)
+    compiler = executor.move(compiler, backend.SCRATCH0, backend.SCRATCH4)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, ".L_fixed_text_digit")
+    compiler = executor.add(compiler, backend.SCRATCH4, backend.SCRATCH3, backend.SCRATCH2)
+    compiler = executor.store(compiler, backend.SCRATCH3, backend.STACK, 56)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.STACK, 52)
+    compiler = executor.store(compiler, backend.SCRATCH4, backend.STACK, 48)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.SCRATCH4, 5)
+    compiler = executor.call(compiler, "rt_alloc")
+    compiler = executor.load(compiler, backend.SCRATCH3, backend.STACK, 56)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.STACK, 52)
+    compiler = executor.load(compiler, backend.SCRATCH4, backend.STACK, 48)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH5, abi.OBJECT_KIND_STRING)
+    compiler = executor.store(compiler, backend.SCRATCH5, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.store(compiler, backend.SCRATCH4, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH5, 0)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH2, ".L_fixed_text_copy")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH6, 45)
+    compiler = executor.store_byte(compiler, backend.SCRATCH6, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH5, 1)
+    compiler = executor.label(compiler, ".L_fixed_text_copy")
+    compiler = executor.branch_zero(compiler, backend.SCRATCH3, ".L_fixed_text_done")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, -1)
+    compiler = executor.add(compiler, backend.SCRATCH6, backend.STACK, backend.SCRATCH3)
+    compiler = executor.load_byte(compiler, backend.SCRATCH6, backend.SCRATCH6, 0)
+    compiler = executor.add(compiler, backend.ARG3, backend.VALUE, backend.SCRATCH5)
+    compiler = executor.store_byte(compiler, backend.SCRATCH6, backend.ARG3, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, 1)
+    compiler = executor.jump(compiler, ".L_fixed_text_copy")
+    compiler = executor.label(compiler, ".L_fixed_text_done")
+    compiler = executor.add(compiler, backend.ARG3, backend.VALUE, backend.SCRATCH4)
+    compiler = executor.store_byte_zero(compiler, backend.ARG3, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    compiler = executor.call(compiler, "rt_show")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 60)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 64)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
 }
 
 skill emit_fixed_add(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_add")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.A0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.A1, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.A0, registers.T2, registers.T3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T4, registers.ZERO, registers.ZERO, abi.FIXED_I32)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A6, registers.T4, ".L_fixed_add_signed")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.A0, registers.T2, "rt_fixed_overflow")
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_add_signed")
-    compiler = assembler.emit_op(compiler, instruction.Kind.XOR, registers.T4, registers.A0, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.XOR, registers.T5, registers.A0, registers.T3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.AND, registers.T4, registers.T4, registers.T5, 0)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, registers.T4, registers.ZERO, "rt_fixed_overflow")
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_add")
+    compiler = executor.move(compiler, backend.SCRATCH2, backend.VALUE)
+    compiler = executor.move(compiler, backend.SCRATCH3, backend.ERROR)
+    compiler = executor.add(compiler, backend.VALUE, backend.SCRATCH2, backend.SCRATCH3)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, abi.FIXED_I32)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH4, ".L_fixed_add_signed")
+    compiler = executor.branch_less_unsigned(compiler, backend.VALUE, backend.SCRATCH2, "rt_fixed_overflow")
+    compiler = executor.jump(compiler, "rt_fixed_new")
+    compiler = executor.label(compiler, ".L_fixed_add_signed")
+    compiler = executor.xor(compiler, backend.SCRATCH4, backend.VALUE, backend.SCRATCH2)
+    compiler = executor.xor(compiler, backend.SCRATCH5, backend.VALUE, backend.SCRATCH3)
+    compiler = executor.and(compiler, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH5)
+    compiler = executor.branch_negative(compiler, backend.SCRATCH4, "rt_fixed_overflow")
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }
 
 skill emit_fixed_sub(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_sub")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.A0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.A1, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.A0, registers.T2, registers.T3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T4, registers.ZERO, registers.ZERO, abi.FIXED_I32)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A6, registers.T4, ".L_fixed_sub_signed")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.T2, registers.T3, "rt_fixed_overflow")
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_sub_signed")
-    compiler = assembler.emit_op(compiler, instruction.Kind.XOR, registers.T4, registers.T2, registers.T3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.XOR, registers.T5, registers.A0, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.AND, registers.T4, registers.T4, registers.T5, 0)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, registers.T4, registers.ZERO, "rt_fixed_overflow")
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_sub")
+    compiler = executor.move(compiler, backend.SCRATCH2, backend.VALUE)
+    compiler = executor.move(compiler, backend.SCRATCH3, backend.ERROR)
+    compiler = executor.sub(compiler, backend.VALUE, backend.SCRATCH2, backend.SCRATCH3)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, abi.FIXED_I32)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH4, ".L_fixed_sub_signed")
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH2, backend.SCRATCH3, "rt_fixed_overflow")
+    compiler = executor.jump(compiler, "rt_fixed_new")
+    compiler = executor.label(compiler, ".L_fixed_sub_signed")
+    compiler = executor.xor(compiler, backend.SCRATCH4, backend.SCRATCH2, backend.SCRATCH3)
+    compiler = executor.xor(compiler, backend.SCRATCH5, backend.VALUE, backend.SCRATCH2)
+    compiler = executor.and(compiler, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH5)
+    compiler = executor.branch_negative(compiler, backend.SCRATCH4, "rt_fixed_overflow")
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }
 
 skill emit_fixed_mul(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_mul")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.A0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.A1, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A5, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, abi.FIXED_I32)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A6, registers.A2, ".L_fixed_mul_unsigned")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.T2, registers.ZERO, ".L_fixed_mul_left_ready")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T2, registers.ZERO, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.XORI, registers.A5, registers.A5, registers.ZERO, 1)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mul_left_ready")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.T3, registers.ZERO, ".L_fixed_mul_unsigned")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T3, registers.ZERO, registers.T3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.XORI, registers.A5, registers.A5, registers.ZERO, 1)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mul_unsigned")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T4, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T5, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A4, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T6, registers.ZERO, registers.ZERO, 32)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mul_loop")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.A2, registers.T3, registers.ZERO, 1)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A2, registers.ZERO, ".L_fixed_mul_shift")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.A2, registers.T4, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLTU, registers.A3, registers.A2, registers.T4, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T5, registers.T5, registers.A4, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T5, registers.T5, registers.A3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T4, registers.A2, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mul_shift")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SRLI, registers.T3, registers.T3, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SRLI, registers.A2, registers.T2, registers.ZERO, 31)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLLI, registers.T2, registers.T2, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLLI, registers.A4, registers.A4, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.OR, registers.A4, registers.A4, registers.A2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T6, registers.T6, registers.ZERO, -1)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T6, registers.ZERO, ".L_fixed_mul_loop")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T5, registers.ZERO, ".L_fixed_mul_overflow")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, abi.FIXED_I32)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A6, registers.A2, ".L_fixed_mul_ready")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A5, registers.ZERO, ".L_fixed_mul_positive")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LUI, registers.A2, registers.ZERO, registers.ZERO, 524288)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.A2, registers.ZERO, 0)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.A2, registers.T4, ".L_fixed_mul_overflow")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T4, registers.ZERO, registers.T4, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_fixed_mul_ready")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mul_positive")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LUI, registers.A2, registers.ZERO, registers.ZERO, 524288)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.A2, registers.ZERO, -1)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.A2, registers.T4, ".L_fixed_mul_overflow")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mul_ready")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.T4, registers.ZERO, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_mul_overflow")
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_overflow")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_mul")
+    compiler = executor.move(compiler, backend.SCRATCH2, backend.VALUE)
+    compiler = executor.move(compiler, backend.SCRATCH3, backend.ERROR)
+    compiler = executor.load_immediate(compiler, backend.ARG5, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG2, abi.FIXED_I32)
+    compiler = executor.branch_not_equal(compiler, backend.FIXED_SOURCE_KIND, backend.ARG2, ".L_fixed_mul_unsigned")
+    compiler = executor.branch_not_negative(compiler, backend.SCRATCH2, ".L_fixed_mul_left_ready")
+    compiler = executor.negate(compiler, backend.SCRATCH2, backend.SCRATCH2)
+    compiler = executor.xor_immediate(compiler, backend.ARG5, backend.ARG5, 1)
+    compiler = executor.label(compiler, ".L_fixed_mul_left_ready")
+    compiler = executor.branch_not_negative(compiler, backend.SCRATCH3, ".L_fixed_mul_unsigned")
+    compiler = executor.negate(compiler, backend.SCRATCH3, backend.SCRATCH3)
+    compiler = executor.xor_immediate(compiler, backend.ARG5, backend.ARG5, 1)
+    compiler = executor.label(compiler, ".L_fixed_mul_unsigned")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH5, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG4, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH6, 32)
+    compiler = executor.label(compiler, ".L_fixed_mul_loop")
+    compiler = executor.and_immediate(compiler, backend.ARG2, backend.SCRATCH3, 1)
+    compiler = executor.branch_zero(compiler, backend.ARG2, ".L_fixed_mul_shift")
+    compiler = executor.add(compiler, backend.ARG2, backend.SCRATCH4, backend.SCRATCH2)
+    compiler = executor.set_less_unsigned(compiler, backend.ARG3, backend.ARG2, backend.SCRATCH4)
+    compiler = executor.add(compiler, backend.SCRATCH5, backend.SCRATCH5, backend.ARG4)
+    compiler = executor.add(compiler, backend.SCRATCH5, backend.SCRATCH5, backend.ARG3)
+    compiler = executor.move(compiler, backend.SCRATCH4, backend.ARG2)
+    compiler = executor.label(compiler, ".L_fixed_mul_shift")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH3, backend.SCRATCH3, 1)
+    compiler = executor.shift_right_unsigned(compiler, backend.ARG2, backend.SCRATCH2, 31)
+    compiler = executor.shift_left(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
+    compiler = executor.shift_left(compiler, backend.ARG4, backend.ARG4, 1)
+    compiler = executor.or(compiler, backend.ARG4, backend.ARG4, backend.ARG2)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH6, backend.SCRATCH6, -1)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH6, ".L_fixed_mul_loop")
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH5, ".L_fixed_mul_overflow")
+    compiler = executor.load_immediate(compiler, backend.ARG2, abi.FIXED_I32)
+    compiler = executor.branch_not_equal(compiler, backend.FIXED_SOURCE_KIND, backend.ARG2, ".L_fixed_mul_ready")
+    compiler = executor.branch_zero(compiler, backend.ARG5, ".L_fixed_mul_positive")
+    compiler = executor.load_word(compiler, backend.ARG2, I32_SIGN_WORD)
+    compiler = executor.branch_less_unsigned(compiler, backend.ARG2, backend.SCRATCH4, ".L_fixed_mul_overflow")
+    compiler = executor.negate(compiler, backend.SCRATCH4, backend.SCRATCH4)
+    compiler = executor.jump(compiler, ".L_fixed_mul_ready")
+    compiler = executor.label(compiler, ".L_fixed_mul_positive")
+    compiler = executor.load_word(compiler, backend.ARG2, I32_MAX_WORD)
+    compiler = executor.branch_less_unsigned(compiler, backend.ARG2, backend.SCRATCH4, ".L_fixed_mul_overflow")
+    compiler = executor.label(compiler, ".L_fixed_mul_ready")
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH4)
+    compiler = executor.jump(compiler, "rt_fixed_new")
+    compiler = executor.label(compiler, ".L_fixed_mul_overflow")
+    compiler = executor.jump(compiler, "rt_fixed_overflow")
     out compiler
 }
 
 skill emit_fixed_div(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_div")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.A0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.A1, registers.ZERO, 0)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T3, registers.ZERO, ".L_fixed_div_nonzero")
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_division_by_zero")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_div_nonzero")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A4, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, abi.FIXED_I32)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A6, registers.A2, ".L_fixed_div_unsigned")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.T2, registers.ZERO, ".L_fixed_div_left_ready")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T2, registers.ZERO, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.XORI, registers.A4, registers.A4, registers.ZERO, 1)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_div_left_ready")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.T3, registers.ZERO, ".L_fixed_div_unsigned")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T3, registers.ZERO, registers.T3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.XORI, registers.A4, registers.A4, registers.ZERO, 1)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_div_unsigned")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T4, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T5, registers.ZERO, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T6, registers.ZERO, registers.ZERO, 32)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_div_loop")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SRLI, registers.A2, registers.T2, registers.ZERO, 31)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLLI, registers.T2, registers.T2, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLLI, registers.T5, registers.T5, registers.ZERO, 1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.OR, registers.T5, registers.T5, registers.A2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLLI, registers.T4, registers.T4, registers.ZERO, 1)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.T5, registers.T3, ".L_fixed_div_next")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T5, registers.T5, registers.T3, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ORI, registers.T4, registers.T4, registers.ZERO, 1)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_div_next")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T6, registers.T6, registers.ZERO, -1)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T6, registers.ZERO, ".L_fixed_div_loop")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A4, registers.ZERO, ".L_fixed_div_positive")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T4, registers.ZERO, registers.T4, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_fixed_div_ready")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_div_positive")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, abi.FIXED_I32)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A6, registers.A2, ".L_fixed_div_ready")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, registers.T4, registers.ZERO, "rt_fixed_overflow")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_div_ready")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.T4, registers.ZERO, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_div")
+    compiler = executor.move(compiler, backend.SCRATCH2, backend.VALUE)
+    compiler = executor.move(compiler, backend.SCRATCH3, backend.ERROR)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH3, ".L_fixed_div_nonzero")
+    compiler = executor.jump(compiler, "rt_division_by_zero")
+    compiler = executor.label(compiler, ".L_fixed_div_nonzero")
+    compiler = executor.load_immediate(compiler, backend.ARG4, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG2, abi.FIXED_I32)
+    compiler = executor.branch_not_equal(compiler, backend.FIXED_SOURCE_KIND, backend.ARG2, ".L_fixed_div_unsigned")
+    compiler = executor.branch_not_negative(compiler, backend.SCRATCH2, ".L_fixed_div_left_ready")
+    compiler = executor.negate(compiler, backend.SCRATCH2, backend.SCRATCH2)
+    compiler = executor.xor_immediate(compiler, backend.ARG4, backend.ARG4, 1)
+    compiler = executor.label(compiler, ".L_fixed_div_left_ready")
+    compiler = executor.branch_not_negative(compiler, backend.SCRATCH3, ".L_fixed_div_unsigned")
+    compiler = executor.negate(compiler, backend.SCRATCH3, backend.SCRATCH3)
+    compiler = executor.xor_immediate(compiler, backend.ARG4, backend.ARG4, 1)
+    compiler = executor.label(compiler, ".L_fixed_div_unsigned")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH5, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH6, 32)
+    compiler = executor.label(compiler, ".L_fixed_div_loop")
+    compiler = executor.shift_right_unsigned(compiler, backend.ARG2, backend.SCRATCH2, 31)
+    compiler = executor.shift_left(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
+    compiler = executor.shift_left(compiler, backend.SCRATCH5, backend.SCRATCH5, 1)
+    compiler = executor.or(compiler, backend.SCRATCH5, backend.SCRATCH5, backend.ARG2)
+    compiler = executor.shift_left(compiler, backend.SCRATCH4, backend.SCRATCH4, 1)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH5, backend.SCRATCH3, ".L_fixed_div_next")
+    compiler = executor.sub(compiler, backend.SCRATCH5, backend.SCRATCH5, backend.SCRATCH3)
+    compiler = executor.or_immediate(compiler, backend.SCRATCH4, backend.SCRATCH4, 1)
+    compiler = executor.label(compiler, ".L_fixed_div_next")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH6, backend.SCRATCH6, -1)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH6, ".L_fixed_div_loop")
+    compiler = executor.branch_zero(compiler, backend.ARG4, ".L_fixed_div_positive")
+    compiler = executor.negate(compiler, backend.SCRATCH4, backend.SCRATCH4)
+    compiler = executor.jump(compiler, ".L_fixed_div_ready")
+    compiler = executor.label(compiler, ".L_fixed_div_positive")
+    compiler = executor.load_immediate(compiler, backend.ARG2, abi.FIXED_I32)
+    compiler = executor.branch_not_equal(compiler, backend.FIXED_SOURCE_KIND, backend.ARG2, ".L_fixed_div_ready")
+    compiler = executor.branch_negative(compiler, backend.SCRATCH4, "rt_fixed_overflow")
+    compiler = executor.label(compiler, ".L_fixed_div_ready")
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH4)
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }
 
 skill emit_fixed_and(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_and")
-    compiler = assembler.emit_op(compiler, instruction.Kind.AND, registers.A0, registers.A0, registers.A1, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_and")
+    compiler = executor.and(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }
 
 skill emit_fixed_or(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_or")
-    compiler = assembler.emit_op(compiler, instruction.Kind.OR, registers.A0, registers.A0, registers.A1, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_or")
+    compiler = executor.or(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }
 
 skill emit_fixed_xor(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_xor")
-    compiler = assembler.emit_op(compiler, instruction.Kind.XOR, registers.A0, registers.A0, registers.A1, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_xor")
+    compiler = executor.xor(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }
 
 skill emit_fixed_not(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_not")
-    compiler = assembler.emit_op(compiler, instruction.Kind.XORI, registers.A0, registers.A0, registers.ZERO, -1)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_not")
+    compiler = executor.xor_immediate(compiler, backend.VALUE, backend.VALUE, -1)
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }
 
 skill emit_fixed_shift_left(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_shift_left")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLL, registers.A0, registers.A0, registers.A1, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_shift_left")
+    compiler = executor.shift_left_by(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }
 
 skill emit_fixed_shift_right(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_shift_right")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SRL, registers.A0, registers.A0, registers.A1, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_shift_right")
+    compiler = executor.shift_right_unsigned_by(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }
 
 skill emit_fixed_convert(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_fixed_convert")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.FIXED_I32)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A6, registers.T0, ".L_fixed_convert_to_signed")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, registers.A0, registers.ZERO, "rt_fixed_overflow")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_convert_to_signed")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A7, registers.T0, ".L_fixed_convert_ready")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, registers.A0, registers.ZERO, "rt_fixed_overflow")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_fixed_convert_ready")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A6, registers.A7, registers.ZERO, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_fixed_new")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_convert")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_I32)
+    compiler = executor.branch_not_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_convert_to_signed")
+    compiler = executor.branch_negative(compiler, backend.VALUE, "rt_fixed_overflow")
+    compiler = executor.label(compiler, ".L_fixed_convert_to_signed")
+    compiler = executor.branch_not_equal(compiler, backend.FIXED_TARGET_KIND, backend.SCRATCH0, ".L_fixed_convert_ready")
+    compiler = executor.branch_negative(compiler, backend.VALUE, "rt_fixed_overflow")
+    compiler = executor.label(compiler, ".L_fixed_convert_ready")
+    compiler = executor.move(compiler, backend.FIXED_SOURCE_KIND, backend.FIXED_TARGET_KIND)
+    compiler = executor.jump(compiler, "rt_fixed_new")
     out compiler
 }

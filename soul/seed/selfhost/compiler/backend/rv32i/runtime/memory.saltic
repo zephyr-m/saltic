@@ -1,17 +1,22 @@
 -- memory — рантайм памяти: rt_alloc и регионы (выход из навыка сжимает
 -- кучу, перенося наружу только живые объекты).
 -- Каждый навык берёт и отдаёт compiler, определяя метку rt_* в коде.
--- Регистры: s1 — вершина кучи, s2 — низ таблицы побегов (растёт вниз),
--- s4/s5 — метка региона и побегов при входе в навык. rt_region_exit: a0/a1
--- значение и ошибка, a2 = REGION_EXIT_VALUE_SKIPPED — значение не корень.
+-- Команды — методами compiler.executor (договор backend), регистры — его роли:
+-- HEAP_TOP — вершина кучи, ESCAPE_BOTTOM — низ таблицы побегов (растёт вниз),
+-- REGION_MARK / ESCAPE_MARK — метки региона и побегов при входе в навык.
+-- rt_region_exit: VALUE/ERROR — значение и ошибка, ARG2 = REGION_EXIT_VALUE_SKIPPED
+-- — значение не корень. rt_region_barrier(ARG2 value, BARRIER_OBJECT адрес Box).
 -- Нехватка места при копировании — откат (.L_region_abort).
 --
--- emit_alloc(compiler) — rt_alloc(a0 байт) -> адрес; rt_out_of_memory
+-- emit_alloc(compiler) — rt_alloc(VALUE байт) -> адрес; rt_out_of_memory
 -- emit_out_of_memory(compiler) — ERROR_MEMORY_EXHAUSTED или выход процесса
 -- emit_region_exit(compiler) — rt_region_exit: копирование, перенос, сжатие
 -- emit_region_forward / emit_region_relocate / emit_region_restore(compiler)
---     — посетители одного указателя в a7
+--     — посетители одного указателя в ARG7
 -- emit_region_barrier(compiler) — rt_region_barrier: запись в старый объект
+-- BARRIER_OBJECT — роль адреса Box на входе в rt_region_barrier (SCRATCH2)
+-- RELOCATION_DELTA — роль сдвига переноса: rt_region_exit кладёт, rt_region_relocate
+--     читает через все обходы (SCRATCH6); обходы и посетители её не трогают
 -- emit_region_remember_slot(compiler) — слот константы как корень
 -- emit_pointer_address / emit_object_size / emit_visit / emit_escape_walk /
 --     emit_block_walk / emit_copies_walk / emit_slide / emit_escape_compact
@@ -22,11 +27,8 @@ use core.str
 use selfhost.abi
 use selfhost.memory.model
 use core.process
-use selfhost.compiler.backend.rv32i.machine.instruction
-use selfhost.compiler.backend.rv32i.machine.layout
-use selfhost.compiler.backend.rv32i.assembler
 use selfhost.compiler.constants
-use selfhost.compiler.backend.rv32i.machine.registers
+use selfhost.compiler.backend
 
 WORD_BYTES = constants.WORD_BYTES
 COUNT_OFFSET = abi.OBJECT_PAYLOAD_OFFSET + constants.GROUP_COUNT_OFFSET
@@ -43,95 +45,105 @@ EXIT_VALUE_OFFSET = 4
 EXIT_ERROR_OFFSET = 8
 EXIT_RETURN_OFFSET = 12
 
+BARRIER_OBJECT = backend.SCRATCH2
+RELOCATION_DELTA = backend.SCRATCH6
+
 skill emit_alloc(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_alloc")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.A0, registers.ZERO, 0)
-    compiler.machine = layout.emit_branch_unsigned_greater(compiler.machine, registers.S1, registers.S2, "rt_out_of_memory")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.A0, registers.ZERO, abi.OBJECT_HEADER_BYTES + abi.OBJECT_ALIGNMENT - 1)
-    compiler.machine = layout.emit_branch_unsigned_greater(compiler.machine, registers.A0, registers.T0, "rt_out_of_memory")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.T0, registers.ZERO, 0 - abi.OBJECT_ALIGNMENT)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T2, registers.S2, registers.S1, 0)
-    compiler.machine = layout.emit_branch_unsigned_greater(compiler.machine, registers.T0, registers.T2, "rt_out_of_memory")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.S1, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.S1, registers.S1, registers.T0, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T1, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.ZERO, abi.OBJECT_HEADER_FLAGS_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_alloc")
+    compiler = executor.move(compiler, backend.SCRATCH1, backend.VALUE)
+    compiler = executor.branch_less_unsigned(compiler, backend.ESCAPE_BOTTOM, backend.HEAP_TOP, "rt_out_of_memory")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_BYTES + abi.OBJECT_ALIGNMENT - 1)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH0, backend.VALUE, "rt_out_of_memory")
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 0 - abi.OBJECT_ALIGNMENT)
+    compiler = executor.sub(compiler, backend.SCRATCH2, backend.ESCAPE_BOTTOM, backend.HEAP_TOP)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH2, backend.SCRATCH0, "rt_out_of_memory")
+    compiler = executor.move(compiler, backend.VALUE, backend.HEAP_TOP)
+    compiler = executor.add(compiler, backend.HEAP_TOP, backend.HEAP_TOP, backend.SCRATCH0)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.VALUE, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
+    compiler = executor.store_zero(compiler, backend.VALUE, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
 }
 
 skill emit_out_of_memory(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_out_of_memory")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.S0, registers.ZERO, ".L_out_of_memory_exit")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, abi.NONE)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.ERROR_MEMORY_EXHAUSTED)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, model.REGION_EXIT_VALUE_SKIPPED)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_region_exit")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.S0, registers.ZERO, constants.return_address_load_offset())
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.S4, registers.S0, registers.ZERO, constants.region_mark_load_offset())
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.S5, registers.S0, registers.ZERO, constants.region_escape_load_offset())
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, constants.previous_frame_load_offset())
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.S0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.S0, registers.T0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_out_of_memory_exit")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, process.EXIT_OUT_OF_MEMORY)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, "rt_platform_exit")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_out_of_memory")
+    compiler = executor.branch_zero(compiler, backend.FRAME, ".L_out_of_memory_exit")
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_MEMORY_EXHAUSTED)
+    compiler = executor.load_immediate(compiler, backend.ARG2, model.REGION_EXIT_VALUE_SKIPPED)
+    compiler = executor.call(compiler, "rt_region_exit")
+    compiler = executor.load(compiler, backend.RETURN, backend.FRAME, constants.return_address_load_offset())
+    compiler = executor.load(compiler, backend.REGION_MARK, backend.FRAME, constants.region_mark_load_offset())
+    compiler = executor.load(compiler, backend.ESCAPE_MARK, backend.FRAME, constants.region_escape_load_offset())
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.FRAME, constants.previous_frame_load_offset())
+    compiler = executor.move(compiler, backend.STACK, backend.FRAME)
+    compiler = executor.move(compiler, backend.FRAME, backend.SCRATCH0)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_out_of_memory_exit")
+    compiler = executor.load_immediate(compiler, backend.VALUE, process.EXIT_OUT_OF_MEMORY)
+    compiler = executor.jump(compiler, "rt_platform_exit")
     out compiler
 }
 
 skill emit_pointer_address(compiler, skip) {
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.A7, registers.ZERO, abi.TAG_MASK)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.T0, registers.ZERO, 0 - abi.TAG_STRING)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLTIU, registers.T1, registers.T1, registers.ZERO, POINTER_TAG_COUNT)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T1, registers.ZERO, skip)
-    out assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T2, registers.A7, registers.ZERO, abi.PAYLOAD_MASK)
+    @executor = compiler.executor
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ARG7, abi.TAG_MASK)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH0, 0 - abi.TAG_STRING)
+    compiler = executor.set_less_unsigned_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, POINTER_TAG_COUNT)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH1, skip)
+    out executor.and_immediate(compiler, backend.SCRATCH2, backend.ARG7, abi.PAYLOAD_MASK)
 }
 
 skill emit_object_size(compiler, size, object) {
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, size, object, registers.ZERO, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, size, size, registers.ZERO, SIZE_ROUNDING)
-    out assembler.emit_op(compiler, instruction.Kind.ANDI, size, size, registers.ZERO, 0 - abi.OBJECT_ALIGNMENT)
+    @executor = compiler.executor
+    compiler = executor.load(compiler, size, object, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
+    compiler = executor.add_immediate(compiler, size, size, SIZE_ROUNDING)
+    out executor.and_immediate(compiler, size, size, 0 - abi.OBJECT_ALIGNMENT)
 }
 
 skill emit_visit(compiler, visitor, base, offset) {
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A7, base, registers.ZERO, offset)
-    compiler.machine = layout.emit_call(compiler.machine, visitor)
-    out assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, base, registers.A7, offset)
+    @executor = compiler.executor
+    compiler = executor.load(compiler, backend.ARG7, base, offset)
+    compiler = executor.call(compiler, visitor)
+    out executor.store(compiler, backend.ARG7, base, offset)
 }
 
 skill emit_escape_walk(compiler, visitor, prefix) {
+    @executor = compiler.executor
     @loop = "{prefix}_escape"
     @fields = "{prefix}_escape_fields"
     @slot = "{prefix}_escape_slot"
     @next = "{prefix}_escape_next"
     @done = "{prefix}_escape_done"
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A5, registers.S2, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, loop)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.A5, registers.S5, done)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A6, registers.A5, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.A6, registers.ZERO, model.ESCAPE_SLOT_FLAG)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T0, registers.ZERO, slot)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.A6, registers.S4, next)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A2, registers.A6, registers.ZERO, COUNT_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A6, registers.A6, registers.ZERO, BOX_VALUES_OFFSET)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, fields)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A2, registers.ZERO, next)
-    compiler = emit_visit(compiler, visitor, registers.A6, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A6, registers.A6, registers.ZERO, BOX_FIELD_BYTES)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.A2, registers.ZERO, -1)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, fields)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, slot)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.A6, registers.A6, registers.ZERO, model.ESCAPE_ENTRY_MASK)
-    compiler = emit_visit(compiler, visitor, registers.A6, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, next)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A5, registers.A5, registers.ZERO, model.ESCAPE_ENTRY_BYTES)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, loop)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, done)
+    compiler = executor.move(compiler, backend.ARG5, backend.ESCAPE_BOTTOM)
+    compiler = executor.label(compiler, loop)
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.ARG5, backend.ESCAPE_MARK, done)
+    compiler = executor.load(compiler, backend.ARG6, backend.ARG5, 0)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ARG6, model.ESCAPE_SLOT_FLAG)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, slot)
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.ARG6, backend.REGION_MARK, next)
+    compiler = executor.load(compiler, backend.ARG2, backend.ARG6, COUNT_OFFSET)
+    compiler = executor.add_immediate(compiler, backend.ARG6, backend.ARG6, BOX_VALUES_OFFSET)
+    compiler = executor.label(compiler, fields)
+    compiler = executor.branch_zero(compiler, backend.ARG2, next)
+    compiler = emit_visit(compiler, visitor, backend.ARG6, 0)
+    compiler = executor.add_immediate(compiler, backend.ARG6, backend.ARG6, BOX_FIELD_BYTES)
+    compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, -1)
+    compiler = executor.jump(compiler, fields)
+    compiler = executor.label(compiler, slot)
+    compiler = executor.and_immediate(compiler, backend.ARG6, backend.ARG6, model.ESCAPE_ENTRY_MASK)
+    compiler = emit_visit(compiler, visitor, backend.ARG6, 0)
+    compiler = executor.label(compiler, next)
+    compiler = executor.add_immediate(compiler, backend.ARG5, backend.ARG5, model.ESCAPE_ENTRY_BYTES)
+    compiler = executor.jump(compiler, loop)
+    compiler = executor.label(compiler, done)
     out compiler
 }
 
 skill emit_block_walk(compiler, visitor, prefix) {
+    @executor = compiler.executor
     @loop = "{prefix}_block"
     @group = "{prefix}_block_group"
     @box = "{prefix}_block_box"
@@ -139,234 +151,243 @@ skill emit_block_walk(compiler, visitor, prefix) {
     @items = "{prefix}_block_items"
     @next = "{prefix}_block_next"
     @done = "{prefix}_block_done"
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A5, registers.A3, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, loop)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.A5, registers.A4, done)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.A5, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A6, registers.A1, registers.ZERO, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.OBJECT_KIND_GROUP)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A6, registers.T0, group)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.OBJECT_KIND_BOX)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A6, registers.T0, box)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, abi.OBJECT_KIND_TREE)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A6, registers.T0, tree)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, next)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, tree)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, 2)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A6, registers.A1, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET + constants.TREE_ROOT_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A5, registers.ZERO, registers.ZERO, GROUP_ITEM_BYTES)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, items)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, group)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A2, registers.A1, registers.ZERO, COUNT_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A6, registers.A1, registers.ZERO, GROUP_ITEMS_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A5, registers.ZERO, registers.ZERO, GROUP_ITEM_BYTES)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, items)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, box)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A2, registers.A1, registers.ZERO, COUNT_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A6, registers.A1, registers.ZERO, BOX_VALUES_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A5, registers.ZERO, registers.ZERO, BOX_FIELD_BYTES)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, items)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.A2, registers.ZERO, next)
-    compiler = emit_visit(compiler, visitor, registers.A6, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.A6, registers.A6, registers.A5, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.A2, registers.ZERO, -1)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, items)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, next)
-    compiler = emit_object_size(compiler, registers.T0, registers.A1)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.A5, registers.A1, registers.T0, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, loop)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, done)
+    compiler = executor.move(compiler, backend.ARG5, backend.ARG3)
+    compiler = executor.label(compiler, loop)
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.ARG5, backend.ARG4, done)
+    compiler = executor.move(compiler, backend.ERROR, backend.ARG5)
+    compiler = executor.load(compiler, backend.ARG6, backend.ERROR, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_GROUP)
+    compiler = executor.branch_equal(compiler, backend.ARG6, backend.SCRATCH0, group)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_BOX)
+    compiler = executor.branch_equal(compiler, backend.ARG6, backend.SCRATCH0, box)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_TREE)
+    compiler = executor.branch_equal(compiler, backend.ARG6, backend.SCRATCH0, tree)
+    compiler = executor.jump(compiler, next)
+    compiler = executor.label(compiler, tree)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 2)
+    compiler = executor.add_immediate(compiler, backend.ARG6, backend.ERROR, abi.OBJECT_PAYLOAD_OFFSET + constants.TREE_ROOT_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.ARG5, GROUP_ITEM_BYTES)
+    compiler = executor.jump(compiler, items)
+    compiler = executor.label(compiler, group)
+    compiler = executor.load(compiler, backend.ARG2, backend.ERROR, COUNT_OFFSET)
+    compiler = executor.add_immediate(compiler, backend.ARG6, backend.ERROR, GROUP_ITEMS_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.ARG5, GROUP_ITEM_BYTES)
+    compiler = executor.jump(compiler, items)
+    compiler = executor.label(compiler, box)
+    compiler = executor.load(compiler, backend.ARG2, backend.ERROR, COUNT_OFFSET)
+    compiler = executor.add_immediate(compiler, backend.ARG6, backend.ERROR, BOX_VALUES_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.ARG5, BOX_FIELD_BYTES)
+    compiler = executor.label(compiler, items)
+    compiler = executor.branch_zero(compiler, backend.ARG2, next)
+    compiler = emit_visit(compiler, visitor, backend.ARG6, 0)
+    compiler = executor.add(compiler, backend.ARG6, backend.ARG6, backend.ARG5)
+    compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, -1)
+    compiler = executor.jump(compiler, items)
+    compiler = executor.label(compiler, next)
+    compiler = emit_object_size(compiler, backend.SCRATCH0, backend.ERROR)
+    compiler = executor.add(compiler, backend.ARG5, backend.ERROR, backend.SCRATCH0)
+    compiler = executor.jump(compiler, loop)
+    compiler = executor.label(compiler, done)
     out compiler
 }
 
 skill emit_region_forward(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_region_forward")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_region_forward")
     compiler = emit_pointer_address(compiler, ".L_region_forward_done")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.T2, registers.S4, ".L_region_forward_done")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.T2, registers.A3, ".L_region_forward_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T3, registers.T2, registers.ZERO, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLTIU, registers.T1, registers.T3, registers.ZERO, KIND_LIMIT)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T1, registers.ZERO, ".L_region_forward_moved")
-    compiler = emit_object_size(compiler, registers.T4, registers.T2)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T5, registers.A4, registers.T4, 0)
-    compiler.machine = layout.emit_branch_unsigned_greater(compiler.machine, registers.T5, registers.S2, ".L_region_abort")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_forward_copy")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T1, registers.T4, ".L_region_forward_copied")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T5, registers.T2, registers.T1, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T5, registers.T5, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.T3, registers.A4, registers.T1, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T3, registers.T5, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.T1, registers.ZERO, WORD_BYTES)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_region_forward_copy")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_forward_copied")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A4, registers.T2, abi.OBJECT_HEADER_FLAGS_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T2, registers.A4, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.OR, registers.A7, registers.A4, registers.T0, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.A4, registers.A4, registers.T4, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_forward_moved")
-    compiler = assembler.emit_op(compiler, instruction.Kind.OR, registers.A7, registers.T3, registers.T0, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_forward_done")
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH2, backend.REGION_MARK, ".L_region_forward_done")
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH2, backend.ARG3, ".L_region_forward_done")
+    compiler = executor.load(compiler, backend.SCRATCH3, backend.SCRATCH2, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.set_less_unsigned_immediate(compiler, backend.SCRATCH1, backend.SCRATCH3, KIND_LIMIT)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH1, ".L_region_forward_moved")
+    compiler = emit_object_size(compiler, backend.SCRATCH4, backend.SCRATCH2)
+    compiler = executor.add(compiler, backend.SCRATCH5, backend.ARG4, backend.SCRATCH4)
+    compiler = executor.branch_less_unsigned(compiler, backend.ESCAPE_BOTTOM, backend.SCRATCH5, ".L_region_abort")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
+    compiler = executor.label(compiler, ".L_region_forward_copy")
+    compiler = executor.branch_equal(compiler, backend.SCRATCH1, backend.SCRATCH4, ".L_region_forward_copied")
+    compiler = executor.add(compiler, backend.SCRATCH5, backend.SCRATCH2, backend.SCRATCH1)
+    compiler = executor.load(compiler, backend.SCRATCH5, backend.SCRATCH5, 0)
+    compiler = executor.add(compiler, backend.SCRATCH3, backend.ARG4, backend.SCRATCH1)
+    compiler = executor.store(compiler, backend.SCRATCH5, backend.SCRATCH3, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, WORD_BYTES)
+    compiler = executor.jump(compiler, ".L_region_forward_copy")
+    compiler = executor.label(compiler, ".L_region_forward_copied")
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.ARG4, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.store(compiler, backend.ARG4, backend.SCRATCH2, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.or(compiler, backend.ARG7, backend.ARG4, backend.SCRATCH0)
+    compiler = executor.add(compiler, backend.ARG4, backend.ARG4, backend.SCRATCH4)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_region_forward_moved")
+    compiler = executor.or(compiler, backend.ARG7, backend.SCRATCH3, backend.SCRATCH0)
+    compiler = executor.label(compiler, ".L_region_forward_done")
+    out executor.ret(compiler)
 }
 
 skill emit_region_relocate(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_region_relocate")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_region_relocate")
     compiler = emit_pointer_address(compiler, ".L_region_relocate_done")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.T2, registers.A3, ".L_region_relocate_done")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.T2, registers.A4, ".L_region_relocate_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.A7, registers.A7, registers.T6, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_relocate_done")
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH2, backend.ARG3, ".L_region_relocate_done")
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH2, backend.ARG4, ".L_region_relocate_done")
+    compiler = executor.sub(compiler, backend.ARG7, backend.ARG7, RELOCATION_DELTA)
+    compiler = executor.label(compiler, ".L_region_relocate_done")
+    out executor.ret(compiler)
 }
 
 skill emit_region_restore(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_region_restore")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_region_restore")
     compiler = emit_pointer_address(compiler, ".L_region_restore_done")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.T2, registers.A3, ".L_region_restore_done")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.T2, registers.A4, ".L_region_restore_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.T2, registers.ZERO, abi.OBJECT_HEADER_FLAGS_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.OR, registers.A7, registers.T2, registers.T0, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_restore_done")
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH2, backend.ARG3, ".L_region_restore_done")
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH2, backend.ARG4, ".L_region_restore_done")
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH2, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.or(compiler, backend.ARG7, backend.SCRATCH2, backend.SCRATCH0)
+    compiler = executor.label(compiler, ".L_region_restore_done")
+    out executor.ret(compiler)
 }
 
 skill emit_copies_walk(compiler, prefix, undo) {
+    @executor = compiler.executor
     @loop = "{prefix}_copies"
     @done = "{prefix}_copies_done"
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A5, registers.A3, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, loop)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.A5, registers.A4, done)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.A5, registers.ZERO, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.move(compiler, backend.ARG5, backend.ARG3)
+    compiler = executor.label(compiler, loop)
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.ARG5, backend.ARG4, done)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.ARG5, abi.OBJECT_HEADER_FLAGS_OFFSET)
     (undo == no) {
-        compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.T0, registers.ZERO, abi.OBJECT_HEADER_FLAGS_OFFSET)
-        compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.T0, registers.ZERO, abi.OBJECT_FLAGS_MASK)
-        compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A5, registers.T0, abi.OBJECT_HEADER_FLAGS_OFFSET)
+        compiler = executor.load(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.OBJECT_HEADER_FLAGS_OFFSET)
+        compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.OBJECT_FLAGS_MASK)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.ARG5, abi.OBJECT_HEADER_FLAGS_OFFSET)
     }
     (undo == yes) {
-        compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.A5, registers.ZERO, abi.OBJECT_HEADER_KIND_OFFSET)
-        compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, abi.OBJECT_HEADER_KIND_OFFSET)
+        compiler = executor.load(compiler, backend.SCRATCH1, backend.ARG5, abi.OBJECT_HEADER_KIND_OFFSET)
+        compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, abi.OBJECT_HEADER_KIND_OFFSET)
     }
-    compiler = emit_object_size(compiler, registers.T0, registers.A5)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADD, registers.A5, registers.A5, registers.T0, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, loop)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, done)
+    compiler = emit_object_size(compiler, backend.SCRATCH0, backend.ARG5)
+    compiler = executor.add(compiler, backend.ARG5, backend.ARG5, backend.SCRATCH0)
+    compiler = executor.jump(compiler, loop)
+    compiler = executor.label(compiler, done)
     out compiler
 }
 
 skill emit_slide(compiler) {
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.A3, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.S4, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_slide")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.T0, registers.A4, ".L_region_slid")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.T0, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T1, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, WORD_BYTES)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.T1, registers.ZERO, WORD_BYTES)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_region_slide")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_slid")
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T0, registers.A4, registers.A3, 0)
-    out assembler.emit_op(compiler, instruction.Kind.ADD, registers.S1, registers.S4, registers.T0, 0)
+    @executor = compiler.executor
+    compiler = executor.move(compiler, backend.SCRATCH0, backend.ARG3)
+    compiler = executor.move(compiler, backend.SCRATCH1, backend.REGION_MARK)
+    compiler = executor.label(compiler, ".L_region_slide")
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH0, backend.ARG4, ".L_region_slid")
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH0, 0)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.SCRATCH1, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, WORD_BYTES)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, WORD_BYTES)
+    compiler = executor.jump(compiler, ".L_region_slide")
+    compiler = executor.label(compiler, ".L_region_slid")
+    compiler = executor.sub(compiler, backend.SCRATCH0, backend.ARG4, backend.ARG3)
+    out executor.add(compiler, backend.HEAP_TOP, backend.REGION_MARK, backend.SCRATCH0)
 }
 
 skill emit_escape_compact(compiler) {
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.S5, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.S5, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_compact")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.S2, registers.T1, ".L_region_compacted")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.T1, registers.ZERO, 0 - model.ESCAPE_ENTRY_BYTES)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.T1, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T3, registers.T2, registers.ZERO, model.ESCAPE_SLOT_FLAG)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T3, registers.ZERO, ".L_region_compact_keep")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.T2, registers.S4, ".L_region_compact")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_compact_keep")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, 0 - model.ESCAPE_ENTRY_BYTES)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T2, 0)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T3, registers.ZERO, ".L_region_compact")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T4, registers.T2, registers.ZERO, abi.OBJECT_HEADER_FLAGS_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T4, registers.T4, registers.ZERO, model.ESCAPE_FLAGS_MASK)
-    compiler = assembler.emit_op(compiler, instruction.Kind.OR, registers.T4, registers.T4, registers.T0, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T2, registers.T4, abi.OBJECT_HEADER_FLAGS_OFFSET)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_region_compact")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_compacted")
-    out assembler.emit_op(compiler, instruction.Kind.ADDI, registers.S2, registers.T0, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.move(compiler, backend.SCRATCH0, backend.ESCAPE_MARK)
+    compiler = executor.move(compiler, backend.SCRATCH1, backend.ESCAPE_MARK)
+    compiler = executor.label(compiler, ".L_region_compact")
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.ESCAPE_BOTTOM, backend.SCRATCH1, ".L_region_compacted")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, 0 - model.ESCAPE_ENTRY_BYTES)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH1, 0)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH3, backend.SCRATCH2, model.ESCAPE_SLOT_FLAG)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH3, ".L_region_compact_keep")
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH2, backend.REGION_MARK, ".L_region_compact")
+    compiler = executor.label(compiler, ".L_region_compact_keep")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 0 - model.ESCAPE_ENTRY_BYTES)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.SCRATCH0, 0)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH3, ".L_region_compact")
+    compiler = executor.load(compiler, backend.SCRATCH4, backend.SCRATCH2, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH4, backend.SCRATCH4, model.ESCAPE_FLAGS_MASK)
+    compiler = executor.or(compiler, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH0)
+    compiler = executor.store(compiler, backend.SCRATCH4, backend.SCRATCH2, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.jump(compiler, ".L_region_compact")
+    compiler = executor.label(compiler, ".L_region_compacted")
+    out executor.move(compiler, backend.ESCAPE_BOTTOM, backend.SCRATCH0)
 }
 
 skill emit_region_exit(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_region_exit")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.S1, registers.S4, ".L_region_exit_work")
-    compiler = assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_exit_work")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - EXIT_FRAME_BYTES)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, EXIT_RETURN_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.A1, EXIT_ERROR_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.A0, EXIT_VALUE_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A3, registers.S1, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A4, registers.S1, registers.ZERO, 0)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A2, registers.ZERO, ".L_region_exit_roots")
-    compiler = emit_visit(compiler, "rt_region_forward", registers.SP, EXIT_VALUE_OFFSET)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_exit_roots")
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_region_exit")
+    compiler = executor.branch_not_equal(compiler, backend.HEAP_TOP, backend.REGION_MARK, ".L_region_exit_work")
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_region_exit_work")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - EXIT_FRAME_BYTES)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, EXIT_RETURN_OFFSET)
+    compiler = executor.store(compiler, backend.ERROR, backend.STACK, EXIT_ERROR_OFFSET)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, EXIT_VALUE_OFFSET)
+    compiler = executor.move(compiler, backend.ARG3, backend.HEAP_TOP)
+    compiler = executor.move(compiler, backend.ARG4, backend.HEAP_TOP)
+    compiler = executor.branch_nonzero(compiler, backend.ARG2, ".L_region_exit_roots")
+    compiler = emit_visit(compiler, "rt_region_forward", backend.STACK, EXIT_VALUE_OFFSET)
+    compiler = executor.label(compiler, ".L_region_exit_roots")
     compiler = emit_escape_walk(compiler, "rt_region_forward", ".L_region_forward")
     compiler = emit_block_walk(compiler, "rt_region_forward", ".L_region_scan")
     compiler = emit_copies_walk(compiler, ".L_region_settle", no)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SUB, registers.T6, registers.A3, registers.S4, 0)
-    compiler = emit_visit(compiler, "rt_region_relocate", registers.SP, EXIT_VALUE_OFFSET)
+    compiler = executor.sub(compiler, RELOCATION_DELTA, backend.ARG3, backend.REGION_MARK)
+    compiler = emit_visit(compiler, "rt_region_relocate", backend.STACK, EXIT_VALUE_OFFSET)
     compiler = emit_escape_walk(compiler, "rt_region_relocate", ".L_region_relocate")
     compiler = emit_block_walk(compiler, "rt_region_relocate", ".L_region_relocated")
     compiler = emit_slide(compiler)
     compiler = emit_escape_compact(compiler)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ".L_region_exit_return")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_abort")
+    compiler = executor.jump(compiler, ".L_region_exit_return")
+    compiler = executor.label(compiler, ".L_region_abort")
     compiler = emit_copies_walk(compiler, ".L_region_undo", yes)
-    compiler = emit_visit(compiler, "rt_region_restore", registers.SP, EXIT_VALUE_OFFSET)
+    compiler = emit_visit(compiler, "rt_region_restore", backend.STACK, EXIT_VALUE_OFFSET)
     compiler = emit_escape_walk(compiler, "rt_region_restore", ".L_region_restore")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_exit_return")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.SP, registers.ZERO, EXIT_VALUE_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.A1, registers.SP, registers.ZERO, EXIT_ERROR_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.SP, registers.ZERO, EXIT_RETURN_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, EXIT_FRAME_BYTES)
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = executor.label(compiler, ".L_region_exit_return")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, EXIT_VALUE_OFFSET)
+    compiler = executor.load(compiler, backend.ERROR, backend.STACK, EXIT_ERROR_OFFSET)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, EXIT_RETURN_OFFSET)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, EXIT_FRAME_BYTES)
+    out executor.ret(compiler)
 }
 
 skill emit_region_barrier(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_region_barrier")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.A2, registers.ZERO, abi.TAG_MASK)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, 0 - abi.TAG_STRING)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLTIU, registers.T0, registers.T0, registers.ZERO, POINTER_TAG_COUNT)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T0, registers.ZERO, ".L_region_barrier_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A2, registers.ZERO, abi.PAYLOAD_MASK)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.T2, registers.S4, ".L_region_barrier_done")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, registers.T2, registers.T1, ".L_region_barrier_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.T2, registers.ZERO, abi.OBJECT_HEADER_FLAGS_OFFSET)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.T0, registers.ZERO, model.ESCAPE_ENTRY_MASK)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T1, registers.ZERO, ".L_region_barrier_record")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.T1, registers.S5, ".L_region_barrier_done")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_barrier_record")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.S2, registers.ZERO, 0 - model.ESCAPE_ENTRY_BYTES)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.T1, registers.S1, "rt_out_of_memory")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.S2, registers.T1, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S2, registers.T2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.T0, registers.ZERO, model.ESCAPE_FLAGS_MASK)
-    compiler = assembler.emit_op(compiler, instruction.Kind.OR, registers.T0, registers.T0, registers.S2, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T2, registers.T0, abi.OBJECT_HEADER_FLAGS_OFFSET)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_barrier_done")
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_region_barrier")
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ARG2, abi.TAG_MASK)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 0 - abi.TAG_STRING)
+    compiler = executor.set_less_unsigned_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, POINTER_TAG_COUNT)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_region_barrier_done")
+    compiler = executor.and_immediate(compiler, backend.SCRATCH1, backend.ARG2, abi.PAYLOAD_MASK)
+    compiler = executor.branch_greater_equal_unsigned(compiler, BARRIER_OBJECT, backend.REGION_MARK, ".L_region_barrier_done")
+    compiler = executor.branch_greater_equal_unsigned(compiler, BARRIER_OBJECT, backend.SCRATCH1, ".L_region_barrier_done")
+    compiler = executor.load(compiler, backend.SCRATCH0, BARRIER_OBJECT, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH1, backend.SCRATCH0, model.ESCAPE_ENTRY_MASK)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH1, ".L_region_barrier_record")
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH1, backend.ESCAPE_MARK, ".L_region_barrier_done")
+    compiler = executor.label(compiler, ".L_region_barrier_record")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.ESCAPE_BOTTOM, 0 - model.ESCAPE_ENTRY_BYTES)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH1, backend.HEAP_TOP, "rt_out_of_memory")
+    compiler = executor.move(compiler, backend.ESCAPE_BOTTOM, backend.SCRATCH1)
+    compiler = executor.store(compiler, BARRIER_OBJECT, backend.ESCAPE_BOTTOM, 0)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, model.ESCAPE_FLAGS_MASK)
+    compiler = executor.or(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.ESCAPE_BOTTOM)
+    compiler = executor.store(compiler, backend.SCRATCH0, BARRIER_OBJECT, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.label(compiler, ".L_region_barrier_done")
+    out executor.ret(compiler)
 }
 
 skill emit_region_remember_slot(compiler) {
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "rt_region_remember_slot")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A0, registers.ZERO, abi.TAG_MASK)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.T1, registers.ZERO, 0 - abi.TAG_STRING)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SLTIU, registers.T1, registers.T1, registers.ZERO, POINTER_TAG_COUNT)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T1, registers.ZERO, ".L_region_remember_done")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.S2, registers.ZERO, 0 - model.ESCAPE_ENTRY_BYTES)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, registers.T1, registers.S1, "rt_out_of_memory")
-    compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.S2, registers.T1, registers.ZERO, 0)
-    compiler = assembler.emit_op(compiler, instruction.Kind.ORI, registers.T0, registers.T0, registers.ZERO, model.ESCAPE_SLOT_FLAG)
-    compiler = assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S2, registers.T0, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_region_remember_done")
-    out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_region_remember_slot")
+    compiler = executor.and_immediate(compiler, backend.SCRATCH1, backend.VALUE, abi.TAG_MASK)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, 0 - abi.TAG_STRING)
+    compiler = executor.set_less_unsigned_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, POINTER_TAG_COUNT)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH1, ".L_region_remember_done")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.ESCAPE_BOTTOM, 0 - model.ESCAPE_ENTRY_BYTES)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH1, backend.HEAP_TOP, "rt_out_of_memory")
+    compiler = executor.move(compiler, backend.ESCAPE_BOTTOM, backend.SCRATCH1)
+    compiler = executor.or_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, model.ESCAPE_SLOT_FLAG)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.ESCAPE_BOTTOM, 0)
+    compiler = executor.label(compiler, ".L_region_remember_done")
+    out executor.ret(compiler)
 }
 
 skill append_runtime(compiler) {
