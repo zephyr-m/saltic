@@ -9,7 +9,7 @@ dist="${SALTIC_DIST_DIR:-.cache/dist}"
 archive="$dist/saltic-$version.tar.gz"
 checksum="$archive.sha256"
 
-if [[ ! "$version" =~ ^[0-9]+-[0-9]+$ ]]; then
+if [[ ! "$version" =~ ^[0-9]+-[0-9]+(-[0-9]+)?$ ]]; then
     echo "неверная версия Saltic: $version" >&2
     exit 1
 fi

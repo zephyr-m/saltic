@@ -51,6 +51,9 @@ global-check:
 hosts:
     bash workbench/hosts.sh
 
+release-draft *base:
+    bash workbench/release-draft.sh "$@"
+
 same *sources:
     bash workbench/same.sh "$@"
 

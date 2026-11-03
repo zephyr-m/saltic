@@ -124,7 +124,8 @@ bootstrap/saltic-142-37-compiler-x86_64-linux hello.saltic hello 134217728 x86_6
 - [docs/PLAN.md](docs/PLAN.md) — план и решения автора, дорога по эпохам и
   два свистка;
 - [CHANGELOG.md](CHANGELOG.md) — история релизов, [VERSION](VERSION) — номер;
-- [docs/FOOTBALL.md](docs/FOOTBALL.md) — версия как счёт матча «фичи : баги»;
+- [docs/FOOTBALL.md](docs/FOOTBALL.md) — версия как счёт матча «фичи : баги :
+  уборка»;
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — скорость среди других языков и
   наши компиляторы;
 - [docs/MISSION.md](docs/MISSION.md), [docs/ORIGIN.md](docs/ORIGIN.md),
@@ -137,12 +138,13 @@ bootstrap/saltic-142-37-compiler-x86_64-linux hello.saltic hello 134217728 x86_6
 
 ## Релиз
 
-1. Посчитать голы по [docs/FOOTBALL.md](docs/FOOTBALL.md) и записать счёт в
-   `VERSION`, `README.md` и `CHANGELOG.md`.
+1. `just release-draft` предложит счёт и черновик по префиксам коммитов;
+   проверить по [docs/FOOTBALL.md](docs/FOOTBALL.md) — фичи, баги и уборку —
+   и записать счёт в `VERSION`, `README.md` и `CHANGELOG.md`.
 2. `just global-check` — компиляторы на полке получат имя новой версии и
    паспорта; `just hosts` — платформы.
-3. Закоммитить `release: Saltic F:B`, вместе с обоими компиляторами.
-4. Аннотированный тег: `git tag -a vF.B -m "Saltic F:B — название"`.
+3. Закоммитить `release: Saltic F:B:C`, вместе с обоими компиляторами.
+4. Аннотированный тег: `git tag -a vF.B.C -m "Saltic F:B:C — название"`.
 5. `git push origin master --follow-tags`.
 
 GitHub Actions сверит тег с `VERSION`, возьмёт описание из `CHANGELOG.md`,
