@@ -121,8 +121,8 @@ bootstrap/saltic-142-37-compiler-x86_64-linux hello.saltic hello 134217728 x86_6
 
 ## Документы
 
-- [docs/PLAN.md](docs/PLAN.md) — план и решения автора, порядок до финального
-  свистка;
+- [docs/PLAN.md](docs/PLAN.md) — план и решения автора, дорога по эпохам и
+  два свистка;
 - [CHANGELOG.md](CHANGELOG.md) — история релизов, [VERSION](VERSION) — номер;
 - [docs/FOOTBALL.md](docs/FOOTBALL.md) — версия как счёт матча «фичи : баги»;
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — скорость среди других языков и
