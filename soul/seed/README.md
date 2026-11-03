@@ -42,8 +42,10 @@
   (`errors.unknown_name(name)`); `diagnostic` ставит её на место в файле;
 - `compiler` + `compiler/{codegen,functions,state,constants}` — перевод в
   машинный код: `codegen` — сердце (выражения, инструкции, вызовы) с
-  помощниками `codegen/{lookup,emitters,loops}`, `functions` собирает функции
-  и константы; backend `compiler/backend/rv32i` и
+  помощниками `codegen/{lookup,emitters,loops,failures}`, `functions` собирает
+  функции и константы; всё это говорит на договоре машины `compiler/backend`
+  (роли регистров и операции) методами исполнителя `compiler.executor`;
+  исполнители: `compiler/backend/rv32i` (`Executor`) и перевод
   `compiler/backend/x86_64_translation` (`encoder`, `translator`, `image`,
   `platform`, `pe`, `uefi`);
 - `compiler/backend/rv32i/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
