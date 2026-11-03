@@ -1,0 +1,135 @@
+-- operand — части команды x86-64: префикс REX, ModRM, SIB, смещение и
+-- непосредственные числа. code — buffer.Buffer, навыки дописывают в конец и
+-- отдают его. Регистр — номер 0…15, NONE (-1) — поля нет; масштаб SIB всегда 1.
+-- Форма команды — группа [prefix, wide, byte_field, extension, код…]: prefix —
+-- 0 или байт перед REX (66), wide — REX.W, byte_field — где байтовый регистр
+-- (0 нет, IN_REG, IN_RM; sil/dil/spl/bpl требуют REX), extension — /digit в
+-- поле reg ModRM или NONE. Порядок: префикс → REX → код → ModRM → SIB → смещение.
+--
+-- bytes(code, items) — дописать группу байтов
+-- low(register) -> младшие 3 бита номера; InvalidRegister
+-- high(register) -> 1 для r8…r15, иначе 0; fits_byte(value) -> yes для −128…127
+-- width(size) -> REX.W: 0 для 4 байтов, 1 для 8; InvalidSize
+-- rex(code, wide, reg, index, base, byte_register) — REX, только если нужен
+-- start(code, form, reg, index, base) — префикс, REX и код формы
+-- register_form(code, form, reg, rm) — команда с ModRM 11 reg rm
+-- memory_form(code, form, reg, base, index, displacement) — команда с
+--     [base + index + displacement]; rsp в индексе меняется местами с базой;
+--     InvalidIndex, если оба rsp
+-- addressing(code, reg, base, index, displacement) — ModRM [+ SIB] [+ disp8/32]
+-- immediate(code, size, value) — знаковое число в 1/2/4 байтах, младший первым
+
+use core.num
+use core.group
+use selfhost.machine.word
+use selfhost.compiler.backend.rv32i.machine.buffer
+
+NONE = -1
+IN_REG = 1
+IN_RM = 2
+RSP = 4
+RBP = 5
+REX = 64
+
+skill bytes(code, items) {
+    drum (items) { code = buffer.append_byte(code, beat) }
+    out code
+}
+
+skill low(register) {
+    (register < 0) { out error.InvalidRegister }
+    (register > 15) { out error.InvalidRegister }
+    (register > 7) { out register - 8 }
+    out register
+}
+
+skill high(register) {
+    (register > 7) { out 1 }
+    out 0
+}
+
+skill fits_byte(value) {
+    (value < 0 - 128) { out no }
+    (value > 127) { out no }
+    out yes
+}
+
+skill width(size) {
+    (size == 4) { out 0 }
+    (size == 8) { out 1 }
+    out error.InvalidSize
+}
+
+skill rex(code, wide, reg, index, base, byte_register) {
+    @value = REX + wide * 8 + high(reg) * 4 + high(index) * 2 + high(base)
+    @needed = no
+    (byte_register > 3) {
+        (byte_register < 8) { needed = yes }
+    }
+    (value > REX) { needed = yes }
+    (needed == yes) { code = buffer.append_byte(code, value) }
+    out code
+}
+
+skill start(code, form, reg, index, base) {
+    @prefix = group.get(form, 0)
+    @byte_field = group.get(form, 2)
+    @byte_register = NONE
+    (byte_field == IN_REG) { byte_register = reg }
+    (byte_field == IN_RM) { byte_register = base }
+    @field = reg
+    @extension = group.get(form, 3)
+    (extension > NONE) { field = extension }
+    (prefix > 0) { code = buffer.append_byte(code, prefix) }
+    code = rex(code, group.get(form, 1), field, index, base, byte_register)
+    out bytes(code, group.slice(form, 4, group.count(form)))
+}
+
+skill register_form(code, form, reg, rm) {
+    @field = reg
+    @extension = group.get(form, 3)
+    (extension > NONE) { field = extension }
+    code = start(code, form, reg, NONE, rm)
+    out buffer.append_byte(code, 192 + low(field) * 8 + low(rm))
+}
+
+skill memory_form(code, form, reg, base, index, displacement) {
+    (index == RSP) {
+        (base == RSP) { out error.InvalidIndex }
+        index = base
+        base = RSP
+    }
+    @field = reg
+    @extension = group.get(form, 3)
+    (extension > NONE) { field = extension }
+    code = start(code, form, reg, index, base)
+    out addressing(code, field, base, index, displacement)
+}
+
+skill addressing(code, reg, base, index, displacement) {
+    @mode = 2
+    (fits_byte(displacement) == yes) { mode = 1 }
+    (displacement == 0) { mode = 0 }
+    (mode == 0) {
+        (low(base) == RBP) { mode = 1 }
+    }
+    @rm = low(base)
+    (index > NONE) { rm = RSP }
+    code = buffer.append_byte(code, mode * 64 + low(reg) * 8 + rm)
+    (rm == RSP) {
+        @scaled = RSP
+        (index > NONE) { scaled = low(index) }
+        code = buffer.append_byte(code, scaled * 8 + low(base))
+    }
+    (mode == 1) { out immediate(code, 1, displacement) }
+    (mode == 2) { out immediate(code, 4, displacement) }
+    out code
+}
+
+skill immediate(code, size, value) {
+    (size == 4) { out buffer.append_word(code, word.from_signed(value)) }
+    (value < 0) { value = value + num.power2(size * 8) }
+    (size == 2) { code = buffer.append_byte(code, num.mod(value, 256)) }
+    (size == 2) { out buffer.append_byte(code, value / 256) }
+    out buffer.append_byte(code, value)
+}

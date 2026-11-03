@@ -1,0 +1,243 @@
+-- encoder — байты команд x86-64 для исполнителя договора: команда → байты,
+-- без меток и раскладки. code — buffer.Buffer (как layout.Program.code):
+-- навык дописывает команду в конец и отдаёт буфер, исполнитель пишет прямо в
+-- программу без промежуточных групп. Регистр — номер 0…15 (EAX…R15D; RSP, R14
+-- — те же 4 и 14 в 64-битных командах); size — 4 или 8 байтов (REX.W);
+-- память — [base + index + displacement], index = NONE без индекса.
+-- Числа — 29-битные знаковые (imm/disp дополнительным кодом); слово целиком —
+-- word.Word, 64 бита — два Word (младшее, старшее). rel32 — число от конца команды.
+--
+-- operate(code, size, op, to, from) — r,r: ADD…CMP, MOVE, TEST, MULTIPLY,
+--     ZERO_BYTE / SIGN_BYTE / ZERO_HALF / SIGN_HALF (movzx/movsx из r8/r16)
+-- operate_immediate(code, size, op, to, value) — r,imm: ADD…CMP (imm8 / imm32),
+--     MOVE (mov r32, imm32; при size 8 — imm32 со знаком), TEST
+-- shift(code, size, op, to, amount) — SHIFT_LEFT / SHIFT_RIGHT / SHIFT_ARITHMETIC
+--     на число или BY_CL; InvalidShift
+-- unary(code, size, op, to) — NEGATE, INVERT, DIVIDE (idiv), DIVIDE_UNSIGNED (div)
+-- set_condition(code, condition, to) — setcc to8; movzx to, to8 (0/1 в 32 битах)
+-- memory(code, form, reg, base, index, displacement) — форма-константа:
+--     LOAD(64), LOAD_ZERO/SIGN_BYTE/HALF, STORE(64), STORE_BYTE/HALF,
+--     ADDRESS(64) — lea, CALL_MEMORY / JUMP_MEMORY (reg не важен); InvalidIndex
+-- store_immediate(code, size, base, index, displacement, value) — mov [m], imm
+--     (size 1/2/4/8; при 8 — imm32 со знаком)
+-- move_word(code, to, data) / move_quad(code, to, low, high) — mov r32, Word /
+--     movabs r64, два Word
+-- relative(code, kind, offset) — jcc (условие) / JUMP / CALL с rel32
+-- single(code, op) — RET, SYSCALL, UD2, HLT, CLI, STI, PAUSE, MFENCE, CDQ, CQO, INT3
+-- register64(code, op, register) — PUSH / POP / CALL_REGISTER / JUMP_REGISTER
+-- Ошибки: InvalidRegister, InvalidSize, InvalidOperation, InvalidCondition.
+-- Части команды (REX, ModRM, SIB, смещения, формы) — в encoder/operand.
+
+use selfhost.machine.word
+use selfhost.compiler.backend.rv32i.machine.buffer
+use selfhost.compiler.backend.x86_64_native.encoder.operand
+
+EAX = 0
+ECX = 1
+EDX = 2
+EBX = 3
+ESP = 4
+EBP = 5
+ESI = 6
+EDI = 7
+R8D = 8
+R9D = 9
+R10D = 10
+R11D = 11
+R12D = 12
+R13D = 13
+R14D = 14
+R15D = 15
+RSP = 4
+R14 = 14
+NONE = -1
+
+ADD = 0
+OR = 1
+AND = 4
+SUB = 5
+XOR = 6
+CMP = 7
+MOVE = 8
+TEST = 9
+MULTIPLY = 10
+ZERO_BYTE = 11
+SIGN_BYTE = 12
+ZERO_HALF = 13
+SIGN_HALF = 14
+
+SHIFT_LEFT = 4
+SHIFT_RIGHT = 5
+SHIFT_ARITHMETIC = 7
+BY_CL = -1
+
+INVERT = 2
+NEGATE = 3
+DIVIDE_UNSIGNED = 6
+DIVIDE = 7
+
+OVERFLOW = 0
+NO_OVERFLOW = 1
+BELOW = 2
+ABOVE_OR_EQUAL = 3
+EQUAL = 4
+NOT_EQUAL = 5
+BELOW_OR_EQUAL = 6
+ABOVE = 7
+SIGN = 8
+NO_SIGN = 9
+LESS = 12
+GREATER_OR_EQUAL = 13
+LESS_OR_EQUAL = 14
+GREATER = 15
+JUMP = 16
+CALL = 17
+
+LOAD = [0, 0, 0, -1, 139]
+LOAD64 = [0, 1, 0, -1, 139]
+LOAD_ZERO_BYTE = [0, 0, 0, -1, 15, 182]
+LOAD_SIGN_BYTE = [0, 0, 0, -1, 15, 190]
+LOAD_ZERO_HALF = [0, 0, 0, -1, 15, 183]
+LOAD_SIGN_HALF = [0, 0, 0, -1, 15, 191]
+STORE = [0, 0, 0, -1, 137]
+STORE64 = [0, 1, 0, -1, 137]
+STORE_BYTE = [0, 0, 1, -1, 136]
+STORE_HALF = [102, 0, 0, -1, 137]
+ADDRESS = [0, 0, 0, -1, 141]
+ADDRESS64 = [0, 1, 0, -1, 141]
+CALL_MEMORY = [0, 0, 0, 2, 255]
+JUMP_MEMORY = [0, 0, 0, 4, 255]
+
+RET = [195]
+SYSCALL = [15, 5]
+UD2 = [15, 11]
+HLT = [244]
+CLI = [250]
+STI = [251]
+PAUSE = [243, 144]
+MFENCE = [15, 174, 240]
+CDQ = [153]
+CQO = [72, 153]
+INT3 = [204]
+
+PUSH = 0
+POP = 1
+CALL_REGISTER = 2
+JUMP_REGISTER = 4
+
+OPERAND16 = 102
+TWO_BYTE = 15
+IN_REG = 1
+IN_RM = 2
+
+skill operate(code, size, op, to, from) {
+    @w = operand.width(size)
+    (op < 0) { out error.InvalidOperation }
+    (op < MOVE) { out operand.register_form(code, [0, w, 0, NONE, op * 8 + 1], from, to) }
+    (op == MOVE) { out operand.register_form(code, [0, w, 0, NONE, 137], from, to) }
+    (op == TEST) { out operand.register_form(code, [0, w, 0, NONE, 133], from, to) }
+    (op == MULTIPLY) { out operand.register_form(code, [0, w, 0, NONE, TWO_BYTE, 175], to, from) }
+    (op == ZERO_BYTE) { out operand.register_form(code, [0, w, IN_RM, NONE, TWO_BYTE, 182], to, from) }
+    (op == SIGN_BYTE) { out operand.register_form(code, [0, w, IN_RM, NONE, TWO_BYTE, 190], to, from) }
+    (op == ZERO_HALF) { out operand.register_form(code, [0, w, 0, NONE, TWO_BYTE, 183], to, from) }
+    (op == SIGN_HALF) { out operand.register_form(code, [0, w, 0, NONE, TWO_BYTE, 191], to, from) }
+    out error.InvalidOperation
+}
+
+skill operate_immediate(code, size, op, to, value) {
+    @w = operand.width(size)
+    (op == MOVE) {
+        (w == 0) { out move_word(code, to, word.from_signed(value)) }
+        code = operand.register_form(code, [0, w, 0, 0, 199], 0, to)
+        out operand.immediate(code, 4, value)
+    }
+    (op == TEST) {
+        pick {
+            (to == EAX) { code = operand.start(code, [0, w, 0, NONE, 169], NONE, NONE, NONE) }
+            { code = operand.register_form(code, [0, w, 0, 0, 247], 0, to) }
+        }
+        out operand.immediate(code, 4, value)
+    }
+    (op < 0) { out error.InvalidOperation }
+    (op > CMP) { out error.InvalidOperation }
+    (operand.fits_byte(value) == yes) {
+        code = operand.register_form(code, [0, w, 0, op, 131], 0, to)
+        out operand.immediate(code, 1, value)
+    }
+    (to == EAX) {
+        code = operand.start(code, [0, w, 0, NONE, op * 8 + 5], NONE, NONE, NONE)
+        out operand.immediate(code, 4, value)
+    }
+    code = operand.register_form(code, [0, w, 0, op, 129], 0, to)
+    out operand.immediate(code, 4, value)
+}
+
+skill shift(code, size, op, to, amount) {
+    @w = operand.width(size)
+    (amount == BY_CL) { out operand.register_form(code, [0, w, 0, op, 211], 0, to) }
+    (amount < 0) { out error.InvalidShift }
+    (amount > size * 8 - 1) { out error.InvalidShift }
+    (amount == 1) { out operand.register_form(code, [0, w, 0, op, 209], 0, to) }
+    code = operand.register_form(code, [0, w, 0, op, 193], 0, to)
+    out buffer.append_byte(code, amount)
+}
+
+skill unary(code, size, op, to) {
+    out operand.register_form(code, [0, operand.width(size), 0, op, 247], 0, to)
+}
+
+skill set_condition(code, condition, to) {
+    (condition < 0) { out error.InvalidCondition }
+    (condition > 15) { out error.InvalidCondition }
+    code = operand.register_form(code, [0, 0, IN_RM, 0, TWO_BYTE, 144 + condition], 0, to)
+    out operate(code, 4, ZERO_BYTE, to, to)
+}
+
+skill memory(code, form, reg, base, index, displacement) {
+    out operand.memory_form(code, form, reg, base, index, displacement)
+}
+
+skill store_immediate(code, size, base, index, displacement, value) {
+    @form = [0, 0, 0, 0, 199]
+    @count = size
+    (size == 1) { form = [0, 0, 0, 0, 198] }
+    (size == 2) { form = [OPERAND16, 0, 0, 0, 199] }
+    (size > 2) {
+        form = [0, operand.width(size), 0, 0, 199]
+        count = 4
+    }
+    code = operand.memory_form(code, form, 0, base, index, displacement)
+    out operand.immediate(code, count, value)
+}
+
+skill move_word(code, to, data) {
+    code = operand.start(code, [0, 0, 0, NONE, 184 + operand.low(to)], NONE, NONE, to)
+    out buffer.append_word(code, data)
+}
+
+skill move_quad(code, to, low, high) {
+    code = operand.start(code, [0, 1, 0, NONE, 184 + operand.low(to)], NONE, NONE, to)
+    code = buffer.append_word(code, low)
+    out buffer.append_word(code, high)
+}
+
+skill relative(code, kind, offset) {
+    (kind < 0) { out error.InvalidCondition }
+    (kind > CALL) { out error.InvalidCondition }
+    (kind == JUMP) { code = buffer.append_byte(code, 233) }
+    (kind == CALL) { code = buffer.append_byte(code, 232) }
+    (kind < JUMP) { code = operand.bytes(code, [TWO_BYTE, 128 + kind]) }
+    out operand.immediate(code, 4, offset)
+}
+
+skill single(code, op) {
+    out operand.bytes(code, op)
+}
+
+skill register64(code, op, register) {
+    (op == PUSH) { out operand.start(code, [0, 0, 0, NONE, 80 + operand.low(register)], NONE, NONE, register) }
+    (op == POP) { out operand.start(code, [0, 0, 0, NONE, 88 + operand.low(register)], NONE, NONE, register) }
+    (op == CALL_REGISTER) { out operand.register_form(code, [0, 0, 0, op, 255], 0, register) }
+    (op == JUMP_REGISTER) { out operand.register_form(code, [0, 0, 0, op, 255], 0, register) }
+    out error.InvalidOperation
+}
