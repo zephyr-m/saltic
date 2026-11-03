@@ -1,0 +1,101 @@
+-- control — переходы, вызовы, адреса меток и платформа договора на x86-64.
+-- Все переходы — cmp/test + jcc rel32 (6 байт) или jmp/call rel32 (5), патч
+-- layout.PatchKind.REL32 на последние 4 байта; адрес метки — mov r32, imm32 с
+-- патчем ABS32 (адрес гостя). Проверенная арифметика — add/sub + jo, внутренние
+-- переходы считаются по длине выпущенного кода, без меток. syscall(n) — call
+-- подпрограммы x86_syscall_<n>, которую даёт платформа при записи образа.
+--
+-- relative_to(compiler, kind, name) — jcc / jmp / call на метку
+-- branch(compiler, condition, left, right, name) — cmp + jcc
+-- branch_test(compiler, condition, from, name) — test + jcc
+-- jump / call(compiler, name); ret(compiler)
+-- checked(compiler, op) — VALUE = VALUE op ERROR, ERROR = NO_ERROR / NUMBER_OVERFLOW
+-- load_address(compiler, to, name, addend)
+-- syscall(compiler, number); wait(compiler, firmware) — hlt / pause; fence(compiler)
+
+use selfhost.abi
+use selfhost.machine.word
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.machine.buffer
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.x86_64_native.encoder
+use selfhost.compiler.backend.x86_64_native.roles
+use selfhost.compiler.backend.x86_64_native.ops
+
+REL32_BYTES = 4
+
+skill note(compiler, kind, name, addend) {
+    @offset = compiler.machine.code.length - REL32_BYTES
+    compiler.machine = layout.note_patch(compiler.machine, layout.Patch { kind = kind, label = name, offset = offset, addend = addend })
+    out compiler
+}
+
+skill relative_to(compiler, kind, name) {
+    compiler = roles.emit(compiler, encoder.relative(compiler.machine.code, kind, 0))
+    out note(compiler, layout.PatchKind.REL32, name, 0)
+}
+
+skill branch(compiler, condition, left, right, name) {
+    compiler = roles.emit(compiler, ops.compare(compiler.machine.code, left, right))
+    out relative_to(compiler, condition, name)
+}
+
+skill branch_test(compiler, condition, from, name) {
+    compiler = roles.emit(compiler, ops.test(compiler.machine.code, from))
+    out relative_to(compiler, condition, name)
+}
+
+skill jump(compiler, name) {
+    out relative_to(compiler, encoder.JUMP, name)
+}
+
+skill call(compiler, name) {
+    out relative_to(compiler, encoder.CALL, name)
+}
+
+skill ret(compiler) {
+    out roles.emit(compiler, encoder.single(compiler.machine.code, encoder.RET))
+}
+
+skill checked(compiler, op) {
+    @code = compiler.machine.code
+    code = encoder.operate(code, 4, op, encoder.EAX, encoder.EDX)
+    code = encoder.relative(code, encoder.OVERFLOW, 0)
+    @overflow_from = code.length
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EDX, abi.CALL_NO_ERROR)
+    code = encoder.relative(code, encoder.JUMP, 0)
+    @done_from = code.length
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EDX, abi.ERROR_NUMBER_OVERFLOW)
+    code = buffer.set_word(code, overflow_from - REL32_BYTES, word.from_signed(done_from - overflow_from))
+    code = buffer.set_word(code, done_from - REL32_BYTES, word.from_signed(code.length - done_from))
+    out roles.emit(compiler, code)
+}
+
+skill load_address(compiler, to, name, addend) {
+    @code = compiler.machine.code
+    @target = roles.register(to)
+    (target == roles.MEMORY) {
+        @x = roles.temp(encoder.NONE, encoder.NONE, encoder.NONE)
+        code = encoder.register64(code, encoder.PUSH, x)
+        code = encoder.move_word(code, x, word.from_number(0))
+        compiler = note(roles.emit(compiler, code), layout.PatchKind.ABS32, name, addend)
+        code = roles.store_into(compiler.machine.code, to, x)
+        out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
+    }
+    code = encoder.move_word(code, target, word.from_number(0))
+    out note(roles.emit(compiler, code), layout.PatchKind.ABS32, name, addend)
+}
+
+skill syscall(compiler, number) {
+    @n = number
+    out call(compiler, "x86_syscall_{n}")
+}
+
+skill wait(compiler, firmware) {
+    (firmware == yes) { out roles.emit(compiler, encoder.single(compiler.machine.code, encoder.HLT)) }
+    out roles.emit(compiler, encoder.single(compiler.machine.code, encoder.PAUSE))
+}
+
+skill fence(compiler) {
+    out roles.emit(compiler, encoder.single(compiler.machine.code, encoder.MFENCE))
+}

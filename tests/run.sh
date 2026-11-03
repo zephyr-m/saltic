@@ -29,7 +29,7 @@ host="${SALTIC_TEST_HOST:-rv32i}"
 source tests/metrics.sh
 
 run_built() {
-    if [[ "$host" == "x86_64" ]]; then
+    if [[ "$host" == "x86_64" || "$host" == "x86_64-native" ]]; then
         measure run "$@"
     else
         measure run qemu-riscv32 -B 0x100000000 "$@"

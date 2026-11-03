@@ -21,6 +21,9 @@
 -- align_buffer(buffer, boundary) -> buffer
 -- emit(program, kind, rd, rs1, rs2, immediate) — команда; ошибки кодирования копятся
 -- emit_word(program, word) / emit_patch(program, Patch, placeholder)
+-- note_patch(program, Patch) — правка без байтов, offset задаёт вызывающий
+--     (REL32 — 4 байта rel32 от конца поля, ABS32 — адрес гостя метки + addend;
+--     оба нейтральны к архитектуре, их пишет исполнитель x86-64)
 -- emit_branch(program, kind, rs1, rs2, label); InvalidBranchInstruction
 -- emit_branch_unsigned_greater(program, rs1, rs2, label) — bltu с переставленными
 -- emit_jump(program, rd, label) / emit_call(program, label)
@@ -63,7 +66,9 @@ PatchKind = enum {
     RELATIVE_LOW,
     ABSOLUTE_HIGH,
     ABSOLUTE_LOW,
-    ADDRESS_WORD
+    ADDRESS_WORD,
+    REL32,
+    ABS32
 }
 
 LABEL_BUCKETS = 512
@@ -244,12 +249,18 @@ skill emit(value, kind, rd, rs1, rs2, immediate) {
     out emit_word(value, encoded)
 }
 
-skill emit_patch(value, patch, placeholder) {
-    patch.offset = value.code.length
+skill note_patch(value, patch) {
     (value.patch_count == 0) { value.patches_first = patch }
     (value.patch_count > 0) { value.patches_last.next = patch }
     value.patches_last = patch
     value.patch_count = value.patch_count + 1
+    value.resolved = no
+    out value
+}
+
+skill emit_patch(value, patch, placeholder) {
+    patch.offset = value.code.length
+    value = note_patch(value, patch)
     out emit_word(value, placeholder)
 }
 
@@ -570,6 +581,14 @@ skill resolve_patch(value, current_layout, patch) {
     (patch.kind == PatchKind.ADDRESS_WORD) {
         @target = label_address(value, current_layout, patch.label, patch.addend)
         out set_section_word(value, patch.section, patch.offset, target)
+    }
+    (patch.kind == PatchKind.REL32) {
+        @distance = target_offset - patch.offset - 4
+        out set_section_word(value, Section.CODE, patch.offset, word.from_signed(distance))
+    }
+    (patch.kind == PatchKind.ABS32) {
+        @target = label_address(value, current_layout, patch.label, patch.addend)
+        out set_section_word(value, Section.CODE, patch.offset, target)
     }
     out error.UnknownPatch
 }

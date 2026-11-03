@@ -1,0 +1,131 @@
+-- image — ELF64 для Linux x86-64 из layout.Program родного бэкенда.
+-- Окно гостя — с адреса GUEST_HIGH << 32 (0x1_0000_0000): сегменты [низкая
+-- память гостя 0…65535], код + rodata (RX, файл со смещения PAGE_BYTES), data
+-- + bss (RW), строки аргументов (RW), стек (RW, за стражем platform.map).
+-- Вход — метка machine.entry (x86_start). Всё выровнено на PAGE_BYTES.
+--
+-- Segment { offset, address, file_bytes, memory_bytes, flags }
+-- append_u32(target, value) / append_u64(target, low, high) — в буфер
+-- append_identity / append_file_header(target, entry, segment_count) /
+--     append_segment(target, Segment) — заголовки
+-- executable(machine) -> buffer с готовым ELF; UnresolvedPatch
+-- write(path, machine) — записать файл; WriteFailed
+
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.rv32i.machine.image
+use selfhost.compiler.backend.rv32i.machine.buffer
+use selfhost.compiler.backend.x86_64_native.platform
+use selfhost.machine.word
+
+HEADER_BYTES = 64
+PROGRAM_HEADER_BYTES = 56
+PAGE_BYTES = 4096
+MACHINE_X86_64 = 62
+TYPE_EXECUTABLE = 2
+SEGMENT_LOAD = 1
+READ_WRITE = 6
+READ_EXECUTE = 5
+GUEST_HIGH = 1
+
+Segment = Box {
+    offset = 0,
+    address = word.Word {},
+    file_bytes = 0,
+    memory_bytes = word.Word {},
+    flags = 0
+}
+
+skill append_u32(target, value) {
+    out buffer.append_word(target, word.from_number(value))
+}
+
+skill append_u64(target, low, high) {
+    target = buffer.append_word(target, low)
+    out append_u32(target, high)
+}
+
+skill append_identity(target) {
+    @items = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    drum (items) { target = buffer.append_byte(target, beat) }
+    out target
+}
+
+skill append_file_header(target, entry, segment_count) {
+    target = append_identity(target)
+    target = buffer.append_u16(target, TYPE_EXECUTABLE)
+    target = buffer.append_u16(target, MACHINE_X86_64)
+    target = append_u32(target, 1)
+    target = append_u64(target, entry, GUEST_HIGH)
+    target = append_u64(target, word.from_number(HEADER_BYTES), 0)
+    target = append_u64(target, word.from_bytes(0, 0, 0, 0), 0)
+    target = append_u32(target, 0)
+    target = buffer.append_u16(target, HEADER_BYTES)
+    target = buffer.append_u16(target, PROGRAM_HEADER_BYTES)
+    target = buffer.append_u16(target, segment_count)
+    target = buffer.append_u16(target, 64)
+    target = buffer.append_u16(target, 0)
+    out buffer.append_u16(target, 0)
+}
+
+skill append_segment(target, segment) {
+    target = append_u32(target, SEGMENT_LOAD)
+    target = append_u32(target, segment.flags)
+    target = append_u64(target, word.from_number(segment.offset), 0)
+    target = append_u64(target, segment.address, GUEST_HIGH)
+    target = append_u64(target, segment.address, GUEST_HIGH)
+    target = append_u64(target, word.from_number(segment.file_bytes), 0)
+    target = append_u64(target, segment.memory_bytes, 0)
+    out append_u64(target, word.from_number(PAGE_BYTES), 0)
+}
+
+skill executable(machine) {
+    (machine.resolved == no) { out error.UnresolvedPatch }
+    @current = layout.layout(machine)
+    @guest = platform.map(machine)
+    @body = image.payload(machine, current)
+    @data_file_bytes = current.file_size - current.data_offset
+    @entry = layout.label_address(machine, current, machine.entry, 0)
+    @segment_count = 4
+    (machine.low_memory_size > 0) { segment_count = 5 }
+
+    @result = buffer.empty()
+    result = append_file_header(result, entry, segment_count)
+    (machine.low_memory_size > 0) {
+        result = append_segment(result, Segment {
+            address = word.from_bytes(0, 0, 0, 0),
+            memory_bytes = word.from_number(machine.low_memory_size),
+            flags = READ_WRITE
+        })
+    }
+    result = append_segment(result, Segment {
+        offset = PAGE_BYTES,
+        address = machine.load_address,
+        file_bytes = current.data_offset,
+        memory_bytes = word.from_number(current.data_offset),
+        flags = READ_EXECUTE
+    })
+    result = append_segment(result, Segment {
+        offset = PAGE_BYTES + current.data_offset,
+        address = layout.address_add(machine.load_address, current.data_offset),
+        file_bytes = data_file_bytes,
+        memory_bytes = word.add_number(machine.bss_size, data_file_bytes),
+        flags = READ_WRITE
+    })
+    result = append_segment(result, Segment {
+        address = guest.strings,
+        memory_bytes = word.from_number(platform.STRINGS_BYTES),
+        flags = READ_WRITE
+    })
+    result = append_segment(result, Segment {
+        address = guest.stack,
+        memory_bytes = word.from_number(platform.STACK_BYTES),
+        flags = READ_WRITE
+    })
+    result = image.pad_to(result, PAGE_BYTES)
+    out buffer.append_buffer(result, body)
+}
+
+skill write(path, machine) {
+    @output = executable(machine)
+    out image.write_buffer(path, output)
+}
