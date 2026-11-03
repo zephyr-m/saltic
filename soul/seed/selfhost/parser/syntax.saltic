@@ -4,7 +4,9 @@
 -- pick, drum, leave, switch; выражения: number, wide-number, fraction-number,
 -- string, template, answer, none, path, call, binary, group, box-new,
 -- enum-value, rescue. С locations = yes узлы обёрнуты ast.located.
--- Первая ошибка останавливает разбор.
+-- Первая ошибка останавливает разбор. Запятая в конце списка (Box, enum,
+-- группа, аргументы, параметры, ветки выбора) — ошибка trailing_comma;
+-- поле у результата вызова `f().x` — ошибка call_field.
 --
 -- Cursor = Box { tokens, index }; Parser = Box { tokens, path, locations } — внутренности
 -- Node = Box { datum, tag }; Read = Box { node, next, diagnostics }
@@ -190,6 +192,13 @@ Parser = Box {
                 (str.len(comma_message) > 0) {
                     @comma_failure = fail(next, comma_message)
                     diagnostics = comma_failure.diagnostics
+                    leave
+                }
+            }
+            (comma == yes) {
+                (is(next, end_kind) == yes) {
+                    @trailing_failure = fail_with(next, errors.trailing_comma())
+                    diagnostics = trailing_failure.diagnostics
                     leave
                 }
             }
@@ -452,6 +461,19 @@ Parser = Box {
                 next = args.next
             }
             (is(next, lexer.TokenKind.LPAREN) == no) {
+                (node.tag == "call") {
+                    (is(next, lexer.TokenKind.DOT) == yes) {
+                        @close_token = at(next - 1)
+                        @dot_token = at(next)
+                        (dot_token.line == close_token.line) {
+                            (dot_token.col == close_token.col + 1) {
+                                @field_failure = fail_with(next, errors.call_field())
+                                diagnostics = field_failure.diagnostics
+                                leave
+                            }
+                        }
+                    }
+                }
                 ((node.tag == "path") == no) { leave }
                 (is(next, lexer.TokenKind.LBRACE) == no) { leave }
                 @box_token = at(next)
@@ -669,8 +691,19 @@ Parser = Box {
                 }
                 cases = group.add(cases, loc(["case", tag, body.node.datum], case_token, locations))
                 next = body.next
-                (is(next, lexer.TokenKind.COMMA) == yes) { next = next + 1 }
+                @case_comma = no
+                (is(next, lexer.TokenKind.COMMA) == yes) {
+                    next = next + 1
+                    case_comma = yes
+                }
                 next = skip_lines(next)
+                (case_comma == yes) {
+                    (is(next, lexer.TokenKind.RBRACE) == yes) {
+                        @trailing_failure = fail_with(next, errors.trailing_comma())
+                        diagnostics = trailing_failure.diagnostics
+                        leave
+                    }
+                }
             }
             out Read { node = make_node("switch", loc(cases, token, locations)), next = next, diagnostics = diagnostics }
         }
