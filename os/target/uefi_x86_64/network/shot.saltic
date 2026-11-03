@@ -1,32 +1,39 @@
 -- shot — снимок экрана по сети (tools/shot.py): экран уменьшается вдвое,
--- пиксели RGB кладутся в арену программы с UPLOAD_OFFSET (64 КБ) — до
--- ~852 КБ при экране 1366 × 768. Эту часть арены программа с сетью не
--- занимает: shot затрёт её посреди работы.
+-- пиксели RGB кладутся в участок арены "shot" (arena_map): 1555200 байт —
+-- ровно половинный кадр 1920 × 1080 (1366 × 768 — 786816). Экран больше —
+-- ShotTooBig, снимок не делается и чужую память не трогает.
 --
--- capture(card) -> байтов в снимке; caption(card, bytes) -> заголовок ответа
+-- capture(card) -> байтов в снимке; ShotTooBig
+-- caption(card, bytes) -> заголовок ответа
 -- send_chunk(card, bytes, packet, index) — отправить кусок снимка
 
 use core.num
 use core.mem
 use core.group
 use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.arena_map
 use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.drivers.rtl8111
 use os.target.uefi_x86_64.network.net
 
 SHOT_CHUNK = 1024
 SHOT_HEADER = 46
-UPLOAD_OFFSET = 65536
 MY_IP = [10, 0, 0, 2]
 PORT = 5555
+
+skill shot_bytes(screen) {
+    out (screen.width / 2) * (screen.height / 2) * 3
+}
 
 skill capture(card) {
     @base = card.base
     @screen = graphics.open(base)
+    @room = arena_map.region("shot")
+    (shot_bytes(screen) > room.bytes) { out error.ShotTooBig }
     @width = screen.width / 2
     @height = screen.height / 2
-    @arena = firmware.guest(card.arena, base)
-    @at = UPLOAD_OFFSET
+    @place = firmware.guest(firmware.region(base, "shot"), base)
+    @at = 0
     @red = 2
     @blue = 0
     (screen.format == graphics.FORMAT_RGB) {
@@ -37,13 +44,13 @@ skill capture(card) {
         @line = beat * 2 * screen.stride * graphics.PIXEL_BYTES
         drum (width) {
             @pixel = line + beat * 2 * graphics.PIXEL_BYTES
-            mem.store8(arena, at, mem.load8(screen.memory, pixel + red))
-            mem.store8(arena, at + 1, mem.load8(screen.memory, pixel + 1))
-            mem.store8(arena, at + 2, mem.load8(screen.memory, pixel + blue))
+            mem.store8(place, at, mem.load8(screen.memory, pixel + red))
+            mem.store8(place, at + 1, mem.load8(screen.memory, pixel + 1))
+            mem.store8(place, at + 2, mem.load8(screen.memory, pixel + blue))
             at = at + 3
         }
     }
-    out width * height * 3
+    out shot_bytes(screen)
 }
 
 skill caption(card, total) {
@@ -61,12 +68,13 @@ skill send_chunk(card, total, packet, index) {
     (size < 1) { out none }
     @header = net.udp_header(card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, size + 4)
     header = net.add16(net.add16(header, index / 65536), num.mod(index, 65536))
-    @arena = firmware.guest(card.arena, card.base)
-    drum (SHOT_HEADER) { mem.store8(arena, rtl8111.TX_BUFFER + beat, group.get(header, beat)) }
-    drum (size) { mem.store8(arena, rtl8111.TX_BUFFER + SHOT_HEADER + beat, mem.load8(arena, UPLOAD_OFFSET + first + beat)) }
+    @frame = firmware.guest(card.tx_buffer, card.base)
+    @place = firmware.guest(firmware.region(card.base, "shot"), card.base)
+    drum (SHOT_HEADER) { mem.store8(frame, beat, group.get(header, beat)) }
+    drum (size) { mem.store8(frame, SHOT_HEADER + beat, mem.load8(place, first + beat)) }
     @length = SHOT_HEADER + size
     (length < net.FRAME_MINIMUM) {
-        drum (net.FRAME_MINIMUM - length) { mem.store8(arena, rtl8111.TX_BUFFER + length + beat, 0) }
+        drum (net.FRAME_MINIMUM - length) { mem.store8(frame, length + beat, 0) }
         length = net.FRAME_MINIMUM
     }
     rtl8111.send_prepared(card, length)

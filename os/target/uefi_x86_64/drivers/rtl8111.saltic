@@ -1,9 +1,10 @@
 -- rtl8111 — драйвер сетевой карты Realtek RTL8111 по MMIO (BAR2), без прерываний.
--- Кольца и буферы живут в firmware.arena: TX — один дескриптор и буфер,
--- RX — 4 дескриптора по 2048 байт. Порядок: open → configure → send/received.
--- Кадр — группа байтов.
+-- Кольца и буферы — участки арены rtl_* из arena_map: TX — один дескриптор
+-- и буфер, RX — 4 дескриптора по 2048 байт. Порядок: open → configure →
+-- send/received. Кадр — группа байтов.
 --
--- Card { base, mmio, arena, mac } — открытая карта
+-- Card { base, mmio, mac, tx_ring, rx_ring, tx_buffer, rx_buffers } — открытая
+--     карта; tx_buffer — Phys, куда можно сложить кадр и позвать send_prepared
 -- has_bit(value, bit) -> yes/no / with_bit(value, bit) -> число с битом
 -- enable(base, config) — включает память и bus master в PCI
 -- registers(base, config) -> Phys MMIO; Bar2IsNotMemory, RegistersAbove4G
@@ -12,15 +13,16 @@
 -- delay(card, count) — пауза чтением регистра
 -- open() -> Card; DeviceNotFound и ошибки registers
 -- reset(card); ResetTimeout
--- descriptor(card, offset, flags, length, buffer) — пишет дескриптор в арену
+-- descriptor(card, slot, flags, length, buffer) — пишет дескриптор по Phys slot
 -- rx_flags(index) -> флаги / arm_rx(card, index) — отдаёт буфер карте
--- write_ring(card, register, offset) — адрес кольца в регистр
+-- write_ring(card, register, ring) — адрес кольца (Phys) в регистр
 -- configure(card) — сброс, кольца, размеры, включение приёма и передачи
 -- wait_link(card) -> текст линка; NoLink после 60 попыток
 -- send(card, bytes) / send_prepared(card, length) -> length; SendTimeout
 -- received(card, index) -> yes/no — карта отдала дескриптор RX
 -- read_frame(card, index) -> [байты] / release(card, index) — вернуть карте
 -- link(card) -> текст / status(card) -> байт PHY
+-- Внутри: rx_slot / rx_buffer(card, index) -> Phys дескриптора и буфера RX
 
 use core.num
 use core.group
@@ -69,17 +71,15 @@ DESCRIPTOR_FIRST_LAST = 12288
 DESCRIPTOR_BYTES = 16
 RX_COUNT = 4
 BUFFER_BYTES = 2048
-TX_RING = 0
-RX_RING = 256
-TX_BUFFER = 4096
-RX_BUFFERS = 8192
-
 
 Card = Box {
     base = firmware.Phys {},
     mmio = firmware.Phys {},
-    arena = firmware.Phys {},
-    mac = []
+    mac = [],
+    tx_ring = firmware.Phys {},
+    rx_ring = firmware.Phys {},
+    tx_buffer = firmware.Phys {},
+    rx_buffers = firmware.Phys {}
 }
 
 skill has_bit(value, bit) {
@@ -134,7 +134,15 @@ skill open() {
     @config = firmware.find_device(base, firmware.ecam(base), VENDOR_REALTEK, MODEL_RTL8111)
     enable(base, config)
     @mmio = registers(base, config)
-    out Card { base = base, mmio = mmio, arena = firmware.arena(base), mac = read_mac(base, mmio) }
+    out Card {
+        base = base,
+        mmio = mmio,
+        mac = read_mac(base, mmio),
+        tx_ring = firmware.region(base, "rtl_tx_ring"),
+        rx_ring = firmware.region(base, "rtl_rx_ring"),
+        tx_buffer = firmware.region(base, "rtl_tx_buffer"),
+        rx_buffers = firmware.region(base, "rtl_rx_buffers")
+    }
 }
 
 skill reset(card) {
@@ -145,15 +153,23 @@ skill reset(card) {
     out error.ResetTimeout
 }
 
-skill descriptor(card, offset, flags, length, buffer) {
-    firmware.write16(card.arena, card.base, offset, length)
-    firmware.write16(card.arena, card.base, offset + 4, 0)
-    firmware.write16(card.arena, card.base, offset + 6, 0)
-    firmware.write_phys32(card.arena, card.base, offset + 8, firmware.add(card.arena, buffer))
-    firmware.write16(card.arena, card.base, offset + 12, 0)
-    firmware.write16(card.arena, card.base, offset + 14, 0)
-    firmware.write16(card.arena, card.base, offset + 2, flags)
+skill descriptor(card, slot, flags, length, buffer) {
+    firmware.write16(slot, card.base, 0, length)
+    firmware.write16(slot, card.base, 4, 0)
+    firmware.write16(slot, card.base, 6, 0)
+    firmware.write_phys32(slot, card.base, 8, buffer)
+    firmware.write16(slot, card.base, 12, 0)
+    firmware.write16(slot, card.base, 14, 0)
+    firmware.write16(slot, card.base, 2, flags)
     out none
+}
+
+skill rx_slot(card, index) {
+    out firmware.add(card.rx_ring, index * DESCRIPTOR_BYTES)
+}
+
+skill rx_buffer(card, index) {
+    out firmware.add(card.rx_buffers, index * BUFFER_BYTES)
 }
 
 skill rx_flags(index) {
@@ -162,11 +178,11 @@ skill rx_flags(index) {
 }
 
 skill arm_rx(card, index) {
-    out descriptor(card, RX_RING + index * DESCRIPTOR_BYTES, rx_flags(index), BUFFER_BYTES, RX_BUFFERS + index * BUFFER_BYTES)
+    out descriptor(card, rx_slot(card, index), rx_flags(index), BUFFER_BYTES, rx_buffer(card, index))
 }
 
-skill write_ring(card, register, offset) {
-    firmware.write_phys32(card.mmio, card.base, register, firmware.add(card.arena, offset))
+skill write_ring(card, register, ring) {
+    firmware.write_phys32(card.mmio, card.base, register, ring)
     firmware.write16(card.mmio, card.base, register + 4, 0)
     firmware.write16(card.mmio, card.base, register + 6, 0)
     out none
@@ -178,8 +194,8 @@ skill configure(card) {
     firmware.write16(card.mmio, card.base, REGISTER_INTERRUPT_MASK, 0)
     firmware.write16(card.mmio, card.base, REGISTER_INTERRUPT_STATUS, 65535)
     drum (RX_COUNT) { arm_rx(card, beat) }
-    write_ring(card, REGISTER_TX_RING, TX_RING)
-    write_ring(card, REGISTER_RX_RING, RX_RING)
+    write_ring(card, REGISTER_TX_RING, card.tx_ring)
+    write_ring(card, REGISTER_RX_RING, card.rx_ring)
     firmware.write16(card.mmio, card.base, REGISTER_RX_MAX_SIZE, RX_MAX_SIZE)
     firmware.write8(card.mmio, card.base, REGISTER_TX_MAX_SIZE, TX_MAX_SIZE)
     firmware.write8(card.mmio, card.base, REGISTER_CHIP_COMMAND, CHIP_RX_TX)
@@ -201,29 +217,29 @@ skill wait_link(card) {
 }
 
 skill send(card, bytes) {
-    drum (group.count(bytes)) { firmware.write8(card.arena, card.base, TX_BUFFER + beat, group.get(bytes, beat)) }
+    drum (group.count(bytes)) { firmware.write8(card.tx_buffer, card.base, beat, group.get(bytes, beat)) }
     out send_prepared(card, group.count(bytes))
 }
 
 skill send_prepared(card, length) {
-    descriptor(card, TX_RING, DESCRIPTOR_OWN + DESCRIPTOR_END + DESCRIPTOR_FIRST_LAST, length, TX_BUFFER)
+    descriptor(card, card.tx_ring, DESCRIPTOR_OWN + DESCRIPTOR_END + DESCRIPTOR_FIRST_LAST, length, card.tx_buffer)
     firmware.write8(card.mmio, card.base, REGISTER_TX_POLL, TX_POLL_NORMAL)
     drum (100000) {
-        (firmware.read16(card.arena, card.base, TX_RING + 2) < DESCRIPTOR_OWN) { out length }
+        (firmware.read16(card.tx_ring, card.base, 2) < DESCRIPTOR_OWN) { out length }
     }
     out error.SendTimeout
 }
 
 skill received(card, index) {
-    out firmware.read16(card.arena, card.base, RX_RING + index * DESCRIPTOR_BYTES + 2) < DESCRIPTOR_OWN
+    out firmware.read16(rx_slot(card, index), card.base, 2) < DESCRIPTOR_OWN
 }
 
 skill read_frame(card, index) {
-    @buffer = RX_BUFFERS + index * BUFFER_BYTES
-    @length = num.mod(firmware.read16(card.arena, card.base, RX_RING + index * DESCRIPTOR_BYTES), 16384)
+    @buffer = rx_buffer(card, index)
+    @length = num.mod(firmware.read16(rx_slot(card, index), card.base, 0), 16384)
     (length > BUFFER_BYTES) { length = BUFFER_BYTES }
     @bytes = []
-    drum (length) { bytes = group.add(bytes, firmware.read8(card.arena, card.base, buffer + beat)) }
+    drum (length) { bytes = group.add(bytes, firmware.read8(buffer, card.base, beat)) }
     out bytes
 }
 

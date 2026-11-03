@@ -7,8 +7,9 @@
 -- Load = Box { ast, included, diagnostics }
 -- join_path(base, relative) -> путь
 -- resolve_module(source_path, parts, root) -> путь к файлу модуля
--- load_error(path, problem, included) -> Load с одной ошибкой
--- expand_file(path, root, locations, included, stack, module_name) -> Load
+-- load_error(path, problem, included, place) -> Load с одной ошибкой на месте place
+-- expand_file(path, root, locations, included, stack, module_name, place) -> Load;
+--     place = [строка, столбец] узла use, которым файл подключён ([0, 0] у корня)
 -- load_file / load_file_loc(path, root) -> Load; load_modules(path, root) — то же
 
 use io.file
@@ -42,20 +43,20 @@ skill resolve_module(source_path, parts, root) {
     out join_path(base, str.add(str.join(parts, "/"), ".saltic"))
 }
 
-skill load_error(path, problem, included) {
-    out Load { ast = ["program"], included = included, diagnostics = [diagnostic.place(problem, path, 0, 0)] }
+skill load_error(path, problem, included, place) {
+    out Load { ast = ["program"], included = included, diagnostics = [diagnostic.place(problem, path, group.get(place, 0), group.get(place, 1))] }
 }
 
-skill expand_file(path, root, locations, included, stack, module_name) {
+skill expand_file(path, root, locations, included, stack, module_name, place) {
     @name = path
     (str.len(module_name) > 0) { name = "{module_name} ({path})" }
     @importer = path
     (group.count(stack) > 0) { importer = group.get(stack, group.count(stack) - 1) }
-    (group.contains(stack, path) == yes) { out load_error(importer, errors.import_cycle(name), included) }
+    (group.contains(stack, path) == yes) { out load_error(importer, errors.import_cycle(name), included, place) }
     (group.contains(included, path) == yes) { out Load { ast = ["program"], included = included, diagnostics = [] } }
     @next_included = group.add(included, path)
     @source = file.read(path) rescue |error| {
-        out load_error(importer, errors.module_not_found(name), next_included)
+        out load_error(importer, errors.module_not_found(name), next_included, place)
     }
     @parsed = syntax.parse_string(source, path)
     (locations == yes) { parsed = syntax.parse_string_loc(source, path) }
@@ -78,7 +79,7 @@ skill expand_file(path, root, locations, included, stack, module_name) {
         (group.get(plain, 0) == "use") {
             @parts = syntax.append_tail([], plain, 1)
             @module_path = resolve_module(path, parts, root)
-            @loaded = expand_file(module_path, root, locations, next_included, next_stack, str.join(parts, "."))
+            @loaded = expand_file(module_path, root, locations, next_included, next_stack, str.join(parts, "."), ast.location(item))
             next_included = loaded.included
             (diagnostic.has(loaded.diagnostics) == yes) {
                 diagnostics = loaded.diagnostics
@@ -91,11 +92,11 @@ skill expand_file(path, root, locations, included, stack, module_name) {
 }
 
 skill load_file(path, root) {
-    out expand_file(path, root, no, [], [], "")
+    out expand_file(path, root, no, [], [], "", [0, 0])
 }
 
 skill load_file_loc(path, root) {
-    out expand_file(path, root, yes, [], [], "")
+    out expand_file(path, root, yes, [], [], "", [0, 0])
 }
 
 skill load_modules(path, root) {
