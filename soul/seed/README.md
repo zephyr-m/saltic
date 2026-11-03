@@ -43,8 +43,9 @@
 - `compiler` + `compiler/{codegen,functions,state,constants}` — перевод в
   машинный код: `codegen` — сердце (выражения, инструкции, вызовы) с
   помощниками `codegen/{lookup,emitters,loops}`, `functions` собирает функции
-  и константы; backend `compiler/backend/rv32i` и `compiler/backend/x86_64`
-  (`encoder`, `translator`, `image`, `platform`, `pe`, `uefi`);
+  и константы; backend `compiler/backend/rv32i` и
+  `compiler/backend/x86_64_translation` (`encoder`, `translator`, `image`,
+  `platform`, `pe`, `uefi`);
 - `compiler/runtime/emit` + `emit/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
   машинный runtime: арифметика, Box и группы, строки, фиксированные типы,
   прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
