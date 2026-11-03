@@ -12,3 +12,6 @@
 - **Документация:** Intel 64 and IA-32 Software Developer's Manual, AMD64
   Architecture Programmer's Manual.
 - **Подробно:** `docs/PLAN.md`, разделы «x86-64» и «Железо и бэкенды».
+- **Кодировщик (`encoder.saltic` + `encoder/operand.saltic`, 04.11.2026):**
+  команда → байты x86-64 в `buffer.Buffer`, без меток; эталоны — GNU `as`
+  (`tests/x86-encoder.saltic`, сверка `workbench/x86-encoder-golden.sh`).

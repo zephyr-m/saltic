@@ -199,6 +199,23 @@ test_edges() {
     echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i и x86_64"
 }
 
+test_x86_encoder() {
+    mkdir -p "$work/x86-encoder"
+    SALTIC_TARGET=rv32i build x86-encoder-rv32i \
+        tests/x86-encoder.saltic \
+        "$work/x86-encoder/rv32i.elf"
+    SALTIC_TARGET=x86_64 build x86-encoder-x86_64 \
+        tests/x86-encoder.saltic \
+        "$work/x86-encoder/x86_64"
+    measure run qemu-riscv32 -B 0x100000000 "$work/x86-encoder/rv32i.elf" \
+        >"$work/x86-encoder/rv32i.txt"
+    measure run "$work/x86-encoder/x86_64" \
+        >"$work/x86-encoder/x86_64.txt"
+    diff -u tests/expected/x86-encoder.txt "$work/x86-encoder/rv32i.txt"
+    diff -u tests/expected/x86-encoder.txt "$work/x86-encoder/x86_64.txt"
+    echo "кодировщик x86-64: байты команд совпадают с GNU as — одинаково под rv32i и x86_64"
+}
+
 test_dict() {
     mkdir -p "$work/dict"
     SALTIC_TARGET=rv32i build dict-rv32i \
@@ -418,6 +435,7 @@ run_case() {
         groups) test_groups ;;
         bytes) test_bytes ;;
         edges) test_edges ;;
+        x86-encoder) test_x86_encoder ;;
         dict) test_dict ;;
         seed-contract) test_seed_contract ;;
         machine) test_machine ;;
@@ -453,6 +471,7 @@ elif [[ "$1" == "all" ]]; then
         groups \
         bytes \
         edges \
+        x86-encoder \
         dict \
         seed-contract \
         machine \
