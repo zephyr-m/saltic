@@ -1,22 +1,23 @@
 -- emitters — мелкие кусочки кода для codegen: литералы, поля Box, сравнения,
 -- строки в rodata, локальные переменные, быстрые пути.
--- Каждый навык берёт и отдаёт compiler; значение — в a0, a1 = CALL_NO_ERROR
--- после emit_word_result. Строки складываются в rodata один раз (string_find).
+-- Каждый навык берёт и отдаёт compiler; команды — методами compiler.executor
+-- (договор backend); значение — в VALUE, ERROR = CALL_NO_ERROR после
+-- emit_word_result. Строки складываются в rodata один раз (string_find).
 --
 -- negative_literal / constant_literal / fixed_literal(node) -> yes/no — узел
 --     есть константа (число, -число, answer, none; fixed — и wide-number)
 -- immediate_operand / simple_operand(compiler, node) -> yes/no
 -- emit_field_get / emit_field_set(compiler, name) — rt_box_get / rt_box_set
--- emit_word_result(compiler) — a1 = CALL_NO_ERROR
--- emit_answer_from_bit(compiler) — бит в a0 → yes/no
--- emit_number_less(compiler, smaller, larger) / emit_word_equal(compiler)
+-- emit_word_result(compiler) — ERROR = CALL_NO_ERROR
+-- emit_answer_from_bit(compiler) — бит в VALUE → yes/no
+-- emit_number_less(compiler, smaller, larger) / emit_word_equal(compiler) — роли
 -- emit_equal_fast_path(compiler) — равные слова без rt_equal
--- emit_checked_word(compiler, kind) — ADD/SUB с проверкой переполнения
+-- jump_unless_yes(compiler, label) — переход, если VALUE — no, none или 0
 -- string_find(compiler, text) -> Symbol; string_label(compiler, text) -> метка
 -- emit_string_data(compiler, text) — байты строки в .data-тексте
 -- emit_string_join(compiler) — rt_string_add для "{…}"
--- load_number / load_number_into(compiler, [register,] number) — число с тегом
--- load_simple(compiler, node, register) / load_fixed_literal(compiler, value)
+-- load_number / load_number_into(compiler, [role,] number) — число с тегом
+-- load_simple(compiler, node, role) / load_fixed_literal(compiler, value)
 -- store_local(compiler, name, value) — запись в слот и вывод типа
 -- store_box(compiler, field_ids, type_number) — rt_alloc Box из значений на стеке
 
@@ -27,9 +28,7 @@ use selfhost.abi
 use selfhost.ast
 use selfhost.compiler.state
 use selfhost.compiler.constants
-use selfhost.compiler.backend.rv32i.machine.instruction
-use selfhost.compiler.backend.rv32i.machine.layout
-use selfhost.compiler.backend.rv32i.machine.registers
+use selfhost.compiler.backend
 use selfhost.machine.word
 use selfhost.compiler.codegen.lookup
 
@@ -57,55 +56,71 @@ skill constant_literal(node) {
 }
 
 skill emit_field_get(compiler, name) {
+    @executor = compiler.executor
     @field = state.symbol_find(compiler.fields, name)
-    compiler = state.load_immediate(compiler, "a1", registers.A1, field.value)
-    compiler = state.load_immediate(compiler, "a2", registers.A2, field.slot)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_box_get")
+    compiler = executor.load_immediate(compiler, backend.ERROR, field.value)
+    compiler = executor.load_immediate(compiler, backend.ARG2, field.slot)
+    compiler = executor.call(compiler, "rt_box_get")
     out compiler
 }
 
 skill emit_field_set(compiler, name) {
+    @executor = compiler.executor
     @field = state.symbol_find(compiler.fields, name)
-    compiler = state.load_immediate(compiler, "a1", registers.A1, field.value)
-    compiler = state.load_immediate(compiler, "a3", registers.A3, field.slot)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_box_set")
+    compiler = executor.load_immediate(compiler, backend.ERROR, field.value)
+    compiler = executor.load_immediate(compiler, backend.ARG3, field.slot)
+    compiler = executor.call(compiler, "rt_box_set")
     out compiler
 }
 
 skill emit_word_result(compiler) {
-    out state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    @executor = compiler.executor
+    out executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
 }
 
 skill emit_answer_from_bit(compiler) {
-    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.A0, registers.A0, registers.ZERO, abi.TAG_SHIFT)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.A0, registers.ZERO, abi.NO)
+    @executor = compiler.executor
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, abi.NO)
     out emit_word_result(compiler)
 }
 
 skill emit_number_less(compiler, smaller, larger) {
-    compiler = state.emit_op(compiler, instruction.Kind.SRAI, registers.A0, registers.A0, registers.ZERO, abi.TAG_SHIFT)
-    compiler = state.emit_op(compiler, instruction.Kind.SRAI, registers.A1, registers.A1, registers.ZERO, abi.TAG_SHIFT)
-    compiler = state.emit_op(compiler, instruction.Kind.SLT, registers.A0, smaller, larger, 0)
+    @executor = compiler.executor
+    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.shift_right_signed(compiler, backend.ERROR, backend.ERROR, abi.TAG_SHIFT)
+    compiler = executor.set_less(compiler, backend.VALUE, smaller, larger)
     out emit_answer_from_bit(compiler)
 }
 
 skill emit_word_equal(compiler) {
-    compiler = state.emit_op(compiler, instruction.Kind.SUB, registers.A0, registers.A0, registers.A1, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.SLTIU, registers.A0, registers.A0, registers.ZERO, 1)
+    @executor = compiler.executor
+    compiler = executor.sub(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
+    compiler = executor.set_zero(compiler, backend.VALUE, backend.VALUE)
     out emit_answer_from_bit(compiler)
 }
 
 skill emit_equal_fast_path(compiler) {
+    @executor = compiler.executor
     @slow = state.label(compiler, "equal_slow")
     @done = state.label(compiler, "equal_done")
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.A0, registers.A1, slow)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, abi.YES)
+    compiler = executor.branch_not_equal(compiler, backend.VALUE, backend.ERROR, slow)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.YES)
     compiler = emit_word_result(compiler)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, done)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, slow)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_equal")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, done)
+    compiler = executor.jump(compiler, done)
+    compiler = executor.label(compiler, slow)
+    compiler = executor.call(compiler, "rt_equal")
+    compiler = executor.label(compiler, done)
     out compiler
+}
+
+skill jump_unless_yes(compiler, name) {
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.NO)
+    compiler = executor.jump_if_equal(compiler, backend.VALUE, backend.SCRATCH0, name)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.NONE)
+    compiler = executor.jump_if_equal(compiler, backend.VALUE, backend.SCRATCH0, name)
+    out executor.jump_if_zero(compiler, backend.VALUE, name)
 }
 
 skill immediate_operand(compiler, node) {
@@ -172,39 +187,38 @@ skill string_label(compiler, text) {
     compiler = state.emit_data(compiler, "  .word {length}")
     compiler = emit_string_data(compiler, text)
     compiler = state.emit_data(compiler, "  .balign {constants.DATA_ALIGNMENT}")
-    compiler.machine = layout.align_section(compiler.machine, layout.Section.RODATA, constants.DATA_ALIGNMENT)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.RODATA, label)
-    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(abi.OBJECT_KIND_STRING))
-    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(payload_bytes))
-    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(abi.OBJECT_FLAG_STATIC))
-    compiler.machine = layout.append_section_word(compiler.machine, layout.Section.RODATA, layout.address_from_number(length))
-    compiler.machine = layout.append_section_text(compiler.machine, layout.Section.RODATA, text, yes)
-    compiler.machine = layout.align_section(compiler.machine, layout.Section.RODATA, constants.DATA_ALIGNMENT)
+    @executor = compiler.executor
+    compiler = executor.align(compiler, backend.RODATA, constants.DATA_ALIGNMENT)
+    compiler = executor.data_label(compiler, backend.RODATA, label)
+    compiler = executor.data_word(compiler, backend.RODATA, word.from_number(abi.OBJECT_KIND_STRING))
+    compiler = executor.data_word(compiler, backend.RODATA, word.from_number(payload_bytes))
+    compiler = executor.data_word(compiler, backend.RODATA, word.from_number(abi.OBJECT_FLAG_STATIC))
+    compiler = executor.data_word(compiler, backend.RODATA, word.from_number(length))
+    compiler = executor.data_text(compiler, backend.RODATA, text)
+    compiler = executor.align(compiler, backend.RODATA, constants.DATA_ALIGNMENT)
     compiler.strings = group.add(compiler.strings, state.Symbol { name = label, kind = "string", text = text })
     out label
 }
 
 skill emit_string_join(compiler) {
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.A0, registers.ZERO, 0)
-    compiler = state.pop(compiler, "a0", registers.A0)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_string_add")
-    out state.push(compiler, "a0", registers.A0)
+    @executor = compiler.executor
+    compiler = executor.move(compiler, backend.ERROR, backend.VALUE)
+    compiler = executor.pop(compiler, backend.VALUE)
+    compiler = executor.call(compiler, "rt_string_add")
+    out executor.push(compiler, backend.VALUE)
 }
 
 skill load_number(compiler, number) {
-    out load_number_into(compiler, registers.A0, number)
+    out load_number_into(compiler, backend.VALUE, number)
 }
 
-skill load_number_into(compiler, register, number) {
+skill load_number_into(compiler, role, number) {
+    @executor = compiler.executor
     (number > -257) {
-        (number < 256) {
-            compiler.machine = layout.emit_load_immediate(compiler.machine, register, abi.tagged(number, abi.TAG_NUMBER))
-            out compiler
-        }
+        (number < 256) { out executor.load_immediate(compiler, role, abi.tagged(number, abi.TAG_NUMBER)) }
     }
     @tagged = word.add_number(word.shift_left(word.from_signed(number), abi.TAG_SHIFT), abi.TAG_NUMBER)
-    compiler.machine = layout.emit_load_word(compiler.machine, register, tagged)
-    out compiler
+    out executor.load_word(compiler, role, tagged)
 }
 
 skill simple_operand(compiler, node) {
@@ -216,15 +230,17 @@ skill simple_operand(compiler, node) {
     out no
 }
 
-skill load_simple(compiler, node, register) {
+skill load_simple(compiler, node, role) {
     @parts = ast.plain(node)
-    (group.get(parts, 0) == "number") { out load_number_into(compiler, register, group.get(parts, 1)) }
-    out state.emit_op(compiler, instruction.Kind.LW, register, registers.S0, registers.ZERO, state.slot(compiler, group.get(parts, 1)))
+    (group.get(parts, 0) == "number") { out load_number_into(compiler, role, group.get(parts, 1)) }
+    @executor = compiler.executor
+    out executor.load(compiler, role, backend.FRAME, state.slot(compiler, group.get(parts, 1)))
 }
 
 skill store_local(compiler, name, value) {
+    @executor = compiler.executor
     @slot = state.slot(compiler, name)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, slot)
+    compiler = executor.store(compiler, backend.VALUE, backend.FRAME, slot)
     @type = lookup.infer_type(compiler, value)
     @known = state.type_find(compiler.current_function.types, name)
     (type == "unknown") {
@@ -256,53 +272,38 @@ skill fixed_literal(value) {
 }
 
 skill load_fixed_literal(compiler, value) {
+    @executor = compiler.executor
     @plain = ast.plain(value)
     @tag = group.get(plain, 0)
-    (tag == "wide-number") {
-        compiler.machine = layout.emit_load_word(compiler.machine, registers.A0, word.from_decimal(group.get(plain, 1)))
-        out compiler
-    }
-    (tag == "number") { out state.load_immediate(compiler, "a0", registers.A0, group.get(plain, 1)) }
+    (tag == "wide-number") { out executor.load_word(compiler, backend.VALUE, word.from_decimal(group.get(plain, 1))) }
+    (tag == "number") { out executor.load_immediate(compiler, backend.VALUE, group.get(plain, 1)) }
     @right = ast.plain(group.get(plain, 3))
-    (group.get(right, 0) == "number") { out state.load_immediate(compiler, "a0", registers.A0, 0 - group.get(right, 1)) }
+    (group.get(right, 0) == "number") { out executor.load_immediate(compiler, backend.VALUE, 0 - group.get(right, 1)) }
     @wide = str.add("-", group.get(right, 1))
-    compiler.machine = layout.emit_load_word(compiler.machine, registers.A0, word.from_decimal(wide))
-    out compiler
+    out executor.load_word(compiler, backend.VALUE, word.from_decimal(wide))
 }
 
 skill store_box(compiler, field_ids, type_number) {
+    @executor = compiler.executor
     @count = group.count(field_ids)
-    compiler = state.load_immediate(compiler, "a0", registers.A0, constants.box_storage_bytes(count + 1))
-    compiler.machine = layout.emit_call(compiler.machine, "rt_alloc")
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, abi.OBJECT_KIND_BOX)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T3, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T3, registers.ZERO, registers.ZERO, count + 1)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T3, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_COUNT_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.VALUE, constants.box_storage_bytes(count + 1))
+    compiler = executor.call(compiler, "rt_alloc")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, abi.OBJECT_KIND_BOX)
+    compiler = executor.store(compiler, backend.SCRATCH3, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, count + 1)
+    compiler = executor.store(compiler, backend.SCRATCH3, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_COUNT_OFFSET)
     drum (count) {
-        compiler = state.load_immediate(compiler, "t0", registers.T0, group.get(field_ids, beat))
-        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_id_offset(beat))
-        compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.SP, registers.ZERO, constants.stack_source_offset(count, beat))
-        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_value_offset(beat))
+        compiler = executor.load_immediate(compiler, backend.SCRATCH0, group.get(field_ids, beat))
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_id_offset(beat))
+        compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, constants.stack_source_offset(count, beat))
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_value_offset(beat))
     }
-    compiler = state.load_immediate(compiler, "t0", registers.T0, constants.BOX_TYPE_FIELD_ID)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_id_offset(count))
-    compiler = state.load_immediate(compiler, "t0", registers.T0, abi.tagged(type_number, abi.TAG_NUMBER))
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.A0, registers.T0, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_value_offset(count))
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, constants.BOX_TYPE_FIELD_ID)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_id_offset(count))
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.tagged(type_number, abi.TAG_NUMBER))
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET + constants.box_field_value_offset(count))
     (count > 0) {
-        compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, constants.stack_bytes(count))
+        compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, constants.stack_bytes(count))
     }
-    out state.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_BOX)
-}
-
-skill emit_checked_word(compiler, kind) {
-    compiler = state.emit_op(compiler, kind, registers.T0, registers.A0, registers.A1, 0)
-    pick {
-        (kind == instruction.Kind.ADD) { compiler = state.emit_op(compiler, instruction.Kind.SLT, registers.T1, registers.T0, registers.A0, 0) }
-        { compiler = state.emit_op(compiler, instruction.Kind.SLT, registers.T1, registers.A0, registers.T0, 0) }
-    }
-    compiler = state.emit_op(compiler, instruction.Kind.SLTI, registers.T2, registers.A1, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.T0, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, registers.ZERO, registers.T1, registers.T2, 8)
-    out state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.ERROR_NUMBER_OVERFLOW)
+    out executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_BOX)
 }

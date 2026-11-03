@@ -1,23 +1,22 @@
--- failures — ошибки в коде навыка: проверка a1 после вызова, значение
+-- failures — ошибки в коде навыка: проверка ERROR после вызова, значение
 -- error.Имя, rescue с восстановлением стека.
--- Ошибка = a1 > 0 (id), a0 = 0. Текущая метка перехвата —
+-- Ошибка = ERROR > 0 (id), VALUE = 0. Текущая метка перехвата —
 -- current_function.failure; rescue временно подменяет её на frame.caught.
+-- Команды — методами compiler.executor (договор backend).
 --
 -- Rescue { done, caught, stack_slot, outer } — кадр rescue
--- check(compiler) — a1 > 0 → переход на failure навыка
--- load_value(compiler, name) — a0 = значение error.Имя (тег ERROR)
--- load_failure(compiler, name) — поднять ошибку: a0 = 0, a1 = id
--- raise_value(compiler) — ошибка-значение из a0 в a1
--- rescue_frame(compiler) -> Rescue; enter(compiler, frame) — сохранить sp
--- catch(compiler, frame, name) — метка caught: вернуть sp, ошибку в слот name
+-- check(compiler) — ERROR > 0 → переход на failure навыка
+-- load_value(compiler, name) — VALUE = значение error.Имя (тег ERROR)
+-- load_failure(compiler, name) — поднять ошибку: VALUE = 0, ERROR = id
+-- raise_value(compiler) — ошибка-значение из VALUE в ERROR
+-- rescue_frame(compiler) -> Rescue; enter(compiler, frame) — сохранить STACK
+-- catch(compiler, frame, name) — метка caught: вернуть STACK, ошибку в слот name
 
 use core.str
 use selfhost.abi
 use selfhost.compiler.state
 use selfhost.compiler.codegen.lookup
-use selfhost.compiler.backend.rv32i.machine.instruction
-use selfhost.compiler.backend.rv32i.machine.layout
-use selfhost.compiler.backend.rv32i.machine.registers
+use selfhost.compiler.backend
 
 Rescue = Box {
     done = "",
@@ -28,26 +27,28 @@ Rescue = Box {
 
 skill check(compiler) {
     (str.len(compiler.current_function.failure) == 0) { out compiler }
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, registers.ZERO, registers.A1, registers.ZERO, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, compiler.current_function.failure)
-    out compiler
+    @executor = compiler.executor
+    out executor.jump_if_nonzero(compiler, backend.ERROR, compiler.current_function.failure)
 }
 
 skill load_value(compiler, name) {
+    @executor = compiler.executor
     compiler = lookup.remember_error(compiler, name)
-    compiler = state.load_immediate(compiler, "a0", registers.A0, abi.error_value(lookup.error_id(compiler, name)))
-    out state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.error_value(lookup.error_id(compiler, name)))
+    out executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
 }
 
 skill load_failure(compiler, name) {
+    @executor = compiler.executor
     compiler = lookup.remember_error(compiler, name)
-    compiler = state.load_immediate(compiler, "a0", registers.A0, 0)
-    out state.load_immediate(compiler, "a1", registers.A1, lookup.error_id(compiler, name))
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    out executor.load_immediate(compiler, backend.ERROR, lookup.error_id(compiler, name))
 }
 
 skill raise_value(compiler) {
-    compiler = state.emit_op(compiler, instruction.Kind.SRLI, registers.A1, registers.A0, registers.ZERO, abi.TAG_SHIFT)
-    out state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 0)
+    @executor = compiler.executor
+    compiler = executor.shift_right_unsigned(compiler, backend.ERROR, backend.VALUE, abi.TAG_SHIFT)
+    out executor.load_immediate(compiler, backend.VALUE, 0)
 }
 
 skill rescue_frame(compiler) {
@@ -58,20 +59,21 @@ skill rescue_frame(compiler) {
 }
 
 skill enter(compiler, frame) {
+    @executor = compiler.executor
     compiler.current_function.next_rescue = compiler.current_function.next_rescue + 1
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.SP, frame.stack_slot)
+    compiler = executor.store(compiler, backend.STACK, backend.FRAME, frame.stack_slot)
     compiler.current_function.failure = frame.caught
     out compiler
 }
 
 skill catch(compiler, frame, name) {
+    @executor = compiler.executor
     compiler.current_function.failure = frame.outer
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.A1, registers.ZERO, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.done)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.caught)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.SP, registers.S0, registers.ZERO, frame.stack_slot)
-    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.A0, registers.A1, registers.ZERO, abi.TAG_SHIFT)
-    compiler = state.emit_op(compiler, instruction.Kind.ORI, registers.A0, registers.A0, registers.ZERO, abi.TAG_ERROR)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, state.slot(compiler, name))
-    out state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler = executor.jump_if_zero(compiler, backend.ERROR, frame.done)
+    compiler = executor.label(compiler, frame.caught)
+    compiler = executor.load(compiler, backend.STACK, backend.FRAME, frame.stack_slot)
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.ERROR, abi.TAG_SHIFT)
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_ERROR)
+    compiler = executor.store(compiler, backend.VALUE, backend.FRAME, state.slot(compiler, name))
+    out executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
 }
