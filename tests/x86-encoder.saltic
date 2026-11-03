@@ -1,0 +1,222 @@
+-- x86-encoder — кодировщик команд x86-64 родного исполнителя
+-- (selfhost/compiler/backend/x86_64_native/encoder) против эталонных байтов
+-- GNU as. Имя проверки — команда в синтаксисе Intel, как её понимает as;
+-- workbench/x86-encoder-golden.sh собирает каждую и сверяет байты с тестом.
+-- Гоняется под rv32i и x86_64, вывод обеих целей сверяется с одним эталоном.
+--
+-- fresh() -> пустой buffer.Buffer
+-- hex(code) -> байты буфера текстом "48 89 e0"
+-- check(suite, command, code, expected) -> suite — байты code против эталона
+-- failure(command) -> имя ошибки или "ok"
+-- registers / immediates / shifts / memory / control(suite) -> suite
+-- program() -> итог testing.test_finish
+
+use core.num
+use core.str
+use craft.testing
+use selfhost.machine.word
+use selfhost.compiler.backend.rv32i.machine.buffer
+use selfhost.compiler.backend.x86_64_native.encoder
+
+skill fresh() {
+    out buffer.empty()
+}
+
+skill hex(code) {
+    @text = ""
+    drum (code.length) {
+        @value = buffer.byte_at(code, beat)
+        (beat > 0) { text = str.add(text, " ") }
+        text = str.add(text, num.hex_digit(value / 16))
+        text = str.add(text, num.hex_digit(num.mod(value, 16)))
+    }
+    out text
+}
+
+skill check(suite, command, code, expected) {
+    out testing.test_equal(suite, command, hex(code), expected)
+}
+
+skill registers(suite) {
+    suite = check(suite, "mov eax, ebx", encoder.operate(fresh(), 4, encoder.MOVE, encoder.EAX, encoder.EBX), "89 d8")
+    suite = check(suite, "mov r8d, eax", encoder.operate(fresh(), 4, encoder.MOVE, encoder.R8D, encoder.EAX), "41 89 c0")
+    suite = check(suite, "mov eax, r15d", encoder.operate(fresh(), 4, encoder.MOVE, encoder.EAX, encoder.R15D), "44 89 f8")
+    suite = check(suite, "mov r9d, r10d", encoder.operate(fresh(), 4, encoder.MOVE, encoder.R9D, encoder.R10D), "45 89 d1")
+    suite = check(suite, "mov rax, rsp", encoder.operate(fresh(), 8, encoder.MOVE, encoder.EAX, encoder.RSP), "48 89 e0")
+    suite = check(suite, "add eax, edx", encoder.operate(fresh(), 4, encoder.ADD, encoder.EAX, encoder.EDX), "01 d0")
+    suite = check(suite, "or ecx, ebx", encoder.operate(fresh(), 4, encoder.OR, encoder.ECX, encoder.EBX), "09 d9")
+    suite = check(suite, "and esi, edi", encoder.operate(fresh(), 4, encoder.AND, encoder.ESI, encoder.EDI), "21 fe")
+    suite = check(suite, "sub r12d, r13d", encoder.operate(fresh(), 4, encoder.SUB, encoder.R12D, encoder.R13D), "45 29 ec")
+    suite = check(suite, "xor eax, eax", encoder.operate(fresh(), 4, encoder.XOR, encoder.EAX, encoder.EAX), "31 c0")
+    suite = check(suite, "cmp ebp, r11d", encoder.operate(fresh(), 4, encoder.CMP, encoder.EBP, encoder.R11D), "44 39 dd")
+    suite = check(suite, "sub rax, r14", encoder.operate(fresh(), 8, encoder.SUB, encoder.EAX, encoder.R14), "4c 29 f0")
+    suite = check(suite, "add rsp, r14", encoder.operate(fresh(), 8, encoder.ADD, encoder.RSP, encoder.R14), "4c 01 f4")
+    suite = check(suite, "test eax, eax", encoder.operate(fresh(), 4, encoder.TEST, encoder.EAX, encoder.EAX), "85 c0")
+    suite = check(suite, "test r10d, ecx", encoder.operate(fresh(), 4, encoder.TEST, encoder.R10D, encoder.ECX), "41 85 ca")
+    suite = check(suite, "imul eax, edx", encoder.operate(fresh(), 4, encoder.MULTIPLY, encoder.EAX, encoder.EDX), "0f af c2")
+    suite = check(suite, "imul r8d, r15d", encoder.operate(fresh(), 4, encoder.MULTIPLY, encoder.R8D, encoder.R15D), "45 0f af c7")
+    suite = check(suite, "imul eax, r9d", encoder.operate(fresh(), 4, encoder.MULTIPLY, encoder.EAX, encoder.R9D), "41 0f af c1")
+    suite = check(suite, "movzx eax, bl", encoder.operate(fresh(), 4, encoder.ZERO_BYTE, encoder.EAX, encoder.EBX), "0f b6 c3")
+    suite = check(suite, "movzx eax, sil", encoder.operate(fresh(), 4, encoder.ZERO_BYTE, encoder.EAX, encoder.ESI), "40 0f b6 c6")
+    suite = check(suite, "movzx r9d, dil", encoder.operate(fresh(), 4, encoder.ZERO_BYTE, encoder.R9D, encoder.EDI), "44 0f b6 cf")
+    suite = check(suite, "movzx eax, r11b", encoder.operate(fresh(), 4, encoder.ZERO_BYTE, encoder.EAX, encoder.R11D), "41 0f b6 c3")
+    suite = check(suite, "movsx eax, cl", encoder.operate(fresh(), 4, encoder.SIGN_BYTE, encoder.EAX, encoder.ECX), "0f be c1")
+    suite = check(suite, "movsx ebx, bpl", encoder.operate(fresh(), 4, encoder.SIGN_BYTE, encoder.EBX, encoder.EBP), "40 0f be dd")
+    suite = check(suite, "movzx ecx, dx", encoder.operate(fresh(), 4, encoder.ZERO_HALF, encoder.ECX, encoder.EDX), "0f b7 ca")
+    suite = check(suite, "movzx eax, si", encoder.operate(fresh(), 4, encoder.ZERO_HALF, encoder.EAX, encoder.ESI), "0f b7 c6")
+    suite = check(suite, "movsx r12d, ax", encoder.operate(fresh(), 4, encoder.SIGN_HALF, encoder.R12D, encoder.EAX), "44 0f bf e0")
+    suite = check(suite, "neg eax", encoder.unary(fresh(), 4, encoder.NEGATE, encoder.EAX), "f7 d8")
+    suite = check(suite, "neg r12d", encoder.unary(fresh(), 4, encoder.NEGATE, encoder.R12D), "41 f7 dc")
+    suite = check(suite, "not ecx", encoder.unary(fresh(), 4, encoder.INVERT, encoder.ECX), "f7 d1")
+    suite = check(suite, "idiv ecx", encoder.unary(fresh(), 4, encoder.DIVIDE, encoder.ECX), "f7 f9")
+    suite = check(suite, "div r9d", encoder.unary(fresh(), 4, encoder.DIVIDE_UNSIGNED, encoder.R9D), "41 f7 f1")
+    suite = check(suite, "idiv rbx", encoder.unary(fresh(), 8, encoder.DIVIDE, encoder.EBX), "48 f7 fb")
+    suite = check(suite, "setl al; movzx eax, al", encoder.set_condition(fresh(), encoder.LESS, encoder.EAX), "0f 9c c0 0f b6 c0")
+    suite = check(suite, "sete sil; movzx esi, sil", encoder.set_condition(fresh(), encoder.EQUAL, encoder.ESI), "40 0f 94 c6 40 0f b6 f6")
+    suite = check(suite, "setb r9b; movzx r9d, r9b", encoder.set_condition(fresh(), encoder.BELOW, encoder.R9D), "41 0f 92 c1 45 0f b6 c9")
+    suite = check(suite, "setg bpl; movzx ebp, bpl", encoder.set_condition(fresh(), encoder.GREATER, encoder.EBP), "40 0f 9f c5 40 0f b6 ed")
+    out suite
+}
+
+skill immediates(suite) {
+    suite = check(suite, "mov eax, 5", encoder.operate_immediate(fresh(), 4, encoder.MOVE, encoder.EAX, 5), "b8 05 00 00 00")
+    suite = check(suite, "mov r13d, 100000", encoder.operate_immediate(fresh(), 4, encoder.MOVE, encoder.R13D, 100000), "41 bd a0 86 01 00")
+    suite = check(suite, "mov eax, -1", encoder.operate_immediate(fresh(), 4, encoder.MOVE, encoder.EAX, 0 - 1), "b8 ff ff ff ff")
+    suite = check(suite, "mov rax, -8", encoder.operate_immediate(fresh(), 8, encoder.MOVE, encoder.EAX, 0 - 8), "48 c7 c0 f8 ff ff ff")
+    suite = check(suite, "mov r14, 5", encoder.operate_immediate(fresh(), 8, encoder.MOVE, encoder.R14, 5), "49 c7 c6 05 00 00 00")
+    suite = check(suite, "add eax, 1", encoder.operate_immediate(fresh(), 4, encoder.ADD, encoder.EAX, 1), "83 c0 01")
+    suite = check(suite, "add eax, 1000", encoder.operate_immediate(fresh(), 4, encoder.ADD, encoder.EAX, 1000), "05 e8 03 00 00")
+    suite = check(suite, "add ebx, 1000", encoder.operate_immediate(fresh(), 4, encoder.ADD, encoder.EBX, 1000), "81 c3 e8 03 00 00")
+    suite = check(suite, "add r8d, -128", encoder.operate_immediate(fresh(), 4, encoder.ADD, encoder.R8D, 0 - 128), "41 83 c0 80")
+    suite = check(suite, "add r8d, 128", encoder.operate_immediate(fresh(), 4, encoder.ADD, encoder.R8D, 128), "41 81 c0 80 00 00 00")
+    suite = check(suite, "sub rsp, 16", encoder.operate_immediate(fresh(), 8, encoder.SUB, encoder.RSP, 16), "48 83 ec 10")
+    suite = check(suite, "and rsp, -16", encoder.operate_immediate(fresh(), 8, encoder.AND, encoder.RSP, 0 - 16), "48 83 e4 f0")
+    suite = check(suite, "add rsp, 4096", encoder.operate_immediate(fresh(), 8, encoder.ADD, encoder.RSP, 4096), "48 81 c4 00 10 00 00")
+    suite = check(suite, "xor ecx, 255", encoder.operate_immediate(fresh(), 4, encoder.XOR, encoder.ECX, 255), "81 f1 ff 00 00 00")
+    suite = check(suite, "cmp edi, 127", encoder.operate_immediate(fresh(), 4, encoder.CMP, encoder.EDI, 127), "83 ff 7f")
+    suite = check(suite, "cmp edi, -129", encoder.operate_immediate(fresh(), 4, encoder.CMP, encoder.EDI, 0 - 129), "81 ff 7f ff ff ff")
+    suite = check(suite, "cmp eax, -129", encoder.operate_immediate(fresh(), 4, encoder.CMP, encoder.EAX, 0 - 129), "3d 7f ff ff ff")
+    suite = check(suite, "or eax, 268435455", encoder.operate_immediate(fresh(), 4, encoder.OR, encoder.EAX, 268435455), "0d ff ff ff 0f")
+    suite = check(suite, "and r15d, -268435455", encoder.operate_immediate(fresh(), 4, encoder.AND, encoder.R15D, 0 - 268435455), "41 81 e7 01 00 00 f0")
+    suite = check(suite, "test eax, 1", encoder.operate_immediate(fresh(), 4, encoder.TEST, encoder.EAX, 1), "a9 01 00 00 00")
+    suite = check(suite, "test ebx, 256", encoder.operate_immediate(fresh(), 4, encoder.TEST, encoder.EBX, 256), "f7 c3 00 01 00 00")
+    suite = check(suite, "test r9d, 7", encoder.operate_immediate(fresh(), 4, encoder.TEST, encoder.R9D, 7), "41 f7 c1 07 00 00 00")
+    suite = check(suite, "mov eax, 0x80000000", encoder.move_word(fresh(), encoder.EAX, word.from_bytes(0, 0, 0, 128)), "b8 00 00 00 80")
+    suite = check(suite, "mov r11d, 0xdeadbeef", encoder.move_word(fresh(), encoder.R11D, word.from_bytes(239, 190, 173, 222)), "41 bb ef be ad de")
+    @low = word.from_bytes(136, 119, 102, 85)
+    @high = word.from_bytes(68, 51, 34, 17)
+    suite = check(suite, "movabs rax, 0x1122334455667788", encoder.move_quad(fresh(), encoder.EAX, low, high), "48 b8 88 77 66 55 44 33 22 11")
+    @ones = word.from_bytes(255, 255, 255, 255)
+    suite = check(suite, "movabs r15, 0xffffffffffffffff", encoder.move_quad(fresh(), encoder.R15D, ones, ones), "49 bf ff ff ff ff ff ff ff ff")
+    out suite
+}
+
+skill shifts(suite) {
+    suite = check(suite, "shl eax, 3", encoder.shift(fresh(), 4, encoder.SHIFT_LEFT, encoder.EAX, 3), "c1 e0 03")
+    suite = check(suite, "shr ebx, 1", encoder.shift(fresh(), 4, encoder.SHIFT_RIGHT, encoder.EBX, 1), "d1 eb")
+    suite = check(suite, "sar r10d, 31", encoder.shift(fresh(), 4, encoder.SHIFT_ARITHMETIC, encoder.R10D, 31), "41 c1 fa 1f")
+    suite = check(suite, "shl rax, 32", encoder.shift(fresh(), 8, encoder.SHIFT_LEFT, encoder.EAX, 32), "48 c1 e0 20")
+    suite = check(suite, "shl eax, cl", encoder.shift(fresh(), 4, encoder.SHIFT_LEFT, encoder.EAX, encoder.BY_CL), "d3 e0")
+    suite = check(suite, "sar r11d, cl", encoder.shift(fresh(), 4, encoder.SHIFT_ARITHMETIC, encoder.R11D, encoder.BY_CL), "41 d3 fb")
+    suite = check(suite, "shr rdx, cl", encoder.shift(fresh(), 8, encoder.SHIFT_RIGHT, encoder.EDX, encoder.BY_CL), "48 d3 ea")
+    out suite
+}
+
+skill memory(suite) {
+    suite = check(suite, "mov eax, dword ptr [r14+rbx+8]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R14, encoder.EBX, 8), "41 8b 44 1e 08")
+    suite = check(suite, "mov eax, dword ptr [r14+12]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R14, encoder.NONE, 12), "41 8b 46 0c")
+    suite = check(suite, "mov eax, dword ptr [r14+rax]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R14, encoder.EAX, 0), "41 8b 04 06")
+    suite = check(suite, "mov edx, dword ptr [r14+r13+4]", encoder.memory(fresh(), encoder.LOAD, encoder.EDX, encoder.R14, encoder.R13D, 4), "43 8b 54 2e 04")
+    suite = check(suite, "mov eax, dword ptr [r13+rax]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R13D, encoder.EAX, 0), "41 8b 44 05 00")
+    suite = check(suite, "mov eax, dword ptr [rbp]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.EBP, encoder.NONE, 0), "8b 45 00")
+    suite = check(suite, "mov eax, dword ptr [r13]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R13D, encoder.NONE, 0), "41 8b 45 00")
+    suite = check(suite, "mov eax, dword ptr [r12]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R12D, encoder.NONE, 0), "41 8b 04 24")
+    suite = check(suite, "mov eax, dword ptr [r12+rcx+1]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R12D, encoder.ECX, 1), "41 8b 44 0c 01")
+    suite = check(suite, "mov eax, dword ptr [rsp]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.RSP, encoder.NONE, 0), "8b 04 24")
+    suite = check(suite, "mov eax, dword ptr [rsp+8]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.RSP, encoder.NONE, 8), "8b 44 24 08")
+    suite = check(suite, "mov ecx, dword ptr [rsp+rax]", encoder.memory(fresh(), encoder.LOAD, encoder.ECX, encoder.EAX, encoder.RSP, 0), "8b 0c 04")
+    suite = check(suite, "mov r15d, dword ptr [r14+r12+100000]", encoder.memory(fresh(), encoder.LOAD, encoder.R15D, encoder.R14, encoder.R12D, 100000), "47 8b bc 26 a0 86 01 00")
+    suite = check(suite, "mov eax, dword ptr [r14+127]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R14, encoder.NONE, 127), "41 8b 46 7f")
+    suite = check(suite, "mov eax, dword ptr [r14+128]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R14, encoder.NONE, 128), "41 8b 86 80 00 00 00")
+    suite = check(suite, "mov eax, dword ptr [r14-128]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R14, encoder.NONE, 0 - 128), "41 8b 46 80")
+    suite = check(suite, "mov eax, dword ptr [r14-200]", encoder.memory(fresh(), encoder.LOAD, encoder.EAX, encoder.R14, encoder.NONE, 0 - 200), "41 8b 86 38 ff ff ff")
+    suite = check(suite, "mov rax, qword ptr [rsp]", encoder.memory(fresh(), encoder.LOAD64, encoder.EAX, encoder.RSP, encoder.NONE, 0), "48 8b 04 24")
+    suite = check(suite, "mov dword ptr [r14+rcx+4], edx", encoder.memory(fresh(), encoder.STORE, encoder.EDX, encoder.R14, encoder.ECX, 4), "41 89 54 0e 04")
+    suite = check(suite, "mov dword ptr [rsp], r11d", encoder.memory(fresh(), encoder.STORE, encoder.R11D, encoder.RSP, encoder.NONE, 0), "44 89 1c 24")
+    suite = check(suite, "mov qword ptr [rsp+8], rax", encoder.memory(fresh(), encoder.STORE64, encoder.EAX, encoder.RSP, encoder.NONE, 8), "48 89 44 24 08")
+    suite = check(suite, "mov byte ptr [rax], sil", encoder.memory(fresh(), encoder.STORE_BYTE, encoder.ESI, encoder.EAX, encoder.NONE, 0), "40 88 30")
+    suite = check(suite, "mov byte ptr [r14+rbx+1], cl", encoder.memory(fresh(), encoder.STORE_BYTE, encoder.ECX, encoder.R14, encoder.EBX, 1), "41 88 4c 1e 01")
+    suite = check(suite, "mov byte ptr [rbx], r8b", encoder.memory(fresh(), encoder.STORE_BYTE, encoder.R8D, encoder.EBX, encoder.NONE, 0), "44 88 03")
+    suite = check(suite, "mov word ptr [r14+rax+2], dx", encoder.memory(fresh(), encoder.STORE_HALF, encoder.EDX, encoder.R14, encoder.EAX, 2), "66 41 89 54 06 02")
+    suite = check(suite, "mov word ptr [rbx], r9w", encoder.memory(fresh(), encoder.STORE_HALF, encoder.R9D, encoder.EBX, encoder.NONE, 0), "66 44 89 0b")
+    suite = check(suite, "movzx eax, byte ptr [r14+rbx]", encoder.memory(fresh(), encoder.LOAD_ZERO_BYTE, encoder.EAX, encoder.R14, encoder.EBX, 0), "41 0f b6 04 1e")
+    suite = check(suite, "movsx eax, byte ptr [r14+rbx+3]", encoder.memory(fresh(), encoder.LOAD_SIGN_BYTE, encoder.EAX, encoder.R14, encoder.EBX, 3), "41 0f be 44 1e 03")
+    suite = check(suite, "movzx esi, word ptr [r14+rdi]", encoder.memory(fresh(), encoder.LOAD_ZERO_HALF, encoder.ESI, encoder.R14, encoder.EDI, 0), "41 0f b7 34 3e")
+    suite = check(suite, "movsx r10d, word ptr [r14+rdi+6]", encoder.memory(fresh(), encoder.LOAD_SIGN_HALF, encoder.R10D, encoder.R14, encoder.EDI, 6), "45 0f bf 54 3e 06")
+    suite = check(suite, "lea eax, [rbx+rcx+4]", encoder.memory(fresh(), encoder.ADDRESS, encoder.EAX, encoder.EBX, encoder.ECX, 4), "8d 44 0b 04")
+    suite = check(suite, "lea r9d, [r12+r13]", encoder.memory(fresh(), encoder.ADDRESS, encoder.R9D, encoder.R12D, encoder.R13D, 0), "47 8d 0c 2c")
+    suite = check(suite, "lea rsp, [r14+rax+16]", encoder.memory(fresh(), encoder.ADDRESS64, encoder.RSP, encoder.R14, encoder.EAX, 16), "49 8d 64 06 10")
+    suite = check(suite, "lea rcx, [rsp+8]", encoder.memory(fresh(), encoder.ADDRESS64, encoder.ECX, encoder.RSP, encoder.NONE, 8), "48 8d 4c 24 08")
+    suite = check(suite, "call qword ptr [rbx+24]", encoder.memory(fresh(), encoder.CALL_MEMORY, 0, encoder.EBX, encoder.NONE, 24), "ff 53 18")
+    suite = check(suite, "jmp qword ptr [r11]", encoder.memory(fresh(), encoder.JUMP_MEMORY, 0, encoder.R11D, encoder.NONE, 0), "41 ff 23")
+    suite = check(suite, "mov dword ptr [r14+rax+8], 5", encoder.store_immediate(fresh(), 4, encoder.R14, encoder.EAX, 8, 5), "41 c7 44 06 08 05 00 00 00")
+    suite = check(suite, "mov dword ptr [r14+40000], 0", encoder.store_immediate(fresh(), 4, encoder.R14, encoder.NONE, 40000, 0), "41 c7 86 40 9c 00 00 00 00 00 00")
+    suite = check(suite, "mov byte ptr [r14+rbx], 0", encoder.store_immediate(fresh(), 1, encoder.R14, encoder.EBX, 0, 0), "41 c6 04 1e 00")
+    suite = check(suite, "mov word ptr [rcx], -1", encoder.store_immediate(fresh(), 2, encoder.ECX, encoder.NONE, 0, 0 - 1), "66 c7 01 ff ff")
+    suite = check(suite, "mov qword ptr [rsp], -1", encoder.store_immediate(fresh(), 8, encoder.RSP, encoder.NONE, 0, 0 - 1), "48 c7 04 24 ff ff ff ff")
+    out suite
+}
+
+skill control(suite) {
+    suite = check(suite, "jne target", encoder.relative(fresh(), encoder.NOT_EQUAL, 0), "0f 85 00 00 00 00")
+    suite = check(suite, "jl .+0x106", encoder.relative(fresh(), encoder.LESS, 256), "0f 8c 00 01 00 00")
+    suite = check(suite, "jo .-250", encoder.relative(fresh(), encoder.OVERFLOW, 0 - 256), "0f 80 00 ff ff ff")
+    suite = check(suite, "jae .+0x10006", encoder.relative(fresh(), encoder.ABOVE_OR_EQUAL, 65536), "0f 83 00 00 01 00")
+    suite = check(suite, "jmp target", encoder.relative(fresh(), encoder.JUMP, 0), "e9 00 00 00 00")
+    suite = check(suite, "jmp .-251", encoder.relative(fresh(), encoder.JUMP, 0 - 256), "e9 00 ff ff ff")
+    suite = check(suite, "call target", encoder.relative(fresh(), encoder.CALL, 0), "e8 00 00 00 00")
+    suite = check(suite, "call .+0x10005", encoder.relative(fresh(), encoder.CALL, 65536), "e8 00 00 01 00")
+    suite = check(suite, "ret", encoder.single(fresh(), encoder.RET), "c3")
+    suite = check(suite, "syscall", encoder.single(fresh(), encoder.SYSCALL), "0f 05")
+    suite = check(suite, "ud2", encoder.single(fresh(), encoder.UD2), "0f 0b")
+    suite = check(suite, "hlt", encoder.single(fresh(), encoder.HLT), "f4")
+    suite = check(suite, "cli", encoder.single(fresh(), encoder.CLI), "fa")
+    suite = check(suite, "sti", encoder.single(fresh(), encoder.STI), "fb")
+    suite = check(suite, "pause", encoder.single(fresh(), encoder.PAUSE), "f3 90")
+    suite = check(suite, "mfence", encoder.single(fresh(), encoder.MFENCE), "0f ae f0")
+    suite = check(suite, "cdq", encoder.single(fresh(), encoder.CDQ), "99")
+    suite = check(suite, "cqo", encoder.single(fresh(), encoder.CQO), "48 99")
+    suite = check(suite, "int3", encoder.single(fresh(), encoder.INT3), "cc")
+    suite = check(suite, "push rbx", encoder.register64(fresh(), encoder.PUSH, encoder.EBX), "53")
+    suite = check(suite, "push r12", encoder.register64(fresh(), encoder.PUSH, encoder.R12D), "41 54")
+    suite = check(suite, "pop rbp", encoder.register64(fresh(), encoder.POP, encoder.EBP), "5d")
+    suite = check(suite, "pop r15", encoder.register64(fresh(), encoder.POP, encoder.R15D), "41 5f")
+    suite = check(suite, "call rax", encoder.register64(fresh(), encoder.CALL_REGISTER, encoder.EAX), "ff d0")
+    suite = check(suite, "call r11", encoder.register64(fresh(), encoder.CALL_REGISTER, encoder.R11D), "41 ff d3")
+    suite = check(suite, "jmp rcx", encoder.register64(fresh(), encoder.JUMP_REGISTER, encoder.ECX), "ff e1")
+    suite = check(suite, "jmp r8", encoder.register64(fresh(), encoder.JUMP_REGISTER, encoder.R8D), "41 ff e0")
+    out suite
+}
+
+skill failure(command) {
+    @code = fresh()
+    (command == "index") { code = encoder.memory(code, encoder.LOAD, encoder.EAX, encoder.RSP, encoder.RSP, 0) rescue |err| { out "{err}" } }
+    (command == "shift") { code = encoder.shift(code, 4, encoder.SHIFT_LEFT, encoder.EAX, 32) rescue |err| { out "{err}" } }
+    (command == "register") { code = encoder.operate(code, 4, encoder.MOVE, 16, encoder.EAX) rescue |err| { out "{err}" } }
+    (command == "size") { code = encoder.unary(code, 2, encoder.NEGATE, encoder.EAX) rescue |err| { out "{err}" } }
+    out "ok"
+}
+
+program() {
+    @suite = testing.test_new()
+    suite = registers(suite)
+    suite = immediates(suite)
+    suite = shifts(suite)
+    suite = memory(suite)
+    suite = control(suite)
+    suite = testing.test_equal(suite, "ошибка: rsp и в базе, и в индексе", failure("index"), "InvalidIndex")
+    suite = testing.test_equal(suite, "ошибка: сдвиг на 32 в 32 битах", failure("shift"), "InvalidShift")
+    suite = testing.test_equal(suite, "ошибка: регистр 16", failure("register"), "InvalidRegister")
+    suite = testing.test_equal(suite, "ошибка: размер 2 у neg", failure("size"), "InvalidSize")
+    out testing.test_finish(suite)
+}
