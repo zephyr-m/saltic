@@ -10,7 +10,7 @@
 - `core/` — то, что нужно любой программе: `core.str`, `core.group`,
   `core.num`, `core.mem`, фиксированные значения `core.u8` … `core.usize`,
   `core.bits32`, `core.address`, а также `core.cpu`, `core.time`,
-  `core.process`, `core.system`, `core.bytes`, `core.crypto`,
+  `core.process`, `core.system`, `core.bytes`, `core.dict`, `core.crypto`,
   `core.graphics`. Заготовки без содержимого: `sync`, `resource`, `robot`.
 - `io.saltic` и `io/` — вывод (`use io`), файлы (`use io.file`), сеть
   (`io.net`).

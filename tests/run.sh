@@ -199,6 +199,23 @@ test_edges() {
     echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i и x86_64"
 }
 
+test_dict() {
+    mkdir -p "$work/dict"
+    SALTIC_TARGET=rv32i build dict-rv32i \
+        tests/dict.saltic \
+        "$work/dict/rv32i.elf"
+    SALTIC_TARGET=x86_64 build dict-x86_64 \
+        tests/dict.saltic \
+        "$work/dict/x86_64"
+    measure run qemu-riscv32 -B 0x100000000 "$work/dict/rv32i.elf" \
+        >"$work/dict/rv32i.txt"
+    measure run "$work/dict/x86_64" \
+        >"$work/dict/x86_64.txt"
+    diff -u tests/expected/dict.txt "$work/dict/rv32i.txt"
+    diff -u tests/expected/dict.txt "$work/dict/x86_64.txt"
+    echo "словарь: запись на месте, UnknownKey, вложенный навык, рост таблицы — одинаково под rv32i и x86_64"
+}
+
 test_memory() {
     mkdir -p "$work/memory"
     build memory \
@@ -376,6 +393,7 @@ run_case() {
         groups) test_groups ;;
         bytes) test_bytes ;;
         edges) test_edges ;;
+        dict) test_dict ;;
         seed-contract) test_seed_contract ;;
         machine) test_machine ;;
         abi) test_abi ;;
@@ -409,6 +427,7 @@ elif [[ "$1" == "all" ]]; then
         groups \
         bytes \
         edges \
+        dict \
         seed-contract \
         machine \
         abi \
