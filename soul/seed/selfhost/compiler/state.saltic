@@ -1,29 +1,29 @@
 -- state — состояние компилятора: таблицы символов, текущий навык, метки,
 -- сбор локальных имён, вход _start и завершение данных.
 -- Таблицы (constants, boxes, skills, …) — группы Symbol, поиск с конца.
--- Слоты локальных — смещения от s0 вниз; emit_op разворачивает смещение,
--- не влезающее в 12 бит, через T6. emit_data/emit_writable/emit_blank —
--- пустые заглушки (текстовый вывод отключён), lines/data/writable не растут.
+-- Слоты локальных — смещения от FRAME вниз. Команды — только через методы
+-- исполнителя договора (backend) в executor; machine — его программа.
+-- emit_data/emit_writable/emit_blank — пустые заглушки (текстовый вывод
+-- отключён), lines/data/writable не растут.
 --
 -- Symbol { name, kind, node, value, text, slot } / Function { name, slots, end,
 --     subject, module, types, next_drum, drum_exit, failure, next_rescue }
--- Names { names, next_drum, next_rescue } / Output { chunks } / State { … }
+-- Names { names, next_drum, next_rescue } / Output { chunks }
+-- State { …, executor, machine } — executor (Box исполнителя, сейчас
+--     rv32i.Executor) назначает compiler при создании; machine — его программа
 -- symbol_find / symbol_has / symbol_add / symbol_add_text(symbols, name, …)
 -- type_find(types, name) / type_set(types, name, type)
 -- output_add(output, text) / output_text(output) — накопитель текста
 -- emit_data / emit_writable(compiler, line) / emit_blank(compiler) — ничего
--- fits_immediate(value) / wide_offset_kind(kind) -> yes/no
--- emit_op(compiler, kind, rd, rs1, rs2, immediate) — команда в machine
 -- safe(text) -> имя для метки; label(compiler, prefix) -> уникальная метка
 -- collect_locals(params, body) -> Names; make_slots(names, first_slot) -> слоты
 -- collect_expression_names / collect_statement_names / collect_block_names
 -- expression_uses_beat / statement_uses_beat / block_uses_beat / items_use_beat
 -- slot(compiler, name) / field(compiler, name) -> смещение / id поля
--- push / pop(compiler, register, machine_register) — через sp
--- load_immediate(compiler, register, machine_register, value)
 -- collect_box / collect_enum(compiler, item, module) / collect_top_level(compiler)
--- header(compiler) — машина host, heap_size; start(compiler) — код _start:
---     аргументы через rt_cstring, вызов saltic_program, rt_platform_exit
+-- header(compiler) — программа исполнителя с входом _start, heap_size
+-- start(compiler) — код _start: аргументы через rt_cstring, вызов
+--     saltic_program, rt_platform_exit
 -- finish_data(compiler) — выравнивание секций, saltic_arena и saltic_heap в bss
 -- box_number(compiler, name) -> номер Box (с 1); dispatch_label(method) -> метка
 
@@ -33,9 +33,8 @@ use core.num
 use selfhost.abi
 use selfhost.ast
 use selfhost.memory.model
-use selfhost.compiler.backend.rv32i.machine.instruction
+use selfhost.compiler.backend
 use selfhost.compiler.backend.rv32i.machine.layout
-use selfhost.compiler.backend.rv32i.machine.registers
 use selfhost.machine.word
 
 Symbol = Box {
@@ -75,6 +74,7 @@ State = Box {
     lines = Output {},
     data = Output {},
     writable = Output {},
+    executor = backend.unassigned(),
     machine = layout.Program {},
     heap_bytes = word.Word {},
     strings = [],
@@ -93,8 +93,6 @@ State = Box {
     next_field_id = 1,
     dispatches = []
 }
-
-WIDE_OFFSET_REGISTER = registers.T6
 
 skill symbol_find(symbols, name) {
     @count = group.count(symbols)
@@ -169,38 +167,6 @@ skill emit_writable(compiler, line) {
 }
 
 skill emit_blank(compiler) {
-    out compiler
-}
-
-skill fits_immediate(value) {
-    (value < -2048) { out no }
-    (value > 2047) { out no }
-    out yes
-}
-
-skill wide_offset_kind(kind) {
-    (kind == instruction.Kind.ADDI) { out yes }
-    (kind == instruction.Kind.LW) { out yes }
-    (kind == instruction.Kind.LB) { out yes }
-    (kind == instruction.Kind.LBU) { out yes }
-    (kind == instruction.Kind.LH) { out yes }
-    (kind == instruction.Kind.LHU) { out yes }
-    (kind == instruction.Kind.SW) { out yes }
-    (kind == instruction.Kind.SB) { out yes }
-    (kind == instruction.Kind.SH) { out yes }
-    out no
-}
-
-skill emit_op(compiler, kind, rd, rs1, rs2, immediate) {
-    (fits_immediate(immediate) == no) {
-        (wide_offset_kind(kind) == yes) {
-            compiler.machine = layout.emit_load_immediate(compiler.machine, WIDE_OFFSET_REGISTER, immediate)
-            compiler.machine = layout.emit(compiler.machine, instruction.Kind.ADD, WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, rs1, 0)
-            compiler.machine = layout.emit(compiler.machine, kind, rd, WIDE_OFFSET_REGISTER, rs2, 0)
-            out compiler
-        }
-    }
-    compiler.machine = layout.emit(compiler.machine, kind, rd, rs1, rs2, immediate)
     out compiler
 }
 
@@ -407,23 +373,6 @@ skill slot(compiler, name) {
     out slot.value
 }
 
-skill push(compiler, register, machine_register) {
-    compiler = emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - abi.VALUE_WORD_BYTES)
-    compiler = emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, machine_register, 0)
-    out compiler
-}
-
-skill pop(compiler, register, machine_register) {
-    compiler = emit_op(compiler, instruction.Kind.LW, machine_register, registers.SP, registers.ZERO, 0)
-    compiler = emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, abi.VALUE_WORD_BYTES)
-    out compiler
-}
-
-skill load_immediate(compiler, register, machine_register, value) {
-    compiler.machine = layout.emit_load_immediate(compiler.machine, machine_register, value)
-    out compiler
-}
-
 skill field(compiler, name) {
     @field = symbol_find(compiler.fields, name)
     out field.value
@@ -478,67 +427,68 @@ skill collect_top_level(compiler) {
 }
 
 skill header(compiler) {
+    @executor = compiler.executor
     (word.is_zero(compiler.heap_bytes) == yes) {
-        compiler.heap_bytes = layout.address_from_number(model.DEFAULT_HEAP_BYTES)
+        compiler.heap_bytes = word.from_number(model.DEFAULT_HEAP_BYTES)
     }
-    compiler.machine = layout.host("_start")
-    compiler.machine.heap_size = compiler.heap_bytes
+    compiler = executor.new_program(compiler, "_start")
+    compiler = executor.heap_size(compiler, compiler.heap_bytes)
     compiler = emit_blank(compiler)
     out compiler
 }
 
 skill start(compiler) {
+    @executor = compiler.executor
     @params = ast.part(compiler.entry, 1)
     @param_count = group.count(params)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, "_start")
-    compiler = emit_op(compiler, instruction.Kind.LW, registers.A0, registers.SP, registers.ZERO, 0)
-    compiler = emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.SP, registers.ZERO, abi.VALUE_WORD_BYTES)
-    compiler = emit_op(compiler, instruction.Kind.ADDI, registers.S3, registers.A1, registers.ZERO, 0)
-    compiler.machine = layout.emit_relative_address(compiler.machine, registers.S1, "saltic_heap", 0)
-    compiler.machine = layout.emit_load_word(compiler.machine, registers.S2, compiler.heap_bytes)
-    compiler = emit_op(compiler, instruction.Kind.ADD, registers.S2, registers.S1, registers.S2, 0)
-    compiler = emit_op(compiler, instruction.Kind.ADDI, registers.S0, registers.ZERO, registers.ZERO, 0)
-    compiler = emit_op(compiler, instruction.Kind.ADDI, registers.S4, registers.S1, registers.ZERO, 0)
-    compiler = emit_op(compiler, instruction.Kind.ADDI, registers.S5, registers.S2, registers.ZERO, 0)
-    compiler.machine = layout.emit_load_immediate(compiler.machine, registers.T0, param_count + 1)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.A0, registers.T0, ".L_start_args_ready")
-    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T1, "rt_missing_args", 0)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.JALR, registers.ZERO, registers.T1, registers.ZERO, 0)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ".L_start_args_ready")
+    compiler = executor.label(compiler, "_start")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.STACK, abi.VALUE_WORD_BYTES)
+    compiler = executor.move(compiler, backend.ARGV, backend.ERROR)
+    compiler = executor.load_address(compiler, backend.HEAP_TOP, "saltic_heap", 0)
+    compiler = executor.load_word(compiler, backend.ESCAPE_BOTTOM, compiler.heap_bytes)
+    compiler = executor.add(compiler, backend.ESCAPE_BOTTOM, backend.HEAP_TOP, backend.ESCAPE_BOTTOM)
+    compiler = executor.load_immediate(compiler, backend.FRAME, 0)
+    compiler = executor.move(compiler, backend.REGION_MARK, backend.HEAP_TOP)
+    compiler = executor.move(compiler, backend.ESCAPE_MARK, backend.ESCAPE_BOTTOM)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, param_count + 1)
+    compiler = executor.branch_greater_equal(compiler, backend.VALUE, backend.SCRATCH0, ".L_start_args_ready")
+    compiler = executor.jump_far(compiler, "rt_missing_args")
+    compiler = executor.label(compiler, ".L_start_args_ready")
     drum (param_count) {
-        compiler = emit_op(compiler, instruction.Kind.LW, registers.A0, registers.S3, registers.ZERO, (beat + 1) * abi.VALUE_WORD_BYTES)
-        compiler.machine = layout.emit_call(compiler.machine, "rt_cstring")
-        compiler = emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - abi.VALUE_WORD_BYTES)
-        compiler = emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.A0, 0)
+        compiler = executor.load(compiler, backend.VALUE, backend.ARGV, (beat + 1) * abi.VALUE_WORD_BYTES)
+        compiler = executor.call(compiler, "rt_cstring")
+        compiler = executor.push(compiler, backend.VALUE)
     }
     drum (param_count) {
-        compiler = emit_op(compiler, instruction.Kind.LW, abi.argument_register(beat), registers.SP, registers.ZERO, (param_count - beat - 1) * abi.VALUE_WORD_BYTES)
+        compiler = executor.load(compiler, backend.argument(beat), backend.STACK, (param_count - beat - 1) * abi.VALUE_WORD_BYTES)
     }
     (param_count > 0) {
-        compiler = emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, param_count * abi.VALUE_WORD_BYTES)
+        compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, param_count * abi.VALUE_WORD_BYTES)
     }
-    compiler.machine = layout.emit_call(compiler.machine, "saltic_program")
-    compiler = emit_op(compiler, instruction.Kind.SLTU, registers.A0, registers.ZERO, registers.A1, 0)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_platform_exit")
+    compiler = executor.call(compiler, "saltic_program")
+    compiler = executor.set_nonzero(compiler, backend.VALUE, backend.ERROR)
+    compiler = executor.call(compiler, "rt_platform_exit")
     compiler = emit_blank(compiler)
     out compiler
 }
 
 skill finish_data(compiler) {
+    @executor = compiler.executor
     (word.is_zero(compiler.heap_bytes) == yes) {
-        compiler.heap_bytes = layout.address_from_number(model.DEFAULT_HEAP_BYTES)
+        compiler.heap_bytes = word.from_number(model.DEFAULT_HEAP_BYTES)
     }
-    compiler.machine.heap_size = compiler.heap_bytes
+    compiler = executor.heap_size(compiler, compiler.heap_bytes)
     compiler.lines = output_add(compiler.lines, output_text(compiler.writable))
     compiler.lines = output_add(compiler.lines, output_text(compiler.data))
-    compiler.machine = layout.align_section(compiler.machine, layout.Section.DATA, abi.OBJECT_ALIGNMENT)
-    compiler.machine = layout.align_section(compiler.machine, layout.Section.RODATA, abi.OBJECT_ALIGNMENT)
-    compiler.machine = layout.align_section(compiler.machine, layout.Section.BSS, model.ARENA_ALIGNMENT)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.BSS, "saltic_arena")
-    compiler.machine = layout.reserve_bss(compiler.machine, layout.address_from_number(model.ARENA_BYTES))
-    compiler.machine = layout.align_section(compiler.machine, layout.Section.BSS, abi.OBJECT_ALIGNMENT)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.BSS, "saltic_heap")
-    compiler.machine = layout.reserve_bss(compiler.machine, compiler.heap_bytes)
+    compiler = executor.align(compiler, backend.DATA, abi.OBJECT_ALIGNMENT)
+    compiler = executor.align(compiler, backend.RODATA, abi.OBJECT_ALIGNMENT)
+    compiler = executor.align(compiler, backend.BSS, model.ARENA_ALIGNMENT)
+    compiler = executor.data_label(compiler, backend.BSS, "saltic_arena")
+    compiler = executor.reserve(compiler, word.from_number(model.ARENA_BYTES))
+    compiler = executor.align(compiler, backend.BSS, abi.OBJECT_ALIGNMENT)
+    compiler = executor.data_label(compiler, backend.BSS, "saltic_heap")
+    compiler = executor.reserve(compiler, compiler.heap_bytes)
     out compiler
 }
 

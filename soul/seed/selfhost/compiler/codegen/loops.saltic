@@ -1,21 +1,20 @@
 -- loops — цикл drum: счётчик, источник (число или группа) и beat.
--- Источник в a0 перед head: группа → beat = элемент (плоская или дерево через
--- rt_group_at), число → beat = номер; отрицательное число — ERROR_NEGATIVE_COUNT.
--- Лёгкий вариант (light_*) — только счётчик, без beat.
+-- Источник в VALUE перед head: группа → beat = элемент (плоская или дерево
+-- через rt_group_at), число → beat = номер; отрицательное число —
+-- ERROR_NEGATIVE_COUNT. Лёгкий вариант (light_*) — только счётчик, без beat.
+-- Команды — методами compiler.executor (договор backend).
 --
 -- Frame { counter, source, position, saved, beat_slot, start, end, numeric,
 --     counted, beat_number, beat_ready, count_ok } — слоты и метки цикла
 -- frame(compiler) -> Frame с новыми слотами и метками
 -- head(compiler, frame) / tail(compiler, frame) — полный цикл вокруг тела
 -- light_head / light_tail(compiler, frame) — без beat
--- raise_if_negative(compiler, frame) — выход из навыка при a0 < 0
+-- raise_if_negative(compiler, frame) — выход из навыка при VALUE < 0
 
 use core.num
 use selfhost.abi
 use selfhost.ast
-use selfhost.compiler.backend.rv32i.machine.instruction
-use selfhost.compiler.backend.rv32i.machine.layout
-use selfhost.compiler.backend.rv32i.machine.registers
+use selfhost.compiler.backend
 use selfhost.compiler.state
 use selfhost.compiler.constants
 
@@ -57,97 +56,100 @@ skill frame(compiler) {
 }
 
 skill light_head(compiler, frame) {
-    compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A0, registers.ZERO, abi.TAG_MASK)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, abi.TAG_GROUP)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T1, registers.T2, frame.numeric)
-    compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A0, registers.ZERO, abi.PAYLOAD_MASK)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.T1, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.counted)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.numeric)
-    compiler = state.emit_op(compiler, instruction.Kind.SRAI, registers.A0, registers.A0, registers.ZERO, abi.TAG_SHIFT)
+    @executor = compiler.executor
+    compiler = executor.and_immediate(compiler, backend.SCRATCH1, backend.VALUE, abi.TAG_MASK)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, abi.TAG_GROUP)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, frame.numeric)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH1, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH1, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.jump(compiler, frame.counted)
+    compiler = executor.label(compiler, frame.numeric)
+    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
     compiler = raise_if_negative(compiler, frame)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.counted)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, frame.counter)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.start)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, frame.counter)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T0, registers.ZERO, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.end)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, -1)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T0, frame.counter)
+    compiler = executor.label(compiler, frame.counted)
+    compiler = executor.store(compiler, backend.VALUE, backend.FRAME, frame.counter)
+    compiler = executor.label(compiler, frame.start)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.FRAME, frame.counter)
+    compiler = executor.jump_if_zero(compiler, backend.SCRATCH0, frame.end)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, -1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.FRAME, frame.counter)
     out compiler
 }
 
 skill head(compiler, frame) {
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, frame.source)
-    compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A0, registers.ZERO, abi.TAG_MASK)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, abi.TAG_GROUP)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T1, registers.T2, frame.numeric)
-    compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T1, registers.A0, registers.ZERO, abi.PAYLOAD_MASK)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.T1, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.counted)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.numeric)
-    compiler = state.emit_op(compiler, instruction.Kind.SRAI, registers.A0, registers.A0, registers.ZERO, abi.TAG_SHIFT)
+    @executor = compiler.executor
+    compiler = executor.store(compiler, backend.VALUE, backend.FRAME, frame.source)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH1, backend.VALUE, abi.TAG_MASK)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, abi.TAG_GROUP)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, frame.numeric)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH1, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH1, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.jump(compiler, frame.counted)
+    compiler = executor.label(compiler, frame.numeric)
+    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
     compiler = raise_if_negative(compiler, frame)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.ZERO, frame.source)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.counted)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.A0, frame.counter)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.ZERO, frame.position)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, frame.beat_slot)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T0, frame.saved)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.start)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, frame.counter)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T0, registers.ZERO, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.end)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, -1)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T0, frame.counter)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.S0, registers.ZERO, frame.position)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.S0, registers.ZERO, frame.source)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.T2, registers.ZERO, frame.beat_number)
-    compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T2, registers.T2, registers.ZERO, abi.PAYLOAD_MASK)
+    compiler = executor.store_zero(compiler, backend.FRAME, frame.source)
+    compiler = executor.label(compiler, frame.counted)
+    compiler = executor.store(compiler, backend.VALUE, backend.FRAME, frame.counter)
+    compiler = executor.store_zero(compiler, backend.FRAME, frame.position)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.FRAME, frame.beat_slot)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.FRAME, frame.saved)
+    compiler = executor.label(compiler, frame.start)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.FRAME, frame.counter)
+    compiler = executor.jump_if_zero(compiler, backend.SCRATCH0, frame.end)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, -1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.FRAME, frame.counter)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.FRAME, frame.position)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.FRAME, frame.source)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH2, frame.beat_number)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, abi.PAYLOAD_MASK)
     @flat = state.label(compiler, "drum_flat")
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T3, registers.T2, registers.ZERO, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T4, registers.ZERO, registers.ZERO, abi.OBJECT_KIND_TREE)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T3, registers.T4, flat)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.T2, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.A1, registers.T1, registers.ZERO, abi.TAG_SHIFT)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_group_at")
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.A0, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.S0, registers.ZERO, frame.position)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.beat_ready)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, flat)
-    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.T3, registers.T1, registers.ZERO, 2)
-    compiler = state.emit_op(compiler, instruction.Kind.ADD, registers.T2, registers.T2, registers.T3, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.T2, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET + abi.VALUE_WORD_BYTES)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.beat_ready)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.beat_number)
-    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.T2, registers.T1, registers.ZERO, abi.TAG_SHIFT)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.beat_ready)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T2, frame.beat_slot)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.T1, registers.ZERO, 1)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T1, frame.position)
+    compiler = executor.load(compiler, backend.SCRATCH3, backend.SCRATCH2, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, abi.OBJECT_KIND_TREE)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH3, backend.SCRATCH4, flat)
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH2)
+    compiler = executor.shift_left(compiler, backend.ERROR, backend.SCRATCH1, abi.TAG_SHIFT)
+    compiler = executor.call(compiler, "rt_group_at")
+    compiler = executor.move(compiler, backend.SCRATCH2, backend.VALUE)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.FRAME, frame.position)
+    compiler = executor.jump(compiler, frame.beat_ready)
+    compiler = executor.label(compiler, flat)
+    compiler = executor.shift_left(compiler, backend.SCRATCH3, backend.SCRATCH1, 2)
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH3)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH2, abi.OBJECT_PAYLOAD_OFFSET + abi.VALUE_WORD_BYTES)
+    compiler = executor.jump(compiler, frame.beat_ready)
+    compiler = executor.label(compiler, frame.beat_number)
+    compiler = executor.shift_left(compiler, backend.SCRATCH2, backend.SCRATCH1, abi.TAG_SHIFT)
+    compiler = executor.label(compiler, frame.beat_ready)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.FRAME, frame.beat_slot)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, 1)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.FRAME, frame.position)
     out compiler
 }
 
 skill tail(compiler, frame) {
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.start)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.end)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, frame.saved)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, registers.T0, frame.beat_slot)
+    @executor = compiler.executor
+    compiler = executor.jump(compiler, frame.start)
+    compiler = executor.label(compiler, frame.end)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.FRAME, frame.saved)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.FRAME, frame.beat_slot)
     out compiler
 }
 
 skill light_tail(compiler, frame) {
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, frame.start)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.end)
+    @executor = compiler.executor
+    compiler = executor.jump(compiler, frame.start)
+    compiler = executor.label(compiler, frame.end)
     out compiler
 }
 
 skill raise_if_negative(compiler, frame) {
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.A0, registers.ZERO, frame.count_ok)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.ERROR_NEGATIVE_COUNT)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, constants.REGION_VALUE_SKIPPED)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, compiler.current_function.end)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, frame.count_ok)
+    @executor = compiler.executor
+    compiler = executor.branch_not_negative(compiler, backend.VALUE, frame.count_ok)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_NEGATIVE_COUNT)
+    compiler = executor.load_immediate(compiler, backend.ARG2, constants.REGION_VALUE_SKIPPED)
+    compiler = executor.jump(compiler, compiler.current_function.end)
+    compiler = executor.label(compiler, frame.count_ok)
     out compiler
 }

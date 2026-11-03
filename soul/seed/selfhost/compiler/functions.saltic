@@ -1,8 +1,9 @@
 -- functions — пролог/эпилог навыков, ленивые константы и диспетчеры методов.
--- Навык: метка saltic_<имя>, кадр по constants, аргументы из a0… в слоты,
+-- Навык: метка saltic_<имя>, кадр по constants, аргументы из ARG0… в слоты,
 -- выход через <имя>_return с rt_region_exit; ошибка — <имя>_failure.
 -- Константа: геттер saltic_constant_get_<имя> считает один раз, цикл —
 -- ERROR_CONSTANT_CYCLE. Метод Box: диспетчер по номеру типа в последнем поле.
+-- Команды — методами compiler.executor (договор backend).
 --
 -- compile_function(compiler, name, params, body, subject, module) — один навык
 --     или метод (subject — имя Box, $self первым параметром)
@@ -17,13 +18,12 @@ use selfhost.abi
 use selfhost.ast
 use selfhost.compiler.state
 use selfhost.compiler.constants
-use selfhost.compiler.backend.rv32i.machine.instruction
-use selfhost.compiler.backend.rv32i.machine.layout
-use selfhost.compiler.backend.rv32i.machine.registers
+use selfhost.compiler.backend
 use selfhost.compiler.codegen
 use selfhost.checker
 
 skill compile_function(compiler, name, params, body, subject, module) {
+    @executor = compiler.executor
     @locals = state.collect_locals(params, body)
     @local_count = group.count(locals.names)
     @frame = constants.frame_bytes(local_count)
@@ -35,45 +35,46 @@ skill compile_function(compiler, name, params, body, subject, module) {
     (str.len(subject) > 0) { types = state.type_set(types, "$self", "box:{subject}") }
     compiler.current_function = state.Function { name = name, slots = slots, end = end, failure = failure, subject = subject, module = module, types = types }
     @function_label = str.add("saltic_", state.safe(name))
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, function_label)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - frame)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, constants.return_address_save_offset(frame))
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.S0, constants.previous_frame_save_offset(frame))
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.S4, constants.region_mark_save_offset(frame))
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.S5, constants.region_escape_save_offset(frame))
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S0, registers.SP, registers.ZERO, frame)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S4, registers.S1, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S5, registers.S2, registers.ZERO, 0)
+    compiler = executor.label(compiler, function_label)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - frame)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, constants.return_address_save_offset(frame))
+    compiler = executor.store(compiler, backend.FRAME, backend.STACK, constants.previous_frame_save_offset(frame))
+    compiler = executor.store(compiler, backend.REGION_MARK, backend.STACK, constants.region_mark_save_offset(frame))
+    compiler = executor.store(compiler, backend.ESCAPE_MARK, backend.STACK, constants.region_escape_save_offset(frame))
+    compiler = executor.add_immediate(compiler, backend.FRAME, backend.STACK, frame)
+    compiler = executor.move(compiler, backend.REGION_MARK, backend.HEAP_TOP)
+    compiler = executor.move(compiler, backend.ESCAPE_MARK, backend.ESCAPE_BOTTOM)
     drum (group.count(params)) {
         @slot = state.slot(compiler, group.get(params, beat))
-        compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.S0, abi.argument_register(beat), slot)
+        compiler = executor.store(compiler, backend.argument(beat), backend.FRAME, slot)
     }
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
     compiler = codegen.compile_block(compiler, body, no)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, abi.NONE)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, end)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, failure)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A2, registers.ZERO, registers.ZERO, constants.REGION_VALUE_SKIPPED)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, end)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.jump(compiler, end)
+    compiler = executor.label(compiler, failure)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG2, constants.REGION_VALUE_SKIPPED)
+    compiler = executor.label(compiler, end)
     @region_done = "{end}_region"
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BEQ, registers.S1, registers.S4, region_done)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_region_exit")
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, region_done)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.S0, registers.ZERO, constants.return_address_load_offset())
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.S4, registers.S0, registers.ZERO, constants.region_mark_load_offset())
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.S5, registers.S0, registers.ZERO, constants.region_escape_load_offset())
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T0, registers.S0, registers.ZERO, constants.previous_frame_load_offset())
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.S0, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.S0, registers.T0, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = executor.branch_equal(compiler, backend.HEAP_TOP, backend.REGION_MARK, region_done)
+    compiler = executor.call(compiler, "rt_region_exit")
+    compiler = executor.label(compiler, region_done)
+    compiler = executor.load(compiler, backend.RETURN, backend.FRAME, constants.return_address_load_offset())
+    compiler = executor.load(compiler, backend.REGION_MARK, backend.FRAME, constants.region_mark_load_offset())
+    compiler = executor.load(compiler, backend.ESCAPE_MARK, backend.FRAME, constants.region_escape_load_offset())
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.FRAME, constants.previous_frame_load_offset())
+    compiler = executor.move(compiler, backend.STACK, backend.FRAME)
+    compiler = executor.move(compiler, backend.FRAME, backend.SCRATCH0)
+    compiler = executor.ret(compiler)
     compiler = state.emit_blank(compiler)
     compiler.current_function = state.Function {}
     out compiler
 }
 
 skill compile_constant(compiler, constant) {
+    @executor = compiler.executor
     @ready = state.label(compiler, "constant_ready")
     @cycle = state.label(compiler, "constant_cycle")
     @failure = state.label(compiler, "constant_failure")
@@ -82,53 +83,50 @@ skill compile_constant(compiler, constant) {
     compiler.current_function = state.Function { name = constant.name, module = constant.text }
 
     @getter = constants.getter_label(constant.name)
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, getter)
+    compiler = executor.label(compiler, getter)
     @frame = constants.constant_frame_bytes()
     @return_address_offset = constants.constant_return_address_offset()
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - frame)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, return_address_offset)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.state_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.T0, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, constants.STATE_READY)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T1, registers.T2, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, ready)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, constants.STATE_INITIALIZING)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BNE, registers.ZERO, registers.T1, registers.T2, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, cycle)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, constants.STATE_INITIALIZING)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - frame)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, return_address_offset)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, constants.state_label(constant.name), 0)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, constants.STATE_READY)
+    compiler = executor.jump_if_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, ready)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, constants.STATE_INITIALIZING)
+    compiler = executor.jump_if_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, cycle)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, constants.STATE_INITIALIZING)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
 
     compiler = codegen.compile_expression(compiler, constant.node)
-    compiler.machine = layout.emit(compiler.machine, instruction.Kind.BEQ, registers.ZERO, registers.A1, registers.ZERO, 8)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, failure)
-    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.value_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.A0, 0)
-    compiler.machine = layout.emit_call(compiler.machine, "rt_region_remember_slot")
-    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.state_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, constants.STATE_READY)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, finish)
+    compiler = executor.jump_if_nonzero(compiler, backend.ERROR, failure)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, constants.value_label(constant.name), 0)
+    compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH0, 0)
+    compiler = executor.call(compiler, "rt_region_remember_slot")
+    compiler = executor.load_address(compiler, backend.SCRATCH0, constants.state_label(constant.name), 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, constants.STATE_READY)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+    compiler = executor.jump(compiler, finish)
 
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, ready)
-    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.value_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.A0, registers.T0, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
-    compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, finish)
+    compiler = executor.label(compiler, ready)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, constants.value_label(constant.name), 0)
+    compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH0, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.jump(compiler, finish)
 
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, cycle)
-    compiler = state.load_immediate(compiler, "a0", registers.A0, 0)
-    compiler = state.load_immediate(compiler, "a1", registers.A1, abi.ERROR_CONSTANT_CYCLE)
+    compiler = executor.label(compiler, cycle)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_CONSTANT_CYCLE)
 
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, failure)
-    compiler.machine = layout.emit_relative_address(compiler.machine, registers.T0, constants.state_label(constant.name), 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, constants.STATE_EMPTY)
-    compiler = state.emit_op(compiler, instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
+    compiler = executor.label(compiler, failure)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, constants.state_label(constant.name), 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, constants.STATE_EMPTY)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
 
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, finish)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.RA, registers.SP, registers.ZERO, return_address_offset)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, frame)
-    compiler = state.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = executor.label(compiler, finish)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, return_address_offset)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, frame)
+    compiler = executor.ret(compiler)
     compiler = state.emit_blank(compiler)
     compiler.current_function = before
     out compiler
@@ -161,29 +159,30 @@ skill compile_functions(compiler) {
 }
 
 skill compile_dispatch(compiler, method) {
+    @executor = compiler.executor
     @label = state.dispatch_label(method)
     @missing = "{label}_missing"
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, label)
-    compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.A0, registers.ZERO, abi.TAG_MASK)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, abi.TAG_BOX)
-    compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T0, registers.T1, missing)
-    compiler = state.emit_op(compiler, instruction.Kind.ANDI, registers.T0, registers.A0, registers.ZERO, abi.PAYLOAD_MASK)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T1, registers.T0, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_COUNT_OFFSET)
-    compiler = state.emit_op(compiler, instruction.Kind.SLLI, registers.T1, registers.T1, registers.ZERO, 3)
-    compiler = state.emit_op(compiler, instruction.Kind.ADD, registers.T0, registers.T0, registers.T1, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.LW, registers.T2, registers.T0, registers.ZERO, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_LAST_VALUE_OFFSET)
+    compiler = executor.label(compiler, label)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.TAG_MASK)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.TAG_BOX)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, missing)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_COUNT_OFFSET)
+    compiler = executor.shift_left(compiler, backend.SCRATCH1, backend.SCRATCH1, 3)
+    compiler = executor.add(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH1)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + constants.BOX_LAST_VALUE_OFFSET)
     drum (group.count(compiler.boxes)) {
         @box = group.get(compiler.boxes, beat)
         (checker.box_has_skill(compiler.boxes, box.name, method) == yes) {
             @next = "{label}_{beat}"
-            compiler = state.load_immediate(compiler, "t1", registers.T1, abi.tagged(beat + 1, abi.TAG_NUMBER))
-            compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, registers.T2, registers.T1, next)
-            compiler.machine = layout.emit_jump(compiler.machine, registers.ZERO, str.add("saltic_", state.safe(str.add("{box.name}.", method))))
-            compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, next)
+            compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.tagged(beat + 1, abi.TAG_NUMBER))
+            compiler = executor.branch_not_equal(compiler, backend.SCRATCH2, backend.SCRATCH1, next)
+            compiler = executor.jump(compiler, str.add("saltic_", state.safe(str.add("{box.name}.", method))))
+            compiler = executor.label(compiler, next)
         }
     }
-    compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, missing)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 0)
-    compiler = state.emit_op(compiler, instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.ERROR_NO_METHOD)
-    out state.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    compiler = executor.label(compiler, missing)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_NO_METHOD)
+    out executor.ret(compiler)
 }
