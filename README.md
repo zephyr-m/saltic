@@ -1,137 +1,164 @@
 <p align="center">
-  <img src="docs/images/mascot.jpg" alt="Saltic — маскот Candy Engine" width="720">
+  <img src="docs/images/mascot.jpg" alt="Saltic — паук-скакун, маскот языка" width="720">
 </p>
 
 # Saltic
 
 **Текущая версия: 142:37**
 
-Saltic — самохостящийся системный язык: его активные парсер, чекер и компилятор
-написаны на самом Saltic. В версии 1.0.0 достигнута стабильная самосборка —
-результаты второго и третьего поколений компилятора совпадают побайтово.
+Saltic — системный язык, который собирает сам себя: парсер, чекер и
+компилятор написаны на самом Saltic, выдают машинный код RISC-V и x86-64 без
+LLVM и без C. На нём же написана ОС, которая живёт на настоящем ноутбуке через
+UEFI — с драйвером сети, своим сетевым стеком, библиотекой интерфейса и
+программами.
+
+Имя — от **Salticidae**, пауков-скакунов: маленьких, с лучшим зрением среди
+пауков, точных в прыжке. Латинское *saltare* — «прыгать» и «танцевать»,
+поэтому цикл в Saltic — барабан (`drum`), а шаг — удар (`beat`). Подробнее —
+[docs/ORIGIN.md](docs/ORIGIN.md).
 
 Saltic делается одним автором для себя и своих агентов: автор принимает
-решения, агенты их исполняют. Когда язык созреет, та же модель — владелец и
-его агенты — станет доступна любому человеку.
+решения, агенты их исполняют. Один способ сделать каждую вещь, никаких тихих
+ошибок, язык однажды замёрзнет — и программы на нём будут жить годами.
 
-История релизов находится в [CHANGELOG.md](CHANGELOG.md), каноничный номер
-версии — в [VERSION](VERSION). Версия — это счёт матча «фичи : баги» по
-[Football Versioning](docs/FOOTBALL.md): язык однажды замёрзнет, и semver ему
-не подходит.
+## В цифрах
 
-## Запуск
+- Самосборка — **2,9 с и 28 МБ**, компилятор — 1,6 МБ (вечером 02.11.2026 было
+  16,9 с и 1,19 ГБ). Неподвижная точка: второе и третье поколения компилятора
+  совпадают байт в байт.
+- **14 ключевых слов** (у Lua — 22, у Go — 25, у C — 32).
+- fib(40) — 2,28 с: быстрее PHP, Lua, Ruby и Python; впереди языки с JIT и C.
+  Таблицы и методика — [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+- Запуск программы — 0,2 мс.
 
-Окружение разработки зафиксировано через Nix:
+## Как выглядит
+
+```saltic
+use io
+use core.group
+
+State = enum {
+    READY,
+    ACTIVE,
+    TIRED
+}
+
+Actor = Box {
+    name = "pip",
+    state = State.READY,
+    energy = 100
+}
+
+skill spend(actor, cost) {
+    (cost > actor.energy) { out error.NotEnoughEnergy }
+    out Actor { name = actor.name, state = State.ACTIVE, energy = actor.energy - cost }
+}
+
+skill try_spend(actor, cost) {
+    @next = spend(actor, cost) rescue |err| {
+        io.show("{err}: нужно {cost}")
+        out Actor { name = actor.name, state = State.TIRED, energy = actor.energy }
+    }
+    out next
+}
+
+program() {
+    @actor = Actor { energy = 30 }
+    @costs = [5, 7, 40]
+    drum (group.count(costs)) {
+        @cost = group.get(costs, beat)
+        actor = try_spend(actor, cost)
+    }
+    @name = actor.name
+    @energy = actor.energy
+    io.show("{name}: осталось {energy}")
+    (actor.state == State.TIRED) { io.show("{name} устал") }
+    out none
+}
+```
+
+```
+NotEnoughEnergy: нужно 40
+pip: осталось 18
+pip устал
+```
+
+`@` — новая переменная, `out` — результат навыка, ошибки — значения с именем
+(`error.NotEnoughEnergy`), `rescue` ловит их на месте. Эталон всех
+возможностей языка — канон [soul/canonical/](soul/canonical/).
+
+## Что уже работает
+
+- **Компилятор** — RV32I как каноническая машина, перевод в x86-64; программы
+  для Linux (rv32i, x86-64), голого RISC-V (qemu-virt) и UEFI.
+- **ОС на qemu-virt** — лаунчер, змейка, пианино со звуком, колония
+  (`just qemu-graphics`).
+- **Acer Aspire E5-575G через UEFI** — агент на диске, управление по кабелю,
+  драйвер Ethernet RTL8111 и свой стек (ARP, IPv4, UDP), драйвер Wi-Fi QCA9377
+  до `SERVICE_READY`, UIEngine (около 60 компонентов в духе shadcn, JTML),
+  программы WIRE, TASKS, CareOS, трассировщик лучей, фрактал.
+- **Язык** — группы-деревья, буфер байтов `core.bytes`, фиксированные типы
+  `u8…usize`, `bits32`, `address`, регионы памяти, ошибки по имени.
+
+## Быстрый старт
+
+Окружение зафиксировано через Nix:
 
 ```bash
 nix --extra-experimental-features "nix-command flakes" develop
 ```
 
-В открывшемся окружении используются обычные `just test`, `just run` и
-`just package`; сами сценарии Saltic ничего о Nix не знают.
+- `just global-check` — самосборка с паспортами и все тесты, с метриками и
+  «было / стало»;
+- `just hosts` — тесты на x86-64 и платформы: qemu-virt, UEFI, closure;
+- `just qemu-graphics` — ОС с программами в окне QEMU.
+
+Собрать свою программу компилятором с полки:
+
+```bash
+bootstrap/saltic-142-37-compiler-x86_64-linux hello.saltic hello 134217728 x86_64
+```
+
+## Документы
+
+- [docs/PLAN.md](docs/PLAN.md) — план и решения автора, порядок до финального
+  свистка;
+- [CHANGELOG.md](CHANGELOG.md) — история релизов, [VERSION](VERSION) — номер;
+- [docs/FOOTBALL.md](docs/FOOTBALL.md) — версия как счёт матча «фичи : баги»;
+- [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — скорость среди других языков и
+  наши компиляторы;
+- [docs/MISSION.md](docs/MISSION.md), [docs/ORIGIN.md](docs/ORIGIN.md),
+  [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) — зачем и откуда;
+- [docs/OS-core.md](docs/OS-core.md) — понимание ОС;
+- [docs/Code_Architecture_канон_для_агентов.md](docs/Code_Architecture_канон_для_агентов.md)
+  и [AGENTS.md](AGENTS.md) — правила для агентов;
+- [docs/history/](docs/history/) — летопись по дням,
+  [docs/fable/](docs/fable/) — задачи и отчёты агента Fable.
 
 ## Релиз
 
-1. Посчитать голы релиза по [docs/FOOTBALL.md](docs/FOOTBALL.md) и записать
-   новый счёт в `VERSION`, `README.md` и `CHANGELOG.md`.
-2. Запустить `bash bootstrap/refresh.sh`: загрузочный компилятор получит имя
-   новой версии и паспорт, прежний файл уйдёт.
-3. Закоммитить готовый релиз.
-4. Создать аннотированный тег с заголовком релиза:
-   `git tag -a vF-B -m "Saltic F:B — название"`.
-5. Отправить коммит и тег: `git push origin master --follow-tags`.
+1. Посчитать голы по [docs/FOOTBALL.md](docs/FOOTBALL.md) и записать счёт в
+   `VERSION`, `README.md` и `CHANGELOG.md`.
+2. `just global-check` — компиляторы на полке получат имя новой версии и
+   паспорта; `just hosts` — платформы.
+3. Закоммитить `release: Saltic F:B`, вместе с обоими компиляторами.
+4. Аннотированный тег: `git tag -a vF.B -m "Saltic F:B — название"`.
+5. `git push origin master --follow-tags`.
 
-GitHub Actions сверит тег с `VERSION`, прогонит полный `just test`, возьмёт
-описание из соответствующего раздела `CHANGELOG.md`, соберёт чистый SDK без
-архива и чекпоинта и опубликует GitHub Release.
+GitHub Actions сверит тег с `VERSION`, возьмёт описание из `CHANGELOG.md`,
+соберёт SDK и опубликует GitHub Release.
 
 ## Bootstrap
 
-Зафиксированный компилятор лежит в [bootstrap/](bootstrap/) под именем
-`saltic-<версия>-compiler-rv32i-linux.elf` с паспортом рядом. На x86-64
-сборка и самосборка запускают его родную версию
-`saltic-<версия>-compiler-x86_64-linux`, которую `bootstrap/` выводит сама:
-результат побайтово тот же, что под QEMU, но в разы быстрее. `SALTIC_NATIVE=0`
-возвращает запуск под QEMU. Обычные `just compile` и
-`just run` не используют JavaScript. Старый JS-контур выведен из активного
-проекта и в сборке или тестах не участвует.
+На полке [bootstrap/](bootstrap/) — компилятор
+`saltic-<версия>-compiler-rv32i-linux.elf` (эталон, собирает сам себя) и его
+родная версия `saltic-<версия>-compiler-x86_64-linux`; у каждого паспорт
+`.txt`: кто собрал, из каких исходников, размер, время и пик памяти.
+Компилятор для голого RISC-V (`…-for-qemu_virt.elf`) собирается локально.
+`SALTIC_NATIVE=0` возвращает запуск под QEMU.
 
 ## Лицензия
 
 Saltic является закрытым программным обеспечением. Приватное тестирование
 разрешено только людям, которым правообладатель явно предоставил доступ.
 Условия: [русский текст](LICENSE.ru) и [английский перевод](LICENSE).
-
-```saltic
-use io
-
-AppName = "Saltic"
-
-State = enum {
-    READY,
-    ACTIVE,
-    FAILED,
-}
-
-Point = Box {
-    x = 0,
-    y = 0
-}
-
-Actor = Box {
-    name = "agent",
-    state = State.READY,
-    energy = 100,
-    position = Point {}
-}
-
-skill move(point, dx, dy) {
-    out Point {
-        x = point.x + dx,
-        y = point.y + dy
-    }
-}
-
-skill spend(actor, cost) {
-    (cost > actor.energy) {
-        out error.NotEnoughEnergy
-    }
-
-    out Actor {
-        name = actor.name,
-        state = State.ACTIVE,
-        energy = actor.energy - cost,
-        position = move(actor.position, 1, 0)
-    }
-}
-
-skill show(actor) {
-    (actor.state) {
-        .READY => io.show("{actor.name} is ready"),
-        .ACTIVE => io.show("{actor.name} is active"),
-        .FAILED => io.show("{actor.name} needs rescue"),
-    }
-
-    io.show("energy: {actor.energy}")
-    io.show("position: {actor.position.x},{actor.position.y}")
-    out none
-}
-
-program() {
-    @actor = Actor {
-        name = "pip",
-        energy = 42,
-        position = Point { x = 2, y = 3 }
-    }
-
-    drum ([5, 7, 11]) {
-        actor = spend(actor, beat) rescue |err| {
-            io.show("failed: ", err)
-            actor
-        }
-    }
-
-    show(actor)
-    out none
-}
-```
