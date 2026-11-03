@@ -1,0 +1,110 @@
+-- arena_map — реестр служебной арены UEFI-программы (saltic_arena, 4 МиБ):
+-- именованные участки без пересечений. Всё, что кладёт данные в арену
+-- (кольца карт, буферы файлов, снимок экрана), берёт участок отсюда по имени;
+-- голое смещение от firmware.arena вне этого файла запрещено. Место участка
+-- в памяти даёт firmware.region(base, name). Участки идут подряд, каждый
+-- начинается с кратного ALIGN (кольца DMA требуют выравнивания). Чтобы
+-- добавить участок — вписать строку в REGIONS и свериться с check().
+--
+-- Region { name, at, bytes } — участок: смещение от firmware.arena и размер
+-- REGIONS — строки [имя, смещение, байт]; row(index) -> Region по номеру
+-- BYTES — байт арены после выравнивания начала; FREE_AT — первое свободное
+-- region(name) -> Region; UnknownRegion
+-- check() -> число участков; RegionsOverlap, RegionBeyondArena, RegionUnaligned
+-- used() -> занято байт всеми участками
+--
+-- Не хватает места — растить саму арену: ARENA_BYTES в
+-- soul/seed/selfhost/memory/model.saltic (bss, цена — только память),
+-- затем BYTES здесь. Участок shot — половинный кадр 1920 × 1080; bay —
+-- запасной приём программ агентом, когда прошивка не дала страниц.
+
+use core.num
+use core.str
+use core.group
+
+BYTES = 4194048
+ALIGN = 256
+FREE_AT = 3879168
+
+Region = Box {
+    name = "",
+    at = 0,
+    bytes = 0
+}
+
+REGIONS = [
+    ["calls", 0, 256],
+    ["scratch", 256, 32512],
+    ["rtl_tx_ring", 32768, 256],
+    ["rtl_rx_ring", 33024, 256],
+    ["rtl_tx_buffer", 33280, 2048],
+    ["rtl_rx_buffers", 35328, 8192],
+    ["wifi_source_ring", 43520, 256],
+    ["wifi_destination_ring", 43776, 256],
+    ["wifi_diag_source", 44032, 256],
+    ["wifi_diag_destination", 44288, 256],
+    ["wifi_event_ring", 44544, 256],
+    ["wifi_command_ring", 44800, 256],
+    ["wifi_request", 45056, 256],
+    ["wifi_frame", 45312, 256],
+    ["wifi_response", 45568, 2048],
+    ["wifi_diag_buffer", 47616, 2048],
+    ["wifi_letters", 49664, 8192],
+    ["wifi_events", 57856, 16384],
+    ["disk_zero", 74240, 65536],
+    ["disk_work", 139776, 17408],
+    ["notes", 157184, 32768],
+    ["tasks", 189952, 32768],
+    ["wire_cache", 222720, 131072],
+    ["cube_buffer", 353792, 921600],
+    ["shot", 1275392, 1555200],
+    ["bay", 2830592, 1048576]
+]
+
+skill make(name, at, bytes) {
+    out Region { name = name, at = at, bytes = bytes }
+}
+
+skill row(index) {
+    @found = group.get(REGIONS, index)
+    out make(group.get(found, 0), group.get(found, 1), group.get(found, 2))
+}
+
+skill region(name) {
+    drum (group.count(REGIONS)) {
+        @found = row(beat)
+        (found.name == name) { out found }
+    }
+    out error.UnknownRegion
+}
+
+skill used() {
+    @total = 0
+    drum (group.count(REGIONS)) {
+        @found = row(beat)
+        total = total + found.bytes
+    }
+    out total
+}
+
+skill overlap(a, b) {
+    (a.at + a.bytes < b.at + 1) { out no }
+    (b.at + b.bytes < a.at + 1) { out no }
+    out yes
+}
+
+skill check() {
+    @count = group.count(REGIONS)
+    drum (count) {
+        @own = row(beat)
+        @index = beat
+        (num.mod(own.at, ALIGN) > 0) { out error.RegionUnaligned }
+        (own.at + own.bytes > BYTES) { out error.RegionBeyondArena }
+        drum (count) {
+            (beat > index) {
+                (overlap(own, row(beat)) == yes) { out error.RegionsOverlap }
+            }
+        }
+    }
+    out count
+}
