@@ -1,6 +1,9 @@
 -- lexer — текст исходника -> поток токенов с местом (строка, столбец).
 -- Токены лежат в TokenBuffer кусками по 256 (читать через token_buffer_at).
 -- Строка "{…}" становится TEMPLATE с parts = [текст, имя, текст, …].
+-- Текст строки не склеивается посимвольно: run — начало нетронутого отрезка
+-- исходника, он берётся одним срезом; после экранирования срез и расшифровка
+-- копятся в piece и по TEXT_PIECE байт уходят в value (collected их сводит).
 -- Комментарий -- допустим только до первого токена кода, иначе
 -- comment_outside_header; при первой ошибке сканирование останавливается.
 --
@@ -35,6 +38,7 @@ QUOTE = "\""
 ESCAPE = "\\"
 ESCAPE_NEWLINE = "n"
 ESCAPE_TAB = "t"
+TEXT_PIECE = 4096
 
 SIGNS = ["@", "\{", "\}", "[", "]", "(", ")", ",", ".", "|", "=", ">", "<", "+", "-", "*", "/"]
 
@@ -207,11 +211,17 @@ Lexer = Box {
         }
     }
 
+    skill collected(value, piece, run, stop) {
+        out str.add(str.add(value, piece), str.slice(source, run, stop))
+    }
+
     skill text(start, line, col) {
         @index = start + 1
         @next_line = line
         @next_col = col + 1
         @length = str.len(source)
+        @run = start + 1
+        @piece = ""
         @value = ""
         @parts = []
         @diagnostics = []
@@ -228,9 +238,10 @@ Lexer = Box {
             }
             @ch = str.get(source, index)
             (ch == QUOTE) {
-                @closed = token(TokenKind.STRING, value, line, col)
+                @text = collected(value, piece, run, index)
+                @closed = token(TokenKind.STRING, text, line, col)
                 (group.count(parts) > 0) {
-                    closed = Token { kind = TokenKind.TEMPLATE, value = value, parts = group.add(parts, value), line = line, col = col }
+                    closed = Token { kind = TokenKind.TEMPLATE, value = text, parts = group.add(parts, text), line = line, col = col }
                 }
                 out Lexeme {
                     token = closed,
@@ -258,12 +269,16 @@ Lexer = Box {
                     (escape == ESCAPE_TAB) { decoded = TAB }
                     (escape == QUOTE) { decoded = QUOTE }
                     (escape == ESCAPE) { decoded = ESCAPE }
-                    value = str.add(value, decoded)
+                    piece = str.add(str.add(piece, str.slice(source, run, index)), decoded)
+                    (str.len(piece) > TEXT_PIECE) {
+                        value = str.add(value, piece)
+                        piece = ""
+                    }
                     index = index + 2
+                    run = index
                     next_col = next_col + 2
                 }
                 (ch == NEWLINE) {
-                    value = str.add(value, ch)
                     index = index + 1
                     next_line = next_line + 1
                     next_col = 1
@@ -280,10 +295,12 @@ Lexer = Box {
                             diagnostics = diagnostics
                         }
                     }
-                    parts = group.add(group.add(parts, value), found.name)
+                    parts = group.add(group.add(parts, collected(value, piece, run, index)), found.name)
                     value = ""
+                    piece = ""
                     next_col = next_col + found.next - index
                     index = found.next
+                    run = index
                 }
                 (ch == "\}") {
                     @problem = diagnostic.place(errors.lone_closing_brace(), path, next_line, next_col)
@@ -298,7 +315,6 @@ Lexer = Box {
                     }
                 }
                 {
-                    value = str.add(value, ch)
                     index = index + 1
                     next_col = next_col + 1
                 }
