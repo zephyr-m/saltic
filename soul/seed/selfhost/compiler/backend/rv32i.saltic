@@ -2,17 +2,13 @@
 -- фасад над machine.layout / machine.image для платформ (qemu_virt) и тестов.
 -- Executor — Box с методами договора (см. ../backend.saltic): роль → регистр
 -- по REGISTER_OF_ROLE (порядок совпадает с номерами ролей в backend), команды
--- через assembler.emit_op (широкие смещения — T6). far_calls = yes — вызовы
--- auipc+jalr. Фасад: target — layout.Program, каждый навык отдаёт его обновлённым.
+-- через assembler.emit_op (широкие смещения — t6, свободный от ролей).
+-- far_calls = yes — вызовы auipc+jalr. Фасад: target — layout.Program,
+-- каждый навык отдаёт его обновлённым.
 --
--- Executor { far_calls } — методы: new_program, heap_size, label, data_label, align,
---     data_word, data_text, reserve, load_immediate, load_word, load_address,
---     move, add_immediate, add, sub, and_immediate, or_immediate, shift_left,
---     shift_right_signed, shift_right_unsigned, set_less, set_zero, set_nonzero,
---     add_checked, sub_checked, load, store, store_zero, push, pop, branch_equal,
---     branch_not_equal, branch_greater_equal, branch_zero, branch_not_negative,
---     jump, jump_if_equal, jump_if_not_equal, jump_if_zero, jump_if_nonzero,
---     jump_far, call, ret — договор в backend.saltic
+-- Executor { far_calls } — все 67 методов договора backend.saltic; внутренние
+--     register(role) -> номер регистра, section(value) -> layout.Section,
+--     checked(compiler, kind) — общая часть add_checked / sub_checked
 -- Operation { kind, rd, rs1, rs2, immediate } / operation(kind, rd, rs1, rs2, immediate)
 -- host(entry) / qemu_virt(entry) -> Program; emit(target, operation)
 -- label(target, section, name) / branch(target, kind, rs1, rs2, label)
@@ -34,10 +30,12 @@ REGISTER_OF_ROLE = [
     registers.A4, registers.A5, registers.A6, registers.A7,
     registers.T0, registers.T1, registers.T2, registers.T3, registers.T4,
     registers.S0, registers.SP, registers.RA,
-    registers.S1, registers.S2, registers.S3, registers.S4, registers.S5
+    registers.S1, registers.S2, registers.S4, registers.S5,
+    registers.T5
 ]
 
 SKIP_NEXT = 8
+FENCE_READ_WRITE = 51
 
 Executor = Box {
     far_calls = no
@@ -84,6 +82,11 @@ Executor = Box {
         out compiler
     }
 
+    skill data_byte(compiler, where, value) {
+        compiler.machine = layout.append_section_byte(compiler.machine, section(where), value)
+        out compiler
+    }
+
     skill data_text(compiler, where, text) {
         compiler.machine = layout.append_section_text(compiler.machine, section(where), text, yes)
         out compiler
@@ -113,6 +116,10 @@ Executor = Box {
         out assembler.emit_op(compiler, instruction.Kind.ADDI, register(to), register(from), registers.ZERO, 0)
     }
 
+    skill negate(compiler, to, from) {
+        out assembler.emit_op(compiler, instruction.Kind.SUB, register(to), registers.ZERO, register(from), 0)
+    }
+
     skill add_immediate(compiler, to, from, value) {
         out assembler.emit_op(compiler, instruction.Kind.ADDI, register(to), register(from), registers.ZERO, value)
     }
@@ -125,12 +132,28 @@ Executor = Box {
         out assembler.emit_op(compiler, instruction.Kind.SUB, register(to), register(left), register(right), 0)
     }
 
+    skill and(compiler, to, left, right) {
+        out assembler.emit_op(compiler, instruction.Kind.AND, register(to), register(left), register(right), 0)
+    }
+
+    skill or(compiler, to, left, right) {
+        out assembler.emit_op(compiler, instruction.Kind.OR, register(to), register(left), register(right), 0)
+    }
+
+    skill xor(compiler, to, left, right) {
+        out assembler.emit_op(compiler, instruction.Kind.XOR, register(to), register(left), register(right), 0)
+    }
+
     skill and_immediate(compiler, to, from, value) {
         out assembler.emit_op(compiler, instruction.Kind.ANDI, register(to), register(from), registers.ZERO, value)
     }
 
     skill or_immediate(compiler, to, from, value) {
         out assembler.emit_op(compiler, instruction.Kind.ORI, register(to), register(from), registers.ZERO, value)
+    }
+
+    skill xor_immediate(compiler, to, from, value) {
+        out assembler.emit_op(compiler, instruction.Kind.XORI, register(to), register(from), registers.ZERO, value)
     }
 
     skill shift_left(compiler, to, from, count) {
@@ -145,8 +168,24 @@ Executor = Box {
         out assembler.emit_op(compiler, instruction.Kind.SRLI, register(to), register(from), registers.ZERO, count)
     }
 
+    skill shift_left_by(compiler, to, from, count) {
+        out assembler.emit_op(compiler, instruction.Kind.SLL, register(to), register(from), register(count), 0)
+    }
+
+    skill shift_right_unsigned_by(compiler, to, from, count) {
+        out assembler.emit_op(compiler, instruction.Kind.SRL, register(to), register(from), register(count), 0)
+    }
+
     skill set_less(compiler, to, left, right) {
         out assembler.emit_op(compiler, instruction.Kind.SLT, register(to), register(left), register(right), 0)
+    }
+
+    skill set_less_unsigned(compiler, to, left, right) {
+        out assembler.emit_op(compiler, instruction.Kind.SLTU, register(to), register(left), register(right), 0)
+    }
+
+    skill set_less_unsigned_immediate(compiler, to, from, value) {
+        out assembler.emit_op(compiler, instruction.Kind.SLTIU, register(to), register(from), registers.ZERO, value)
     }
 
     skill set_zero(compiler, to, from) {
@@ -182,12 +221,32 @@ Executor = Box {
         out assembler.emit_op(compiler, instruction.Kind.LW, register(to), register(base), registers.ZERO, offset)
     }
 
+    skill load_byte(compiler, to, base, offset) {
+        out assembler.emit_op(compiler, instruction.Kind.LBU, register(to), register(base), registers.ZERO, offset)
+    }
+
+    skill load_half(compiler, to, base, offset) {
+        out assembler.emit_op(compiler, instruction.Kind.LHU, register(to), register(base), registers.ZERO, offset)
+    }
+
     skill store(compiler, from, base, offset) {
         out assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, register(base), register(from), offset)
     }
 
+    skill store_byte(compiler, from, base, offset) {
+        out assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, register(base), register(from), offset)
+    }
+
+    skill store_half(compiler, from, base, offset) {
+        out assembler.emit_op(compiler, instruction.Kind.SH, registers.ZERO, register(base), register(from), offset)
+    }
+
     skill store_zero(compiler, base, offset) {
         out assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, register(base), registers.ZERO, offset)
+    }
+
+    skill store_byte_zero(compiler, base, offset) {
+        out assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, register(base), registers.ZERO, offset)
     }
 
     skill push(compiler, from) {
@@ -210,8 +269,23 @@ Executor = Box {
         out compiler
     }
 
+    skill branch_less(compiler, left, right, name) {
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, register(left), register(right), name)
+        out compiler
+    }
+
     skill branch_greater_equal(compiler, left, right, name) {
         compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, register(left), register(right), name)
+        out compiler
+    }
+
+    skill branch_less_unsigned(compiler, left, right, name) {
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLTU, register(left), register(right), name)
+        out compiler
+    }
+
+    skill branch_greater_equal_unsigned(compiler, left, right, name) {
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGEU, register(left), register(right), name)
         out compiler
     }
 
@@ -220,8 +294,23 @@ Executor = Box {
         out compiler
     }
 
+    skill branch_nonzero(compiler, from, name) {
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BNE, register(from), registers.ZERO, name)
+        out compiler
+    }
+
+    skill branch_negative(compiler, from, name) {
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BLT, register(from), registers.ZERO, name)
+        out compiler
+    }
+
     skill branch_not_negative(compiler, from, name) {
         compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, register(from), registers.ZERO, name)
+        out compiler
+    }
+
+    skill branch_not_positive(compiler, from, name) {
+        compiler.machine = layout.emit_branch(compiler.machine, instruction.Kind.BGE, registers.ZERO, register(from), name)
         out compiler
     }
 
@@ -263,6 +352,19 @@ Executor = Box {
 
     skill ret(compiler) {
         out assembler.emit_op(compiler, instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+    }
+
+    skill syscall(compiler, number) {
+        compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.A7, registers.ZERO, registers.ZERO, number)
+        out assembler.emit_op(compiler, instruction.Kind.ECALL, registers.ZERO, registers.ZERO, registers.ZERO, 0)
+    }
+
+    skill wait(compiler) {
+        out assembler.emit_op(compiler, instruction.Kind.WFI, registers.ZERO, registers.ZERO, registers.ZERO, 0)
+    }
+
+    skill fence(compiler) {
+        out assembler.emit_op(compiler, instruction.Kind.FENCE, registers.ZERO, registers.ZERO, registers.ZERO, FENCE_READ_WRITE)
     }
 }
 

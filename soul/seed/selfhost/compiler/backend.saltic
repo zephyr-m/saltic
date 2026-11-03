@@ -1,36 +1,54 @@
 -- backend — договор машины: роли регистров и операции, которыми codegen,
--- functions и state говорят с исполнителем (Box бэкенда в compiler.executor).
+-- functions, state и рантайм rt_* говорят с исполнителем (Box бэкенда в
+-- compiler.executor).
 -- Роль — число 0…ROLE_COUNT-1, регистр под неё выбирает исполнитель.
 -- Операция — метод исполнителя: берёт compiler, пишет в compiler.machine,
 -- отдаёт compiler. Значение навыка — в VALUE, ошибка — в ERROR (CALL_NO_ERROR
--- — успеха). Широкие смещения (не влезающие в команду) — забота исполнителя.
--- Первый исполнитель — rv32i.Executor; у x86-64 будет свой Box с теми же методами.
+-- — успеха). Широкие смещения (не влезающие в команду) — забота исполнителя
+-- (у rv32i.Executor на них уходит t6, ролью он не бывает).
+-- RETURN — только store в кадр после входа и load перед ret; как значение
+-- не используется, исполнитель вправе держать адрес возврата на своём стеке
+-- и делать store/load RETURN пустыми (x86-64: родные call/ret).
+-- Бюджет регистров исполнителя x86-64 — 14 ролей: VALUE, ERROR, ARG2, ARG3,
+-- SCRATCH0…SCRATCH5, FRAME, HEAP_TOP, REGION_MARK, ESCAPE_MARK (STACK = rsp);
+-- ARG4…ARG7 и ESCAPE_BOTTOM у него живут в памяти, поэтому в горячих циклах
+-- рантайма их нет. Первый исполнитель — rv32i.Executor; у x86-64 — свой Box.
 --
 -- Роли: VALUE (= ARG0), ERROR (= ARG1), ARG2…ARG7 (FIXED_SOURCE_KIND = ARG6,
---     FIXED_TARGET_KIND = ARG7), SCRATCH0…SCRATCH4, FRAME, STACK, RETURN,
---     HEAP_TOP, ESCAPE_BOTTOM, ARGV, REGION_MARK, ESCAPE_MARK
+--     FIXED_TARGET_KIND = ARG7), SCRATCH0…SCRATCH5, FRAME, STACK, RETURN,
+--     HEAP_TOP, ESCAPE_BOTTOM, REGION_MARK, ESCAPE_MARK
 -- CODE / RODATA / DATA / BSS — секции программы (числа, аргумент section)
 -- argument(index) -> роль аргумента index (0…7)
 -- unassigned() -> none; значение поля State.executor до назначения исполнителя
 --
 -- Операции исполнителя (методы его Box, все (compiler, …) -> compiler):
 -- new_program(entry) — новая программа; heap_size(bytes); label(name) — метка в коде;
--- data_label(section, name) / align(section, boundary) / data_word(section, word) /
---     data_text(section, text) — текст с нулём в конце; reserve(bytes) — bss
+-- data_label(section, name) / align(section, boundary) / data_byte(section, byte) /
+--     data_word(section, word) / data_text(section, text) — текст с нулём в конце;
+--     reserve(bytes) — bss
 -- load_immediate(to, n) / load_word(to, word) / load_address(to, label, addend)
--- move(to, from) / add_immediate(to, from, n) / add / sub(to, left, right)
--- and_immediate / or_immediate(to, from, n) — n в пределах команды
--- shift_left / shift_right_signed / shift_right_unsigned(to, from, count)
--- set_less(to, left, right) — знаковое; set_zero / set_nonzero(to, from) — 0/1
+-- move(to, from) / negate(to, from) / add_immediate(to, from, n)
+-- add / sub / and / or / xor(to, left, right)
+-- and_immediate / or_immediate / xor_immediate(to, from, n) — n в пределах команды
+-- shift_left / shift_right_signed / shift_right_unsigned(to, from, count) — count число;
+--     shift_left_by / shift_right_unsigned_by(to, from, count) — count роль (младшие 5 бит)
+-- set_less / set_less_unsigned(to, left, right) — 0/1; set_less_unsigned_immediate(to, from, n);
+--     set_zero / set_nonzero(to, from) — 0/1
 -- add_checked / sub_checked() — VALUE = VALUE ± ERROR; ERROR = CALL_NO_ERROR или
 --     ERROR_NUMBER_OVERFLOW; портит SCRATCH0…SCRATCH2
--- load(to, base, offset) / store(from, base, offset) / store_zero(base, offset)
+-- load / load_byte / load_half(to, base, offset) — слово / байт / полуслово без знака
+-- store / store_byte / store_half(from, base, offset); store_zero / store_byte_zero(base, offset)
 -- push(from) / pop(to) — слово через STACK
--- branch_equal / branch_not_equal / branch_greater_equal(left, right, label),
---     branch_zero / branch_not_negative(from, label) — близкие переходы
+-- branch_equal / branch_not_equal / branch_less / branch_greater_equal(left, right, label) — знаковые,
+--     branch_less_unsigned / branch_greater_equal_unsigned(left, right, label),
+--     branch_zero / branch_nonzero / branch_negative / branch_not_negative /
+--     branch_not_positive(from, label) — близкие переходы
 -- jump(label); jump_if_equal / jump_if_not_equal(left, right, label),
 --     jump_if_zero / jump_if_nonzero(from, label) — на любое расстояние
 -- jump_far(label) — через адрес в SCRATCH1; call(label); ret()
+-- syscall(number) — вызов платформы: номер из core.system (RV32-Linux), аргументы в
+--     VALUE, ERROR, ARG2…ARG5, результат в VALUE; портит только VALUE
+-- wait() — ждать прерывания; fence() — барьер памяти
 
 VALUE = 0
 ERROR = 1
@@ -52,9 +70,9 @@ STACK = 14
 RETURN = 15
 HEAP_TOP = 16
 ESCAPE_BOTTOM = 17
-ARGV = 18
-REGION_MARK = 19
-ESCAPE_MARK = 20
+REGION_MARK = 18
+ESCAPE_MARK = 19
+SCRATCH5 = 20
 ROLE_COUNT = 21
 
 CODE = 0
