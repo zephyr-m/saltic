@@ -182,6 +182,23 @@ test_bytes() {
     echo "буфер байтов: нули, запись на месте, ошибки по имени подтверждены"
 }
 
+test_edges() {
+    mkdir -p "$work/edges"
+    SALTIC_TARGET=rv32i build edges-rv32i \
+        tests/edges.saltic \
+        "$work/edges/rv32i.elf"
+    SALTIC_TARGET=x86_64 build edges-x86_64 \
+        tests/edges.saltic \
+        "$work/edges/x86_64"
+    measure run qemu-riscv32 -B 0x100000000 "$work/edges/rv32i.elf" \
+        >"$work/edges/rv32i.txt"
+    measure run "$work/edges/x86_64" \
+        >"$work/edges/x86_64.txt"
+    diff -u tests/expected/edges.txt "$work/edges/rv32i.txt"
+    diff -u tests/expected/edges.txt "$work/edges/x86_64.txt"
+    echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i и x86_64"
+}
+
 test_memory() {
     mkdir -p "$work/memory"
     build memory \
@@ -358,6 +375,7 @@ run_case() {
         diagnostics) test_diagnostics ;;
         groups) test_groups ;;
         bytes) test_bytes ;;
+        edges) test_edges ;;
         seed-contract) test_seed_contract ;;
         machine) test_machine ;;
         abi) test_abi ;;
@@ -390,6 +408,7 @@ elif [[ "$1" == "all" ]]; then
         diagnostics \
         groups \
         bytes \
+        edges \
         seed-contract \
         machine \
         abi \
