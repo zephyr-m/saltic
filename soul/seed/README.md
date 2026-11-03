@@ -46,12 +46,14 @@
   и константы; backend `compiler/backend/rv32i` и
   `compiler/backend/x86_64_translation` (`encoder`, `translator`, `image`,
   `platform`, `pe`, `uefi`);
-- `compiler/runtime/emit` + `emit/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
-  машинный runtime: арифметика, Box и группы, строки, фиксированные типы,
-  прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
-- `machine/{instruction,registers,codec,decoder,word,buffer,layout,image,profile}` —
-  команды и регистры RV32I, кодирование и разбор команд, 32-битное слово,
-  байтовый буфер, раскладка, ELF32-образ;
+- `compiler/backend/rv32i/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
+  машинный runtime на ассемблере RV32I: арифметика, Box и группы, строки,
+  фиксированные типы, прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
+- `compiler/backend/rv32i/machine/{instruction,registers,codec,decoder,buffer,layout,image,profile}` —
+  команды и регистры RV32I, кодирование и разбор команд, байтовый буфер,
+  раскладка, ELF32-образ;
+- `machine/word` — 32-битное слово из четырёх байтов, общее для всех
+  бэкендов, образов и ОС;
 - `abi` — одно машинное слово, теги значений, номер ошибки в отдельном
   регистре, 12-байтовый заголовок объекта;
 - `toolchain.saltic` — точка входа компилятора.
