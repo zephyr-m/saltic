@@ -4,6 +4,8 @@
 --   quit  — выйти на главный экран агента (reply.home), из любой программы
 --   state — ответить текстом, который программа сообщила о себе через tell
 --   shot  — снимок экрана (tools/shot.py)
+--   key <клавиша или текст> — нажатие в очередь keys, программа читает его
+--         через uefi.poll_key как настоящее
 -- state и quit понимает и mRPC (пакет-объект JSON, network.mrpc); прочие
 -- cmd — unknown_cmd со списком.
 -- Остальные пакеты UDP на 5555 отдаются программе — у неё свои команды.
@@ -19,7 +21,8 @@
 -- reply_text(remote, packet, text) — ответить отправителю
 -- send_to(remote, packet, port, text_bytes) — ответить на другой порт
 -- answer(remote, bytes) -> пакет или none — разбор одного кадра (для serve)
--- answer_mrpc(remote, packet) — ответ mRPC: state, quit, help, иначе unknown_cmd
+-- answer_mrpc(remote, packet) — ответ mRPC: state, quit, key, help, иначе unknown_cmd
+-- key_reply(text) -> текст — нажатия в очередь keys
 
 use core.num
 use core.str
@@ -35,6 +38,7 @@ use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.network.mrpc
 use os.target.uefi_x86_64.platform.utf8
+use os.target.uefi_x86_64.platform.keys
 
 MY_IP = [10, 0, 0, 2]
 PORT = 5555
@@ -89,6 +93,10 @@ skill answer(remote, bytes) {
         reply_text(remote, packet, shot.caption(remote.card, remote.shot_bytes))
         out none
     }
+    (str.starts_with(packet.text, "key ") == yes) {
+        reply_text(remote, packet, key_reply(str.slice(packet.text, 4, str.len(packet.text))))
+        out none
+    }
     (packet.text == "state") {
         @told = remote.state
         (str.len(told) == 0) { told = QUIET_STATE }
@@ -104,10 +112,16 @@ skill answer(remote, bytes) {
     out packet
 }
 
+skill key_reply(text) {
+    @count = keys.push(firmware.guest_base(), text) rescue |err| { out "клавиша не принята: {err}" }
+    out "принято нажатий: {count}"
+}
+
 skill commands() {
     out [
         mrpc.Command { name = "state", kind = "query", about = "что программа сообщила о себе" },
-        mrpc.Command { name = "quit", kind = "exec", about = "выйти на главный экран агента" }
+        mrpc.Command { name = "quit", kind = "exec", about = "выйти на главный экран агента" },
+        mrpc.Command { name = "key", kind = "exec", params = ["key"], about = "нажать клавишу или набрать текст" }
     ]
 }
 
@@ -124,6 +138,11 @@ skill answer_mrpc(remote, packet) {
         drum (remote.owned) { uefi.free_pages(firmware.guest_base(), group.get(beat, 0), group.get(beat, 1)) }
         reply.home("вышла по команде quit")
         out none
+    }
+    (call.cmd == "key") {
+        @asked = mrpc.line(call, mrpc.find(commands(), "key"))
+        (asked.ok == no) { out send_to(remote, packet, packet.from_port, mrpc.failure(call, "missing_param", "нужен параметр key", "key", 0)) }
+        out send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode(key_reply(str.slice(asked.text, 4, str.len(asked.text)))), 0, REPLY_LIMIT))
     }
     (call.cmd == "help") { out send_to(remote, packet, packet.from_port, mrpc.help(call, commands(), 0, REPLY_LIMIT)) }
     out send_to(remote, packet, packet.from_port, mrpc.unknown(call, commands(), 0))

@@ -1,0 +1,82 @@
+-- keys — нажатия, присланные по сети (команда key): очередь в участке арены
+-- "keys" своей программы; uefi.poll_key берёт отсюда раньше клавиатуры, так
+-- что программа не отличает их от настоящих. Слово 0 — сколько в очереди
+-- (до LIMIT), дальше по 4 байта: scan16, char16 — как у EFI_INPUT_KEY.
+--
+-- codes(text) -> группа [scan, char]: имя клавиши (NAMES) или буквы текста
+--     по одной (UTF-8 → кодовая точка); UnknownKey для пустого
+-- push(base, text) -> сколько нажатий встало в очередь; KeysFull
+-- pop(base) -> [scan, char] или none
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+
+LIMIT = 15
+CELL = 4
+NAMES = [
+    ["esc", 23, 0],
+    ["up", 1, 0],
+    ["down", 2, 0],
+    ["right", 3, 0],
+    ["left", 4, 0],
+    ["home", 5, 0],
+    ["end", 6, 0],
+    ["enter", 0, 13],
+    ["tab", 0, 9],
+    ["backspace", 0, 8],
+    ["space", 0, 32]
+]
+
+skill codes(text) {
+    (str.len(text) == 0) { out error.UnknownKey }
+    drum (group.count(NAMES)) {
+        @row = group.get(NAMES, beat)
+        (group.get(row, 0) == str.lower(text)) { out [[group.get(row, 1), group.get(row, 2)]] }
+    }
+    @found = []
+    @at = 0
+    drum (str.len(text)) {
+        (beat == at) {
+            @lead = str.byte(text, at)
+            @point = lead
+            @length = 1
+            (lead > 191) {
+                length = 2
+                point = (lead - 192) * 64 + str.byte(text, at + 1) - 128
+            }
+            (lead > 223) {
+                length = 3
+                point = ((lead - 224) * 64 + str.byte(text, at + 1) - 128) * 64 + str.byte(text, at + 2) - 128
+            }
+            found = group.add(found, [0, point])
+            at = at + length
+        }
+    }
+    out found
+}
+
+skill push(base, text) {
+    @wanted = codes(text)
+    @queue = firmware.region(base, "keys")
+    @count = firmware.read16(queue, base, 0)
+    (count + group.count(wanted) > LIMIT) { out error.KeysFull }
+    drum (group.count(wanted)) {
+        @key = group.get(wanted, beat)
+        @cell = CELL + (count + beat) * CELL
+        firmware.write16(queue, base, cell, group.get(key, 0))
+        firmware.write16(queue, base, cell + 2, group.get(key, 1))
+    }
+    firmware.write16(queue, base, 0, count + group.count(wanted))
+    out group.count(wanted)
+}
+
+skill pop(base) {
+    @queue = firmware.region(base, "keys")
+    @count = firmware.read16(queue, base, 0)
+    (count == 0) { out none }
+    @key = [firmware.read16(queue, base, CELL), firmware.read16(queue, base, CELL + 2)]
+    drum ((count - 1) * 2) { firmware.write16(queue, base, CELL + beat * 2, firmware.read16(queue, base, CELL + CELL + beat * 2)) }
+    firmware.write16(queue, base, 0, count - 1)
+    out key
+}
