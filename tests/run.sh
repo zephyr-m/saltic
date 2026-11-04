@@ -412,6 +412,16 @@ test_tasks() {
     echo "tasks: модель и интерфейс подтверждены"
 }
 
+test_panels() {
+    mkdir -p "$work/panels"
+    build panels \
+        tests/panels.saltic \
+        "$work/panels/program.elf"
+    run_built \
+        "$work/panels/program.elf"
+    echo "panels: строки журнала и подписи системной панели подтверждены"
+}
+
 test_closure() {
     local closure_work="$work/closure"
     mkdir -p "$closure_work"
@@ -463,6 +473,7 @@ run_case() {
         uefi) test_uefi ;;
         jtml) test_jtml ;;
         tasks) test_tasks ;;
+        panels) test_panels ;;
         closure) test_closure ;;
         *)
             echo "неизвестная проверка: $1" >&2
@@ -497,7 +508,8 @@ elif [[ "$1" == "all" ]]; then
         native \
         native-translation \
         jtml \
-        tasks
+        tasks \
+        panels
 fi
 
 for name in "$@"; do

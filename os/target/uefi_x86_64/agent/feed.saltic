@@ -7,9 +7,12 @@
 -- paper(screen) -> цвет фона
 -- draw_header(agent, version, details) — заголовок, бейдж версии, линия, маскот
 -- draw_mascot(base) — карточка с паучком справа
--- scroll(agent, screen, amount) — сдвигает ленту вверх копированием кадра
+-- scroll(agent, screen, amount) — сдвигает ленту вверх копированием строк кадра
+--     по ширине экрана агента (боковые панели не трогает)
 -- next_row(agent, screen, height) -> y новой строки, прокручивая при нужде
 -- text_bytes(text, limit) -> [байты], не больше limit
+-- room(screen, indent) -> сколько букв влезает левее паучка
+-- fit(bytes, letters) -> [байты] не длиннее letters букв UTF-8
 -- show_command(agent, who, payload) — строка: время, кто, байты команды
 -- split_lines(bytes) -> [[байты]] по переводам строки
 -- show_reply / show_code(agent, bytes) — ответ (или код синим моно) с отступом
@@ -26,6 +29,7 @@ use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.platform.clock
 use os.target.uefi_x86_64.screen.spider
+use os.target.uefi_x86_64.screen.lettering
 use os.uiengine.canvas
 use os.uiengine.shapes
 use os.uiengine.fonts
@@ -35,7 +39,7 @@ BAR_SPACE = 64
 SHELF_SPACE = 84
 TOP = 92
 LINE_GAP = 4
-LOG_LIMIT = 110
+LETTER = 8
 REPLY_INDENT = 24
 REPLY_LINES = 24
 CLOCK_WIDTH = 120
@@ -80,10 +84,12 @@ skill scroll(agent, screen, amount) {
     @services = uefi.boot_services(base)
     @limit = screen.height - BAR_SPACE - 32 - SHELF_SPACE
     @row_bytes = screen.stride * graphics.PIXEL_BYTES
-    @upper = firmware.add(screen.frame, (TOP - 8) * row_bytes)
-    @lower = firmware.add(screen.frame, (TOP - 8 + amount) * row_bytes)
-    @length = (limit - TOP + 8 - amount) * row_bytes
-    firmware.call(base, firmware.pointer(services, base, BOOT_COPY_MEM), [upper, lower, firmware.number(length)])
+    @copy = firmware.pointer(services, base, BOOT_COPY_MEM)
+    @span = firmware.number(screen.width * graphics.PIXEL_BYTES)
+    drum (limit - TOP + 8 - amount) {
+        @y = TOP - 8 + beat
+        firmware.call(base, copy, [firmware.add(screen.frame, y * row_bytes), firmware.add(screen.frame, (y + amount) * row_bytes), span])
+    }
     graphics.fill(screen, 0, limit - amount, screen.width, amount, paper(screen))
     draw_mascot(base)
     agent.cursor = agent.cursor - amount
@@ -106,6 +112,22 @@ skill text_bytes(text, limit) {
     out bytes
 }
 
+skill room(screen, indent) {
+    out (screen.width - 2 * MARGIN - MASCOT_WIDTH - 16 - indent) / LETTER
+}
+
+skill fit(bytes, letters) {
+    @index = 0
+    drum (letters) {
+        (index < group.count(bytes)) {
+            @point = lettering.decode(bytes, index)
+            index = index + point.width
+        }
+    }
+    (index > group.count(bytes)) { index = group.count(bytes) }
+    out group.slice(bytes, 0, index)
+}
+
 skill show_command(agent, who, payload) {
     (agent.console == yes) { out none }
     (agent.lent == yes) { out none }
@@ -115,9 +137,7 @@ skill show_command(agent, who, payload) {
     @moment_text = clock.clock_text(clock.local_time(uefi.now(agent.card.base)))
     @pen = fonts.draw_text(screen, MARGIN, row + 2, moment_text, canvas.ZINC_500, fonts.MONO)
     pen = fonts.draw_text(screen, pen + 12, row + 1, who, canvas.ZINC_500, fonts.SMALL)
-    @shown = group.count(payload)
-    (shown > LOG_LIMIT) { shown = LOG_LIMIT }
-    out fonts.draw_bytes(screen, pen + 12, row, group.slice(payload, 0, shown), canvas.ZINC_900, face)
+    out fonts.draw_bytes(screen, pen + 12, row, fit(payload, room(screen, pen + 12 - MARGIN)), canvas.ZINC_900, face)
 }
 
 skill split_lines(bytes) {
@@ -156,10 +176,7 @@ skill show_lines(agent, bytes, indent, is_code) {
     (shown > REPLY_LINES) { shown = REPLY_LINES }
     drum (shown) {
         @row = next_row(agent, screen, face.line)
-        @line = group.get(lines, beat)
-        @width = group.count(line)
-        (width > LOG_LIMIT) { width = LOG_LIMIT }
-        fonts.draw_bytes(screen, MARGIN + indent, row, group.slice(line, 0, width), color, face)
+        fonts.draw_bytes(screen, MARGIN + indent, row, fit(group.get(lines, beat), room(screen, indent)), color, face)
     }
     @hidden = group.count(lines) - shown
     (hidden > 0) {

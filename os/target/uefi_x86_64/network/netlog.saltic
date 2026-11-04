@@ -1,0 +1,140 @@
+-- netlog — сетевой журнал в левой четверти экрана: запросы к Saltic и его
+-- ответы, один на агента и любую программу. Строки лежат в страницах
+-- прошивки, помеченных таблицей конфигурации UEFI (GUID ниже), поэтому
+-- программа, запущенная агентом, пишет в тот же журнал. Если страницы
+-- журнала ниже окна программы, она заводит новые и ставит их в таблицу
+-- вместо старых. graphics.open отдаёт программам экран без боковых четвертей.
+--
+-- Страницы: HEADER байт (след. ячейка u16, заполнено u16; с NUMBERS — числа
+-- соседей, например system_panel), затем SLOTS ячеек по SLOT байт:
+-- [вид, длина, байты строки]. Новые строки — внизу, длинные переносятся.
+--
+-- ask(base, bytes) / say(base, bytes) / say_text(base, text) — записать запрос
+--     или ответ и перерисовать; ошибок не бросают (нет экрана — молчат)
+-- draw(base) — перерисовать панель
+-- find(base) -> Phys журнала; новый, если его нет или он вне окна
+-- add(base, kind, bytes) — записать строку и перерисовать
+-- number_at(base, log, offset) / set_number(base, log, offset, value) —
+--     число до 2^32 в заголовке, offset от NUMBERS до HEADER
+
+use core.num
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.platform.clock
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.screen.lettering
+use os.target.uefi_x86_64.network.netlog.journal
+
+GUID = [83, 65, 76, 84, 73, 67, 45, 78, 69, 84, 76, 79, 71, 0, 0, 2]
+SYSTEM_TABLE_COUNT = 104
+SYSTEM_TABLE_ENTRIES = 112
+TABLE_ENTRY = 24
+TABLE_POINTER = 16
+BOOT_INSTALL_CONFIGURATION_TABLE = 192
+SCRATCH_GUID = 2048
+PAGES = 3
+HEADER = 64
+NUMBERS = 16
+SLOTS = 32
+SLOT = 256
+MARGIN = 16
+ROW = 18
+FACE = lettering.FACE_SMALL
+
+skill is_ours(base, entry) {
+    drum (16) {
+        ((firmware.read8(entry, base, beat) == group.get(GUID, beat)) == no) { out no }
+    }
+    out yes
+}
+
+skill create(base) {
+    @place = uefi.pages_below_4g(base, PAGES)
+    drum (HEADER) { firmware.write8(place, base, beat, 0) }
+    @guid_at = firmware.scratch(base, SCRATCH_GUID)
+    drum (16) { firmware.write8(guid_at, base, beat, group.get(GUID, beat)) }
+    @install = firmware.pointer(uefi.boot_services(base), base, BOOT_INSTALL_CONFIGURATION_TABLE)
+    firmware.call(base, install, [guid_at, place])
+    out place
+}
+
+skill find(base) {
+    @table = firmware.system_table()
+    @entries = firmware.pointer(table, base, SYSTEM_TABLE_ENTRIES)
+    drum (firmware.read16(table, base, SYSTEM_TABLE_COUNT)) {
+        @entry = firmware.add(entries, beat * TABLE_ENTRY)
+        (is_ours(base, entry) == yes) {
+            @place = firmware.pointer(entry, base, TABLE_POINTER)
+            firmware.guest(place, base) rescue |err| { out create(base) }
+            out place
+        }
+    }
+    out create(base)
+}
+
+skill add(base, kind, bytes) {
+    @log = find(base)
+    @next = firmware.read16(log, base, 0)
+    @filled = firmware.read16(log, base, 2)
+    @line = journal.entry(kind, clock.clock_text(clock.local_time(uefi.now(base))), bytes, SLOT - 2)
+    @slot = firmware.add(log, HEADER + next * SLOT)
+    firmware.write8(slot, base, 0, kind)
+    firmware.write8(slot, base, 1, group.count(line))
+    drum (group.count(line)) { firmware.write8(slot, base, 2 + beat, group.get(line, beat)) }
+    firmware.write16(log, base, 0, num.mod(next + 1, SLOTS))
+    (filled < SLOTS) { firmware.write16(log, base, 2, filled + 1) }
+    out draw(base)
+}
+
+skill ask(base, bytes) {
+    out add(base, journal.ASK, bytes) rescue |err| { none }
+}
+
+skill say(base, bytes) {
+    out add(base, journal.SAY, bytes) rescue |err| { none }
+}
+
+skill say_text(base, text) {
+    out say(base, journal.bytes_of(text))
+}
+
+skill number_at(base, log, offset) {
+    out firmware.read16(log, base, offset) + firmware.read16(log, base, offset + 2) * 65536
+}
+
+skill set_number(base, log, offset, value) {
+    firmware.write16(log, base, offset, num.mod(value, 65536))
+    out firmware.write16(log, base, offset + 2, value / 65536)
+}
+
+skill draw(base) {
+    @whole = graphics.open_whole(base)
+    @side = graphics.side_width(whole.width)
+    graphics.fill(whole, 0, 0, side, whole.height, graphics.color(whole, 24, 24, 27))
+    graphics.fill(whole, side - 1, 0, 1, whole.height, graphics.color(whole, 63, 63, 70))
+    lettering.paint_text(whole, FACE, MARGIN, MARGIN, "сеть — 10.0.0.2:5555", graphics.color(whole, 113, 113, 122))
+    @face = FACE
+    @letters = (side - 2 * MARGIN) / face.width
+    @top = MARGIN + ROW * 2
+    @y = whole.height - MARGIN
+    @ask_ink = graphics.color(whole, 251, 146, 60)
+    @say_ink = graphics.color(whole, 228, 228, 231)
+    @log = find(base)
+    @next = firmware.read16(log, base, 0)
+    drum (firmware.read16(log, base, 2)) {
+        @slot = firmware.add(log, HEADER + num.mod(next - 1 - beat + SLOTS, SLOTS) * SLOT)
+        @ink = say_ink
+        (firmware.read8(slot, base, 0) == journal.ASK) { ink = ask_ink }
+        @bytes = []
+        drum (firmware.read8(slot, base, 1)) { bytes = group.add(bytes, firmware.read8(slot, base, 2 + beat)) }
+        @rows = journal.wrap(bytes, letters)
+        @count = group.count(rows)
+        (y - count * ROW < top) { leave }
+        drum (count) {
+            y = y - ROW
+            lettering.paint_bytes(whole, FACE, MARGIN, y, group.get(rows, count - 1 - beat), ink)
+        }
+    }
+    out none
+}

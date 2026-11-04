@@ -1,0 +1,102 @@
+-- journal — строки сетевого журнала без железа: время, знак, первая строка
+-- текста и счёт остальных. Знак: «>» — запрос к Saltic, «<» — его ответ.
+-- Байты — UTF-8; обрезка не рвёт букву посередине.
+--
+-- ASK / SAY — вид строки
+-- bytes_of(text) -> [байты]
+-- first_line(bytes) -> [байты] до первого перевода строки
+-- line_count(bytes) -> строк в тексте; перевод строки в конце не считается
+-- cut(bytes, limit) -> не больше limit байт, целыми буквами
+-- entry(kind, moment_text, bytes, limit) -> [байты] строки журнала,
+--     «ЧЧ:ММ:СС > текст (+N строк)», не длиннее limit
+-- letter_bytes(lead) -> сколько байт занимает буква с этим первым байтом
+-- wrap(bytes, letters) -> [[байты]] — ряды не длиннее letters букв; рвёт после
+--     пробела, если он есть в ряду, иначе посреди слова; пустой текст — один ряд
+
+use core.str
+use core.group
+
+ASK = 1
+SAY = 2
+NEWLINE = 10
+
+skill bytes_of(text) {
+    @bytes = []
+    drum (str.len(text)) { bytes = group.add(bytes, str.byte(text, beat)) }
+    out bytes
+}
+
+skill first_line(bytes) {
+    drum (group.count(bytes)) {
+        (group.get(bytes, beat) == NEWLINE) { out group.slice(bytes, 0, beat) }
+    }
+    out bytes
+}
+
+skill line_count(bytes) {
+    @count = group.count(bytes)
+    (count == 0) { out 1 }
+    @lines = 1
+    drum (bytes) {
+        (beat == NEWLINE) { lines = lines + 1 }
+    }
+    (group.get(bytes, count - 1) == NEWLINE) { lines = lines - 1 }
+    out lines
+}
+
+skill cut(bytes, limit) {
+    (limit < 1) { out [] }
+    (group.count(bytes) < limit + 1) { out bytes }
+    @end = limit
+    drum (3) {
+        @byte = group.get(bytes, end)
+        (byte > 127) {
+            (byte < 192) { end = end - 1 }
+        }
+    }
+    out group.slice(bytes, 0, end)
+}
+
+skill entry(kind, moment_text, bytes, limit) {
+    @mark = " > "
+    (kind == SAY) { mark = " < " }
+    @head = bytes_of(str.add(moment_text, mark))
+    @more = line_count(bytes) - 1
+    @tail = []
+    (more > 0) { tail = bytes_of(" (+{more} строк)") }
+    @room = limit - group.count(head) - group.count(tail)
+    out group.concat(group.concat(head, cut(first_line(bytes), room)), tail)
+}
+
+skill letter_bytes(lead) {
+    (lead < 192) { out 1 }
+    (lead < 224) { out 2 }
+    (lead < 240) { out 3 }
+    out 4
+}
+
+skill wrap(bytes, letters) {
+    @count = group.count(bytes)
+    (count == 0) { out [[]] }
+    @rows = []
+    @start = 0
+    drum (count) {
+        (start < count) {
+            @end = start
+            @space = -1
+            drum (letters) {
+                (end < count) {
+                    (group.get(bytes, end) == 32) { space = end }
+                    end = end + letter_bytes(group.get(bytes, end))
+                }
+            }
+            (end > count) { end = count }
+            (end < count) {
+                (space > start) { end = space + 1 }
+            }
+            rows = group.add(rows, group.slice(bytes, start, end))
+            start = end
+        }
+    }
+    out rows
+}

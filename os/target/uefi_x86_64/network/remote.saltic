@@ -5,6 +5,9 @@
 --   state — ответить текстом, который программа сообщила о себе через tell
 --   shot  — снимок экрана (tools/shot.py)
 -- Остальные пакеты UDP на 5555 отдаются программе — у неё свои команды.
+-- Каждый запрос и каждый ответ (и программы тоже) пишется в netlog — панель
+-- слева; куски снимка shot-part не пишутся. Раз в PANEL_EVERY вызовов serve —
+-- system_panel.tick (панель справа).
 --
 -- Remote — карта, состояние программы текстом, байты последнего снимка
 -- open_remote() -> Remote; без кабеля — NoLink
@@ -15,6 +18,7 @@
 -- send_to(remote, packet, port, text_bytes) — ответить на другой порт
 -- answer(remote, bytes) -> пакет или none — разбор одного кадра (для serve)
 
+use core.num
 use core.str
 use core.group
 use os.target.uefi_x86_64.drivers.rtl8111
@@ -22,6 +26,8 @@ use os.target.uefi_x86_64.network.net
 use os.target.uefi_x86_64.network.shot
 use os.target.uefi_x86_64.platform.parse
 use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.netlog
+use os.target.uefi_x86_64.screen.system_panel
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
 
@@ -29,13 +35,15 @@ MY_IP = [10, 0, 0, 2]
 PORT = 5555
 PART = "shot-part "
 
+PANEL_EVERY = 8
 QUIET_STATE = "программа не рассказала о себе (нет remote.tell)"
 
 Remote = Box {
     card = rtl8111.Card {},
     shot_bytes = 0,
     state = "",
-    owned = []
+    owned = [],
+    rounds = 0
 }
 
 skill open_remote() {
@@ -46,6 +54,7 @@ skill open_remote() {
 }
 
 skill reply_text(remote, packet, text) {
+    netlog.say_text(remote.card.base, text)
     out rtl8111.send(remote.card, net.udp_frame(remote.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, text))
 }
 
@@ -60,6 +69,7 @@ skill answer(remote, bytes) {
         shot.send_chunk(remote.card, remote.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.len(PART), str.len(packet.text))))
         out none
     }
+    netlog.ask(remote.card.base, packet.payload)
     (packet.text == "shot") {
         @taken = shot.capture(remote.card) rescue |err| {
             reply_text(remote, packet, "снимок не сделан: {err} (участок shot — половина экрана до 1920 × 1080)")
@@ -85,6 +95,8 @@ skill answer(remote, bytes) {
 }
 
 skill serve(remote) {
+    remote.rounds = remote.rounds + 1
+    (num.mod(remote.rounds, PANEL_EVERY) == 0) { system_panel.tick(remote.card.base, remote.card) rescue |err| { none } }
     @packets = []
     drum (rtl8111.RX_COUNT) {
         (rtl8111.received(remote.card, beat) == yes) {
@@ -98,6 +110,7 @@ skill serve(remote) {
 }
 
 skill send_to(remote, packet, port, text_bytes) {
+    netlog.say(remote.card.base, text_bytes)
     out rtl8111.send(remote.card, net.udp_frame_bytes(remote.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, port, text_bytes))
 }
 

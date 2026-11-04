@@ -15,13 +15,15 @@
 -- execute(agent, text, payload) -> текст — разбор команды по первому слову
 -- link_russian(status) -> текст линка / has_link(card) -> yes/no
 -- refresh_shelf(agent) / open_program(agent) / press(agent, key) — полка и клавиши
--- answer(agent, bytes) -> agent — UDP-команда или кусок shot
+-- answer(agent, bytes) -> agent — UDP-команда или кусок shot; команда и ответ —
+--     ещё и в netlog, панель внизу экрана
 -- store_chunk(agent, bytes) -> agent — кусок программы в bay, ответ "ok N"
 -- handle(agent, bytes) -> agent — ARP или UDP по портам
 -- greet(card) / watch_link(agent) / last_cry(card, message) — сеть и баннеры
 -- wait_second(base) / countdown(agent, seconds) — отсчёт перед перезагрузкой
 -- draw_progress(agent) — полоса приёма, если экран наш
--- tick(agent) — один круг: кадры, клавиши раз в KEY_EVERY, часы раз в CLOCK_EVERY
+-- tick(agent) — один круг: кадры, клавиши раз в KEY_EVERY, часы и системная
+--     панель раз в CLOCK_EVERY
 -- survive(agent) — tick с перехватом сбоя / serve(agent) — вечный цикл
 -- run() — открыть карту, линк, проверить arena_map, bay (страницы ниже
 --     4 ГБ на UPLOAD_LIMIT; нет страниц — участок арены "bay"), serve
@@ -50,10 +52,12 @@ use os.target.uefi_x86_64.agent.feed
 use os.target.uefi_x86_64.drivers.camera
 use os.target.uefi_x86_64.network.shot
 use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.netlog
+use os.target.uefi_x86_64.screen.system_panel
 use os.target.uefi_x86_64.agent.programs
 use os.target.uefi_x86_64.agent.shelf
 
-VERSION = 11
+VERSION = 12
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -135,6 +139,7 @@ skill launch(agent) {
     ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
     @size = agent.expected
     log(agent, "run: starting uploaded image, {size} bytes")
+    system_panel.flush(agent.card.base, agent.card) rescue |err| { none }
     @launched = uefi.start_image(agent.card.base, agent.bay, size)
     agent.output = launched.output
     agent.lent = yes
@@ -222,12 +227,14 @@ skill draw_test(agent) {
 skill clear_screen(agent) {
     @screen = graphics.open(agent.card.base)
     graphics.fill(screen, 0, 0, screen.width, screen.height, feed.paper(screen))
-    feed.draw_header(agent, VERSION, "Acer Aspire E5-575G — 10.0.0.2:5555 — программы в \\SALTIC\\BIN")
+    feed.draw_header(agent, VERSION, "10.0.0.2:5555")
     agent.line = 0
     agent.cursor = feed.TOP
     agent.console = no
     agent.lent = no
     refresh_shelf(agent)
+    netlog.draw(agent.card.base) rescue |err| { none }
+    system_panel.draw(agent.card.base, agent.card) rescue |err| { none }
     out "экран очищен"
 }
 
@@ -242,6 +249,7 @@ skill keep_program(agent, words) {
     (agent.expected == 0) { out "ничего не принято" }
     @name = group.get(words, 1)
     @written = programs.keep(agent.card.base, agent.bay, agent.expected, name)
+    system_panel.measure_disk(agent.card.base) rescue |err| { none }
     (agent.lent == no) { refresh_shelf(agent) }
     out "сохранил {name}: {written} байт в \\SALTIC\\BIN"
 }
@@ -314,6 +322,7 @@ skill install_image(agent) {
     (agent.expected == 0) { out "сначала upload программы" }
     ((agent.received == agent.expected) == no) { out str.add("приём не закончен: ", upload_state(agent)) }
     @written = files.install(agent.card.base, agent.bay, agent.expected)
+    system_panel.measure_disk(agent.card.base) rescue |err| { none }
     out "записал \\EFI\\BOOT\\BOOTX64.EFI на том SALTIC: {written} байт"
 }
 
@@ -405,12 +414,14 @@ skill answer(agent, bytes) {
     @command = packet.text
     log(agent, "command from {who}: {command}")
     feed.show_command(agent, who, packet.payload)
+    netlog.ask(agent.card.base, packet.payload)
     @said = execute(agent, command, packet.payload) rescue |err| { "ошибка: {err}" }
     @reply_bytes = feed.text_bytes(said, REPLY_LIMIT)
     (group.count(agent.output) > 0) { reply_bytes = group.concat(group.add(reply_bytes, 10), agent.output) }
     agent.output = []
     (group.count(reply_bytes) > REPLY_LIMIT) { reply_bytes = group.slice(reply_bytes, 0, REPLY_LIMIT) }
     feed.show_reply(agent, reply_bytes)
+    netlog.say(agent.card.base, reply_bytes)
     @frame = net.udp_frame_bytes(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply_bytes)
     @sent = rtl8111.send(agent.card, frame)
     log(agent, "  replied {sent} bytes")
@@ -513,6 +524,7 @@ skill tick(agent) {
         watch_link(agent)
         (agent.console == no) {
             (agent.lent == no) { feed.draw_clock(agent) }
+            system_panel.tick(agent.card.base, agent.card) rescue |err| { none }
         }
     }
     out none
@@ -572,7 +584,9 @@ skill run() {
     @where = firmware.phys_text(bay)
     io.show("[6] upload bay {where}, limit {limit} bytes")
     @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = limit, linked = linked }
+    system_panel.measure_disk(card.base) rescue |err| { none }
     clear_screen(agent)
+    netlog.say_text(card.base, "агент Saltic {VERSION} слушает 10.0.0.2:5555")
     serve(agent) rescue |err| {
         last_cry(card, "агент остановился: {err}")
         out err

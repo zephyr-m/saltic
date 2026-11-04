@@ -1,0 +1,176 @@
+-- system_panel — правая четверть экрана: память, диск и сеть, только то, что
+-- прошивка и карта знают точно. Числа, которые должны пережить смену программы
+-- (байты сети, место на диске), лежат в заголовке netlog по смещениям ниже.
+-- Скорость — байты карты с прошлого tick, делённые на прошедшие секунды.
+--
+-- Memory { total_mb, free_mb } — ОЗУ по карте памяти прошивки
+-- memory(base) -> Memory; NoMemoryMap
+-- measure_disk(base) — размер и свободное место тома Saltic в netlog
+--     (агент зовёт при старте и после записи на диск); нет тома — нули
+-- tick(base, card) — раз в секунду: счётчики карты в netlog, перерисовка;
+--     чаще — ничего не делает; звать из цикла сети
+-- flush(base, card) — счётчики карты в итоги netlog и в ноль (перед сменой образа)
+-- draw(base, card) — перерисовать панель
+-- link_speed(status) -> «100 Мбит/с» или «нет»
+-- Внутри: gauge — подпись, полоса и «занято X из Y»; add_bytes — КБ и остаток
+
+use core.num
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.drivers.rtl8111
+use os.target.uefi_x86_64.storage.files
+use os.target.uefi_x86_64.network.netlog
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.screen.lettering
+use os.target.uefi_x86_64.screen.system_panel.sizes
+
+BOOT_GET_MEMORY_MAP = 56
+SCRATCH_MAP_SIZE = 12224
+SCRATCH_MAP_KEY = 12232
+SCRATCH_MAP_STEP = 12240
+SCRATCH_MAP_VERSION = 12248
+SCRATCH_MAP = 12288
+MAP_BYTES = 16384
+CONVENTIONAL = 7
+PAGES_PER_MB = 256
+MARK = 16
+RX_KB = 20
+TX_KB = 24
+RX_REST = 28
+TX_REST = 32
+RX_SPEED = 36
+TX_SPEED = 40
+DISK_SIZE = 44
+DISK_FREE = 48
+SECONDS_PER_HOUR = 3600
+MARGIN = 16
+ROW = 18
+BAR = 8
+FACE = lettering.FACE_SMALL
+
+Memory = Box {
+    total_mb = 0,
+    free_mb = 0
+}
+
+skill counted(kind) {
+    (kind == 9) { out yes }
+    (kind == 10) { out yes }
+    (kind < 1) { out no }
+    out kind < 8
+}
+
+skill memory(base) {
+    @size_at = firmware.scratch(base, SCRATCH_MAP_SIZE)
+    firmware.write64(size_at, base, 0, firmware.number(MAP_BYTES))
+    @map = firmware.scratch(base, SCRATCH_MAP)
+    @step_at = firmware.scratch(base, SCRATCH_MAP_STEP)
+    @asked = firmware.call(base, firmware.pointer(uefi.boot_services(base), base, BOOT_GET_MEMORY_MAP), [size_at, map, firmware.scratch(base, SCRATCH_MAP_KEY), step_at, firmware.scratch(base, SCRATCH_MAP_VERSION)])
+    (asked.failed == yes) { out error.NoMemoryMap }
+    @size = firmware.read16(size_at, base, 0) + firmware.read16(size_at, base, 2) * 65536
+    @step = firmware.read16(step_at, base, 0)
+    (step < 1) { out error.NoMemoryMap }
+    @total = 0
+    @free = 0
+    drum (size / step) {
+        @entry = firmware.add(map, beat * step)
+        @kind = firmware.read16(entry, base, 0)
+        @pages = firmware.read16(entry, base, 24) + firmware.read16(entry, base, 26) * 65536
+        (counted(kind) == yes) { total = total + pages }
+        (kind == CONVENTIONAL) { free = free + pages }
+    }
+    out Memory { total_mb = total / PAGES_PER_MB, free_mb = free / PAGES_PER_MB }
+}
+
+skill measure_disk(base) {
+    @log = netlog.find(base)
+    @space = [0, 0]
+    @root = files.saltic_root(base) rescue |err| { none }
+    ((root == none) == no) {
+        space = files.volume_space(base, root) rescue |err| { [0, 0] }
+        files.close_file(base, root)
+    }
+    netlog.set_number(base, log, DISK_SIZE, group.get(space, 0))
+    out netlog.set_number(base, log, DISK_FREE, group.get(space, 1))
+}
+
+skill add_bytes(base, log, kb_at, rest_at, bytes) {
+    @rest = netlog.number_at(base, log, rest_at) + bytes
+    netlog.set_number(base, log, kb_at, netlog.number_at(base, log, kb_at) + rest / 1024)
+    out netlog.set_number(base, log, rest_at, num.mod(rest, 1024))
+}
+
+skill flush(base, card) {
+    @log = netlog.find(base)
+    add_bytes(base, log, RX_KB, RX_REST, card.received_bytes)
+    add_bytes(base, log, TX_KB, TX_REST, card.sent_bytes)
+    card.received_bytes = 0
+    card.sent_bytes = 0
+    out none
+}
+
+skill tick(base, card) {
+    @log = netlog.find(base)
+    @moment = uefi.now(base)
+    @mark = moment.minute * 60 + moment.second
+    @elapsed = num.mod(mark - netlog.number_at(base, log, MARK) + SECONDS_PER_HOUR, SECONDS_PER_HOUR)
+    (elapsed == 0) { out none }
+    netlog.set_number(base, log, MARK, mark)
+    netlog.set_number(base, log, RX_SPEED, card.received_bytes / elapsed)
+    netlog.set_number(base, log, TX_SPEED, card.sent_bytes / elapsed)
+    flush(base, card)
+    out draw(base, card)
+}
+
+skill link_speed(status) {
+    (rtl8111.has_bit(status, rtl8111.PHY_LINK) == no) { out "нет" }
+    (rtl8111.has_bit(status, rtl8111.PHY_1000) == yes) { out "1000 Мбит/с" }
+    (rtl8111.has_bit(status, rtl8111.PHY_100) == yes) { out "100 Мбит/с" }
+    out "10 Мбит/с"
+}
+
+skill gauge(screen, x, y, width, title, used_mb, total_mb) {
+    lettering.paint_text(screen, FACE, x, y, title, graphics.color(screen, 228, 228, 231))
+    @grey = graphics.color(screen, 161, 161, 170)
+    (total_mb < 1) {
+        lettering.paint_text(screen, FACE, x, y + ROW, "нет сведений", grey)
+        out y + ROW * 3
+    }
+    @share = sizes.percent(used_mb, total_mb)
+    graphics.fill(screen, x, y + ROW + 2, width, BAR, graphics.color(screen, 63, 63, 70))
+    graphics.fill(screen, x, y + ROW + 2, width * share / 100, BAR, graphics.color(screen, 251, 146, 60))
+    @used = sizes.mb_text(used_mb)
+    @total = sizes.mb_text(total_mb)
+    lettering.paint_text(screen, FACE, x, y + ROW + BAR + 8, "занято {used} из {total}, {share} %", grey)
+    out y + ROW * 4
+}
+
+skill draw(base, card) {
+    @whole = graphics.open_whole(base)
+    @side = graphics.side_width(whole.width)
+    @left = whole.width - side
+    @x = left + MARGIN
+    @width = side - 2 * MARGIN
+    @grey = graphics.color(whole, 161, 161, 170)
+    @ink = graphics.color(whole, 228, 228, 231)
+    graphics.fill(whole, left, 0, side, whole.height, graphics.color(whole, 24, 24, 27))
+    graphics.fill(whole, left, 0, 1, whole.height, graphics.color(whole, 63, 63, 70))
+    lettering.paint_text(whole, FACE, x, MARGIN, "система", graphics.color(whole, 113, 113, 122))
+    @log = netlog.find(base)
+    @known = memory(base) rescue |err| { Memory {} }
+    @y = gauge(whole, x, MARGIN + ROW * 2, width, "память", known.total_mb - known.free_mb, known.total_mb)
+    @disk_size = netlog.number_at(base, log, DISK_SIZE)
+    y = gauge(whole, x, y, width, "диск Saltic", disk_size - netlog.number_at(base, log, DISK_FREE), disk_size)
+    lettering.paint_text(whole, FACE, x, y, "сеть", ink)
+    @link = link_speed(rtl8111.status(card))
+    @incoming = sizes.speed_text(netlog.number_at(base, log, RX_SPEED))
+    @outgoing = sizes.speed_text(netlog.number_at(base, log, TX_SPEED))
+    @received = sizes.kb_text(netlog.number_at(base, log, RX_KB))
+    @sent = sizes.kb_text(netlog.number_at(base, log, TX_KB))
+    lettering.paint_text(whole, FACE, x, y + ROW, "линк {link}", grey)
+    lettering.paint_text(whole, FACE, x, y + ROW * 2, "приём {incoming}", grey)
+    lettering.paint_text(whole, FACE, x, y + ROW * 3, "отправка {outgoing}", grey)
+    lettering.paint_text(whole, FACE, x, y + ROW * 4, "принято всего {received}", grey)
+    out lettering.paint_text(whole, FACE, x, y + ROW * 5, "отправлено всего {sent}", grey)
+}

@@ -3,8 +3,9 @@
 -- и буфер, RX — 4 дескриптора по 2048 байт. Порядок: open → configure →
 -- send/received. Кадр — группа байтов.
 --
--- Card { base, mmio, mac, tx_ring, rx_ring, tx_buffer, rx_buffers } — открытая
---     карта; tx_buffer — Phys, куда можно сложить кадр и позвать send_prepared
+-- Card { base, mmio, mac, tx_ring, rx_ring, tx_buffer, rx_buffers, sent_bytes,
+--     received_bytes } — открытая карта; tx_buffer — Phys, куда можно сложить
+--     кадр и позвать send_prepared; *_bytes — счётчики, обнуляет читатель
 -- has_bit(value, bit) -> yes/no / with_bit(value, bit) -> число с битом
 -- enable(base, config) — включает память и bus master в PCI
 -- registers(base, config) -> Phys MMIO; Bar2IsNotMemory, RegistersAbove4G
@@ -79,7 +80,9 @@ Card = Box {
     tx_ring = firmware.Phys {},
     rx_ring = firmware.Phys {},
     tx_buffer = firmware.Phys {},
-    rx_buffers = firmware.Phys {}
+    rx_buffers = firmware.Phys {},
+    sent_bytes = 0,
+    received_bytes = 0
 }
 
 skill has_bit(value, bit) {
@@ -225,7 +228,10 @@ skill send_prepared(card, length) {
     descriptor(card, card.tx_ring, DESCRIPTOR_OWN + DESCRIPTOR_END + DESCRIPTOR_FIRST_LAST, length, card.tx_buffer)
     firmware.write8(card.mmio, card.base, REGISTER_TX_POLL, TX_POLL_NORMAL)
     drum (100000) {
-        (firmware.read16(card.tx_ring, card.base, 2) < DESCRIPTOR_OWN) { out length }
+        (firmware.read16(card.tx_ring, card.base, 2) < DESCRIPTOR_OWN) {
+            card.sent_bytes = card.sent_bytes + length
+            out length
+        }
     }
     out error.SendTimeout
 }
@@ -238,6 +244,7 @@ skill read_frame(card, index) {
     @buffer = rx_buffer(card, index)
     @length = num.mod(firmware.read16(rx_slot(card, index), card.base, 0), 16384)
     (length > BUFFER_BYTES) { length = BUFFER_BYTES }
+    card.received_bytes = card.received_bytes + length
     @bytes = []
     drum (length) { bytes = group.add(bytes, firmware.read8(buffer, card.base, beat)) }
     out bytes
