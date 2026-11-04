@@ -4,6 +4,8 @@
 --   quit  — выйти на главный экран агента (reply.home), из любой программы
 --   state — ответить текстом, который программа сообщила о себе через tell
 --   shot  — снимок экрана (tools/shot.py)
+-- state и quit понимает и mRPC (пакет-объект JSON, network.mrpc); прочие
+-- cmd — unknown_cmd со списком.
 -- Остальные пакеты UDP на 5555 отдаются программе — у неё свои команды.
 -- Каждый запрос и каждый ответ (и программы тоже) пишется в netlog — панель
 -- слева; куски снимка shot-part не пишутся. Раз в PANEL_EVERY вызовов serve —
@@ -17,6 +19,7 @@
 -- reply_text(remote, packet, text) — ответить отправителю
 -- send_to(remote, packet, port, text_bytes) — ответить на другой порт
 -- answer(remote, bytes) -> пакет или none — разбор одного кадра (для serve)
+-- answer_mrpc(remote, packet) — ответ mRPC: state, quit, help, иначе unknown_cmd
 
 use core.num
 use core.str
@@ -30,12 +33,15 @@ use os.target.uefi_x86_64.network.netlog
 use os.target.uefi_x86_64.screen.system_panel
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.network.mrpc
+use os.target.uefi_x86_64.platform.utf8
 
 MY_IP = [10, 0, 0, 2]
 PORT = 5555
 PART = "shot-part "
 
 PANEL_EVERY = 8
+REPLY_LIMIT = 1400
 QUIET_STATE = "программа не рассказала о себе (нет remote.tell)"
 
 Remote = Box {
@@ -70,6 +76,10 @@ skill answer(remote, bytes) {
         out none
     }
     netlog.ask(remote.card.base, packet.payload)
+    (mrpc.is_request(packet.payload) == yes) {
+        answer_mrpc(remote, packet)
+        out none
+    }
     (packet.text == "shot") {
         @taken = shot.capture(remote.card) rescue |err| {
             reply_text(remote, packet, "снимок не сделан: {err} (участок shot — половина экрана до 1920 × 1080)")
@@ -92,6 +102,31 @@ skill answer(remote, bytes) {
         out none
     }
     out packet
+}
+
+skill commands() {
+    out [
+        mrpc.Command { name = "state", kind = "query", about = "что программа сообщила о себе" },
+        mrpc.Command { name = "quit", kind = "exec", about = "выйти на главный экран агента" }
+    ]
+}
+
+skill answer_mrpc(remote, packet) {
+    @call = mrpc.decode(packet.text)
+    (call.ok == no) { out send_to(remote, packet, packet.from_port, mrpc.failure(call, "invalid_param", call.message, "", 0)) }
+    (call.cmd == "state") {
+        @told = remote.state
+        (str.len(told) == 0) { told = QUIET_STATE }
+        out send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode(told), 0, REPLY_LIMIT))
+    }
+    (call.cmd == "quit") {
+        send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode("выхожу на главный экран"), 0, REPLY_LIMIT))
+        drum (remote.owned) { uefi.free_pages(firmware.guest_base(), group.get(beat, 0), group.get(beat, 1)) }
+        reply.home("вышла по команде quit")
+        out none
+    }
+    (call.cmd == "help") { out send_to(remote, packet, packet.from_port, mrpc.help(call, commands(), 0)) }
+    out send_to(remote, packet, packet.from_port, mrpc.unknown(call, commands(), 0))
 }
 
 skill serve(remote) {

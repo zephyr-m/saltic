@@ -422,6 +422,16 @@ test_panels() {
     echo "panels: строки журнала и подписи системной панели подтверждены"
 }
 
+test_mrpc() {
+    mkdir -p "$work/mrpc"
+    build mrpc \
+        tests/mrpc.saltic \
+        "$work/mrpc/program.elf"
+    run_built \
+        "$work/mrpc/program.elf"
+    echo "mrpc: запросы и ответы mRPC/1.0 агента подтверждены"
+}
+
 test_closure() {
     local closure_work="$work/closure"
     mkdir -p "$closure_work"
@@ -474,6 +484,7 @@ run_case() {
         jtml) test_jtml ;;
         tasks) test_tasks ;;
         panels) test_panels ;;
+        mrpc) test_mrpc ;;
         closure) test_closure ;;
         *)
             echo "неизвестная проверка: $1" >&2
@@ -509,7 +520,8 @@ elif [[ "$1" == "all" ]]; then
         native-translation \
         jtml \
         tasks \
-        panels
+        panels \
+        mrpc
 fi
 
 for name in "$@"; do

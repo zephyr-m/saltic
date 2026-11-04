@@ -1,0 +1,62 @@
+-- mrpc — тест mRPC/1.0 агента без железа (network.mrpc): узнавание запроса,
+-- разбор cmd и id, текст старой команды из параметров, ответы ok / error,
+-- обрезка длинного текста по границе буквы, unknown_cmd со списком.
+-- Запуск: tests/run.sh mrpc; эталона нет — только проверки.
+--
+-- same(a, b) -> yes/no — группы байтов равны поэлементно (== сравнивает ссылки)
+-- program() -> none; TestsFailed
+
+use core.group
+use craft.testing
+use os.target.uefi_x86_64.network.mrpc
+use os.target.uefi_x86_64.platform.utf8
+
+skill same(a, b) {
+    ((group.count(a) == group.count(b)) == no) { out no }
+    drum (group.count(a)) {
+        ((group.get(a, beat) == group.get(b, beat)) == no) { out no }
+    }
+    out yes
+}
+
+skill registry() {
+    out [
+        mrpc.Command { name = "info", kind = "query", about = "о себе" },
+        mrpc.Command { name = "mem", kind = "query", params = ["address"], options = ["bytes"], about = "память" }
+    ]
+}
+
+program() {
+    @suite = testing.test_new()
+    suite = testing.test_yes(suite, "запрос: объект с пробелом впереди", mrpc.is_request(utf8.encode(" \{\"cmd\":\"info\"\}")))
+    suite = testing.test_yes(suite, "запрос: текстовая команда — не mRPC", mrpc.is_request(utf8.encode("info")) == no)
+    suite = testing.test_yes(suite, "запрос: пустой — не mRPC", mrpc.is_request([]) == no)
+
+    @call = mrpc.decode("\{\"cmd\":\"mem\",\"id\":\"к1\",\"address\":\"1000\",\"bytes\":16\}")
+    suite = testing.test_yes(suite, "decode: разобран", call.ok)
+    suite = testing.test_equal(suite, "decode: cmd", call.cmd, "mem")
+    suite = testing.test_yes(suite, "decode: id строкой в кавычках", same(call.id, utf8.encode("\"к1\"")))
+    @command = mrpc.find(registry(), "mem")
+    @line = mrpc.line(call, command)
+    suite = testing.test_equal(suite, "line: параметры по порядку", line.text, "mem 1000 16")
+    @bare = mrpc.line(mrpc.decode("\{\"cmd\":\"mem\"\}"), command)
+    suite = testing.test_yes(suite, "line: нет обязательного", bare.ok == no)
+    suite = testing.test_equal(suite, "line: имя недостающего", bare.param, "address")
+    suite = testing.test_yes(suite, "find: нет такой", mrpc.find(registry(), "nope") == none)
+    @broken = mrpc.decode("\{cmd")
+    suite = testing.test_yes(suite, "decode: не JSON", broken.ok == no)
+    @array = mrpc.decode("[1]")
+    suite = testing.test_equal(suite, "decode: не объект", array.message, "запрос mRPC — объект JSON")
+
+    @info = mrpc.decode("\{\"cmd\":\"info\",\"id\":7\}")
+    @good = mrpc.success(info, utf8.encode("строка \"1\"\nвторая"), 0, 1400)
+    suite = testing.test_yes(suite, "success: UTF-8 как есть, \\\" и \\n", same(good, utf8.encode("\{\"ok\":true,\"cmd\":\"info\",\"id\":7,\"v\":\"mRPC/1.0\",\"ms\":0,\"data\":\{\"text\":\"строка \\\"1\\\"\\nвторая\"\}\}")))
+    @short = mrpc.success(info, utf8.encode("жжжжжжжжжж"), 1000, 95)
+    suite = testing.test_yes(suite, "success: обрезка по букве с cut", same(short, utf8.encode("\{\"ok\":true,\"cmd\":\"info\",\"id\":7,\"v\":\"mRPC/1.0\",\"ms\":1000,\"data\":\{\"text\":\"ж\",\"cut\":true\}\}")))
+    @bad = mrpc.failure(info, "missing_param", "нужен параметр name", "name", 0)
+    suite = testing.test_yes(suite, "failure: код, сообщение, param", same(bad, utf8.encode("\{\"ok\":false,\"cmd\":\"info\",\"id\":7,\"v\":\"mRPC/1.0\",\"ms\":0,\"error\":\{\"code\":\"missing_param\",\"message\":\"нужен параметр name\",\"param\":\"name\"\}\}")))
+    @odd = mrpc.decode("\{\"cmd\":\"zz\"\}")
+    @lost = mrpc.unknown(odd, registry(), 0)
+    suite = testing.test_yes(suite, "unknown: список команд", same(lost, utf8.encode("\{\"ok\":false,\"cmd\":\"zz\",\"v\":\"mRPC/1.0\",\"ms\":0,\"error\":\{\"code\":\"unknown_cmd\",\"message\":\"нет команды zz; список — help\"\},\"commands\":[\"info\",\"mem\"]\}")))
+    out testing.test_finish(suite)
+}

@@ -1,0 +1,271 @@
+-- mrpc — mRPC/1.0 поверх UDP: одна датаграмма — один объект JSON. Запрос
+-- {"cmd": имя, "id": …, параметры…}; ответ — ok, cmd, v, ms, id (если был),
+-- data { text[, cut] } или error { code, message[, param] }. Строки ответа —
+-- UTF-8 как есть, чтобы русский текст влез в датаграмму. ms — с точностью
+-- часов прошивки (на Acer — секунды). Реестр команд даёт вызывающий.
+--
+-- Command { name, kind, params, options, about } / Call { ok, cmd, id,
+--     request, message } / Line { ok, text, param }
+-- is_request(bytes) -> yes, если первый непробельный байт — {
+-- decode(text) -> Call; ok = no и message, если это не объект с cmd
+-- find(registry, name) -> Command или none
+-- line(call, command) -> Line — текст старой команды; ok = no и param, если
+--     нет обязательного параметра
+-- success(call, bytes, ms, limit) / failure(call, code, message, param, ms) /
+--     unknown(call, registry, ms) / help(call, registry, ms) /
+--     describe(call, registry, ms) -> байты ответа
+
+use core.num
+use core.group
+use os.target.uefi_x86_64.platform.utf8
+use craft.protocols.data.json
+use craft.protocols.data.json.value
+use craft.protocols.data.json.reader
+
+VERSION = "mRPC/1.0"
+OPEN_BRACE = 123
+QUOTE = 34
+BACKSLASH = 92
+SPACES = [32, 9, 10, 13]
+HEX = "0123456789abcdef"
+
+Command = Box {
+    name = "",
+    kind = "raw",
+    params = [],
+    options = [],
+    about = ""
+}
+
+Call = Box {
+    ok = no,
+    cmd = "",
+    id = [],
+    request = json.Value {},
+    message = ""
+}
+
+Line = Box {
+    ok = no,
+    text = "",
+    param = ""
+}
+
+Escaped = Box {
+    bytes = [],
+    cut = no
+}
+
+skill is_request(bytes) {
+    drum (group.count(bytes)) {
+        @byte = group.get(bytes, beat)
+        (group.contains(SPACES, byte) == no) {
+            (byte == OPEN_BRACE) { out yes }
+            out no
+        }
+    }
+    out no
+}
+
+skill unit_bytes(code) {
+    (code < 128) { out [code] }
+    (code < 2048) { out [192 + code / 64, 128 + num.mod(code, 64)] }
+    (code < 65536) { out [224 + code / 4096, 128 + num.mod(code / 64, 64), 128 + num.mod(code, 64)] }
+    out [240 + code / 262144, 128 + num.mod(code / 4096, 64), 128 + num.mod(code / 64, 64), 128 + num.mod(code, 64)]
+}
+
+skill text_bytes(text) {
+    @bytes = []
+    drum (group.count(text.units)) { bytes = group.concat(bytes, unit_bytes(group.get(text.units, beat))) }
+    out bytes
+}
+
+skill plain(item) {
+    (value.is_kind(item, json.JsonKind.STRING) == yes) {
+        @bytes = text_bytes(item.string)
+        out utf8.decode(bytes, 0, group.count(bytes))
+    }
+    (value.is_kind(item, json.JsonKind.NUMBER) == yes) { out item.number }
+    (value.is_kind(item, json.JsonKind.ANSWER) == yes) {
+        (item.answer == yes) { out "yes" }
+        out "no"
+    }
+    out ""
+}
+
+skill escape_byte(byte) {
+    (byte == QUOTE) { out [BACKSLASH, QUOTE] }
+    (byte == BACKSLASH) { out [BACKSLASH, BACKSLASH] }
+    (byte == 10) { out [BACKSLASH, 110] }
+    (byte == 13) { out [BACKSLASH, 114] }
+    (byte == 9) { out [BACKSLASH, 116] }
+    (byte < 32) { out group.concat(utf8.encode("\\u00"), [str_byte(HEX, byte / 16), str_byte(HEX, num.mod(byte, 16))]) }
+    out [byte]
+}
+
+skill str_byte(text, index) {
+    @bytes = utf8.encode(text)
+    out group.get(bytes, index)
+}
+
+skill letter_length(lead) {
+    (lead < 192) { out 1 }
+    (lead < 224) { out 2 }
+    (lead < 240) { out 3 }
+    out 4
+}
+
+skill escape(bytes, budget) {
+    @done = []
+    @next_at = 0
+    @count = group.count(bytes)
+    drum (count) {
+        ((beat < next_at) == no) {
+            @length = letter_length(group.get(bytes, beat))
+            (beat + length > count) { length = count - beat }
+            @piece = group.slice(bytes, beat, beat + length)
+            (length == 1) { piece = escape_byte(group.get(bytes, beat)) }
+            (group.count(done) + group.count(piece) > budget) { out Escaped { bytes = done, cut = yes } }
+            done = group.concat(done, piece)
+            next_at = beat + length
+        }
+    }
+    out Escaped { bytes = done }
+}
+
+skill quoted(bytes) {
+    @inner = escape(bytes, group.count(bytes) * 6)
+    out group.add(group.concat([QUOTE], inner.bytes), QUOTE)
+}
+
+skill quoted_text(text) {
+    out quoted(utf8.encode(text))
+}
+
+skill decode(text) {
+    @read = reader.parse(text)
+    (read.ok == no) { out Call { message = read.message } }
+    (value.is_kind(read.value, json.JsonKind.OBJECT) == no) { out Call { message = "запрос mRPC — объект JSON" } }
+    @cmd = value.get(read.value, "cmd")
+    (cmd.found == no) { out Call { message = "нет поля cmd" } }
+    (value.is_kind(cmd.value, json.JsonKind.STRING) == no) { out Call { message = "cmd — строка" } }
+    @id = value.get(read.value, "id")
+    @id_bytes = []
+    (id.found == yes) {
+        id_bytes = utf8.encode(plain(id.value))
+        @given = id.value
+        (value.is_kind(given, json.JsonKind.STRING) == yes) { id_bytes = quoted(text_bytes(given.string)) }
+    }
+    out Call { ok = yes, cmd = plain(cmd.value), id = id_bytes, request = read.value }
+}
+
+skill find(registry, name) {
+    drum (group.count(registry)) {
+        @command = group.get(registry, beat)
+        (command.name == name) { out command }
+    }
+    out none
+}
+
+skill line(call, command) {
+    @text = command.name
+    drum (group.count(command.params)) {
+        @param = group.get(command.params, beat)
+        @given = value.get(call.request, param)
+        (given.found == no) { out Line { param = param } }
+        @said = plain(given.value)
+        text = "{text} {said}"
+    }
+    drum (group.count(command.options)) {
+        @option = group.get(command.options, beat)
+        @given = value.get(call.request, option)
+        (given.found == yes) {
+            @said = plain(given.value)
+            text = "{text} {said}"
+        }
+    }
+    out Line { ok = yes, text = text }
+}
+
+skill head(call, ok, ms) {
+    @answer = "false"
+    (ok == yes) { answer = "true" }
+    @bytes = group.concat(utf8.encode("\{\"ok\":{answer},\"cmd\":"), quoted_text(call.cmd))
+    (group.count(call.id) > 0) { bytes = group.concat(group.concat(bytes, utf8.encode(",\"id\":")), call.id) }
+    out group.concat(bytes, utf8.encode(",\"v\":\"{VERSION}\",\"ms\":{ms}"))
+}
+
+skill success(call, bytes, ms, limit) {
+    @start = group.concat(head(call, yes, ms), utf8.encode(",\"data\":\{\"text\":\""))
+    @room = limit - group.count(start) - 20
+    @text = escape(bytes, room)
+    @tail = "\"\}\}"
+    (text.cut == yes) { tail = "\",\"cut\":true\}\}" }
+    out group.concat(group.concat(start, text.bytes), utf8.encode(tail))
+}
+
+skill failure(call, code, message, param, ms) {
+    @bytes = group.concat(head(call, no, ms), utf8.encode(",\"error\":\{\"code\":\"{code}\",\"message\":"))
+    bytes = group.concat(bytes, quoted_text(message))
+    (group.count(utf8.encode(param)) > 0) { bytes = group.concat(group.concat(bytes, utf8.encode(",\"param\":")), quoted_text(param)) }
+    out group.concat(bytes, utf8.encode("\}\}"))
+}
+
+skill names(items) {
+    @bytes = [91]
+    drum (group.count(items)) {
+        (beat > 0) { bytes = group.add(bytes, 44) }
+        bytes = group.concat(bytes, quoted_text(group.get(items, beat)))
+    }
+    out group.add(bytes, 93)
+}
+
+skill unknown(call, registry, ms) {
+    @bytes = failure(call, "unknown_cmd", "нет команды {call.cmd}; список — help", "", ms)
+    bytes = group.slice(bytes, 0, group.count(bytes) - 1)
+    @all = []
+    drum (group.count(registry)) {
+        @command = group.get(registry, beat)
+        all = group.add(all, command.name)
+    }
+    out group.concat(group.concat(bytes, utf8.encode(",\"commands\":")), group.concat(names(all), utf8.encode("\}")))
+}
+
+skill entry(command) {
+    @bytes = group.concat(utf8.encode("\{\"type\":"), quoted_text(command.kind))
+    bytes = group.concat(group.concat(bytes, utf8.encode(",\"params\":")), names(command.params))
+    (group.count(command.options) > 0) {
+        bytes = group.concat(bytes, utf8.encode(",\"options\":\{"))
+        drum (group.count(command.options)) {
+            (beat > 0) { bytes = group.add(bytes, 44) }
+            bytes = group.concat(group.concat(bytes, quoted_text(group.get(command.options, beat))), utf8.encode(":null"))
+        }
+        bytes = group.add(bytes, 125)
+    }
+    out bytes
+}
+
+skill help(call, registry, ms) {
+    @bytes = group.concat(head(call, yes, ms), utf8.encode(",\"data\":\{\"commands\":\{"))
+    drum (group.count(registry)) {
+        @command = group.get(registry, beat)
+        (beat > 0) { bytes = group.add(bytes, 44) }
+        bytes = group.concat(group.concat(group.concat(bytes, quoted_text(command.name)), [58]), group.add(entry(command), 125))
+    }
+    @total = group.count(registry)
+    out group.concat(bytes, utf8.encode("\},\"total\":{total}\}\}"))
+}
+
+skill describe(call, registry, ms) {
+    @asked = value.get(call.request, "command")
+    (asked.found == no) { out failure(call, "missing_param", "нужен параметр command", "command", ms) }
+    @name = plain(asked.value)
+    @command = find(registry, name)
+    (command == none) { out failure(call, "not_found", "нет команды {name}", "command", ms) }
+    @bytes = group.concat(head(call, yes, ms), utf8.encode(",\"data\":\{\"name\":"))
+    bytes = group.concat(group.concat(bytes, quoted_text(name)), utf8.encode(","))
+    @body = entry(command)
+    bytes = group.concat(bytes, group.slice(body, 1, group.count(body)))
+    bytes = group.concat(group.concat(bytes, utf8.encode(",\"description\":")), quoted_text(command.about))
+    out group.concat(bytes, utf8.encode("\}\}"))
+}

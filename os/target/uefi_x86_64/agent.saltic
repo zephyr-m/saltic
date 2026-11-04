@@ -1,6 +1,7 @@
 -- agent — программа-агент для Acer: слушает команды по UDP (10.0.0.2:5555),
 -- принимает программы по порту 5556, запускает их, держит полку на диске.
--- Только x86_64-uefi; куча 1073741824. Никогда не выходит. Команды — HELP.
+-- Только x86_64-uefi; куча 1073741824. Никогда не выходит. Команды — реестр
+-- agent.commands; на том же порту — mRPC/1.0 (пакет-объект JSON, network.mrpc).
 -- Agent — всё состояние цикла; card.base — guest_base. Ответ на команду —
 -- текст до REPLY_LIMIT байт плюс вывод запущенной программы (reply.*).
 --
@@ -16,6 +17,8 @@
 --     device_list / information / draw_test / clear_screen / home_state /
 --     print_line / restart_later(agent[, words|payload]) -> текст ответа команды
 -- execute(agent, text, payload) -> текст — разбор команды по первому слову
+-- mrpc_reply(agent, packet) -> байты ответа mRPC: help/describe, иначе
+--     текст команды из реестра → execute
 -- link_russian(status) -> текст линка / has_link(card) -> yes/no
 -- refresh_shelf(agent) / open_program(agent) / press(agent, key) — полка и клавиши
 -- answer(agent, bytes) -> agent — UDP-команда или кусок shot; команда и ответ —
@@ -63,8 +66,11 @@ use os.target.uefi_x86_64.screen.system_panel
 use os.target.uefi_x86_64.agent.programs
 use os.target.uefi_x86_64.agent.shelf
 use os.target.uefi_x86_64.agent.saver
+use os.target.uefi_x86_64.agent.commands
+use os.target.uefi_x86_64.network.mrpc
+use os.target.uefi_x86_64.platform.utf8
 
-VERSION = 12
+VERSION = 13
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -77,7 +83,6 @@ PAGE_BYTES = 4096
 REPORT_EVERY = 32768
 MY_IP = [10, 0, 0, 2]
 LISTEN_ROUNDS = 200000000
-HELP = "команды: help — эта справка | info — о себе | pci — устройства | mem <адрес hex> [байт, до 64] — память | echo <текст> | upload <байт> — принять программу | check — что принято | run — запустить принятое | screen — проверочная картинка | print <текст> — напечатать своим шрифтом | clear — очистить экран (после run экран у программы, лента молчит до clear) | volumes — файловые системы и их папки EFI (только чтение) | prepare-disk — какой диск будет стёрт; prepare-disk ERASE-ACER-DISK — стереть и разметить | install — записать принятую программу на диск | usb — устройства USB | camera — что умеет камера | code <текст> — показать кусок кода | keep <имя> — сохранить принятую программу на диск, она появится в панели (Enter — открыть) | open <имя> — открыть программу из панели (ответ сразу, программа — следом) | state — где я и что вокруг текстом; в программе: state, quit (выйти), shot | time — дата и время | reboot — перезагрузить ноутбук | shot — снимок экрана (забирает tools/shot.py)"
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -241,13 +246,13 @@ skill information(agent) {
     @held = agent.bay_pages * PAGE_BYTES / 1024
     @link = link_russian(rtl8111.status(agent.card))
     @frames = agent.frames
-    @commands = agent.commands
+    @handled = agent.commands
     @arp = agent.arp
     @failures = agent.failures
     @last_error = agent.last_error
     @columns = agent.columns
     @rows = agent.rows
-    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}, приём программ {bay}, своих страниц {held} КБ, предел {limit} байт\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
+    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}, приём программ {bay}, своих страниц {held} КБ, предел {limit} байт\nкадров {frames}, команд {handled}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
 }
 
 skill draw_test(agent) {
@@ -416,7 +421,7 @@ skill device_list(agent) {
 skill execute(agent, text, payload) {
     @words = str.split(text, " ")
     @name = group.get(words, 0)
-    (name == "help") { out HELP }
+    (name == "help") { out commands.help_text() }
     (name == "info") { out information(agent) }
     (name == "pci") { out device_list(agent) }
     (name == "mem") { out memory_dump(agent, words) }
@@ -444,7 +449,30 @@ skill execute(agent, text, payload) {
     (name == "prepare-disk") { out prepare_disk(agent, words) }
     (name == "install") { out install_image(agent) }
     (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
-    out "не знаю команду '{name}'. {HELP}"
+    @help = commands.help_text()
+    out "не знаю команду '{name}'. {help}"
+}
+
+skill mrpc_reply(agent, packet) {
+    @started = day_second(agent.card.base)
+    @call = mrpc.decode(packet.text)
+    @registry = commands.registry()
+    (call.ok == no) { out mrpc.failure(call, "invalid_param", call.message, "", 0) }
+    (call.cmd == "help") { out mrpc.help(call, registry, 0) }
+    (call.cmd == "describe") { out mrpc.describe(call, registry, 0) }
+    @command = mrpc.find(registry, call.cmd)
+    (command == none) { out mrpc.unknown(call, registry, 0) }
+    @line = mrpc.line(call, command)
+    (line.ok == no) { out mrpc.failure(call, "missing_param", "нужен параметр {line.param}", line.param, 0) }
+    @said = execute(agent, line.text, utf8.encode(line.text)) rescue |err| {
+        @spent = num.mod(day_second(agent.card.base) - started + DAY_SECONDS, DAY_SECONDS) * 1000
+        out mrpc.failure(call, "internal", "{err}", "", spent)
+    }
+    @bytes = utf8.encode(said)
+    (group.count(agent.output) > 0) { bytes = group.concat(group.add(bytes, 10), agent.output) }
+    agent.output = []
+    @ms = num.mod(day_second(agent.card.base) - started + DAY_SECONDS, DAY_SECONDS) * 1000
+    out mrpc.success(call, bytes, ms, REPLY_LIMIT)
 }
 
 skill wait_second(base) {
@@ -484,11 +512,15 @@ skill answer(agent, bytes) {
     log(agent, "command from {who}: {command}")
     feed.show_command(agent, who, packet.payload)
     netlog.ask(agent.card.base, packet.payload)
-    @said = execute(agent, command, packet.payload) rescue |err| { "ошибка: {err}" }
-    @reply_bytes = feed.text_bytes(said, REPLY_LIMIT)
-    (group.count(agent.output) > 0) { reply_bytes = group.concat(group.add(reply_bytes, 10), agent.output) }
-    agent.output = []
-    (group.count(reply_bytes) > REPLY_LIMIT) { reply_bytes = group.slice(reply_bytes, 0, REPLY_LIMIT) }
+    @reply_bytes = []
+    (mrpc.is_request(packet.payload) == yes) { reply_bytes = mrpc_reply(agent, packet) }
+    (mrpc.is_request(packet.payload) == no) {
+        @said = execute(agent, command, packet.payload) rescue |err| { "ошибка: {err}" }
+        reply_bytes = feed.text_bytes(said, REPLY_LIMIT)
+        (group.count(agent.output) > 0) { reply_bytes = group.concat(group.add(reply_bytes, 10), agent.output) }
+        agent.output = []
+        (group.count(reply_bytes) > REPLY_LIMIT) { reply_bytes = group.slice(reply_bytes, 0, REPLY_LIMIT) }
+    }
     feed.show_reply(agent, reply_bytes)
     netlog.say(agent.card.base, reply_bytes)
     @frame = net.udp_frame_bytes(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply_bytes)
