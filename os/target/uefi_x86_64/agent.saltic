@@ -18,8 +18,10 @@
 --     print_line / restart_later(agent[, words|payload]) -> текст ответа команды
 -- execute(agent, text, payload) -> текст — разбор команды по первому слову
 -- key_reply(base, text) -> текст — нажатия в очередь keys (их читает press)
--- mrpc_reply(agent, packet) -> байты ответа mRPC: help/describe, иначе
---     текст команды из реестра → execute
+-- mrpc_reply(agent, packet) -> байты ответа mRPC: help/describe, info —
+--     полями (info_fields), иначе текст команды из реестра → execute
+-- Info { mac, ip, … } / gather(agent) -> Info — что знает о себе агент;
+--     information(agent) -> текст / info_fields(info) -> члены mrpc.data
 -- link_russian(status) -> текст линка / has_link(card) -> yes/no
 -- refresh_shelf(agent) / open_program(agent) / press(agent, key) — полка и клавиши
 -- answer(agent, bytes) -> agent — UDP-команда или кусок shot; команда и ответ —
@@ -70,6 +72,7 @@ use os.target.uefi_x86_64.agent.saver
 use os.target.uefi_x86_64.agent.commands
 use os.target.uefi_x86_64.platform.keys
 use os.target.uefi_x86_64.network.mrpc
+use os.target.uefi_x86_64.network.mrpc.data
 use os.target.uefi_x86_64.platform.utf8
 
 VERSION = 13
@@ -239,22 +242,79 @@ skill link_russian(status) {
     out "есть, {speed} Мбит/с, {duplex}"
 }
 
+Info = Box {
+    mac = "",
+    ip = "",
+    arena = "",
+    bay = "",
+    held = 0,
+    limit = 0,
+    link = "",
+    up = no,
+    mbps = 0,
+    full = no,
+    frames = 0,
+    handled = 0,
+    arp = 0,
+    columns = 0,
+    rows = 0,
+    failures = 0,
+    last_error = ""
+}
+
+skill gather(agent) {
+    @status = rtl8111.status(agent.card)
+    @mbps = 0
+    (rtl8111.has_bit(status, rtl8111.PHY_10) == yes) { mbps = 10 }
+    (rtl8111.has_bit(status, rtl8111.PHY_100) == yes) { mbps = 100 }
+    (rtl8111.has_bit(status, rtl8111.PHY_1000) == yes) { mbps = 1000 }
+    out Info {
+        mac = net.mac_text(agent.card.mac),
+        ip = net.ip_text(MY_IP),
+        arena = firmware.phys_text(firmware.arena(agent.card.base)),
+        bay = firmware.phys_text(agent.bay),
+        held = agent.bay_pages * PAGE_BYTES / 1024,
+        limit = agent.limit,
+        link = link_russian(status),
+        up = rtl8111.has_bit(status, rtl8111.PHY_LINK),
+        mbps = mbps,
+        full = rtl8111.has_bit(status, rtl8111.PHY_FULL_DUPLEX),
+        frames = agent.frames,
+        handled = agent.commands,
+        arp = agent.arp,
+        columns = agent.columns,
+        rows = agent.rows,
+        failures = agent.failures,
+        last_error = agent.last_error
+    }
+}
+
 skill information(agent) {
-    @mac = net.mac_text(agent.card.mac)
-    @ip = net.ip_text(MY_IP)
-    @arena = firmware.phys_text(firmware.arena(agent.card.base))
-    @bay = firmware.phys_text(agent.bay)
-    @limit = agent.limit
-    @held = agent.bay_pages * PAGE_BYTES / 1024
-    @link = link_russian(rtl8111.status(agent.card))
-    @frames = agent.frames
-    @handled = agent.commands
-    @arp = agent.arp
-    @failures = agent.failures
-    @last_error = agent.last_error
-    @columns = agent.columns
-    @rows = agent.rows
-    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}, приём программ {bay}, своих страниц {held} КБ, предел {limit} байт\nкадров {frames}, команд {handled}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
+    @info = gather(agent)
+    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {info.mac}, ip {info.ip}, udp-порт 5555\nлинк {info.link}\nарена DMA {info.arena}, приём программ {info.bay}, своих страниц {info.held} КБ, предел {info.limit} байт\nкадров {info.frames}, команд {info.handled}, ответов ARP {info.arp}\nэкран {info.columns} × {info.rows} символов\nсбоев в цикле {info.failures}, последний: {info.last_error}"
+}
+
+skill info_fields(info) {
+    @duplex = "half"
+    (info.full == yes) { duplex = "full" }
+    @link = [data.answer("up", info.up), data.number("mbps", info.mbps), data.text("duplex", duplex)]
+    @screen = [data.number("columns", info.columns), data.number("rows", info.rows)]
+    out [
+        data.number("agent", VERSION),
+        data.text("mac", info.mac),
+        data.text("ip", info.ip),
+        data.object("link", link),
+        data.text("arena", info.arena),
+        data.text("bay", info.bay),
+        data.number("bay_kb", info.held),
+        data.number("limit", info.limit),
+        data.number("frames", info.frames),
+        data.number("commands", info.handled),
+        data.number("arp", info.arp),
+        data.object("screen", screen),
+        data.number("failures", info.failures),
+        data.text("last_error", info.last_error)
+    ]
 }
 
 skill draw_test(agent) {
@@ -463,6 +523,7 @@ skill mrpc_reply(agent, packet) {
     (call.ok == no) { out mrpc.failure(call, "invalid_param", call.message, "", 0) }
     (call.cmd == "help") { out mrpc.help(call, registry, 0, REPLY_LIMIT) }
     (call.cmd == "describe") { out mrpc.describe(call, registry, 0) }
+    (call.cmd == "info") { out data.reply(call, info_fields(gather(agent)), 0) }
     @command = mrpc.find(registry, call.cmd)
     (command == none) { out mrpc.unknown(call, registry, 0) }
     @line = mrpc.line(call, command)

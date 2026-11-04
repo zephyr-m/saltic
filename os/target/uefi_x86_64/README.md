@@ -223,6 +223,10 @@ mRPC/1.0, 04.11.2026: агент и программы с `remote` понима�
 клавиатуры, поэтому агент и программы видят его как настоящее. Имена: esc,
 enter, tab, left, right, up, down, home, end, backspace, space; любой другой
 текст набирается по буквам. До 15 нажатий в очереди.
+В mRPC `info` отвечает полями (`agent`, `mac`, `ip`, `link {up, mbps, duplex}`,
+`arena`, `bay`, `bay_kb`, `limit`, `frames`, `commands`, `arp`, `screen {columns,
+rows}`, `failures`, `last_error`) — их строит `network/mrpc/data`; остальные
+команды пока отдают `data.text`.
 
 Кусок кода без пересборки агента, 02.11.2026: `tools/snippet.py` собирает
 маленькую программу (64 МБ) из куска и запускает её рядом с агентом; то,
