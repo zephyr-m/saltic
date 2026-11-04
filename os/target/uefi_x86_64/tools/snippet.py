@@ -32,10 +32,14 @@ def compiler():
     return str(shelf[-1])
 
 
-def bay_address():
+def bay_address(total):
+    """Причал агента под заливку total байт: upload заранее даёт ему страницы
+    нужного размера, upload.py потом получит те же."""
     asked = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     asked.settimeout(5)
     asked.bind(("10.0.0.1", 0))
+    asked.sendto(f"upload {total}".encode(), ("10.0.0.2", 5555))
+    asked.recvfrom(65535)
     asked.sendto(b"info", ("10.0.0.2", 5555))
     said = asked.recvfrom(65535)[0].decode(errors="replace")
     return int(said.split("приём программ ", 1)[1].split(",", 1)[0], 16)
@@ -72,7 +76,7 @@ source, image = work / "snippet.saltic", work / "snippet.efi"
 data = Path(os.environ["SNIPPET_DATA"]).read_bytes() if os.environ.get("SNIPPET_DATA") else b""
 constants = ""
 if data:
-    at = bay_address() + DATA_OFFSET
+    at = bay_address(DATA_OFFSET + len(data)) + DATA_OFFSET
     constants = f"\nDATA_HI = {at >> 16}\nDATA_LO = {at & 0xffff}\nDATA_BYTES = {len(data)}"
     print(f"snippet: данные {len(data)} байт лягут по адресу {at:08x}", flush=True)
 source.write_text(program(snippet, constants))
