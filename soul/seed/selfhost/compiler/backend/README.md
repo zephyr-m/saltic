@@ -16,7 +16,7 @@
 |---|---|---|---|
 | RV32I | `rv32i.saltic`, `rv32i/` | qemu-virt; RP2350 на ядрах RISC-V | ✅ есть — первый бэкенд, компромисс; уйдёт в архив с машиной-максимум (эпоха 5). `rv32i.Executor` — первый исполнитель договора; в `rv32i/` — всё RV32I из компилятора: `machine/` (команды, кодировщик, раскладка, ELF32), `assembler` (команды по номерам регистров для исполнителя) и `runtime/` (рантайм `rt_*` на договоре — общий для всех исполнителей, см. шаг 3 в `docs/fable/2026-11-03-runtime.md`) |
 | x86-64 перевод | `x86_64_translation.saltic`, `x86_64_translation/` | Linux, UEFI на Acer, Steam Deck | ✅ есть — переводит готовый RV32I |
-| x86-64 родной | `x86_64_native.saltic`, `x86_64_native/` | то же, но быстро | ✅ Linux (шаг 4): `Executor` на договоре, кодировщик, ELF64, цель `x86_64-native`; UEFI — шаг 5 |
+| x86-64 родной | `x86_64_native.saltic`, `x86_64_native/` | то же, но быстро | ✅ Linux (шаг 4): `Executor` на договоре, кодировщик, ELF64, цели `x86_64` и `x86_64-uefi` с 04.11.2026; агент на Acer — родной |
 | Thumb-2 | `thumb2/` | STM32H7, Teensy 4.1, RP2350 на ARM | ⬜ заглушка |
 | Xtensa | `xtensa/` | ESP32, ESP32-S3 | ⬜ заглушка |
 | ARM64 | `arm64/` | Raspberry Pi, Orange Pi, телефоны, Linux и Android | ⬜ заглушка |

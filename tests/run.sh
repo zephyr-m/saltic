@@ -29,7 +29,7 @@ host="${SALTIC_TEST_HOST:-rv32i}"
 source tests/metrics.sh
 
 run_built() {
-    if [[ "$host" == "x86_64" || "$host" == "x86_64-native" ]]; then
+    if [[ "$host" == x86_64* ]]; then
         measure run "$@"
     else
         measure run qemu-riscv32 -B 0x100000000 "$@"
@@ -190,19 +190,19 @@ test_edges() {
     SALTIC_TARGET=x86_64 build edges-x86_64 \
         tests/edges.saltic \
         "$work/edges/x86_64"
-    SALTIC_TARGET=x86_64-native build edges-x86_64-native \
+    SALTIC_TARGET=x86_64-translation build edges-x86_64-translation \
         tests/edges.saltic \
-        "$work/edges/x86_64-native"
+        "$work/edges/x86_64-translation"
     measure run qemu-riscv32 -B 0x100000000 "$work/edges/rv32i.elf" \
         >"$work/edges/rv32i.txt"
     measure run "$work/edges/x86_64" \
         >"$work/edges/x86_64.txt"
-    measure run "$work/edges/x86_64-native" \
-        >"$work/edges/x86_64-native.txt"
+    measure run "$work/edges/x86_64-translation" \
+        >"$work/edges/x86_64-translation.txt"
     diff -u tests/expected/edges.txt "$work/edges/rv32i.txt"
     diff -u tests/expected/edges.txt "$work/edges/x86_64.txt"
-    diff -u tests/expected/edges.txt "$work/edges/x86_64-native.txt"
-    echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i, x86_64 и x86_64-native"
+    diff -u tests/expected/edges.txt "$work/edges/x86_64-translation.txt"
+    echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i, x86_64 и x86_64-translation"
 }
 
 test_x86_encoder() {
@@ -242,7 +242,7 @@ test_dict() {
 test_platform() {
     mkdir -p "$work/platform"
     local target host_run
-    for target in rv32i x86_64 x86_64-native; do
+    for target in rv32i x86_64 x86_64-translation; do
         SALTIC_TARGET=$target build platform-$target tests/platform.saltic "$work/platform/$target"
         SALTIC_TARGET=$target build uncaught-$target tests/fixtures/uncaught.saltic "$work/platform/uncaught-$target"
         SALTIC_TARGET=$target build needs-args-$target tests/fixtures/needs-args.saltic "$work/platform/needs-args-$target"
@@ -261,7 +261,7 @@ test_platform() {
         test "$(<"$work/platform/needs-args-$target.txt")" = "нужно 2 аргументов"
         test "$("${host_run[@]}" "$work/platform/needs-args-$target" раз два)" = "раз два"
     done
-    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются — одинаково под rv32i, x86_64 и x86_64-native"
+    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются — одинаково под rv32i, x86_64 и x86_64-translation"
 }
 
 test_memory() {
@@ -387,9 +387,9 @@ test_uefi() {
     SALTIC_UEFI_DIR="$work/uefi" bash os/target/uefi_x86_64/run.sh --check
 }
 
-test_uefi_native() {
-    SALTIC_TARGET=x86_64-uefi-native SALTIC_UEFI_DIR="$work/uefi-native" bash os/target/uefi_x86_64/build.sh
-    SALTIC_UEFI_DIR="$work/uefi-native" bash os/target/uefi_x86_64/run.sh --check
+test_uefi_translation() {
+    SALTIC_TARGET=x86_64-uefi-translation SALTIC_UEFI_DIR="$work/uefi-translation" bash os/target/uefi_x86_64/build.sh
+    SALTIC_UEFI_DIR="$work/uefi-translation" bash os/target/uefi_x86_64/run.sh --check
 }
 
 test_jtml() {
@@ -457,8 +457,8 @@ run_case() {
         memory) test_memory ;;
         platform) test_platform ;;
         native) test_native ;;
-        native-x86) SALTIC_NATIVE_TARGET=x86_64-native test_native ;;
-        uefi-native) test_uefi_native ;;
+        native-translation) SALTIC_NATIVE_TARGET=x86_64-translation test_native ;;
+        uefi-translation) test_uefi_translation ;;
         qemu-virt) test_qemu_virt ;;
         uefi) test_uefi ;;
         jtml) test_jtml ;;
@@ -476,7 +476,7 @@ if (( $# == 0 )); then
 fi
 
 if [[ "$1" == "platforms" ]]; then
-    set -- qemu-virt uefi uefi-native closure
+    set -- qemu-virt uefi uefi-translation closure
 elif [[ "$1" == "all" ]]; then
     set -- \
         checker \
@@ -495,7 +495,7 @@ elif [[ "$1" == "all" ]]; then
         memory \
         platform \
         native \
-        native-x86 \
+        native-translation \
         jtml \
         tasks
 fi

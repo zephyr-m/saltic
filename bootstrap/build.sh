@@ -75,7 +75,7 @@ fi
 
 magic="$(od -An -tx1 -N4 "$compiler_output" | tr -d '[:space:]')"
 expected="7f454c46"
-[[ "$target" == "x86_64-uefi" || "$target" == "x86_64-uefi-native" ]] && expected="4d5a"
+[[ "$target" == x86_64-uefi* ]] && expected="4d5a"
 if [[ "${magic:0:${#expected}}" != "$expected" ]]; then
     echo "bootstrap build: компилятор не создал образ (ожидалась подпись $expected)" >&2
     exit 1
