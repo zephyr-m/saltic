@@ -1,29 +1,32 @@
--- host — рантайм хоста: вывод, выход, файлы, текст значений и ошибок,
--- вызовы процессора и прошивки (syscall договора с номерами из core.system).
+-- host — рантайм хоста: вывод, выход и ошибки входа, файлы, текст значений
+-- и ошибок, команды процессора и прошивки. Всё платформенное идёт через
+-- метки договора платформы (compiler/platform): rt_platform_write / exit /
+-- file_read / file_write / wait / firmware / call.
 -- Каждый навык берёт и отдаёт compiler, определяя метку rt_* в коде.
 -- Команды — методами compiler.executor (договор backend), регистры — его роли.
--- rt_platform_write/exit — только для Linux; на qemu-virt и UEFI их даёт
--- платформа, поэтому runtime.append_runtime_common их не включает.
 --
--- emit_platform_write / emit_platform_exit(compiler) — write / exit Linux
--- emit_newline(compiler) — rt_newline; emit_missing_args(compiler) — выход
+-- emit_newline(compiler) — rt_newline
+-- emit_missing_args(compiler) — rt_missing_args(VALUE n): «нужно n аргументов», выход 64
+-- emit_start_failure(compiler) — rt_start_failure(VALUE id): «ошибка: Имя», выход 1
+-- emit_show_text(compiler, label) — печать статической строки rodata через rt_show
 -- emit_show(compiler) — rt_show: строка, число, yes/no, ошибка
 -- emit_value_text(compiler) — rt_value_text -> строка для "{…}"
 -- emit_error_text(compiler) — rt_error_text: имя ошибки по id (системные и
 --     пользовательские); emit_error_case / error_text_label — части
--- emit_file_read / emit_file_write(compiler) — rt_file_read / rt_file_write
---     (строка, до 1 МБ чтения); emit_file_error — ERROR_FILE
--- emit_file_write_bytes / emit_file_write_byte_group(compiler) — группа
---     байтов (чисел 0–255) в файл
--- emit_cpu_wait / emit_cpu_fence(compiler) — wfi / fence
--- emit_cpu_firmware / emit_cpu_call(compiler) — syscall в прошивку
+-- emit_file_write_bytes(compiler) — rt_file_write_bytes(path, группа чисел 0–255)
+--     через rt_platform_file_write; emit_file_bytes_text — rt_file_bytes_text(группа,
+--     count, cells) -> строка из байтов (cells = 1 — элементы-ячейки Box)
+-- emit_cpu_wait / emit_cpu_fence(compiler) — rt_platform_wait / fence
+-- emit_cpu_firmware / emit_cpu_call(compiler) — через rt_platform_firmware / call
 
 use selfhost.abi
 use core.process
-use core.system
 use selfhost.compiler.backend.rv32i.runtime.terminal
 use core.group
+
+EXIT_FAILURE = 1
 use selfhost.compiler.backend
+use selfhost.compiler.platform
 
 skill emit_newline(compiler) {
     @executor = compiler.executor
@@ -43,44 +46,59 @@ skill emit_newline(compiler) {
 skill emit_missing_args(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_missing_args")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -16)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 12)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 8)
+    compiler = emit_show_text(compiler, "rt_need_text")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 8)
+    compiler = executor.call(compiler, "rt_show")
+    compiler = emit_show_text(compiler, "rt_arguments_text")
+    compiler = executor.call(compiler, "rt_newline")
     compiler = executor.load_immediate(compiler, backend.VALUE, process.EXIT_MISSING_ARGUMENTS)
-    compiler = executor.jump(compiler, "rt_platform_exit")
-    out compiler
+    out executor.jump(compiler, platform.EXIT)
 }
 
-skill emit_platform_write(compiler) {
+skill emit_start_failure(compiler) {
     @executor = compiler.executor
-    compiler = executor.label(compiler, "rt_platform_write")
-    compiler = executor.syscall(compiler, system.SYSCALL_WRITE)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    compiler = executor.label(compiler, "rt_start_failure")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -16)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 12)
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_ERROR)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 8)
+    compiler = emit_show_text(compiler, "rt_failure_text")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 8)
+    compiler = executor.call(compiler, "rt_show")
+    compiler = executor.call(compiler, "rt_newline")
+    compiler = executor.load_immediate(compiler, backend.VALUE, EXIT_FAILURE)
+    out executor.jump(compiler, platform.EXIT)
 }
 
-skill emit_platform_exit(compiler) {
+skill emit_show_text(compiler, label) {
     @executor = compiler.executor
-    compiler = executor.label(compiler, "rt_platform_exit")
-    out executor.syscall(compiler, system.SYSCALL_EXIT)
+    compiler = executor.load_address(compiler, backend.VALUE, label, 0)
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    out executor.call(compiler, "rt_show")
 }
-
 skill emit_cpu_firmware(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_cpu_firmware")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -16)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 12)
     compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
-    compiler = executor.syscall(compiler, system.SYSCALL_FIRMWARE)
+    compiler = executor.call(compiler, platform.FIRMWARE)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 12)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 16)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_cpu_firmware_done")
     compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.label(compiler, ".L_cpu_firmware_done")
     out executor.ret(compiler)
 }
-
 skill emit_cpu_wait(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_cpu_wait")
-    compiler = executor.wait(compiler)
-    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    out executor.jump(compiler, platform.WAIT)
 }
-
 skill emit_cpu_fence(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_cpu_fence")
@@ -90,185 +108,68 @@ skill emit_cpu_fence(compiler) {
     out executor.ret(compiler)
 }
 
-skill emit_file_write(compiler) {
-    @executor = compiler.executor
-    compiler = executor.label(compiler, "rt_file_write")
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
-    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 28)
-    compiler = executor.store(compiler, backend.ERROR, backend.STACK, 24)
-    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
-    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load_immediate(compiler, backend.VALUE, -100)
-    compiler = executor.load_immediate(compiler, backend.ARG2, 577)
-    compiler = executor.load_immediate(compiler, backend.ARG3, 420)
-    compiler = executor.syscall(compiler, system.SYSCALL_OPENAT)
-    compiler = executor.branch_negative(compiler, backend.VALUE, "rt_file_error")
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 20)
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 24)
-    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.PAYLOAD_MASK)
-    compiler = executor.load(compiler, backend.ARG2, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET)
-    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 20)
-    compiler = executor.syscall(compiler, system.SYSCALL_WRITE)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 20)
-    compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
-    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
-    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 28)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 32)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
-}
-
-skill emit_file_error(compiler) {
-    @executor = compiler.executor
-    compiler = executor.label(compiler, "rt_file_error")
-    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_FILE)
-    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 28)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 32)
-    out executor.ret(compiler)
-}
-
-skill emit_file_read(compiler) {
-    @executor = compiler.executor
-    compiler = executor.label(compiler, "rt_file_read")
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
-    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 28)
-    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
-    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load_immediate(compiler, backend.VALUE, -100)
-    compiler = executor.load_immediate(compiler, backend.ARG2, 0)
-    compiler = executor.load_immediate(compiler, backend.ARG3, 0)
-    compiler = executor.syscall(compiler, system.SYSCALL_OPENAT)
-    compiler = executor.branch_negative(compiler, backend.VALUE, "rt_file_error")
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 24)
-    compiler = executor.load_immediate(compiler, backend.VALUE, 1048581)
-    compiler = executor.call(compiler, "rt_alloc")
-    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
-    compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 20)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 24)
-    compiler = executor.load(compiler, backend.ERROR, backend.STACK, 20)
-    compiler = executor.add_immediate(compiler, backend.ERROR, backend.ERROR, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load_immediate(compiler, backend.ARG2, 1048576)
-    compiler = executor.syscall(compiler, system.SYSCALL_READ)
-    compiler = executor.branch_negative(compiler, backend.VALUE, "rt_file_error")
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 20)
-    compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET)
-    compiler = executor.add(compiler, backend.SCRATCH1, backend.SCRATCH0, backend.VALUE)
-    compiler = executor.store_byte_zero(compiler, backend.SCRATCH1, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 24)
-    compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 20)
-    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
-    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 28)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 32)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
-}
-
 skill emit_file_write_bytes(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_file_write_bytes")
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
-    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 28)
-    compiler = executor.store(compiler, backend.ERROR, backend.STACK, 24)
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 4)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -16)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 12)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 8)
     compiler = executor.move(compiler, backend.VALUE, backend.ERROR)
     compiler = executor.call(compiler, "rt_group_flatten")
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 24)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 4)
     compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
-    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load_immediate(compiler, backend.VALUE, -100)
-    compiler = executor.load_immediate(compiler, backend.ARG2, 577)
-    compiler = executor.load_immediate(compiler, backend.ARG3, 420)
-    compiler = executor.syscall(compiler, system.SYSCALL_OPENAT)
-    compiler = executor.branch_negative(compiler, backend.VALUE, "rt_file_error")
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 20)
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 24)
-    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.PAYLOAD_MASK)
-    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET)
-    compiler = executor.store(compiler, backend.SCRATCH1, backend.STACK, 12)
-    compiler = executor.branch_zero(compiler, backend.SCRATCH1, ".L_file_write_bytes_close")
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 20)
-    compiler = executor.load(compiler, backend.ERROR, backend.STACK, 24)
-    compiler = executor.load(compiler, backend.ARG2, backend.STACK, 12)
-    compiler = executor.load_immediate(compiler, backend.ARG3, 0)
-    compiler = executor.call(compiler, "rt_file_write_byte_group")
-    compiler = executor.branch_negative(compiler, backend.VALUE, "rt_file_error")
-    compiler = executor.label(compiler, ".L_file_write_bytes_close")
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 20)
-    compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
-    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
-    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 28)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 32)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.load(compiler, backend.ERROR, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 0)
+    compiler = executor.call(compiler, "rt_file_bytes_text")
+    compiler = executor.move(compiler, backend.ERROR, backend.VALUE)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 8)
+    compiler = executor.call(compiler, platform.FILE_WRITE)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 12)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 16)
     out executor.ret(compiler)
 }
-
-skill emit_file_write_byte_group(compiler) {
+skill emit_file_bytes_text(compiler) {
     @executor = compiler.executor
-    compiler = executor.label(compiler, "rt_file_write_byte_group")
+    compiler = executor.label(compiler, "rt_file_bytes_text")
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
     compiler = executor.store(compiler, backend.RETURN, backend.STACK, 28)
     compiler = executor.store(compiler, backend.VALUE, backend.STACK, 24)
     compiler = executor.store(compiler, backend.ERROR, backend.STACK, 20)
     compiler = executor.store(compiler, backend.ARG2, backend.STACK, 16)
-    compiler = executor.store(compiler, backend.ARG3, backend.STACK, 12)
-    compiler = executor.move(compiler, backend.VALUE, backend.ERROR)
-    compiler = executor.call(compiler, "rt_group_flatten")
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 20)
-    compiler = executor.move(compiler, backend.ERROR, backend.VALUE)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 24)
-    compiler = executor.load(compiler, backend.ARG2, backend.STACK, 16)
-    compiler = executor.load(compiler, backend.ARG3, backend.STACK, 12)
-    compiler = executor.branch_zero(compiler, backend.ARG2, ".L_file_write_byte_group_empty")
-    compiler = executor.add_immediate(compiler, backend.VALUE, backend.ARG2, 5)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.ERROR, 5)
     compiler = executor.call(compiler, "rt_alloc")
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
     compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, 16)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, 20)
     compiler = executor.store(compiler, backend.SCRATCH1, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET)
     compiler = executor.store(compiler, backend.VALUE, backend.STACK, 8)
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 20)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 24)
     compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.PAYLOAD_MASK)
-    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, 16)
     compiler = executor.load(compiler, backend.SCRATCH2, backend.STACK, 8)
     compiler = executor.load_immediate(compiler, backend.SCRATCH3, 0)
-    compiler = executor.label(compiler, ".L_file_write_byte_group_copy")
-    compiler = executor.branch_equal(compiler, backend.SCRATCH3, backend.SCRATCH1, ".L_file_write_byte_group_ready")
+    compiler = executor.label(compiler, ".L_file_bytes_text_copy")
+    compiler = executor.branch_equal(compiler, backend.SCRATCH3, backend.SCRATCH1, ".L_file_bytes_text_ready")
     compiler = executor.shift_left(compiler, backend.SCRATCH4, backend.SCRATCH3, 2)
     compiler = executor.add(compiler, backend.SCRATCH4, backend.SCRATCH0, backend.SCRATCH4)
     compiler = executor.load(compiler, backend.SCRATCH5, backend.SCRATCH4, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load(compiler, backend.ARG2, backend.STACK, 12)
-    compiler = executor.branch_zero(compiler, backend.ARG2, ".L_file_write_byte_group_value")
+    compiler = executor.load(compiler, backend.ARG2, backend.STACK, 16)
+    compiler = executor.branch_zero(compiler, backend.ARG2, ".L_file_bytes_text_value")
     compiler = executor.and_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, abi.PAYLOAD_MASK)
     compiler = executor.load(compiler, backend.SCRATCH5, backend.SCRATCH5, abi.OBJECT_PAYLOAD_OFFSET + 8)
-    compiler = executor.label(compiler, ".L_file_write_byte_group_value")
+    compiler = executor.label(compiler, ".L_file_bytes_text_value")
     compiler = executor.shift_right_signed(compiler, backend.SCRATCH5, backend.SCRATCH5, abi.TAG_SHIFT)
-    compiler = executor.add(compiler, backend.ARG2, backend.SCRATCH2, backend.SCRATCH3)
-    compiler = executor.store_byte(compiler, backend.SCRATCH5, backend.ARG2, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.add(compiler, backend.SCRATCH4, backend.SCRATCH2, backend.SCRATCH3)
+    compiler = executor.store_byte(compiler, backend.SCRATCH5, backend.SCRATCH4, abi.OBJECT_PAYLOAD_OFFSET + 4)
     compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, 1)
-    compiler = executor.jump(compiler, ".L_file_write_byte_group_copy")
-    compiler = executor.label(compiler, ".L_file_write_byte_group_ready")
+    compiler = executor.jump(compiler, ".L_file_bytes_text_copy")
+    compiler = executor.label(compiler, ".L_file_bytes_text_ready")
     compiler = executor.add(compiler, backend.SCRATCH0, backend.SCRATCH2, backend.SCRATCH1)
     compiler = executor.store_byte_zero(compiler, backend.SCRATCH0, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 24)
-    compiler = executor.load(compiler, backend.ERROR, backend.STACK, 8)
-    compiler = executor.add_immediate(compiler, backend.ERROR, backend.ERROR, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load(compiler, backend.ARG2, backend.STACK, 16)
-    compiler = executor.syscall(compiler, system.SYSCALL_WRITE)
-    compiler = executor.jump(compiler, ".L_file_write_byte_group_return")
-    compiler = executor.label(compiler, ".L_file_write_byte_group_empty")
-    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
-    compiler = executor.label(compiler, ".L_file_write_byte_group_return")
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.SCRATCH2, abi.TAG_STRING)
     compiler = executor.load(compiler, backend.RETURN, backend.STACK, 28)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 32)
     compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
     out executor.ret(compiler)
 }
-
 skill emit_value_text(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_value_text")
@@ -395,14 +296,17 @@ skill emit_error_text(compiler) {
 skill emit_cpu_call(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_cpu_call")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -16)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 12)
     compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
     compiler = executor.shift_right_signed(compiler, backend.ERROR, backend.ERROR, abi.TAG_SHIFT)
-    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, 16)
-    compiler = executor.or(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
-    compiler = executor.syscall(compiler, system.SYSCALL_FIRMWARE_CALL)
+    compiler = executor.call(compiler, platform.CALL)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 12)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 16)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_cpu_call_done")
     compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, 16)
     compiler = executor.shift_right_unsigned(compiler, backend.VALUE, backend.VALUE, 16)
     compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.label(compiler, ".L_cpu_call_done")
     out executor.ret(compiler)
 }

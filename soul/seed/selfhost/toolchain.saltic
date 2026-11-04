@@ -1,7 +1,10 @@
 -- toolchain — компилятор Saltic как программа: исходник -> проверка -> машина
 -- RV32I -> образ для цели.
 -- Запуск: program(исходник, выход, куча_текстом, цель); цели rv32i (ELF),
--- x86_64 (перевод в x86-64), x86_64-uefi. Модули ищутся от текущей папки.
+-- x86_64 (перевод в x86-64), x86_64-uefi, x86_64-native и x86_64-uefi-native
+-- (родной x86-64: ELF64 Linux, PE32+ UEFI); x86_64-translation и
+-- x86_64-uefi-translation — те же переводные цели по явному имени (оракул).
+-- Модули ищутся от текущей папки.
 -- Если ближние вызовы не уложились — собирает заново с дальними.
 -- Исходник грузится с местами (parser.load_file_loc): дерево с обёртками
 -- ast.located идёт в чекер и кодоген как есть, кодоген читает узлы через
@@ -10,7 +13,11 @@
 --
 -- build(source_path, output_path, heap_text, target) -> none;
 --     ParseFailed, CheckFailed, ValueOutsideRange, UnknownTarget, WriteFailed
+-- build_machine(ast, heap_size, far_calls, firmware) -> машина RV32I: исполнитель
+--     rv32i.Executor и платформа linux.Linux или stub.Uefi
 -- write_native(ast, heap_size, output_path, firmware) -> none; WriteFailed
+-- write_x86(ast, heap_size, output_path, firmware) -> none — родной x86-64:
+--     ELF64 Linux или PE32+ UEFI; WriteFailed
 -- show(problem) / toolchain_show_diagnostics(diagnostics) — печать
 
 use core.str
@@ -19,8 +26,12 @@ use io
 use selfhost.parser
 use selfhost.checker
 use selfhost.compiler
+use selfhost.compiler.backend.rv32i
+use selfhost.compiler.platform.linux
+use selfhost.compiler.backend.x86_64_translation.stub
 use selfhost.compiler.backend.rv32i.machine.image
 use selfhost.compiler.backend.x86_64_translation
+use selfhost.compiler.backend.x86_64_native
 use selfhost.machine.word
 use selfhost.errors
 
@@ -34,14 +45,20 @@ skill toolchain_show_diagnostics(diagnostics) {
     out none
 }
 
+skill build_machine(ast, heap_size, far_calls, firmware) {
+    @executor = rv32i.Executor { far_calls = far_calls }
+    (firmware == yes) { out compiler.compile_machine(ast, heap_size, executor, stub.Uefi {}) }
+    out compiler.compile_machine(ast, heap_size, executor, linux.Linux {})
+}
+
 skill write_native(ast, heap_size, output_path, firmware) {
-    @machine = compiler.compile_machine_with_heap(ast, heap_size)
+    @machine = build_machine(ast, heap_size, no, firmware)
     io.show("toolchain: перевожу в x86-64 ", output_path)
     pick {
         (firmware == yes) {
             x86_64_translation.write_uefi(output_path, machine) rescue |failure| {
                 show(errors.near_calls_failed())
-                @far = compiler.compile_machine_far_with_heap(ast, heap_size, no)
+                @far = build_machine(ast, heap_size, yes, yes)
                 x86_64_translation.write_uefi(output_path, far) rescue |again| {
                     show(errors.far_calls_failed())
                     out error.WriteFailed
@@ -52,7 +69,7 @@ skill write_native(ast, heap_size, output_path, firmware) {
         {
             x86_64_translation.write(output_path, machine) rescue |failure| {
                 show(errors.near_calls_failed())
-                @far = compiler.compile_machine_far_with_heap(ast, heap_size, no)
+                @far = build_machine(ast, heap_size, yes, no)
                 x86_64_translation.write(output_path, far) rescue |again| {
                     show(errors.far_calls_failed())
                     out error.WriteFailed
@@ -60,6 +77,25 @@ skill write_native(ast, heap_size, output_path, firmware) {
                 out none
             }
         }
+    }
+    out none
+}
+
+skill write_x86(ast, heap_size, output_path, firmware) {
+    @executor = x86_64_native.Executor { firmware = firmware }
+    io.show("toolchain: пишу родной x86-64 ", output_path)
+    (firmware == yes) {
+        @firmware_machine = compiler.compile_machine(ast, heap_size, executor, stub.Uefi {})
+        x86_64_native.write_uefi(output_path, firmware_machine) rescue |failure| {
+            io.show("toolchain: образ UEFI не собрался: ", failure)
+            out error.WriteFailed
+        }
+        out none
+    }
+    @machine = compiler.compile_machine(ast, heap_size, executor, linux.Linux {})
+    x86_64_native.write(output_path, machine) rescue |failure| {
+        io.show("toolchain: образ x86-64 не собрался: ", failure)
+        out error.WriteFailed
     }
     out none
 }
@@ -83,13 +119,17 @@ skill build(source_path, output_path, heap_text, target) {
     @heap_size = word.from_decimal(heap_text)
     io.show("toolchain: собираю")
     (target == "x86_64") { out write_native(checked.tree, heap_size, output_path, no) }
+    (target == "x86_64-translation") { out write_native(checked.tree, heap_size, output_path, no) }
     (target == "x86_64-uefi") { out write_native(checked.tree, heap_size, output_path, yes) }
+    (target == "x86_64-uefi-translation") { out write_native(checked.tree, heap_size, output_path, yes) }
+    (target == "x86_64-native") { out write_x86(checked.tree, heap_size, output_path, no) }
+    (target == "x86_64-uefi-native") { out write_x86(checked.tree, heap_size, output_path, yes) }
     ((target == "rv32i") == no) { out error.UnknownTarget }
-    @machine = compiler.compile_machine_with_heap(checked.tree, heap_size)
+    @machine = build_machine(checked.tree, heap_size, no, no)
     io.show("toolchain: пишу ", output_path)
     image.write(output_path, machine) rescue |failure| {
         show(errors.near_calls_failed())
-        @far = compiler.compile_machine_far_with_heap(checked.tree, heap_size, no)
+        @far = build_machine(checked.tree, heap_size, yes, no)
         image.write(output_path, far) rescue |again| {
             show(errors.far_calls_failed())
             out error.WriteFailed

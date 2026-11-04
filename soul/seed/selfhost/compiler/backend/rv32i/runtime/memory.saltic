@@ -6,7 +6,10 @@
 -- REGION_MARK / ESCAPE_MARK — метки региона и побегов при входе в навык.
 -- rt_region_exit: VALUE/ERROR — значение и ошибка, ARG2 = REGION_EXIT_VALUE_SKIPPED
 -- — значение не корень. rt_region_barrier(ARG2 value, BARRIER_OBJECT адрес Box).
--- Нехватка места при копировании — откат (.L_region_abort).
+-- Нехватка места при копировании — посетитель ставит флаг ABORT_LABEL (слово bss)
+-- и возвращается; rt_region_exit после обходов видит флаг и откатывает
+-- (.L_region_abort). Прыгать из посетителя в rt_region_exit нельзя: у исполнителя
+-- с родным call на стеке лежит адрес возврата.
 --
 -- emit_alloc(compiler) — rt_alloc(VALUE байт) -> адрес; rt_out_of_memory
 -- emit_out_of_memory(compiler) — ERROR_MEMORY_EXHAUSTED или выход процесса
@@ -15,8 +18,8 @@
 --     — посетители одного указателя в ARG7
 -- emit_region_barrier(compiler) — rt_region_barrier: запись в старый объект
 -- BARRIER_OBJECT — роль адреса Box на входе в rt_region_barrier (SCRATCH2)
--- Сдвиг переноса — слот EXIT_DELTA_OFFSET кадра rt_region_exit: посетители зовутся
---     с тем же STACK и rt_region_relocate читает его оттуда
+-- Сдвиг переноса — слово DELTA_LABEL в bss: rt_region_exit кладёт, rt_region_relocate
+--     читает (через стек нельзя: у исполнителя с родным call адрес возврата лежит выше)
 -- emit_region_remember_slot(compiler) — слот константы как корень
 -- emit_pointer_address / emit_object_size / emit_visit / emit_escape_walk /
 --     emit_block_walk / emit_copies_walk / emit_slide / emit_escape_compact
@@ -29,6 +32,7 @@ use selfhost.memory.model
 use core.process
 use selfhost.compiler.constants
 use selfhost.compiler.backend
+use selfhost.machine.word
 
 WORD_BYTES = constants.WORD_BYTES
 COUNT_OFFSET = abi.OBJECT_PAYLOAD_OFFSET + constants.GROUP_COUNT_OFFSET
@@ -41,7 +45,8 @@ POINTER_TAG_COUNT = abi.TAG_BOX - abi.TAG_STRING + 1
 KIND_LIMIT = abi.OBJECT_KIND_TREE + 1
 
 EXIT_FRAME_BYTES = 16
-EXIT_DELTA_OFFSET = 0
+DELTA_LABEL = "rt_region_delta"
+ABORT_LABEL = "rt_region_abort_flag"
 EXIT_VALUE_OFFSET = 4
 EXIT_ERROR_OFFSET = 8
 EXIT_RETURN_OFFSET = 12
@@ -202,7 +207,7 @@ skill emit_region_forward(compiler) {
     compiler = executor.branch_zero(compiler, backend.SCRATCH1, ".L_region_forward_moved")
     compiler = emit_object_size(compiler, backend.SCRATCH4, backend.SCRATCH2)
     compiler = executor.add(compiler, backend.SCRATCH5, backend.ARG4, backend.SCRATCH4)
-    compiler = executor.branch_less_unsigned(compiler, backend.ESCAPE_BOTTOM, backend.SCRATCH5, ".L_region_abort")
+    compiler = executor.branch_less_unsigned(compiler, backend.ESCAPE_BOTTOM, backend.SCRATCH5, ".L_region_forward_full")
     compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
     compiler = executor.label(compiler, ".L_region_forward_copy")
     compiler = executor.branch_equal(compiler, backend.SCRATCH1, backend.SCRATCH4, ".L_region_forward_copied")
@@ -221,6 +226,11 @@ skill emit_region_forward(compiler) {
     compiler = executor.label(compiler, ".L_region_forward_moved")
     compiler = executor.or(compiler, backend.ARG7, backend.SCRATCH3, backend.SCRATCH0)
     compiler = executor.label(compiler, ".L_region_forward_done")
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_region_forward_full")
+    compiler = executor.load_address(compiler, backend.SCRATCH3, ABORT_LABEL, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH5, 1)
+    compiler = executor.store(compiler, backend.SCRATCH5, backend.SCRATCH3, 0)
     out executor.ret(compiler)
 }
 
@@ -230,7 +240,8 @@ skill emit_region_relocate(compiler) {
     compiler = emit_pointer_address(compiler, ".L_region_relocate_done")
     compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH2, backend.ARG3, ".L_region_relocate_done")
     compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH2, backend.ARG4, ".L_region_relocate_done")
-    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, EXIT_DELTA_OFFSET)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, DELTA_LABEL, 0)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH1, 0)
     compiler = executor.sub(compiler, backend.ARG7, backend.ARG7, backend.SCRATCH1)
     compiler = executor.label(compiler, ".L_region_relocate_done")
     out executor.ret(compiler)
@@ -324,14 +335,20 @@ skill emit_region_exit(compiler) {
     compiler = executor.store(compiler, backend.VALUE, backend.STACK, EXIT_VALUE_OFFSET)
     compiler = executor.move(compiler, backend.ARG3, backend.HEAP_TOP)
     compiler = executor.move(compiler, backend.ARG4, backend.HEAP_TOP)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, ABORT_LABEL, 0)
+    compiler = executor.store_zero(compiler, backend.SCRATCH0, 0)
     compiler = executor.branch_nonzero(compiler, backend.ARG2, ".L_region_exit_roots")
     compiler = emit_visit(compiler, "rt_region_forward", backend.STACK, EXIT_VALUE_OFFSET)
     compiler = executor.label(compiler, ".L_region_exit_roots")
     compiler = emit_escape_walk(compiler, "rt_region_forward", ".L_region_forward")
     compiler = emit_block_walk(compiler, "rt_region_forward", ".L_region_scan")
+    compiler = executor.load_address(compiler, backend.SCRATCH0, ABORT_LABEL, 0)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.SCRATCH0, 0)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, ".L_region_abort")
     compiler = emit_copies_walk(compiler, ".L_region_settle", no)
     compiler = executor.sub(compiler, backend.SCRATCH0, backend.ARG3, backend.REGION_MARK)
-    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, EXIT_DELTA_OFFSET)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, DELTA_LABEL, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
     compiler = emit_visit(compiler, "rt_region_relocate", backend.STACK, EXIT_VALUE_OFFSET)
     compiler = emit_escape_walk(compiler, "rt_region_relocate", ".L_region_relocate")
     compiler = emit_block_walk(compiler, "rt_region_relocate", ".L_region_relocated")
@@ -400,5 +417,11 @@ skill append_runtime(compiler) {
     compiler = emit_region_relocate(compiler)
     compiler = emit_region_restore(compiler)
     compiler = emit_region_barrier(compiler)
-    out emit_region_remember_slot(compiler)
+    compiler = emit_region_remember_slot(compiler)
+    @executor = compiler.executor
+    compiler = executor.align(compiler, backend.BSS, WORD_BYTES)
+    compiler = executor.data_label(compiler, backend.BSS, DELTA_LABEL)
+    compiler = executor.reserve(compiler, word.from_number(WORD_BYTES))
+    compiler = executor.data_label(compiler, backend.BSS, ABORT_LABEL)
+    out executor.reserve(compiler, word.from_number(WORD_BYTES))
 }

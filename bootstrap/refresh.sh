@@ -85,6 +85,12 @@ fi
 echo "bootstrap refresh: проверяю fixed point"
 cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
 
+echo "bootstrap refresh: оракул родного x86-64 — stage-1 собирает stage-2 под x86_64-native, тот собирает rv32i"
+stage "$work/stage-1/toolchain" x86_64-native "$work/stage-2/toolchain-native"
+stage "$work/stage-2/toolchain-native" rv32i "$work/stage-3/toolchain-native.elf"
+cmp "$work/stage-3/toolchain.elf" "$work/stage-3/toolchain-native.elf"
+echo "bootstrap refresh: родной x86-64 даёт те же байты rv32i, что перевод"
+
 compiler="$(saltic_compiler_path rv32i linux .elf)"
 if cmp -s "$work/stage-3/toolchain.elf" "$compiler" && [[ -f "${compiler%.elf}.txt" ]]; then
     echo "bootstrap refresh: $(basename "$compiler") не изменился"

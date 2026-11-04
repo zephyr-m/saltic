@@ -11,7 +11,7 @@ log=.cache/build/workbench/hosts.log
 pattern='итог|проверка:|error|подтвержд|ок$|ok$|пройдена|^x86-64:|^uefi: образ грузится'
 : > "$log"
 status=0
-for step in "x86_64 all" "rv32i platforms"; do
+for step in "x86_64 all" "x86_64-native all" "rv32i platforms"; do
     read -r host group <<< "$step"
     echo "== $host: $group"
     SALTIC_TEST_HOST="$host" nix --extra-experimental-features "nix-command flakes" develop \

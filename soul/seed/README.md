@@ -45,9 +45,16 @@
   помощниками `codegen/{lookup,emitters,loops,failures}`, `functions` собирает
   функции и константы; всё это говорит на договоре машины `compiler/backend`
   (роли регистров и операции) методами исполнителя `compiler.executor`;
-  исполнители: `compiler/backend/rv32i` (`Executor`) и перевод
-  `compiler/backend/x86_64_translation` (`encoder`, `translator`, `image`,
-  `platform`, `pe`, `uefi`);
+  исполнители: `compiler/backend/rv32i` (`Executor`), родной x86-64
+  `compiler/backend/x86_64_native` (`Executor` на `encoder`, `roles`, `ops`,
+  `access`, `control`; `platform` — вход и syscall Linux, `image` — ELF64) и
+  перевод `compiler/backend/x86_64_translation` (`encoder`, `translator`,
+  `image`, `platform`, `pe`, `uefi`, `stub`);
+- `compiler/platform` + `platform/linux` — договор платформы: метки
+  `rt_platform_*` (write, exit, key, file_read, file_write, now, wait, firmware,
+  call), которые цель даёт программе; чего не умеет — ошибка `NotSupported`.
+  Платформа — Box с методом `append(compiler)`: `platform.linux.Linux` (rv32i и
+  перевод x86_64), `backend/x86_64_translation/stub.Uefi`, `os/target/qemu_virt/platform.Platform`;
 - `compiler/backend/rv32i/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
   машинный runtime `rt_*` на договоре машины (роли и операции `compiler/backend`,
   общий для исполнителей): арифметика, Box и группы, строки,

@@ -29,7 +29,7 @@ host="${SALTIC_TEST_HOST:-rv32i}"
 source tests/metrics.sh
 
 run_built() {
-    if [[ "$host" == "x86_64" ]]; then
+    if [[ "$host" == "x86_64" || "$host" == "x86_64-native" ]]; then
         measure run "$@"
     else
         measure run qemu-riscv32 -B 0x100000000 "$@"
@@ -190,13 +190,19 @@ test_edges() {
     SALTIC_TARGET=x86_64 build edges-x86_64 \
         tests/edges.saltic \
         "$work/edges/x86_64"
+    SALTIC_TARGET=x86_64-native build edges-x86_64-native \
+        tests/edges.saltic \
+        "$work/edges/x86_64-native"
     measure run qemu-riscv32 -B 0x100000000 "$work/edges/rv32i.elf" \
         >"$work/edges/rv32i.txt"
     measure run "$work/edges/x86_64" \
         >"$work/edges/x86_64.txt"
+    measure run "$work/edges/x86_64-native" \
+        >"$work/edges/x86_64-native.txt"
     diff -u tests/expected/edges.txt "$work/edges/rv32i.txt"
     diff -u tests/expected/edges.txt "$work/edges/x86_64.txt"
-    echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i и x86_64"
+    diff -u tests/expected/edges.txt "$work/edges/x86_64-native.txt"
+    echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i, x86_64 и x86_64-native"
 }
 
 test_x86_encoder() {
@@ -233,6 +239,31 @@ test_dict() {
     echo "словарь: запись на месте, UnknownKey, вложенный навык, рост таблицы — одинаково под rv32i и x86_64"
 }
 
+test_platform() {
+    mkdir -p "$work/platform"
+    local target host_run
+    for target in rv32i x86_64 x86_64-native; do
+        SALTIC_TARGET=$target build platform-$target tests/platform.saltic "$work/platform/$target"
+        SALTIC_TARGET=$target build uncaught-$target tests/fixtures/uncaught.saltic "$work/platform/uncaught-$target"
+        SALTIC_TARGET=$target build needs-args-$target tests/fixtures/needs-args.saltic "$work/platform/needs-args-$target"
+        if [[ "$target" == rv32i ]]; then host_run=(qemu-riscv32 -B 0x100000000); else host_run=(); fi
+        "${host_run[@]}" "$work/platform/$target" >"$work/platform/$target.txt"
+        diff -u tests/expected/platform.txt "$work/platform/$target.txt"
+        if "${host_run[@]}" "$work/platform/uncaught-$target" >"$work/platform/uncaught-$target.txt"; then
+            echo "платформа: непойманная ошибка не стала кодом выхода ($target)" >&2
+            return 1
+        fi
+        test "$(<"$work/platform/uncaught-$target.txt")" = "$(printf 'до ошибки\nошибка: Boom')"
+        if "${host_run[@]}" "$work/platform/needs-args-$target" >"$work/platform/needs-args-$target.txt"; then
+            echo "платформа: нехватка аргументов не стала кодом выхода ($target)" >&2
+            return 1
+        fi
+        test "$(<"$work/platform/needs-args-$target.txt")" = "нужно 2 аргументов"
+        test "$("${host_run[@]}" "$work/platform/needs-args-$target" раз два)" = "раз два"
+    done
+    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются — одинаково под rv32i, x86_64 и x86_64-native"
+}
+
 test_memory() {
     mkdir -p "$work/memory"
     build memory \
@@ -245,8 +276,9 @@ test_memory() {
 }
 
 test_native() {
+    local target="${SALTIC_NATIVE_TARGET:-x86_64}"
     mkdir -p "$work/native"
-    SALTIC_TARGET=x86_64 build native-canonical \
+    SALTIC_TARGET=$target build native-canonical \
         soul/canonical/main.saltic \
         "$work/native/canonical" \
         67108864
@@ -259,12 +291,12 @@ test_native() {
         soul/canonical/expected/output.txt \
         "$work/native/stdout.txt"
     test "$(<"$work/native/output.txt")" = "pip:0"
-    SALTIC_TARGET=x86_64 build native-memory \
+    SALTIC_TARGET=$target build native-memory \
         soul/seed/tests/memory.saltic \
         "$work/native/memory" \
         1048576
     "$work/native/memory"
-    SALTIC_TARGET=x86_64 build native-deep \
+    SALTIC_TARGET=$target build native-deep \
         tests/fixtures/deep-recursion.saltic \
         "$work/native/deep" \
         1048576
@@ -276,22 +308,22 @@ test_native() {
         echo "x86-64: переполненный стек вернулся из рекурсии" >&2
         return 1
     fi
-    SALTIC_TARGET=x86_64 build native-keys \
+    SALTIC_TARGET=$target build native-keys \
         tests/fixtures/keys.saltic \
         "$work/native/keys" \
         1048576
     test "$(printf 'a\t\177 z\nq' | "$work/native/keys")" = "[a][tab][backspace][ ][z][enter]"
-    SALTIC_TARGET=x86_64 build native-imports \
+    SALTIC_TARGET=$target build native-imports \
         tests/fixtures/imports.saltic \
         "$work/native/imports" \
         67108864
     test "$("$work/native/imports")" = "$(printf 'длина: 6\nпусто: yes\nстрок: 3\nфайл прочитан: yes\nбайт 259: ByteOutsideRange')"
-    SALTIC_TARGET=x86_64 build native-big-numbers \
+    SALTIC_TARGET=$target build native-big-numbers \
         tests/fixtures/big-numbers.saltic \
         "$work/native/big-numbers" \
         1048576
     test "$("$work/native/big-numbers" | tr '\n' ' ')" = "-268435455 268435455 33554432 -33554433 100000000 33554431 -256 255 4096 -4097 200000001 268435455 "
-    echo "x86-64: канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает, большие числа точны"
+    echo "x86-64 ($target): канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает, большие числа точны"
 }
 
 test_seed_contract() {
@@ -351,6 +383,11 @@ test_qemu_virt() {
 test_uefi() {
     SALTIC_UEFI_DIR="$work/uefi" bash os/target/uefi_x86_64/build.sh
     SALTIC_UEFI_DIR="$work/uefi" bash os/target/uefi_x86_64/run.sh --check
+}
+
+test_uefi_native() {
+    SALTIC_TARGET=x86_64-uefi-native SALTIC_UEFI_DIR="$work/uefi-native" bash os/target/uefi_x86_64/build.sh
+    SALTIC_UEFI_DIR="$work/uefi-native" bash os/target/uefi_x86_64/run.sh --check
 }
 
 test_jtml() {
@@ -416,7 +453,10 @@ run_case() {
         machine) test_machine ;;
         abi) test_abi ;;
         memory) test_memory ;;
+        platform) test_platform ;;
         native) test_native ;;
+        native-x86) SALTIC_NATIVE_TARGET=x86_64-native test_native ;;
+        uefi-native) test_uefi_native ;;
         qemu-virt) test_qemu_virt ;;
         uefi) test_uefi ;;
         jtml) test_jtml ;;
@@ -434,7 +474,7 @@ if (( $# == 0 )); then
 fi
 
 if [[ "$1" == "platforms" ]]; then
-    set -- qemu-virt uefi closure
+    set -- qemu-virt uefi uefi-native closure
 elif [[ "$1" == "all" ]]; then
     set -- \
         checker \
@@ -451,7 +491,9 @@ elif [[ "$1" == "all" ]]; then
         machine \
         abi \
         memory \
+        platform \
         native \
+        native-x86 \
         jtml \
         tasks
 fi

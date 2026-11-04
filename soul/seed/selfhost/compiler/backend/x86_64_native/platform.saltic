@@ -1,0 +1,147 @@
+-- platform — Linux для родного x86-64: вход x86_start и подпрограммы
+-- x86_syscall_<n>, которые зовёт executor.syscall(n) (n — номер RV32-Linux из
+-- core.system, таблица SYSCALLS переводит его в номер x86-64 и говорит, какие
+-- аргументы — адреса гостя). Вход: r14 = окно гостя (GUEST_BASE), argv ядра
+-- копируется в строки гостя, таблица [argc, argv…] — в arguments, rsp = её
+-- адрес, jmp _start. Подпрограмма видит роли в регистрах: VALUE, ERROR,
+-- ARG2, ARG3 → rdi, rsi, rdx, r10; ARG4, ARG5 из ячеек → r8, r9; сохраняет
+-- всё, кроме VALUE (результат, eax, старшая половина обнулена).
+-- Карта гостя (map): строки STRINGS_BYTES за концом bss (страница), страж
+-- STACK_GUARD_BYTES без отображения, стек STACK_BYTES, аргументы — верхние
+-- ARGUMENTS_BYTES стека.
+--
+-- Map { strings, stack, arguments } — адреса гостя (word)
+-- map(machine) -> Map по layout.layout(machine)
+-- append(machine) -> machine с входом и подпрограммами в коде (метки
+--     x86_start, x86_syscall_<n>); адреса строк и аргументов вписаны
+
+use core.group
+use core.num
+use selfhost.machine.word
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.machine.buffer
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.x86_64_native.encoder
+use selfhost.compiler.backend.x86_64_native.roles
+
+STRINGS_BYTES = 65536
+ARGUMENTS_BYTES = 65536
+STACK_BYTES = 8388608
+STACK_GUARD_BYTES = 1048576
+GUEST_BASE_HIGH = 1
+POINTER_BYTES = 8
+POINTER_SHIFT = 3
+CELL_SHIFT = 2
+JCC_BYTES = 6
+JMP_BYTES = 5
+REL32_BYTES = 4
+
+SECOND_IS_POINTER = 1
+THIRD_IS_POINTER = 2
+SYSCALLS = [
+    [29, 16, THIRD_IS_POINTER],
+    [56, 257, SECOND_IS_POINTER],
+    [57, 3, 0],
+    [63, 0, SECOND_IS_POINTER],
+    [64, 1, SECOND_IS_POINTER],
+    [93, 60, 0]
+]
+SAVED = [encoder.ECX, encoder.R11D, encoder.EDI, encoder.ESI, encoder.EDX, encoder.R8D, encoder.R9D, encoder.R10D]
+
+Map = Box {
+    strings = word.Word {},
+    stack = word.Word {},
+    arguments = word.Word {}
+}
+
+skill map(machine) {
+    @current = layout.layout(machine)
+    @strings = word.align_page(word.add(machine.load_address, current.memory_size))
+    @stack = word.add_number(strings, STRINGS_BYTES + STACK_GUARD_BYTES)
+    out Map {
+        strings = strings,
+        stack = stack,
+        arguments = word.add_number(stack, STACK_BYTES - ARGUMENTS_BYTES)
+    }
+}
+
+skill backward(code, kind, target) {
+    @length = JCC_BYTES
+    (kind == encoder.JUMP) { length = JMP_BYTES }
+    out encoder.relative(code, kind, target - code.length - length)
+}
+
+skill append_entry(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_start")
+    @code = machine.code
+    code = encoder.move_quad(code, encoder.R14D, word.from_number(0), word.from_number(GUEST_BASE_HIGH))
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.EBX, encoder.ESP)
+    code = encoder.memory(code, encoder.LOAD, encoder.ECX, encoder.EBX, encoder.NONE, 0)
+    code = encoder.move_word(code, encoder.EDI, word.from_number(0))
+    @arguments_at = code.length - REL32_BYTES
+    code = encoder.memory(code, encoder.STORE, encoder.ECX, encoder.R14D, encoder.EDI, 0)
+    code = encoder.move_word(code, encoder.EDX, word.from_number(0))
+    @strings_at = code.length - REL32_BYTES
+    code = encoder.operate(code, 4, encoder.XOR, encoder.ESI, encoder.ESI)
+    @loop = code.length
+    code = encoder.operate(code, 4, encoder.CMP, encoder.ESI, encoder.ECX)
+    code = encoder.relative(code, encoder.ABOVE_OR_EQUAL, 0)
+    @done_from = code.length
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.R9D, encoder.ESI)
+    code = encoder.shift(code, 4, encoder.SHIFT_LEFT, encoder.R9D, POINTER_SHIFT)
+    code = encoder.memory(code, encoder.LOAD64, encoder.R8D, encoder.EBX, encoder.R9D, POINTER_BYTES)
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.R10D, encoder.ESI)
+    code = encoder.shift(code, 4, encoder.SHIFT_LEFT, encoder.R10D, CELL_SHIFT)
+    code = encoder.operate(code, 4, encoder.ADD, encoder.R10D, encoder.EDI)
+    code = encoder.memory(code, encoder.STORE, encoder.EDX, encoder.R14D, encoder.R10D, 4)
+    @bytes = code.length
+    code = encoder.memory(code, encoder.LOAD_ZERO_BYTE, encoder.EAX, encoder.R8D, encoder.NONE, 0)
+    code = encoder.memory(code, encoder.STORE_BYTE, encoder.EAX, encoder.R14D, encoder.EDX, 0)
+    code = encoder.operate_immediate(code, 8, encoder.ADD, encoder.R8D, 1)
+    code = encoder.operate_immediate(code, 4, encoder.ADD, encoder.EDX, 1)
+    code = encoder.operate(code, 4, encoder.TEST, encoder.EAX, encoder.EAX)
+    code = backward(code, encoder.NOT_EQUAL, bytes)
+    code = encoder.operate_immediate(code, 4, encoder.ADD, encoder.ESI, 1)
+    code = backward(code, encoder.JUMP, loop)
+    code = buffer.set_word(code, done_from - REL32_BYTES, word.from_signed(code.length - done_from))
+    code = encoder.memory(code, encoder.ADDRESS64, encoder.ESP, encoder.R14D, encoder.EDI, 0)
+    code = encoder.relative(code, encoder.JUMP, 0)
+    machine.code = code
+    machine = layout.note_patch(machine, layout.Patch { kind = layout.PatchKind.REL32, label = "_start", offset = code.length - REL32_BYTES })
+    @guest = map(machine)
+    machine.code = buffer.set_word(machine.code, arguments_at, guest.arguments)
+    machine.code = buffer.set_word(machine.code, strings_at, guest.strings)
+    out machine
+}
+
+skill append_syscall(machine, entry) {
+    @number = group.get(entry, 0)
+    @host = group.get(entry, 1)
+    @pointers = group.get(entry, 2)
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_syscall_{number}")
+    @code = machine.code
+    drum (SAVED) { code = encoder.register64(code, encoder.PUSH, beat) }
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.EDI, encoder.EAX)
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.ESI, encoder.EDX)
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.EDX, encoder.R8D)
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.R10D, encoder.R9D)
+    code = encoder.memory(code, encoder.LOAD, encoder.R8D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG4))
+    code = encoder.memory(code, encoder.LOAD, encoder.R9D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG5))
+    (num.mod(pointers, 2) == SECOND_IS_POINTER) { code = encoder.memory(code, encoder.ADDRESS64, encoder.ESI, encoder.R14D, encoder.ESI, 0) }
+    (pointers == THIRD_IS_POINTER) { code = encoder.memory(code, encoder.ADDRESS64, encoder.EDX, encoder.R14D, encoder.EDX, 0) }
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, host)
+    code = encoder.single(code, encoder.SYSCALL)
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.EAX, encoder.EAX)
+    @count = group.count(SAVED)
+    drum (count) { code = encoder.register64(code, encoder.POP, group.get(SAVED, count - 1 - beat)) }
+    code = encoder.single(code, encoder.RET)
+    machine.code = code
+    out machine
+}
+
+skill append(machine) {
+    machine = append_entry(machine)
+    drum (SYSCALLS) { machine = append_syscall(machine, beat) }
+    machine.entry = "x86_start"
+    out machine
+}
