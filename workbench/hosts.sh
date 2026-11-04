@@ -11,6 +11,7 @@ log=.cache/build/workbench/hosts.log
 pattern='итог|проверка:|error|подтвержд|ок$|ok$|пройдена|^x86-64:|^uefi: образ грузится'
 : > "$log"
 status=0
+aborted=0
 for step in "x86_64 all" "x86_64-native all" "rv32i platforms"; do
     read -r host group <<< "$step"
     echo "== $host: $group"
@@ -22,7 +23,8 @@ for step in "x86_64 all" "x86_64-native all" "rv32i platforms"; do
         echo "== $host: $group ОБОРВАЛСЯ (код $step_status), последние строки лога:"
         grep -v '\[ok\]' "$log" | tail -12
         status=$step_status
+        aborted=$((aborted + 1))
     fi
 done
-echo "== упавших проверок: $(grep -c 'FAIL\]' "$log")"
+echo "== упавших проверок: $(grep -c 'FAIL\]' "$log"), оборвавшихся прогонов: $aborted"
 exit "$status"

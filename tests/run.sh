@@ -360,8 +360,10 @@ test_machine() {
     grep -Fq 'контроль провала -> 1  [FAIL]' "$work/machine/testing-failure.txt"
     grep -Fq 'итог: пройдено 0, провалено 1' "$work/machine/testing-failure.txt"
     grep -Fq 'проваленные проверки:' "$work/machine/testing-failure.txt"
-    tail -n 1 "$work/machine/testing-failure.txt" \
+    tail -n 2 "$work/machine/testing-failure.txt" | head -n 1 \
         | grep -Fq -- '- контроль провала -> 1  [FAIL] (ожидалось 2)'
+    tail -n 1 "$work/machine/testing-failure.txt" \
+        | grep -Fqx 'ошибка: TestsFailed'
     echo "машина: кодирование и образ подтверждены"
 }
 
