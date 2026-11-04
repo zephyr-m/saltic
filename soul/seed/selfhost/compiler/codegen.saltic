@@ -149,6 +149,25 @@ skill compile_binary(compiler, operator, left, right) {
     out compiler
 }
 
+skill compile_fixed_from(compiler, made, argument) {
+    @executor = compiler.executor
+    (emitters.fixed_literal(argument) == yes) {
+        compiler = emitters.load_fixed_literal(compiler, argument)
+        compiler = executor.load_immediate(compiler, backend.FIXED_SOURCE_KIND, contract.fixed_kind(made))
+        out executor.call(compiler, "rt_fixed_new")
+    }
+    @source_type = lookup.infer_type(compiler, argument)
+    compiler = compile_expression(compiler, argument)
+    (contract.is_fixed_type(source_type) == yes) {
+        compiler = executor.load_immediate(compiler, backend.FIXED_SOURCE_KIND, contract.fixed_kind(source_type))
+        compiler = executor.load_immediate(compiler, backend.FIXED_TARGET_KIND, contract.fixed_kind(made))
+        out executor.call(compiler, "rt_fixed_convert")
+    }
+    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.load_immediate(compiler, backend.FIXED_SOURCE_KIND, contract.fixed_kind(made))
+    out executor.call(compiler, "rt_fixed_new")
+}
+
 skill compile_rescue(compiler, node) {
     @plain = ast.plain(node)
     @frame = failures.rescue_frame(compiler)
@@ -250,30 +269,17 @@ skill compile_call(compiler, node) {
     @name = lookup.call_name(compiler, callee)
     @seed_kind = contract.find(name)
     (contract.is_show(seed_kind) == yes) { out compile_show(compiler, args) }
-    (contract.is_fixed_type(name) == yes) {
+    @made = contract.conversion(seed_kind)
+    (contract.is_fixed_type(name) == yes) { made = name }
+    (str.bytes(made) > 0) { out compile_fixed_from(compiler, made, group.get(args, 0)) }
+    (name == "core.num.from") {
         @argument = group.get(args, 0)
-        pick {
-            (emitters.fixed_literal(argument) == yes) { compiler = emitters.load_fixed_literal(compiler, argument) }
-            {
-                compiler = compile_expression(compiler, argument)
-                @source_type = lookup.infer_type(compiler, argument)
-                (contract.is_fixed_type(source_type) == no) {
-                    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
-                }
-            }
-        }
-        compiler = executor.load_immediate(compiler, backend.FIXED_SOURCE_KIND, contract.fixed_kind(name))
-        compiler = executor.call(compiler, "rt_fixed_new")
-        out compiler
-    }
-    @conversion = contract.conversion(seed_kind)
-    (str.bytes(conversion) > 0) {
-        compiler = compile_arguments(compiler, args)
-        @source_type = lookup.infer_type(compiler, group.get(args, 0))
+        @source_type = lookup.infer_type(compiler, argument)
+        compiler = compile_expression(compiler, argument)
+        (contract.is_fixed_type(source_type) == no) { out compiler }
         compiler = executor.load_immediate(compiler, backend.FIXED_SOURCE_KIND, contract.fixed_kind(source_type))
-        compiler = executor.load_immediate(compiler, backend.FIXED_TARGET_KIND, contract.fixed_kind(conversion))
-        compiler = executor.call(compiler, "rt_fixed_convert")
-        out compiler
+        compiler = executor.call(compiler, "rt_fixed_to_number")
+        out failures.check(compiler)
     }
     @fixed_target = ""
     (contract.is_fixed_call(seed_kind) == yes) { fixed_target = contract.target(seed_kind, "unknown") }
