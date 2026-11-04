@@ -7,7 +7,9 @@
 -- Agent { card, frames, commands, arp, expected, received, total, columns,
 --     rows, line, cursor, console, shown_second, rounds, failures, last_error,
 --     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, limit,
---     linked, opening }
+--     linked, opening, saver, active_at }
+-- day_second(base) -> секунда суток / wake(agent) -> yes, если снят хранитель;
+--     отмечает активность / doze(agent) — хранитель после SAVER_AFTER секунд простоя
 -- log(agent, message) — в консоль, пока console = yes
 -- begin_upload / upload_state / launch / keep_program / open_by_word /
 --     memory_dump / prepare_disk / install_image / time_reply / show_code /
@@ -60,6 +62,7 @@ use os.target.uefi_x86_64.network.netlog
 use os.target.uefi_x86_64.screen.system_panel
 use os.target.uefi_x86_64.agent.programs
 use os.target.uefi_x86_64.agent.shelf
+use os.target.uefi_x86_64.agent.saver
 
 VERSION = 12
 KEY_EVERY = 256
@@ -103,13 +106,17 @@ Agent = Box {
     chosen = 0,
     limit = 0,
     linked = no,
-    opening = ""
+    opening = "",
+    saver = no,
+    active_at = 0
 }
 
 COUNTDOWN = 5
 SECOND_WAIT = 50000000
 SHOT_PREFIX = "shot-part "
 CLOCK_EVERY = 20000
+SAVER_AFTER = 60
+DAY_SECONDS = 86400
 ERASE_WORD = "ERASE-ACER-DISK"
 
 skill log(agent, message) {
@@ -187,6 +194,7 @@ skill launch(agent) {
     rtl8111.wait_link(agent.card) rescue |err| { none }
     agent.linked = has_link(agent.card)
     log(agent, "run: card configured again, listening")
+    agent.active_at = day_second(agent.card.base)
     (outcome.failed == no) {
         (code == reply.HOME) { clear_screen(agent) }
     }
@@ -326,8 +334,29 @@ skill open_program(agent) {
     out feed.show_reply(agent, feed.text_bytes(result, 200))
 }
 
+skill day_second(base) {
+    @moment = uefi.now(base)
+    out moment.hour * 3600 + moment.minute * 60 + moment.second
+}
+
+skill wake(agent) {
+    agent.active_at = day_second(agent.card.base)
+    (agent.saver == no) { out no }
+    agent.saver = no
+    clear_screen(agent)
+    out yes
+}
+
+skill doze(agent) {
+    @idle = num.mod(day_second(agent.card.base) - agent.active_at + DAY_SECONDS, DAY_SECONDS)
+    (idle < SAVER_AFTER) { out none }
+    agent.saver = yes
+    out saver.draw(agent.card.base, VERSION)
+}
+
 skill press(agent, key) {
     (key.ready == no) { out none }
+    (wake(agent) == yes) { out none }
     (agent.lent == yes) { out clear_screen(agent) }
     @count = group.count(agent.names)
     (count == 0) { out none }
@@ -449,6 +478,7 @@ skill answer(agent, bytes) {
         shot.send_chunk(agent.card, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.len(SHOT_PREFIX), str.len(packet.text))))
         out agent
     }
+    ((packet.text == "shot") == no) { wake(agent) }
     @who = net.ip_text(packet.from_ip)
     @command = packet.text
     log(agent, "command from {who}: {command}")
@@ -562,7 +592,10 @@ skill tick(agent) {
         agent.rounds = 0
         watch_link(agent)
         (agent.console == no) {
-            (agent.lent == no) { feed.draw_clock(agent) }
+            (agent.saver == no) {
+                (agent.lent == no) { feed.draw_clock(agent) }
+                doze(agent)
+            }
             system_panel.tick(agent.card.base, agent.card) rescue |err| { none }
         }
     }
@@ -615,6 +648,7 @@ skill run() {
     @bay = firmware.region(card.base, "bay")
     io.show("[6] upload bay taken per upload, limit {UPLOAD_LIMIT} bytes")
     @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = UPLOAD_LIMIT, linked = linked }
+    agent.active_at = day_second(card.base)
     system_panel.measure_disk(card.base) rescue |err| { none }
     clear_screen(agent)
     netlog.say_text(card.base, "агент Saltic {VERSION} слушает 10.0.0.2:5555")
