@@ -1,7 +1,9 @@
 -- image — ELF64 для Linux x86-64 из layout.Program родного бэкенда.
--- Окно гостя — с адреса GUEST_HIGH << 32 (0x1_0000_0000): сегменты [низкая
--- память гостя 0…65535], код + rodata (RX, файл со смещения PAGE_BYTES), data
--- + bss (RW), строки аргументов (RW), стек (RW, за стражем platform.map).
+-- Окно гостя — с адреса GUEST_HIGH << 32 (0x1_0000_0000): сегменты: страница
+-- ячеек ролей (RW, первая страница кода, файл со смещения PAGE_BYTES), код +
+-- rodata (RX), data + bss (RW), строки аргументов (RW), стек (RW, за стражем
+-- platform.map) и низкая память гостя 0…65535 (RW, без файла — её ждут
+-- core.mem и канон).
 -- Вход — метка machine.entry (x86_start). Всё выровнено на PAGE_BYTES.
 --
 -- Segment { offset, address, file_bytes, memory_bytes, flags }
@@ -15,6 +17,7 @@ use selfhost.compiler.backend.rv32i.machine.layout
 use selfhost.compiler.backend.rv32i.machine.image
 use selfhost.compiler.backend.rv32i.machine.buffer
 use selfhost.compiler.backend.x86_64_native.platform
+use selfhost.compiler.backend.x86_64_native.roles
 use selfhost.machine.word
 
 HEADER_BYTES = 64
@@ -85,23 +88,27 @@ skill executable(machine) {
     @body = image.payload(machine, current)
     @data_file_bytes = current.file_size - current.data_offset
     @entry = layout.label_address(machine, current, machine.entry, 0)
-    @segment_count = 4
-    (machine.low_memory_size > 0) { segment_count = 5 }
+    @segment_count = 6
 
     @result = buffer.empty()
     result = append_file_header(result, entry, segment_count)
-    (machine.low_memory_size > 0) {
-        result = append_segment(result, Segment {
-            address = word.from_bytes(0, 0, 0, 0),
-            memory_bytes = word.from_number(machine.low_memory_size),
-            flags = READ_WRITE
-        })
-    }
+    result = append_segment(result, Segment {
+        address = word.from_bytes(0, 0, 0, 0),
+        memory_bytes = word.from_number(machine.low_memory_size),
+        flags = READ_WRITE
+    })
     result = append_segment(result, Segment {
         offset = PAGE_BYTES,
         address = machine.load_address,
-        file_bytes = current.data_offset,
-        memory_bytes = word.from_number(current.data_offset),
+        file_bytes = roles.SLOTS_BYTES,
+        memory_bytes = word.from_number(roles.SLOTS_BYTES),
+        flags = READ_WRITE
+    })
+    result = append_segment(result, Segment {
+        offset = PAGE_BYTES + roles.SLOTS_BYTES,
+        address = layout.address_add(machine.load_address, roles.SLOTS_BYTES),
+        file_bytes = current.data_offset - roles.SLOTS_BYTES,
+        memory_bytes = word.from_number(current.data_offset - roles.SLOTS_BYTES),
         flags = READ_EXECUTE
     })
     result = append_segment(result, Segment {

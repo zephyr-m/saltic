@@ -1,0 +1,298 @@
+-- uefi — прошивка UEFI для родного x86-64: вход x86_efi_main и подпрограммы
+-- x86_syscall_<n> для платформы stub.Uefi: 64 — вывод через ConOut->OutputString
+-- (символ за символом: \n → CR LF, байты 0x80…0xBF пропускаются, старшие → ?),
+-- 93 — выход в прошивку с EFI_SUCCESS, 63 — одна клавиша через
+-- ConIn->ReadKeyStroke / WaitForEvent (скан-код → 0x1b, символ ≥ 0x80 → ?),
+-- 29 — ioctl нет (−25), 500 — 16-битный кусок r14 / SystemTable / ImageHandle,
+-- 503 — вызов функции прошивки по блоку [функция, 10 аргументов, результат].
+-- Вход (MS x64: rcx = ImageHandle, rdx = SystemTable): сохранить регистры,
+-- r14 = база образа (call/pop/sub RVA), запомнить таблицу, образ и rsp в
+-- словах страницы ячеек (FIRMWARE_*), снять сторож SetWatchdogTimer, argc = 1,
+-- rsp = аргументы гостя, jmp _start. Подпрограммы сохраняют все регистры-роли,
+-- кроме VALUE, и выравнивают rsp на 16 с тенью 32 байта перед вызовом прошивки.
+-- Смещения таблиц — как в os/target/uefi_x86_64/platform/uefi.saltic.
+--
+-- append(machine) -> machine с входом и подпрограммами; entry = x86_efi_main
+
+use core.group
+use selfhost.machine.word
+use selfhost.compiler.backend.rv32i.machine.buffer
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.x86_64_native.encoder
+use selfhost.compiler.backend.x86_64_native.platform
+
+IMAGE_RVA = 65536
+ARGUMENTS_MARK = "x86_arguments_immediate"
+FIRMWARE_TABLE = 66560
+FIRMWARE_IMAGE = 66568
+FIRMWARE_STACK = 66576
+FIRMWARE_TEXT = 66592
+FIRMWARE_KEY = 66608
+FIRMWARE_INDEX = 66616
+
+SYSTEM_CON_IN = 48
+SYSTEM_CON_OUT = 64
+SYSTEM_BOOT_SERVICES = 96
+OUTPUT_STRING = 8
+READ_KEY_STROKE = 8
+WAIT_FOR_KEY = 16
+WAIT_FOR_EVENT = 96
+SET_WATCHDOG_TIMER = 256
+KEY_CHAR_OFFSET = 2
+
+CALL_ARGUMENTS = 16
+CALL_STACK_ARGUMENTS = 4
+CALL_RESULT = 96
+CALL_FRAME = 96
+SHADOW_BYTES = 40
+POINTER_BYTES = 8
+REL32_BYTES = 4
+NEWLINE = 10
+RETURN_CHAR = 13
+QUESTION = 63
+ESCAPE = 27
+ENOTTY = -25
+EFI_SUCCESS = 0
+
+SAVED_ENTRY = [encoder.EBX, encoder.EBP, encoder.ESI, encoder.EDI, encoder.R12D, encoder.R13D, encoder.R14D, encoder.R15D]
+SAVED_CALL = [encoder.ECX, encoder.EDX, encoder.R8D, encoder.R9D, encoder.R10D, encoder.R11D, encoder.EBX, encoder.ESI, encoder.EDI]
+
+skill push_all(code, items) {
+    drum (items) { code = encoder.register64(code, encoder.PUSH, beat) }
+    out code
+}
+
+skill pop_all(code, items) {
+    @count = group.count(items)
+    drum (count) { code = encoder.register64(code, encoder.POP, group.get(items, count - 1 - beat)) }
+    out code
+}
+
+skill land(code, from) {
+    out buffer.set_word(code, from - REL32_BYTES, word.from_signed(code.length - from))
+}
+
+skill frame_begin(code) {
+    code = push_all(code, SAVED_CALL)
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.EBX, encoder.ESP)
+    code = encoder.operate_immediate(code, 8, encoder.AND, encoder.ESP, -16)
+    out encoder.operate_immediate(code, 8, encoder.SUB, encoder.ESP, SHADOW_BYTES - 8)
+}
+
+skill frame_end(code) {
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.ESP, encoder.EBX)
+    code = pop_all(code, SAVED_CALL)
+    out encoder.single(code, encoder.RET)
+}
+
+skill system_table(code, target) {
+    out encoder.memory(code, encoder.LOAD64, target, encoder.R14D, encoder.NONE, FIRMWARE_TABLE)
+}
+
+skill append_entry(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_efi_main")
+    @code = machine.code
+    code = push_all(code, SAVED_ENTRY)
+    code = encoder.relative(code, encoder.CALL, 0)
+    @next = code.length
+    code = encoder.register64(code, encoder.POP, encoder.R14D)
+    code = encoder.operate_immediate(code, 8, encoder.SUB, encoder.R14D, IMAGE_RVA + next)
+    code = encoder.memory(code, encoder.STORE64, encoder.EDX, encoder.R14D, encoder.NONE, FIRMWARE_TABLE)
+    code = encoder.memory(code, encoder.STORE64, encoder.ECX, encoder.R14D, encoder.NONE, FIRMWARE_IMAGE)
+    code = encoder.memory(code, encoder.STORE64, encoder.ESP, encoder.R14D, encoder.NONE, FIRMWARE_STACK)
+    code = encoder.memory(code, encoder.LOAD64, encoder.EAX, encoder.EDX, encoder.NONE, SYSTEM_BOOT_SERVICES)
+    code = encoder.operate(code, 4, encoder.XOR, encoder.ECX, encoder.ECX)
+    code = encoder.operate(code, 4, encoder.XOR, encoder.EDX, encoder.EDX)
+    code = encoder.operate(code, 4, encoder.XOR, encoder.R8D, encoder.R8D)
+    code = encoder.operate(code, 4, encoder.XOR, encoder.R9D, encoder.R9D)
+    code = encoder.operate_immediate(code, 8, encoder.SUB, encoder.ESP, SHADOW_BYTES)
+    code = encoder.memory(code, encoder.CALL_MEMORY, 0, encoder.EAX, encoder.NONE, SET_WATCHDOG_TIMER)
+    code = encoder.operate_immediate(code, 8, encoder.ADD, encoder.ESP, SHADOW_BYTES)
+    code = encoder.move_word(code, encoder.EDI, word.from_number(0))
+    machine.code = code
+    machine = layout.define_label(machine, layout.Section.CODE, ARGUMENTS_MARK)
+    code = machine.code
+    code = encoder.store_immediate(code, 4, encoder.R14D, encoder.EDI, 0, 1)
+    code = encoder.memory(code, encoder.ADDRESS64, encoder.ESP, encoder.R14D, encoder.EDI, 0)
+    code = encoder.relative(code, encoder.JUMP, 0)
+    machine.code = code
+    machine = layout.note_patch(machine, layout.Patch { kind = layout.PatchKind.REL32, label = "_start", offset = code.length - REL32_BYTES })
+    out machine
+}
+
+skill fix_arguments(machine, arguments_at) {
+    @guest = platform.map(machine)
+    machine.code = buffer.set_word(machine.code, arguments_at, guest.arguments)
+    out machine
+}
+
+skill append_exit(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_syscall_93")
+    @code = machine.code
+    code = encoder.memory(code, encoder.LOAD64, encoder.ESP, encoder.R14D, encoder.NONE, FIRMWARE_STACK)
+    code = pop_all(code, SAVED_ENTRY)
+    code = encoder.operate(code, 4, encoder.XOR, encoder.EAX, encoder.EAX)
+    machine.code = encoder.single(code, encoder.RET)
+    out machine
+}
+
+skill append_ioctl(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_syscall_29")
+    @code = machine.code
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, ENOTTY)
+    machine.code = encoder.single(code, encoder.RET)
+    out machine
+}
+
+skill output_text(code) {
+    code = system_table(code, encoder.ECX)
+    code = encoder.memory(code, encoder.LOAD64, encoder.ECX, encoder.ECX, encoder.NONE, SYSTEM_CON_OUT)
+    code = encoder.memory(code, encoder.ADDRESS64, encoder.EDX, encoder.R14D, encoder.NONE, FIRMWARE_TEXT)
+    out encoder.memory(code, encoder.CALL_MEMORY, 0, encoder.ECX, encoder.NONE, OUTPUT_STRING)
+}
+
+skill append_write(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_syscall_64")
+    @code = machine.code
+    code = frame_begin(code)
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.ESI, encoder.EDX)
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.EDI, encoder.ESI)
+    code = encoder.operate(code, 4, encoder.ADD, encoder.EDI, encoder.R8D)
+    @loop = code.length
+    code = encoder.operate(code, 4, encoder.CMP, encoder.ESI, encoder.EDI)
+    code = encoder.relative(code, encoder.ABOVE_OR_EQUAL, 0)
+    @done_from = code.length
+    code = encoder.memory(code, encoder.LOAD_ZERO_BYTE, encoder.EAX, encoder.R14D, encoder.ESI, 0)
+    code = encoder.operate_immediate(code, 4, encoder.ADD, encoder.ESI, 1)
+    code = encoder.operate_immediate(code, 4, encoder.CMP, encoder.EAX, 128)
+    code = encoder.relative(code, encoder.BELOW, 0)
+    @ascii_from = code.length
+    code = encoder.operate_immediate(code, 4, encoder.CMP, encoder.EAX, 192)
+    code = platform.backward(code, encoder.BELOW, loop)
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, QUESTION)
+    code = land(code, ascii_from)
+    code = encoder.operate_immediate(code, 4, encoder.CMP, encoder.EAX, NEWLINE)
+    code = encoder.relative(code, encoder.NOT_EQUAL, 0)
+    @plain_from = code.length
+    code = encoder.store_immediate(code, 2, encoder.R14D, encoder.NONE, FIRMWARE_TEXT, RETURN_CHAR)
+    code = encoder.store_immediate(code, 2, encoder.R14D, encoder.NONE, FIRMWARE_TEXT + 2, NEWLINE)
+    code = encoder.store_immediate(code, 2, encoder.R14D, encoder.NONE, FIRMWARE_TEXT + 4, 0)
+    code = encoder.relative(code, encoder.JUMP, 0)
+    @show_from = code.length
+    code = land(code, plain_from)
+    code = encoder.memory(code, encoder.STORE_HALF, encoder.EAX, encoder.R14D, encoder.NONE, FIRMWARE_TEXT)
+    code = encoder.store_immediate(code, 2, encoder.R14D, encoder.NONE, FIRMWARE_TEXT + 2, 0)
+    code = land(code, show_from)
+    code = output_text(code)
+    code = platform.backward(code, encoder.JUMP, loop)
+    code = land(code, done_from)
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.ESP, encoder.EBX)
+    code = encoder.memory(code, encoder.LOAD, encoder.EAX, encoder.ESP, encoder.NONE, POINTER_BYTES * 6)
+    code = pop_all(code, SAVED_CALL)
+    machine.code = encoder.single(code, encoder.RET)
+    out machine
+}
+
+skill append_read(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_syscall_63")
+    @code = machine.code
+    code = frame_begin(code)
+    @loop = code.length
+    code = system_table(code, encoder.ECX)
+    code = encoder.memory(code, encoder.LOAD64, encoder.ECX, encoder.ECX, encoder.NONE, SYSTEM_CON_IN)
+    code = encoder.memory(code, encoder.ADDRESS64, encoder.EDX, encoder.R14D, encoder.NONE, FIRMWARE_KEY)
+    code = encoder.memory(code, encoder.CALL_MEMORY, 0, encoder.ECX, encoder.NONE, READ_KEY_STROKE)
+    code = encoder.operate(code, 8, encoder.TEST, encoder.EAX, encoder.EAX)
+    code = encoder.relative(code, encoder.EQUAL, 0)
+    @got_from = code.length
+    code = system_table(code, encoder.EAX)
+    code = encoder.memory(code, encoder.LOAD64, encoder.EDX, encoder.EAX, encoder.NONE, SYSTEM_CON_IN)
+    code = encoder.memory(code, encoder.ADDRESS64, encoder.EDX, encoder.EDX, encoder.NONE, WAIT_FOR_KEY)
+    code = encoder.memory(code, encoder.LOAD64, encoder.EAX, encoder.EAX, encoder.NONE, SYSTEM_BOOT_SERVICES)
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.ECX, 1)
+    code = encoder.memory(code, encoder.ADDRESS64, encoder.R8D, encoder.R14D, encoder.NONE, FIRMWARE_INDEX)
+    code = encoder.memory(code, encoder.CALL_MEMORY, 0, encoder.EAX, encoder.NONE, WAIT_FOR_EVENT)
+    code = platform.backward(code, encoder.JUMP, loop)
+    code = land(code, got_from)
+    code = encoder.memory(code, encoder.LOAD_ZERO_HALF, encoder.EAX, encoder.R14D, encoder.NONE, FIRMWARE_KEY + KEY_CHAR_OFFSET)
+    code = encoder.operate(code, 4, encoder.TEST, encoder.EAX, encoder.EAX)
+    code = encoder.relative(code, encoder.NOT_EQUAL, 0)
+    @have_from = code.length
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, ESCAPE)
+    code = land(code, have_from)
+    code = encoder.operate_immediate(code, 4, encoder.CMP, encoder.EAX, 128)
+    code = encoder.relative(code, encoder.BELOW, 0)
+    @plain_from = code.length
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, QUESTION)
+    code = land(code, plain_from)
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.ESP, encoder.EBX)
+    code = encoder.memory(code, encoder.LOAD, encoder.ECX, encoder.ESP, encoder.NONE, POINTER_BYTES * 7)
+    code = encoder.memory(code, encoder.STORE_BYTE, encoder.EAX, encoder.R14D, encoder.ECX, 0)
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, 1)
+    code = pop_all(code, SAVED_CALL)
+    machine.code = encoder.single(code, encoder.RET)
+    out machine
+}
+
+skill append_firmware(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_syscall_500")
+    @code = machine.code
+    code = encoder.register64(code, encoder.PUSH, encoder.ECX)
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.ECX, encoder.EAX)
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.EAX, encoder.R14D)
+    code = encoder.operate_immediate(code, 4, encoder.CMP, encoder.ECX, 4)
+    code = encoder.relative(code, encoder.BELOW, 0)
+    @shift_from_base = code.length
+    code = encoder.memory(code, encoder.LOAD64, encoder.EAX, encoder.R14D, encoder.NONE, FIRMWARE_TABLE)
+    code = encoder.operate_immediate(code, 4, encoder.CMP, encoder.ECX, 8)
+    code = encoder.relative(code, encoder.BELOW, 0)
+    @shift_from_table = code.length
+    code = encoder.memory(code, encoder.LOAD64, encoder.EAX, encoder.R14D, encoder.NONE, FIRMWARE_IMAGE)
+    code = land(code, shift_from_base)
+    code = land(code, shift_from_table)
+    code = encoder.operate_immediate(code, 4, encoder.AND, encoder.ECX, 3)
+    code = encoder.shift(code, 4, encoder.SHIFT_LEFT, encoder.ECX, 4)
+    code = encoder.shift(code, 8, encoder.SHIFT_RIGHT, encoder.EAX, encoder.BY_CL)
+    code = encoder.operate_immediate(code, 4, encoder.AND, encoder.EAX, 65535)
+    code = encoder.register64(code, encoder.POP, encoder.ECX)
+    machine.code = encoder.single(code, encoder.RET)
+    out machine
+}
+
+skill append_call(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_syscall_503")
+    @code = machine.code
+    code = push_all(code, SAVED_CALL)
+    code = encoder.memory(code, encoder.ADDRESS64, encoder.EBX, encoder.R14D, encoder.EAX, 0)
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.ESI, encoder.ESP)
+    code = encoder.operate_immediate(code, 8, encoder.AND, encoder.ESP, -16)
+    code = encoder.operate_immediate(code, 8, encoder.SUB, encoder.ESP, CALL_FRAME)
+    drum (6) {
+        code = encoder.memory(code, encoder.LOAD64, encoder.EAX, encoder.EBX, encoder.NONE, CALL_ARGUMENTS + (CALL_STACK_ARGUMENTS + beat) * POINTER_BYTES)
+        code = encoder.memory(code, encoder.STORE64, encoder.EAX, encoder.ESP, encoder.NONE, 32 + beat * POINTER_BYTES)
+    }
+    code = encoder.memory(code, encoder.LOAD64, encoder.ECX, encoder.EBX, encoder.NONE, CALL_ARGUMENTS)
+    code = encoder.memory(code, encoder.LOAD64, encoder.EDX, encoder.EBX, encoder.NONE, CALL_ARGUMENTS + POINTER_BYTES)
+    code = encoder.memory(code, encoder.LOAD64, encoder.R8D, encoder.EBX, encoder.NONE, CALL_ARGUMENTS + 2 * POINTER_BYTES)
+    code = encoder.memory(code, encoder.LOAD64, encoder.R9D, encoder.EBX, encoder.NONE, CALL_ARGUMENTS + 3 * POINTER_BYTES)
+    code = encoder.memory(code, encoder.CALL_MEMORY, 0, encoder.EBX, encoder.NONE, 0)
+    code = encoder.memory(code, encoder.STORE64, encoder.EAX, encoder.EBX, encoder.NONE, CALL_RESULT)
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.ESP, encoder.ESI)
+    code = encoder.operate(code, 4, encoder.MOVE, encoder.EAX, encoder.EAX)
+    code = pop_all(code, SAVED_CALL)
+    machine.code = encoder.single(code, encoder.RET)
+    out machine
+}
+
+skill append(machine) {
+    machine = append_entry(machine)
+    machine = append_exit(machine)
+    machine = append_ioctl(machine)
+    machine = append_write(machine)
+    machine = append_read(machine)
+    machine = append_firmware(machine)
+    machine = append_call(machine)
+    machine.entry = "x86_efi_main"
+    @mark = layout.find_label(machine, ARGUMENTS_MARK)
+    out fix_arguments(machine, mark.offset - REL32_BYTES)
+}

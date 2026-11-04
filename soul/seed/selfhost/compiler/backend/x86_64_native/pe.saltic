@@ -1,0 +1,138 @@
+-- pe — PE32+ для UEFI из layout.Program родного бэкенда: одна секция .text
+-- (чтение, запись, исполнение) с RVA = адресу загрузки гостя (65536), так
+-- что r14 = база образа и адрес гостя X — это RVA X; низкая память гостя
+-- 0…65535 — заголовки и резерв образа (её никто не трогает). Тело секции —
+-- payload (страница ячеек, код, rodata, data) и пустая таблица релокаций;
+-- виртуальный размер — до конца стека гостя (bss, куча, строки, стек внутри
+-- образа, стража нет). Вход — RVA метки machine.entry (x86_efi_main).
+--
+-- append_dos_header / append_file_header(target) — заголовки
+-- append_optional_header(target, entry_rva, raw_bytes, image_bytes, relocation_rva)
+-- append_section_header(target, raw_bytes, virtual_bytes)
+-- executable(machine) -> buffer PE32+; UnresolvedPatch
+-- write(path, machine) — записать файл; WriteFailed
+
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.rv32i.machine.image
+use selfhost.compiler.backend.x86_64_native.platform
+use selfhost.machine.word
+use selfhost.compiler.backend.rv32i.machine.buffer
+
+PE_OFFSET = 64
+HEADERS_BYTES = 512
+FILE_ALIGNMENT = 512
+SECTION_ALIGNMENT = 4096
+SECTION_RVA = 65536
+MACHINE_X86_64 = 34404
+SECTION_COUNT = 1
+OPTIONAL_HEADER_BYTES = 240
+EXECUTABLE_IMAGE = 34
+PE32_PLUS = 523
+EFI_APPLICATION = 10
+DIRECTORY_COUNT = 16
+RELOCATION_DIRECTORY = 5
+RELOCATION_BYTES = 12
+STACK_RESERVE = 1048576
+
+skill append_dos_header(target) {
+    target = buffer.append_text(target, "MZ")
+    target = image.pad_to(target, 60)
+    target = image.append_number32(target, PE_OFFSET)
+    out image.pad_to(target, PE_OFFSET)
+}
+
+skill append_file_header(target) {
+    target = buffer.append_text(target, "PE")
+    target = buffer.append_u16(target, 0)
+    target = buffer.append_u16(target, MACHINE_X86_64)
+    target = buffer.append_u16(target, SECTION_COUNT)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = buffer.append_u16(target, OPTIONAL_HEADER_BYTES)
+    out buffer.append_u16(target, EXECUTABLE_IMAGE)
+}
+
+skill append_optional_header(target, entry_rva, raw_bytes, image_bytes, relocation_rva) {
+    target = buffer.append_u16(target, PE32_PLUS)
+    target = buffer.append_u16(target, 0)
+    target = image.append_number32(target, raw_bytes)
+    target = image.append_number32(target, raw_bytes)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, entry_rva)
+    target = image.append_number32(target, SECTION_RVA)
+    target = buffer.append_word(target, word.from_bytes(0, 0, 0, 16))
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, SECTION_ALIGNMENT)
+    target = image.append_number32(target, FILE_ALIGNMENT)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = buffer.append_word(target, image_bytes)
+    target = image.append_number32(target, HEADERS_BYTES)
+    target = image.append_number32(target, 0)
+    target = buffer.append_u16(target, EFI_APPLICATION)
+    target = buffer.append_u16(target, 0)
+    drum (4) {
+        target = image.append_number32(target, STACK_RESERVE)
+        target = image.append_number32(target, 0)
+    }
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, DIRECTORY_COUNT)
+    drum (DIRECTORY_COUNT) {
+        pick {
+            (beat == RELOCATION_DIRECTORY) {
+                target = image.append_number32(target, relocation_rva)
+                target = image.append_number32(target, RELOCATION_BYTES)
+            }
+            {
+                target = image.append_number32(target, 0)
+                target = image.append_number32(target, 0)
+            }
+        }
+    }
+    out target
+}
+
+skill append_section_header(target, raw_bytes, virtual_bytes) {
+    target = buffer.append_text(target, ".text")
+    target = buffer.append_zeroes(target, 3)
+    target = buffer.append_word(target, virtual_bytes)
+    target = image.append_number32(target, SECTION_RVA)
+    target = image.append_number32(target, raw_bytes)
+    target = image.append_number32(target, HEADERS_BYTES)
+    target = image.append_number32(target, 0)
+    target = image.append_number32(target, 0)
+    target = buffer.append_u16(target, 0)
+    target = buffer.append_u16(target, 0)
+    out buffer.append_word(target, word.from_bytes(224, 0, 0, 224))
+}
+
+skill executable(machine) {
+    (machine.resolved == no) { out error.UnresolvedPatch }
+    @current = layout.layout(machine)
+    @guest = platform.map(machine)
+    @body = image.payload(machine, current)
+    @relocation_offset = layout.align(body.length, 4)
+    body = image.pad_to(body, relocation_offset)
+    body = image.append_number32(body, SECTION_ALIGNMENT)
+    body = image.append_number32(body, RELOCATION_BYTES)
+    body = image.append_number32(body, 0)
+    @raw_bytes = layout.align(body.length, FILE_ALIGNMENT)
+    @image_end = word.align_page(word.add_number(guest.stack, platform.STACK_BYTES))
+    @virtual_bytes = word.from_number(word.to_number(image_end) - SECTION_RVA)
+    @entry_rva = word.to_number(layout.label_address(machine, current, machine.entry, 0))
+    @result = buffer.empty()
+    result = append_dos_header(result)
+    result = append_file_header(result)
+    result = append_optional_header(result, entry_rva, raw_bytes, image_end, SECTION_RVA + relocation_offset)
+    result = append_section_header(result, raw_bytes, virtual_bytes)
+    result = image.pad_to(result, HEADERS_BYTES)
+    result = buffer.append_buffer(result, body)
+    out image.pad_to(result, HEADERS_BYTES + raw_bytes)
+}
+
+skill write(path, machine) {
+    out image.write_buffer(path, executable(machine))
+}

@@ -1,7 +1,8 @@
 -- toolchain — компилятор Saltic как программа: исходник -> проверка -> машина
 -- RV32I -> образ для цели.
 -- Запуск: program(исходник, выход, куча_текстом, цель); цели rv32i (ELF),
--- x86_64 (перевод в x86-64), x86_64-uefi, x86_64-native (родной x86-64, ELF64).
+-- x86_64 (перевод в x86-64), x86_64-uefi, x86_64-native и x86_64-uefi-native
+-- (родной x86-64: ELF64 Linux, PE32+ UEFI).
 -- Модули ищутся от текущей папки.
 -- Если ближние вызовы не уложились — собирает заново с дальними.
 -- Исходник грузится с местами (parser.load_file_loc): дерево с обёртками
@@ -14,7 +15,8 @@
 -- build_machine(ast, heap_size, far_calls, firmware) -> машина RV32I: исполнитель
 --     rv32i.Executor и платформа linux.Linux или stub.Uefi
 -- write_native(ast, heap_size, output_path, firmware) -> none; WriteFailed
--- write_x86(ast, heap_size, output_path) -> none — родной x86-64; WriteFailed
+-- write_x86(ast, heap_size, output_path, firmware) -> none — родной x86-64:
+--     ELF64 Linux или PE32+ UEFI; WriteFailed
 -- show(problem) / toolchain_show_diagnostics(diagnostics) — печать
 
 use core.str
@@ -78,9 +80,18 @@ skill write_native(ast, heap_size, output_path, firmware) {
     out none
 }
 
-skill write_x86(ast, heap_size, output_path) {
-    @machine = compiler.compile_machine(ast, heap_size, x86_64_native.Executor { firmware = no }, linux.Linux {})
+skill write_x86(ast, heap_size, output_path, firmware) {
+    @executor = x86_64_native.Executor { firmware = firmware }
     io.show("toolchain: пишу родной x86-64 ", output_path)
+    (firmware == yes) {
+        @firmware_machine = compiler.compile_machine(ast, heap_size, executor, stub.Uefi {})
+        x86_64_native.write_uefi(output_path, firmware_machine) rescue |failure| {
+            io.show("toolchain: образ UEFI не собрался: ", failure)
+            out error.WriteFailed
+        }
+        out none
+    }
+    @machine = compiler.compile_machine(ast, heap_size, executor, linux.Linux {})
     x86_64_native.write(output_path, machine) rescue |failure| {
         io.show("toolchain: образ x86-64 не собрался: ", failure)
         out error.WriteFailed
@@ -108,7 +119,8 @@ skill build(source_path, output_path, heap_text, target) {
     io.show("toolchain: собираю")
     (target == "x86_64") { out write_native(checked.tree, heap_size, output_path, no) }
     (target == "x86_64-uefi") { out write_native(checked.tree, heap_size, output_path, yes) }
-    (target == "x86_64-native") { out write_x86(checked.tree, heap_size, output_path) }
+    (target == "x86_64-native") { out write_x86(checked.tree, heap_size, output_path, no) }
+    (target == "x86_64-uefi-native") { out write_x86(checked.tree, heap_size, output_path, yes) }
     ((target == "rv32i") == no) { out error.UnknownTarget }
     @machine = build_machine(checked.tree, heap_size, no, no)
     io.show("toolchain: пишу ", output_path)
