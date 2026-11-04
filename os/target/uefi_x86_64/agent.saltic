@@ -6,7 +6,8 @@
 --
 -- Agent { card, frames, commands, arp, expected, received, total, columns,
 --     rows, line, cursor, console, shown_second, rounds, failures, last_error,
---     shot_bytes, restart, output, lent, bay, names, chosen, limit, linked, opening }
+--     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, limit,
+--     linked, opening }
 -- log(agent, message) — в консоль, пока console = yes
 -- begin_upload / upload_state / launch / keep_program / open_by_word /
 --     memory_dump / prepare_disk / install_image / time_reply / show_code /
@@ -25,8 +26,10 @@
 -- tick(agent) — один круг: кадры, клавиши раз в KEY_EVERY, часы и системная
 --     панель раз в CLOCK_EVERY
 -- survive(agent) — tick с перехватом сбоя / serve(agent) — вечный цикл
--- run() — открыть карту, линк, проверить arena_map, bay (страницы ниже
---     4 ГБ на UPLOAD_LIMIT; нет страниц — участок арены "bay"), serve
+-- take_bay(agent, bytes) — причал под программу: свои страницы старого
+--     отдаются, до участка арены "bay" — он, больше — страницы в окне агента
+--     ровно по размеру; NoUploadRoom / trim_bay(agent, size) — отдать хвост
+-- run() — открыть карту, линк, проверить arena_map, serve; причал — по заливке
 -- program() — вход: run с баннером при сбое, затем вечное ожидание
 
 use io
@@ -66,7 +69,7 @@ REPLY_LIMIT = 1400
 PORT = 5555
 DATA_PORT = 5556
 UPLOAD_LIMIT = 33554432
-UPLOAD_PAGES = 8192
+PAGE_BYTES = 4096
 REPORT_EVERY = 32768
 MY_IP = [10, 0, 0, 2]
 LISTEN_ROUNDS = 200000000
@@ -94,6 +97,7 @@ Agent = Box {
     output = [],
     lent = no,
     bay = firmware.Phys {},
+    bay_pages = 0,
     names = [],
     chosen = 0,
     limit = 0,
@@ -112,6 +116,31 @@ skill log(agent, message) {
     out none
 }
 
+skill take_bay(agent, bytes) {
+    @base = agent.card.base
+    (agent.bay_pages > 0) {
+        uefi.free_pages(base, agent.bay, agent.bay_pages)
+        agent.bay_pages = 0
+    }
+    agent.bay = firmware.region(base, "bay")
+    @spare = arena_map.region("bay")
+    (bytes < spare.bytes + 1) { out none }
+    @pages = (bytes + PAGE_BYTES - 1) / PAGE_BYTES
+    @place = uefi.pages_in_window(base, pages) rescue |err| { out error.NoUploadRoom }
+    agent.bay = place
+    agent.bay_pages = pages
+    out none
+}
+
+skill trim_bay(agent, size) {
+    @keep = (size + PAGE_BYTES - 1) / PAGE_BYTES
+    (agent.bay_pages > keep) {
+        uefi.free_pages(agent.card.base, firmware.add(agent.bay, keep * PAGE_BYTES), agent.bay_pages - keep)
+        agent.bay_pages = keep
+    }
+    out none
+}
+
 skill begin_upload(agent, words) {
     (group.count(words) < 2) { out "как: upload <байт>" }
     @size = parse.parse_size(group.get(words, 1))
@@ -120,6 +149,8 @@ skill begin_upload(agent, words) {
         @limit = agent.limit
         out "слишком много: предел {limit} байт"
     }
+    agent.expected = 0
+    take_bay(agent, size) rescue |err| { out "нет памяти под {size} байт" }
     agent.expected = size
     agent.received = 0
     agent.total = 0
@@ -195,6 +226,7 @@ skill information(agent) {
     @arena = firmware.phys_text(firmware.arena(agent.card.base))
     @bay = firmware.phys_text(agent.bay)
     @limit = agent.limit
+    @held = agent.bay_pages * PAGE_BYTES / 1024
     @link = link_russian(rtl8111.status(agent.card))
     @frames = agent.frames
     @commands = agent.commands
@@ -203,7 +235,7 @@ skill information(agent) {
     @last_error = agent.last_error
     @columns = agent.columns
     @rows = agent.rows
-    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}, приём программ {bay}, предел {limit} байт\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
+    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {mac}, ip {ip}, udp-порт 5555\nлинк {link}\nарена DMA {arena}, приём программ {bay}, своих страниц {held} КБ, предел {limit} байт\nкадров {frames}, команд {commands}, ответов ARP {arp}\nэкран {columns} × {rows} символов\nсбоев в цикле {failures}, последний: {last_error}"
 }
 
 skill draw_test(agent) {
@@ -279,7 +311,10 @@ skill open_by_word(agent, words) {
 skill open_program(agent) {
     (group.count(agent.names) == 0) { out none }
     @name = group.get(agent.names, agent.chosen)
+    agent.expected = 0
+    take_bay(agent, agent.limit)
     @size = programs.load(agent.card.base, name, agent.bay, agent.limit)
+    trim_bay(agent, size)
     agent.expected = size
     agent.received = size
     feed.show_command(agent, "клавиатура", feed.text_bytes("открываю {name}", 64))
@@ -574,16 +609,8 @@ skill run() {
     io.show("[5] arena map: {regions} regions, {arena_used} bytes, no overlap")
     io.show("")
     @bay = firmware.region(card.base, "bay")
-    @spare = arena_map.region("bay")
-    @limit = spare.bytes
-    @pages = uefi.pages_below_4g(card.base, UPLOAD_PAGES) rescue |err| { firmware.Phys {} }
-    (pages.hi + pages.lo > 0) {
-        bay = pages
-        limit = UPLOAD_LIMIT
-    }
-    @where = firmware.phys_text(bay)
-    io.show("[6] upload bay {where}, limit {limit} bytes")
-    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = limit, linked = linked }
+    io.show("[6] upload bay taken per upload, limit {UPLOAD_LIMIT} bytes")
+    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = UPLOAD_LIMIT, linked = linked }
     system_panel.measure_disk(card.base) rescue |err| { none }
     clear_screen(agent)
     netlog.say_text(card.base, "агент Saltic {VERSION} слушает 10.0.0.2:5555")
