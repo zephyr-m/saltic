@@ -4,7 +4,7 @@
 
 # Saltic
 
-**Текущая версия: 146:37:96**
+**Текущая версия: 154:47:128**
 
 Saltic — системный язык, который собирает сам себя: парсер, чекер и
 компилятор написаны на самом Saltic, выдают машинный код RISC-V и x86-64 без
@@ -117,7 +117,7 @@ nix --extra-experimental-features "nix-command flakes" develop
 Собрать свою программу компилятором с полки:
 
 ```bash
-bootstrap/saltic-146-37-96-compiler-x86_64-linux hello.saltic hello 134217728 x86_64
+bootstrap/saltic-154-47-128-compiler-x86_64-linux hello.saltic hello 134217728 x86_64
 ```
 
 ## Документы
