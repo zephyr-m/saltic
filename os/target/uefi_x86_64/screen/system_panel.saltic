@@ -7,14 +7,18 @@
 -- memory(base) -> Memory; NoMemoryMap
 -- measure_disk(base) — размер и свободное место тома Saltic в netlog
 --     (агент зовёт при старте и после записи на диск); нет тома — нули
--- tick(base, card) — раз в секунду: счётчики карты в netlog, перерисовка;
---     чаще — ничего не делает; звать из цикла сети
+-- tick(base, card) — раз в секунду: счётчики карты в netlog и show без
+--     принуждения; чаще — ничего не делает; звать из цикла сети
 -- flush(base, card) — счётчики карты в итоги netlog и в ноль (перед сменой образа)
--- draw(base, card) — перерисовать панель
+-- draw(base, card) — перерисовать панель / show(base, card, always) — то же,
+--     но при always = no — только если подписи изменились; рисует в задний
+--     буфер (netlog.canvas) и кладёт на экран одним копированием
 -- link_speed(status) -> «100 Мбит/с» или «нет»
--- Внутри: gauge — подпись, полоса и «занято X из Y»; add_bytes — КБ и остаток
+-- Внутри: gauge — подпись, полоса и «занято X из Y»; add_bytes — КБ и остаток;
+--     signature — отпечаток подписей
 
 use core.num
+use core.str
 use core.group
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
@@ -43,6 +47,9 @@ RX_SPEED = 36
 TX_SPEED = 40
 DISK_SIZE = 44
 DISK_FREE = 48
+RIGHT_CANVAS = 56
+SIGNATURE = 60
+SIGNATURE_MOD = 65521
 SECONDS_PER_HOUR = 3600
 MARGIN = 16
 ROW = 18
@@ -120,7 +127,7 @@ skill tick(base, card) {
     netlog.set_number(base, log, RX_SPEED, card.received_bytes / elapsed)
     netlog.set_number(base, log, TX_SPEED, card.sent_bytes / elapsed)
     flush(base, card)
-    out draw(base, card)
+    out show(base, card, no)
 }
 
 skill link_speed(status) {
@@ -146,31 +153,48 @@ skill gauge(screen, x, y, width, title, used_mb, total_mb) {
     out y + ROW * 4
 }
 
+skill signature(text) {
+    @mark = 0
+    drum (str.len(text)) { mark = num.mod(mark * 31 + str.byte(text, beat), SIGNATURE_MOD) }
+    out mark
+}
+
 skill draw(base, card) {
-    @whole = graphics.open_whole(base)
-    @side = graphics.side_width(whole.width)
-    @left = whole.width - side
-    @x = left + MARGIN
-    @width = side - 2 * MARGIN
-    @grey = graphics.color(whole, 161, 161, 170)
-    @ink = graphics.color(whole, 228, 228, 231)
-    graphics.fill(whole, left, 0, side, whole.height, graphics.color(whole, 24, 24, 27))
-    graphics.fill(whole, left, 0, 1, whole.height, graphics.color(whole, 63, 63, 70))
-    lettering.paint_text(whole, FACE, x, MARGIN, "система", graphics.color(whole, 113, 113, 122))
+    out show(base, card, yes)
+}
+
+skill show(base, card, always) {
     @log = netlog.find(base)
     @known = memory(base) rescue |err| { Memory {} }
-    @y = gauge(whole, x, MARGIN + ROW * 2, width, "память", known.total_mb - known.free_mb, known.total_mb)
-    @disk_size = netlog.number_at(base, log, DISK_SIZE)
-    y = gauge(whole, x, y, width, "диск Saltic", disk_size - netlog.number_at(base, log, DISK_FREE), disk_size)
-    lettering.paint_text(whole, FACE, x, y, "сеть", ink)
+    @memory_used = known.total_mb - known.free_mb
+    @memory_total = known.total_mb
+    @disk_total = netlog.number_at(base, log, DISK_SIZE)
+    @disk_used = disk_total - netlog.number_at(base, log, DISK_FREE)
     @link = link_speed(rtl8111.status(card))
     @incoming = sizes.speed_text(netlog.number_at(base, log, RX_SPEED))
     @outgoing = sizes.speed_text(netlog.number_at(base, log, TX_SPEED))
     @received = sizes.kb_text(netlog.number_at(base, log, RX_KB))
     @sent = sizes.kb_text(netlog.number_at(base, log, TX_KB))
-    lettering.paint_text(whole, FACE, x, y + ROW, "линк {link}", grey)
-    lettering.paint_text(whole, FACE, x, y + ROW * 2, "приём {incoming}", grey)
-    lettering.paint_text(whole, FACE, x, y + ROW * 3, "отправка {outgoing}", grey)
-    lettering.paint_text(whole, FACE, x, y + ROW * 4, "принято всего {received}", grey)
-    out lettering.paint_text(whole, FACE, x, y + ROW * 5, "отправлено всего {sent}", grey)
+    @mark = signature("{memory_used}/{memory_total}/{disk_used}/{disk_total}/{link}/{incoming}/{outgoing}/{received}/{sent}")
+    (always == no) {
+        (mark == netlog.number_at(base, log, SIGNATURE)) { out none }
+    }
+    netlog.set_number(base, log, SIGNATURE, mark)
+    @whole = graphics.open_whole(base)
+    @side = graphics.side_width(whole.width)
+    @panel = netlog.canvas(base, RIGHT_CANVAS, side, whole)
+    @width = side - 2 * MARGIN
+    @grey = graphics.color(whole, 161, 161, 170)
+    graphics.fill(panel, 0, 0, side, whole.height, graphics.color(whole, 24, 24, 27))
+    graphics.fill(panel, 0, 0, 1, whole.height, graphics.color(whole, 63, 63, 70))
+    lettering.paint_text(panel, FACE, MARGIN, MARGIN, "система", graphics.color(whole, 113, 113, 122))
+    @y = gauge(panel, MARGIN, MARGIN + ROW * 2, width, "память", memory_used, memory_total)
+    y = gauge(panel, MARGIN, y, width, "диск Saltic", disk_used, disk_total)
+    lettering.paint_text(panel, FACE, MARGIN, y, "сеть", graphics.color(whole, 228, 228, 231))
+    lettering.paint_text(panel, FACE, MARGIN, y + ROW, "линк {link}", grey)
+    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 2, "приём {incoming}", grey)
+    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 3, "отправка {outgoing}", grey)
+    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 4, "принято всего {received}", grey)
+    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 5, "отправлено всего {sent}", grey)
+    out graphics.put(base, panel, whole, whole.width - side)
 }

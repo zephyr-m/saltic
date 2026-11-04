@@ -15,7 +15,9 @@
 -- find(base) -> Phys журнала; новый, если его нет или он вне окна
 -- add(base, kind, bytes) — записать строку и перерисовать
 -- number_at(base, log, offset) / set_number(base, log, offset, value) —
---     число до 2^32 в заголовке, offset от NUMBERS до HEADER
+--     число до 2^28 в заголовке, offset от NUMBERS до HEADER
+-- canvas(base, offset, width, whole) -> graphics.Screen — задний буфер панели;
+--     его адрес хранится в заголовке по offset, вне окна — заводится новый
 
 use core.num
 use core.group
@@ -36,6 +38,7 @@ SCRATCH_GUID = 2048
 PAGES = 3
 HEADER = 64
 NUMBERS = 16
+LEFT_CANVAS = 52
 SLOTS = 32
 SLOT = 256
 MARGIN = 16
@@ -108,12 +111,28 @@ skill set_number(base, log, offset, value) {
     out firmware.write16(log, base, offset + 2, value / 65536)
 }
 
+skill canvas(base, offset, width, whole) {
+    @log = find(base)
+    @place = firmware.read32(log, base, offset)
+    (place.hi + place.lo > 0) {
+        @seen = firmware.guest(place, base) rescue |err| { [] }
+        (group.count(seen) == 0) { place = firmware.Phys {} }
+    }
+    (place.hi + place.lo == 0) {
+        place = uefi.pages_in_window(base, (width * whole.height * graphics.PIXEL_BYTES + 4095) / 4096)
+        firmware.write16(log, base, offset, place.lo)
+        firmware.write16(log, base, offset + 2, place.hi)
+    }
+    out graphics.canvas(base, place, width, whole.height, whole)
+}
+
 skill draw(base) {
     @whole = graphics.open_whole(base)
     @side = graphics.side_width(whole.width)
-    graphics.fill(whole, 0, 0, side, whole.height, graphics.color(whole, 24, 24, 27))
-    graphics.fill(whole, side - 1, 0, 1, whole.height, graphics.color(whole, 63, 63, 70))
-    lettering.paint_text(whole, FACE, MARGIN, MARGIN, "сеть — 10.0.0.2:5555", graphics.color(whole, 113, 113, 122))
+    @panel = canvas(base, LEFT_CANVAS, side, whole)
+    graphics.fill(panel, 0, 0, side, whole.height, graphics.color(whole, 24, 24, 27))
+    graphics.fill(panel, side - 1, 0, 1, whole.height, graphics.color(whole, 63, 63, 70))
+    lettering.paint_text(panel, FACE, MARGIN, MARGIN, "сеть — 10.0.0.2:5555", graphics.color(whole, 113, 113, 122))
     @face = FACE
     @letters = (side - 2 * MARGIN) / face.width
     @top = MARGIN + ROW * 2
@@ -133,8 +152,8 @@ skill draw(base) {
         (y - count * ROW < top) { leave }
         drum (count) {
             y = y - ROW
-            lettering.paint_bytes(whole, FACE, MARGIN, y, group.get(rows, count - 1 - beat), ink)
+            lettering.paint_bytes(panel, FACE, MARGIN, y, group.get(rows, count - 1 - beat), ink)
         }
     }
-    out none
+    out graphics.put(base, panel, whole, 0)
 }
