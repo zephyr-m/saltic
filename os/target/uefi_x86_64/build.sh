@@ -12,6 +12,6 @@ image="$work/image"
 mkdir -p "$image/EFI/BOOT"
 
 echo "uefi: собираю $source"
-SALTIC_TARGET=x86_64-uefi SALTIC_BUILD_DIR="$work/build" SALTIC_HEAP_BYTES=67108864 \
+SALTIC_TARGET="${SALTIC_TARGET:-x86_64-uefi}" SALTIC_BUILD_DIR="$work/build" SALTIC_HEAP_BYTES=67108864 \
     bash bootstrap/build.sh "$source" "$image/EFI/BOOT/BOOTX64.EFI"
 echo "uefi: образ флешки — $image (скопируй его содержимое на FAT32-флешку)"

@@ -63,9 +63,13 @@ rm -f "$compiler_output"
 
 # Загрузочный компилятор с полки работает своей родной x86-версией: те же байты,
 # в разы быстрее. Любой другой rv32i-компилятор (stage-1 и т. п.) — под QEMU.
+# Компилятор, подставленный через SALTIC_BOOTSTRAP_COMPILER и собранный для
+# x86-64 (ELF64), запускается прямо.
 runner=(qemu-riscv32 -B 0x100000000 "$compiler")
 if [[ "${SALTIC_NATIVE:-1}" != "0" && "$compiler" == "$(saltic_bootstrap_compiler)" ]]; then
     runner=("$(saltic_native_compiler)")
+elif [[ "$(od -An -tx1 -j4 -N1 "$compiler" | tr -d '[:space:]')" == "02" ]]; then
+    runner=("$compiler")
 fi
 "${runner[@]}" "$source_path" "$compiler_output" "$heap_bytes" "$target"
 
