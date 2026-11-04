@@ -2,7 +2,7 @@
 
 UIEngine (кнопки, сглаженный шрифт) — [os/uiengine](../../uiengine/README.md).
 
-Летопись первого вечера на железе, с фотографиями: [docs/history/2026-11-01.md](../../../docs/history/2026-11-01.md).
+Летопись первого вечера на железе, с фотографиями: [.archive/docs/history/2026-11-01.md](../../../.archive/docs/history/2026-11-01.md).
 
 Saltic на ноутбуке без Linux: программа собирается как UEFI-приложение
 (PE32+) и грузится прошивкой с флешки.
@@ -26,7 +26,7 @@ Saltic на ноутбуке без Linux: программа собираетс
 | `platform/firmware.saltic` | общая основа: физические адреса, чтение и запись памяти, таблицы UEFI и ACPI, ECAM, поиск устройства PCI |
 | `platform/pci.saltic` | перечисление устройств PCI: системная таблица UEFI → ACPI RSDP → XSDT → MCFG → ECAM, обход всех шин |
 | `programs/pci.saltic` | список устройств PCI на экран; не выходит, пока ноутбук не выключат |
-| `drivers/qca9377.saltic` + `drivers/qca9377/` | драйвер Wi-Fi QCA9377 по ath10k: сброс, кольца CE, BMI, прошивка, READY, канал WMI, паспорт `SERVICE_READY` — рассказ в [docs/history/2026-11-02.md](../../../docs/history/2026-11-02.md) |
+| `drivers/qca9377.saltic` + `drivers/qca9377/` | драйвер Wi-Fi QCA9377 по ath10k: сброс, кольца CE, BMI, прошивка, READY, канал WMI, паспорт `SERVICE_READY` — рассказ в [.archive/docs/history/2026-11-02.md](../../../.archive/docs/history/2026-11-02.md) |
 | `drivers/rtl8111.saltic` | драйвер Ethernet Realtek RTL8111: найти карту, сбросить, кольца дескрипторов в арене, дождаться линка; `send` кадра, `received`/`read_frame`/`release` для приёма. QEMU эту карту не эмулирует — проверка только на железе |
 | `network/net.saltic` | сеть на группах байтов: Ethernet, ARP (ответ «10.0.0.2 — это я»), IPv4 с контрольной суммой, UDP; проверяется на Linux |
 | `agent.saltic` | приёмник команд на 10.0.0.2:5555: `help`, `info`, `pci`, `mem <адрес> [байт]`, `echo`, `upload <байт>`, `check`, `run`; отвечает на ARP и по-русски (экран Acer — по-английски: у прошивки нет кириллицы); куски программы принимает на порт 5556 в арену и запускает её через прошивку |

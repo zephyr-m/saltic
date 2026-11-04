@@ -26,7 +26,7 @@
 «вызови навык», «перейди, если ноль» — методами `compiler.executor`
 (`../backend.saltic`). `Executor` отсюда переводит роли в регистры и зовёт
 `assembler.emit_op` / `machine.layout`. Машинный код программ от этого не
-изменился ни на байт (`docs/fable/2026-11-03-contract.md`).
+изменился ни на байт (`.archive/docs/fable/2026-11-03-contract.md`).
 
 **Рантайм на договоре (шаг 3, 04.11.2026).** `runtime/*` тоже говорит
 только ролями и операциями договора (`executor.load`, `executor.syscall`,
@@ -39,7 +39,7 @@
 прыгает `fixed`); провалы меток (`rt_string_upper → rt_string_case`,
 `rt_fixed_mem_load32 → load`, `store32 → store`) — внутри одного навыка.
 Машинный код не изменился, кроме двадцати пересылок `add rd, rs, x0 →
-addi rd, rs, 0` (`docs/fable/2026-11-03-runtime.md`). Рантайм лежит здесь,
+addi rd, rs, 0` (`.archive/docs/fable/2026-11-03-runtime.md`). Рантайм лежит здесь,
 потому что исполнитель RV32I — единственный; с появлением второго его место
 решит автор. Thumb-2, Xtensa и ARM64 получают codegen и рантайм бесплатно,
 им нужны только исполнитель, образ и платформа.

@@ -38,4 +38,4 @@ ebp, `HEAP_TOP` r15d, `REGION_MARK` r12d, `ESCAPE_MARK` r13d, `STACK` rsp;
 Не сделано: UEFI (шаг 5: `pe`, `uefi` — вход и вызовы прошивки через
 `encoder`), `rel8`, умножение и деление железом, символы в ELF64.
 Документация: Intel 64 and IA-32 SDM, AMD64 APM; `docs/PLAN.md` «x86-64»;
-отчёт `docs/fable/2026-11-04-native-x86.md`.
+отчёт `.archive/docs/fable/2026-11-04-native-x86.md`.

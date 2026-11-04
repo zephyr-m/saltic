@@ -3,7 +3,9 @@
 Что узнали, прежде чем делать: замеры, подсчёты, прогнозы строк, риски.
 Решений здесь нет — они в [PLAN.md](PLAN.md), а то, что ждёт автора, — в
 [QUESTIONS.md](QUESTIONS.md). Большие отчёты агентов лежат в
-[fable/](fable/); здесь — короткие разведки и указатели на большие.
+[fable/](fable/), выполненные — в
+[.archive/docs/fable/](../.archive/docs/fable/); здесь — короткие разведки и
+указатели на большие.
 Новая разведка — сверху.
 
 ## 3а: фиксированные типы выходят из навыка — 04.11.2026
@@ -51,8 +53,14 @@ x86-бэкенда и честного счёта сборщика.
 
 ## Большие отчёты
 
+В работе:
+
 - [fable/2026-11-03-64bit.md](fable/2026-11-03-64bit.md) — 64-битные числа, три пути
-- [fable/2026-11-04-native-x86.md](fable/2026-11-04-native-x86.md) — родной x86-64
-- [fable/2026-11-03-x86-executor.md](fable/2026-11-03-x86-executor.md), [fable/2026-11-03-x86.md](fable/2026-11-03-x86.md) — исполнитель и порт x86
-- [fable/2026-11-03-platforms.md](fable/2026-11-03-platforms.md) — договор платформы
-- [fable/2026-11-03-audit.md](fable/2026-11-03-audit.md), [fable/2026-11-02-audit.md](fable/2026-11-02-audit.md) — аудиты языка
+- [fable/2026-11-03-audit.md](fable/2026-11-03-audit.md), [fable/2026-11-02-audit.md](fable/2026-11-02-audit.md) — аудиты языка (открыты пункты `beat`, `mem.load8`, числа)
+
+Выполнены — в архиве:
+
+- [2026-11-04-native-x86.md](../.archive/docs/fable/2026-11-04-native-x86.md) — родной x86-64
+- [2026-11-03-x86-executor.md](../.archive/docs/fable/2026-11-03-x86-executor.md), [2026-11-03-x86.md](../.archive/docs/fable/2026-11-03-x86.md) — исполнитель и порт x86
+- [2026-11-03-platforms.md](../.archive/docs/fable/2026-11-03-platforms.md) — договор платформы
+- [2026-11-03-contract.md](../.archive/docs/fable/2026-11-03-contract.md), [2026-11-03-runtime.md](../.archive/docs/fable/2026-11-03-runtime.md) — договор машины, рантайм на договоре

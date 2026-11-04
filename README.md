@@ -134,8 +134,10 @@ bootstrap/saltic-154-47-128-compiler-x86_64-linux hello.saltic hello 134217728 x
 - [docs/OS-core.md](docs/OS-core.md) — понимание ОС;
 - [docs/Code_Architecture_канон_для_агентов.md](docs/Code_Architecture_канон_для_агентов.md)
   и [AGENTS.md](AGENTS.md) — правила для агентов;
-- [docs/history/](docs/history/) — летопись по дням,
-  [docs/fable/](docs/fable/) — задачи и отчёты агента Fable.
+- [.archive/docs/history/](.archive/docs/history/) — летопись по дням,
+  [docs/fable/](docs/fable/) — отчёты агента Fable в работе, выполненные —
+  в [.archive/docs/fable/](.archive/docs/fable/); разведка — [docs/RECON.md](docs/RECON.md),
+  открытые вопросы — [docs/QUESTIONS.md](docs/QUESTIONS.md).
 
 ## Релиз
 
