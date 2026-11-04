@@ -12,12 +12,15 @@
 -- line(call, command) -> Line — текст старой команды; ok = no и param, если
 --     нет обязательного параметра
 -- success(call, bytes, ms, limit) / failure(call, code, message, param, ms) /
---     unknown(call, registry, ms) / help(call, registry, ms) /
+--     unknown(call, registry, ms) / help(call, registry, ms, limit) — с
+--     описаниями, страницей с параметра from до limit байт, next — откуда
+--     следующая /
 --     describe(call, registry, ms) -> байты ответа
 
 use core.num
 use core.group
 use os.target.uefi_x86_64.platform.utf8
+use os.target.uefi_x86_64.platform.parse
 use craft.protocols.data.json
 use craft.protocols.data.json.value
 use craft.protocols.data.json.reader
@@ -245,15 +248,34 @@ skill entry(command) {
     out bytes
 }
 
-skill help(call, registry, ms) {
+skill help(call, registry, ms, limit) {
+    @from = 0
+    @asked = value.get(call.request, "from")
+    (asked.found == yes) { from = parse.parse_size(plain(asked.value)) }
     @bytes = group.concat(head(call, yes, ms), utf8.encode(",\"data\":\{\"commands\":\{"))
-    drum (group.count(registry)) {
-        @command = group.get(registry, beat)
-        (beat > 0) { bytes = group.add(bytes, 44) }
-        bytes = group.concat(group.concat(group.concat(bytes, quoted_text(command.name)), [58]), group.add(entry(command), 125))
-    }
     @total = group.count(registry)
-    out group.concat(bytes, utf8.encode("\},\"total\":{total}\}\}"))
+    @next = total
+    @first = yes
+    drum (total) {
+        ((beat < from) == no) {
+            (next == total) {
+                @command = group.get(registry, beat)
+                @piece = group.concat(group.concat(quoted_text(command.name), [58]), entry(command))
+                piece = group.add(group.concat(group.concat(piece, utf8.encode(",\"description\":")), quoted_text(command.about)), 125)
+                (group.count(bytes) + group.count(piece) + 40 > limit) {
+                    (first == no) { next = beat }
+                }
+                (next == total) {
+                    (first == no) { bytes = group.add(bytes, 44) }
+                    bytes = group.concat(bytes, piece)
+                    first = no
+                }
+            }
+        }
+    }
+    @tail = "\},\"total\":{total}\}\}"
+    (next < total) { tail = "\},\"total\":{total},\"next\":{next}\}\}" }
+    out group.concat(bytes, utf8.encode(tail))
 }
 
 skill describe(call, registry, ms) {

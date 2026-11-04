@@ -78,17 +78,14 @@ def reply_text(reply):
 
 
 def registry():
+    commands, start = {}, 0
     try:
-        listing = ask("help", timeout=3)
+        while start is not None:
+            page = ask("help", {"from": start}, timeout=3).get("data", {})
+            commands.update(page.get("commands", {}))
+            start = page.get("next")
     except OSError as err:
         log(f"агент молчит ({err}) — только общие инструменты")
-        return {}
-    commands = listing.get("data", {}).get("commands", {})
-    for name, entry in commands.items():
-        try:
-            entry["description"] = ask("describe", {"command": name}, timeout=3).get("data", {}).get("description", "")
-        except OSError:
-            entry["description"] = ""
     log(f"от агента {len(commands)} команд")
     return commands
 
