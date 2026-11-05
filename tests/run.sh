@@ -224,6 +224,32 @@ test_always() {
     echo "always: регион на оборот — 200 000 оборотов в 1 МБ, внешнее переживает уборку, под rv32i и x86_64"
 }
 
+test_rv64() {
+    mkdir -p "$work/rv64"
+    SALTIC_TARGET=rv64 build edges-rv64 \
+        tests/edges.saltic \
+        "$work/rv64/edges"
+    SALTIC_TARGET=rv64 build always-rv64 \
+        tests/always.saltic \
+        "$work/rv64/always" \
+        1048576
+    measure run qemu-riscv64 -B 0x100000000 "$work/rv64/edges" >"$work/rv64/edges.txt"
+    measure run qemu-riscv64 -B 0x100000000 "$work/rv64/always" >"$work/rv64/always.txt"
+    diff -u tests/expected/edges.txt "$work/rv64/edges.txt"
+    diff -u tests/expected/always.txt "$work/rv64/always.txt"
+    echo "rv64: edges и always под qemu-riscv64 — те же выводы, что у rv32i и x86_64"
+}
+
+test_rva23() {
+    mkdir -p "$work/rva23"
+    SALTIC_TARGET=x86_64 build rva23 \
+        tests/rva23.saltic \
+        "$work/rva23/program"
+    measure run "$work/rva23/program" >"$work/rva23/lines.txt"
+    python3 workbench/rva23/verify.py "$work/rva23/lines.txt"
+    echo "rva23: кодировщик RV64 сошёлся с GNU-ассемблером на всех командах таблицы"
+}
+
 test_x86_encoder() {
     mkdir -p "$work/x86-encoder"
     SALTIC_TARGET=rv32i build x86-encoder-rv32i \
@@ -489,6 +515,8 @@ run_case() {
         bytes) test_bytes ;;
         edges) test_edges ;;
         always) test_always ;;
+        rva23) test_rva23 ;;
+        rv64) test_rv64 ;;
         x86-encoder) test_x86_encoder ;;
         dict) test_dict ;;
         seed-contract) test_seed_contract ;;
@@ -530,6 +558,8 @@ elif [[ "$1" == "all" ]]; then
         bytes \
         edges \
         always \
+        rva23 \
+        rv64 \
         x86-encoder \
         dict \
         seed-contract \

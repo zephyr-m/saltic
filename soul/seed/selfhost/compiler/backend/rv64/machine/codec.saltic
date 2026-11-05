@@ -1,0 +1,172 @@
+-- codec — кодирование команд RVA23 по таблице generated/rva23 (её пишет
+-- workbench/rva23/generate.py из GNU-ассемблера). Команда — имя и группа
+-- значений операндов: регистр — номер, смещение и число — как в ассемблере,
+-- маска вектора — 0 или 1 (1 — «, v0.t»), fli — номер константы.
+-- Кодировка: строка таблицы хранит команду при базовых операндах; каждый бит
+-- операнда, отличный от базового, переворачивает свои биты команды.
+--
+-- Encoded = Box { bytes, size } — байты команды, младший первый; size — 2 или 4
+-- find(name) -> номер строки; UnknownInstruction
+-- kinds(name) -> имена видов операндов по порядку; UnknownInstruction
+-- form_at(index) -> операнды строки [номер вида, база, карта битов]
+-- limits(kind) -> [наименьшее, наибольшее, шаг]; forbidden(kind) -> [значения]
+-- encode(name, operands) -> Encoded; OperandCount, OperandOutOfRange
+-- render(name, operands) -> текст команды для ассемблера (проверка таблицы)
+-- count() / name_at(index) -> число строк / имя строки
+
+use core.str
+use core.num
+use core.dict
+use core.group
+use selfhost.compiler.backend.rv64.machine.generated.rva23
+
+INDEX = build_index()
+
+Encoded = Box {
+    bytes = [],
+    size = 4
+}
+
+skill build_index() {
+    @index = dict.new()
+    drum (group.count(rva23.NAMES)) { dict.set(index, group.get(rva23.NAMES, beat), beat) }
+    out index
+}
+
+skill count() {
+    out group.count(rva23.NAMES)
+}
+
+skill name_at(index) {
+    out group.get(rva23.NAMES, index)
+}
+
+skill find(name) {
+    (dict.has(INDEX, name) == no) { out error.UnknownInstruction }
+    out dict.get(INDEX, name)
+}
+
+skill form_at(index) {
+    @row = group.get(rva23.ROWS, index)
+    out group.get(rva23.FORMS, group.get(row, 5))
+}
+
+skill kinds(name) {
+    @result = []
+    drum (form_at(find(name))) { result = group.add(result, group.get(rva23.KIND_NAMES, group.get(beat, 0))) }
+    out result
+}
+
+skill limits(kind) {
+    out group.get(rva23.KIND_LIMITS, kind)
+}
+
+skill forbidden(kind) {
+    out group.get(rva23.KIND_FORBIDDEN, kind)
+}
+
+skill check(kind, value) {
+    @range = limits(kind)
+    (value < group.get(range, 0)) { out error.OperandOutOfRange }
+    (value > group.get(range, 1)) { out error.OperandOutOfRange }
+    (num.mod(value, group.get(range, 2)) > 0) { out error.OperandOutOfRange }
+    drum (forbidden(kind)) {
+        (value == beat) { out error.OperandOutOfRange }
+    }
+    out value
+}
+
+skill bit(value, at) {
+    out num.mod(value / num.power2(at), 2)
+}
+
+skill flip(bytes, at) {
+    @index = at / 8
+    @old = group.get(bytes, index)
+    @weight = num.power2(num.mod(at, 8))
+    @next = old + weight
+    (bit(old, num.mod(at, 8)) == 1) { next = old - weight }
+    @result = []
+    drum (group.count(bytes)) {
+        pick {
+            (beat == index) { result = group.add(result, next) }
+            { result = group.add(result, group.get(bytes, beat)) }
+        }
+    }
+    out result
+}
+
+skill encode(name, operands) {
+    @index = find(name)
+    @row = group.get(rva23.ROWS, index)
+    @form = form_at(index)
+    ((group.count(operands) == group.count(form)) == no) { out error.OperandCount }
+    @size = group.get(row, 0)
+    @bytes = [group.get(row, 1), group.get(row, 2), group.get(row, 3), group.get(row, 4)]
+    drum (group.count(form)) {
+        @operand = group.get(form, beat)
+        @value = check(group.get(operand, 0), group.get(operands, beat))
+        @base = group.get(operand, 1)
+        @maps = group.get(operand, 2)
+        @last = group.get(group.get(maps, group.count(maps) - 1), 0)
+        (value < 0) { value = value + num.power2(last + 1) }
+        drum (maps) {
+            @entry = beat
+            @at = group.get(entry, 0)
+            ((bit(value, at) == bit(base, at)) == no) {
+                drum (group.count(entry) - 1) { bytes = flip(bytes, group.get(entry, beat + 1)) }
+            }
+        }
+    }
+    (size == 2) { bytes = [group.get(bytes, 0), group.get(bytes, 1)] }
+    out Encoded { bytes = bytes, size = size }
+}
+
+skill fence_text(value) {
+    @text = ""
+    (bit(value, 3) == 1) { text = "{text}i" }
+    (bit(value, 2) == 1) { text = "{text}o" }
+    (bit(value, 1) == 1) { text = "{text}r" }
+    (bit(value, 0) == 1) { text = "{text}w" }
+    out text
+}
+
+skill operand_text(kind, value) {
+    @style = group.get(rva23.KIND_STYLES, kind)
+    (style == "x") { out "x{value}" }
+    (style == "f") { out "f{value}" }
+    (style == "v") { out "v{value}" }
+    (style == "vm") {
+        (value == 1) { out ", v0.t" }
+        out ""
+    }
+    (style == "offset") { out ". + {value}" }
+    (style == "fli") { out group.get(rva23.FLI, value) }
+    (style == "fence") { out fence_text(value) }
+    (style == "clui") {
+        (value < 0) { value = value + 1048576 }
+        out "{value}"
+    }
+    out "{value}"
+}
+
+skill render(name, operands) {
+    @index = find(name)
+    @form = form_at(index)
+    @shape = group.get(rva23.SHAPES, index)
+    @text = name
+    (str.bytes(shape) > 0) { text = "{name} " }
+    @at = 0
+    drum (str.bytes(shape)) {
+        @ch = str.get(shape, beat)
+        pick {
+            (ch == "%") {
+                @operand = group.get(form, at)
+                text = str.concat(text, operand_text(group.get(operand, 0), group.get(operands, at)))
+                at = at + 1
+            }
+            { text = str.concat(text, ch) }
+        }
+    }
+    out text
+}

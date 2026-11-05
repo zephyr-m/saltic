@@ -9,6 +9,7 @@
 -- Linux { name } — платформа: append(compiler) -> compiler, все метки договора
 -- emit_write / emit_exit(compiler) — rt_platform_write / rt_platform_exit
 -- emit_key(compiler) — rt_platform_key: до 8 байт, имена клавиш; Ctrl-C — выход 130;
+--     кадр на стеке — termios, буфер и ячейки-слова (key_slot / key_frame от words);
 --     emit_terminal_mode / emit_name_branches / emit_name_results / emit_key_bytes — части;
 --     key_label / text_label(name) -> метки; append_key_data(compiler) — тексты имён
 -- emit_file_read / emit_file_write / emit_file_error(compiler) — файлы
@@ -35,14 +36,13 @@ KEY_BUFFER_BYTES = 8
 INTERRUPT_BYTE = 3
 INTERRUPT_EXIT = 130
 
-FRAME_BYTES = 128
 SAVED_TERMIOS = 16
 RAW_TERMIOS = 56
 KEY_BUFFER = 96
-KEY_COUNT = 104
-KEY_TERMINAL = 108
-KEY_OBJECT = 112
-RETURN_ADDRESS = 124
+KEY_SLOTS = 104
+KEY_COUNT = 0
+KEY_TERMINAL = 1
+KEY_OBJECT = 2
 
 SINGLE_KEYS = [27, 13, 10, 127, 8, 9]
 SINGLE_NAMES = ["escape", "enter", "enter", "backspace", "backspace", "tab"]
@@ -85,7 +85,7 @@ skill emit_file_read(compiler) {
     @executor = compiler.executor
     @words = compiler.words
     compiler = executor.label(compiler, platform.FILE_READ)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - words.bytes * 8)
     compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 7)
     compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
     compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, words.payload + words.bytes)
@@ -95,7 +95,7 @@ skill emit_file_read(compiler) {
     compiler = executor.syscall(compiler, system.SYSCALL_OPENAT)
     compiler = executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
     compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * 6)
-    compiler = executor.load_immediate(compiler, backend.VALUE, 1048581)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 1048576 + words.string_data + 1)
     compiler = executor.call(compiler, "rt_alloc")
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
     compiler = executor.store32(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
@@ -124,7 +124,7 @@ skill emit_file_write(compiler) {
     @executor = compiler.executor
     @words = compiler.words
     compiler = executor.label(compiler, platform.FILE_WRITE)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - words.bytes * 8)
     compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 7)
     compiler = executor.store(compiler, backend.ERROR, backend.STACK, words.bytes * 6)
     compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
@@ -204,13 +204,13 @@ skill emit_key_bytes(compiler) {
     @executor = compiler.executor
     @words = compiler.words
     compiler = executor.label(compiler, ".L_key_bytes")
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, KEY_COUNT)
-    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, 5)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, key_slot(compiler.words, KEY_COUNT))
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.string_data + 1)
     compiler = executor.call(compiler, "rt_alloc")
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, KEY_OBJECT)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, key_slot(compiler.words, KEY_OBJECT))
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
     compiler = executor.store32(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, KEY_COUNT)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, key_slot(compiler.words, KEY_COUNT))
     compiler = executor.store(compiler, backend.SCRATCH1, backend.VALUE, words.payload)
     compiler = executor.load_immediate(compiler, backend.SCRATCH2, 0)
     compiler = executor.label(compiler, ".L_key_copy")
@@ -227,17 +227,27 @@ skill emit_key_bytes(compiler) {
     out executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
 }
 
+skill key_slot(words, slot) {
+    out KEY_SLOTS + slot * words.bytes
+}
+
+skill key_frame(words) {
+    @bytes = KEY_SLOTS + 4 * words.bytes
+    out (bytes + 15) / 16 * 16
+}
+
 skill emit_key(compiler) {
     @executor = compiler.executor
+    @words = compiler.words
     compiler = executor.label(compiler, platform.KEY)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - FRAME_BYTES)
-    compiler = executor.store(compiler, backend.RETURN, backend.STACK, RETURN_ADDRESS)
-    compiler = executor.store_zero(compiler, backend.STACK, KEY_TERMINAL)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - key_frame(compiler.words))
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, key_frame(compiler.words) - compiler.words.bytes)
+    compiler = executor.store_zero(compiler, backend.STACK, key_slot(compiler.words, KEY_TERMINAL))
 
     compiler = emit_terminal_mode(compiler, TERMINAL_GET, SAVED_TERMIOS)
     compiler = executor.branch_negative(compiler, backend.VALUE, ".L_key_read")
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
-    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, KEY_TERMINAL)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, key_slot(compiler.words, KEY_TERMINAL))
     drum (TERMIOS_WORDS) {
         compiler = executor.load32(compiler, backend.SCRATCH0, backend.STACK, SAVED_TERMIOS + beat * 4)
         compiler = executor.store32(compiler, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + beat * 4)
@@ -254,19 +264,19 @@ skill emit_key(compiler) {
     compiler = executor.load_immediate(compiler, backend.VALUE, STDIN)
     compiler = executor.add_immediate(compiler, backend.ERROR, backend.STACK, KEY_BUFFER)
     compiler = executor.load_immediate(compiler, backend.ARG2, 1)
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, KEY_TERMINAL)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, key_slot(compiler.words, KEY_TERMINAL))
     compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_key_size")
     compiler = executor.load_immediate(compiler, backend.ARG2, KEY_BUFFER_BYTES)
     compiler = executor.label(compiler, ".L_key_size")
     compiler = executor.syscall(compiler, system.SYSCALL_READ)
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, KEY_COUNT)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, key_slot(compiler.words, KEY_COUNT))
 
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, KEY_TERMINAL)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, key_slot(compiler.words, KEY_TERMINAL))
     compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_key_restored")
     compiler = emit_terminal_mode(compiler, TERMINAL_SET, SAVED_TERMIOS)
     compiler = executor.label(compiler, ".L_key_restored")
 
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, KEY_COUNT)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, key_slot(compiler.words, KEY_COUNT))
     compiler = executor.branch_not_positive(compiler, backend.SCRATCH0, key_label("none"))
     compiler = executor.load_byte(compiler, backend.SCRATCH1, backend.STACK, KEY_BUFFER)
     compiler = executor.load_immediate(compiler, backend.SCRATCH2, INTERRUPT_BYTE)
@@ -296,8 +306,8 @@ skill emit_key(compiler) {
     compiler = emit_name_results(compiler)
 
     compiler = executor.label(compiler, ".L_key_done")
-    compiler = executor.load(compiler, backend.RETURN, backend.STACK, RETURN_ADDRESS)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, FRAME_BYTES)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, key_frame(compiler.words) - compiler.words.bytes)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, key_frame(compiler.words))
     compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
     out executor.ret(compiler)
 }

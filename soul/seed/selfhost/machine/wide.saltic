@@ -1,0 +1,149 @@
+-- wide — 64-битное значение из двух 32-битных word: low и high. Нужно RV64:
+-- константы больше 32 бит (61-битные числа, маски, li), 64-битные поля ELF.
+-- Пока компилятор сам работает на 29-битных числах, считает побайтно.
+-- Переполнение 64 бит — WideOutsideRange; отрицательные — дополнительный код.
+--
+-- Wide { low, high } — младшее и старшее слово
+-- from_word(word) / from_number(value) / from_signed(value) -> Wide
+-- from_decimal(text) -> Wide со знаком; InvalidWordText, WideOutsideRange
+-- to_word(value) -> word, если старшее слово — ноль; WideOutsideRange
+-- is_zero(value) -> yes/no; add(left, right) -> Wide; WideOutsideRange
+-- negate(value) / shift_left(value, shift) -> Wide (по модулю 2^64)
+-- text(value) -> десятичный текст без знака
+
+use core.str
+use core.num
+use core.group
+use selfhost.machine.word
+
+Wide = Box {
+    low = word.Word {},
+    high = word.Word {}
+}
+
+skill to_bytes(value) {
+    out [value.low.b0, value.low.b1, value.low.b2, value.low.b3, value.high.b0, value.high.b1, value.high.b2, value.high.b3]
+}
+
+skill from_bytes(bytes) {
+    @low = word.from_bytes(group.get(bytes, 0), group.get(bytes, 1), group.get(bytes, 2), group.get(bytes, 3))
+    @high = word.from_bytes(group.get(bytes, 4), group.get(bytes, 5), group.get(bytes, 6), group.get(bytes, 7))
+    out Wide { low = low, high = high }
+}
+
+skill from_word(value) {
+    out Wide { low = value, high = word.Word {} }
+}
+
+skill from_number(value) {
+    out from_word(word.from_number(value))
+}
+
+skill from_signed(value) {
+    (value < 0) { out negate(from_number(0 - value)) }
+    out from_number(value)
+}
+
+skill to_word(value) {
+    (word.is_zero(value.high) == no) { out error.WideOutsideRange }
+    out value.low
+}
+
+skill is_zero(value) {
+    (word.is_zero(value.low) == no) { out no }
+    out word.is_zero(value.high)
+}
+
+skill scaled(value, scale, extra) {
+    @result = []
+    @carry = extra
+    drum (to_bytes(value)) {
+        @total = beat * scale + carry
+        result = group.add(result, num.mod(total, 256))
+        carry = total / 256
+    }
+    (carry > 0) { out error.WideOutsideRange }
+    out from_bytes(result)
+}
+
+skill add(left, right) {
+    @a = to_bytes(left)
+    @b = to_bytes(right)
+    @result = []
+    @carry = 0
+    drum (8) {
+        @total = group.get(a, beat) + group.get(b, beat) + carry
+        result = group.add(result, num.mod(total, 256))
+        carry = total / 256
+    }
+    (carry > 0) { out error.WideOutsideRange }
+    out from_bytes(result)
+}
+
+skill negate(value) {
+    @result = []
+    @carry = 1
+    drum (to_bytes(value)) {
+        @total = 255 - beat + carry
+        result = group.add(result, num.mod(total, 256))
+        carry = total / 256
+    }
+    out from_bytes(result)
+}
+
+skill shift_left(value, shift) {
+    @result = value
+    drum (shift) {
+        @bytes = []
+        @carry = 0
+        drum (to_bytes(result)) {
+            @total = beat * 2 + carry
+            bytes = group.add(bytes, num.mod(total, 256))
+            carry = total / 256
+        }
+        result = from_bytes(bytes)
+    }
+    out result
+}
+
+skill from_decimal(text) {
+    @length = str.bytes(text)
+    (length == 0) { out error.InvalidWordText }
+    @negative = str.starts_with(text, "-")
+    @first = 0
+    (negative == yes) {
+        (length == 1) { out error.InvalidWordText }
+        first = 1
+    }
+    @result = Wide {}
+    drum (length - first) {
+        @ch = str.get(text, beat + first)
+        (str.is_digit(ch) == no) { out error.InvalidWordText }
+        result = scaled(result, 10, num.digit(ch))
+    }
+    (negative == yes) { out negate(result) }
+    out result
+}
+
+skill text(value) {
+    @current = to_bytes(value)
+    @result = ""
+    drum (20) {
+        @quotient = []
+        @rest = 0
+        @active = no
+        drum (8) {
+            @at = 7 - beat
+            @part = rest * 256 + group.get(current, at)
+            quotient = group.add(quotient, part / 10)
+            rest = num.mod(part, 10)
+            (part / 10 > 0) { active = yes }
+        }
+        result = str.concat(str.get("0123456789", rest), result)
+        @next = []
+        drum (8) { next = group.add(next, group.get(quotient, 7 - beat)) }
+        current = next
+        (active == no) { out result }
+    }
+    out result
+}

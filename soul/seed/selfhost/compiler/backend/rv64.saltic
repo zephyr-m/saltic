@@ -1,0 +1,404 @@
+-- rv64 — исполнитель договора машины для RV64 (канон RVA23). Всё, что на
+-- RV64 кодируется так же, как на RV32I — арифметика, сравнения, переходы,
+-- вызовы, auipc + addi, lui + addi, ecall, — отдаёт исполнителю RV32I на той
+-- же раскладке программы (rv32i.machine.layout: правки переходов и адресов те
+-- же). Сам делает 64-битное: слово 8 байт (ld / sd, push / pop, data_word),
+-- 32-битные поля (lwu / sw / data32), сдвиги до 63 — через machine.codec
+-- (таблица RVA23). Широкое смещение (не влезает в 12 бит) — через t6, как у
+-- RV32I. Раскладка памяти — abi.shape на 8 байт (WORDS).
+--
+-- Executor { far_calls } — методы договора backend.saltic; внутренние
+--     narrow() -> rv32i.Executor с теми же far_calls,
+--     emit(compiler, name, operands) — команда RVA23 в код,
+--     memory(compiler, name, data, base, offset) — загрузка / сохранение
+-- WORDS — abi.shape.of(8); WORD_BYTES — 8
+
+use core.group
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.rv32i.machine.registers
+use selfhost.compiler.backend.rv64.machine.codec
+use selfhost.abi.shape
+use selfhost.machine.word
+
+WORDS = shape.of(8)
+WORD_BYTES = 8
+WIDE_OFFSET_REGISTER = registers.T6
+
+Executor = Box {
+    far_calls = no
+
+    skill narrow() {
+        out rv32i.Executor { far_calls = far_calls }
+    }
+
+    skill register(role) {
+        @base = narrow()
+        out base.register(role)
+    }
+
+    skill emit(compiler, name, operands) {
+        @encoded = codec.encode(name, operands)
+        @bytes = encoded.bytes
+        compiler.machine = layout.emit_word(compiler.machine, word.from_bytes(group.get(bytes, 0), group.get(bytes, 1), group.get(bytes, 2), group.get(bytes, 3)))
+        out compiler
+    }
+
+    skill memory(compiler, name, data, base, offset) {
+        (offset < -2048) {
+            compiler.machine = layout.emit_load_immediate(compiler.machine, WIDE_OFFSET_REGISTER, offset)
+            compiler = emit(compiler, "add", [WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, base])
+            out emit(compiler, name, [data, 0, WIDE_OFFSET_REGISTER])
+        }
+        (offset > 2047) {
+            compiler.machine = layout.emit_load_immediate(compiler.machine, WIDE_OFFSET_REGISTER, offset)
+            compiler = emit(compiler, "add", [WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, base])
+            out emit(compiler, name, [data, 0, WIDE_OFFSET_REGISTER])
+        }
+        out emit(compiler, name, [data, offset, base])
+    }
+
+    skill new_program(compiler, entry) {
+        @base = narrow()
+        compiler = base.new_program(compiler, entry)
+        compiler.words = WORDS
+        out compiler
+    }
+
+    skill heap_size(compiler, bytes) {
+        @base = narrow()
+        out base.heap_size(compiler, bytes)
+    }
+
+    skill label(compiler, name) {
+        @base = narrow()
+        out base.label(compiler, name)
+    }
+
+    skill data_label(compiler, where, name) {
+        @base = narrow()
+        out base.data_label(compiler, where, name)
+    }
+
+    skill align(compiler, where, boundary) {
+        @base = narrow()
+        out base.align(compiler, where, boundary)
+    }
+
+    skill data32(compiler, where, value) {
+        @base = narrow()
+        out base.data_word(compiler, where, value)
+    }
+
+    skill data_word(compiler, where, value) {
+        @base = narrow()
+        compiler = base.data_word(compiler, where, value)
+        @fill = 0
+        (value.b3 > 127) { fill = 255 }
+        drum (4) { compiler = base.data_byte(compiler, where, fill) }
+        out compiler
+    }
+
+    skill data_byte(compiler, where, value) {
+        @base = narrow()
+        out base.data_byte(compiler, where, value)
+    }
+
+    skill data_text(compiler, where, text) {
+        @base = narrow()
+        out base.data_text(compiler, where, text)
+    }
+
+    skill reserve(compiler, bytes) {
+        @base = narrow()
+        out base.reserve(compiler, bytes)
+    }
+
+    skill load_immediate(compiler, to, value) {
+        @base = narrow()
+        out base.load_immediate(compiler, to, value)
+    }
+
+    skill load_word(compiler, to, value) {
+        @base = narrow()
+        out base.load_word(compiler, to, value)
+    }
+
+    skill load_address(compiler, to, name, addend) {
+        @base = narrow()
+        out base.load_address(compiler, to, name, addend)
+    }
+
+    skill move(compiler, to, from) {
+        @base = narrow()
+        out base.move(compiler, to, from)
+    }
+
+    skill negate(compiler, to, from) {
+        @base = narrow()
+        out base.negate(compiler, to, from)
+    }
+
+    skill add_immediate(compiler, to, from, value) {
+        @base = narrow()
+        out base.add_immediate(compiler, to, from, value)
+    }
+
+    skill add(compiler, to, left, right) {
+        @base = narrow()
+        out base.add(compiler, to, left, right)
+    }
+
+    skill sub(compiler, to, left, right) {
+        @base = narrow()
+        out base.sub(compiler, to, left, right)
+    }
+
+    skill and(compiler, to, left, right) {
+        @base = narrow()
+        out base.and(compiler, to, left, right)
+    }
+
+    skill or(compiler, to, left, right) {
+        @base = narrow()
+        out base.or(compiler, to, left, right)
+    }
+
+    skill xor(compiler, to, left, right) {
+        @base = narrow()
+        out base.xor(compiler, to, left, right)
+    }
+
+    skill and_immediate(compiler, to, from, value) {
+        @base = narrow()
+        out base.and_immediate(compiler, to, from, value)
+    }
+
+    skill or_immediate(compiler, to, from, value) {
+        @base = narrow()
+        out base.or_immediate(compiler, to, from, value)
+    }
+
+    skill xor_immediate(compiler, to, from, value) {
+        @base = narrow()
+        out base.xor_immediate(compiler, to, from, value)
+    }
+
+    skill shift_left(compiler, to, from, count) {
+        out emit(compiler, "slli", [register(to), register(from), count])
+    }
+
+    skill shift_right_signed(compiler, to, from, count) {
+        out emit(compiler, "srai", [register(to), register(from), count])
+    }
+
+    skill shift_right_unsigned(compiler, to, from, count) {
+        out emit(compiler, "srli", [register(to), register(from), count])
+    }
+
+    skill shift_left_by(compiler, to, from, count) {
+        @base = narrow()
+        out base.shift_left_by(compiler, to, from, count)
+    }
+
+    skill shift_right_unsigned_by(compiler, to, from, count) {
+        @base = narrow()
+        out base.shift_right_unsigned_by(compiler, to, from, count)
+    }
+
+    skill set_less(compiler, to, left, right) {
+        @base = narrow()
+        out base.set_less(compiler, to, left, right)
+    }
+
+    skill set_less_unsigned(compiler, to, left, right) {
+        @base = narrow()
+        out base.set_less_unsigned(compiler, to, left, right)
+    }
+
+    skill set_less_unsigned_immediate(compiler, to, from, value) {
+        @base = narrow()
+        out base.set_less_unsigned_immediate(compiler, to, from, value)
+    }
+
+    skill set_zero(compiler, to, from) {
+        @base = narrow()
+        out base.set_zero(compiler, to, from)
+    }
+
+    skill set_nonzero(compiler, to, from) {
+        @base = narrow()
+        out base.set_nonzero(compiler, to, from)
+    }
+
+    skill add_checked(compiler) {
+        @base = narrow()
+        out base.add_checked(compiler)
+    }
+
+    skill sub_checked(compiler) {
+        @base = narrow()
+        out base.sub_checked(compiler)
+    }
+
+    skill load(compiler, to, base, offset) {
+        out memory(compiler, "ld", register(to), register(base), offset)
+    }
+
+    skill load32(compiler, to, base, offset) {
+        out memory(compiler, "lwu", register(to), register(base), offset)
+    }
+
+    skill store32(compiler, from, base, offset) {
+        out memory(compiler, "sw", register(from), register(base), offset)
+    }
+
+    skill load_byte(compiler, to, base, offset) {
+        out memory(compiler, "lbu", register(to), register(base), offset)
+    }
+
+    skill load_half(compiler, to, base, offset) {
+        out memory(compiler, "lhu", register(to), register(base), offset)
+    }
+
+    skill store(compiler, from, base, offset) {
+        out memory(compiler, "sd", register(from), register(base), offset)
+    }
+
+    skill store_byte(compiler, from, base, offset) {
+        out memory(compiler, "sb", register(from), register(base), offset)
+    }
+
+    skill store_half(compiler, from, base, offset) {
+        out memory(compiler, "sh", register(from), register(base), offset)
+    }
+
+    skill store_zero(compiler, base, offset) {
+        out memory(compiler, "sd", registers.ZERO, register(base), offset)
+    }
+
+    skill store_byte_zero(compiler, base, offset) {
+        out memory(compiler, "sb", registers.ZERO, register(base), offset)
+    }
+
+    skill push(compiler, from) {
+        compiler = emit(compiler, "addi", [registers.SP, registers.SP, 0 - WORD_BYTES])
+        out emit(compiler, "sd", [register(from), 0, registers.SP])
+    }
+
+    skill pop(compiler, to) {
+        compiler = emit(compiler, "ld", [register(to), 0, registers.SP])
+        out emit(compiler, "addi", [registers.SP, registers.SP, WORD_BYTES])
+    }
+
+    skill branch_equal(compiler, left, right, name) {
+        @base = narrow()
+        out base.branch_equal(compiler, left, right, name)
+    }
+
+    skill branch_not_equal(compiler, left, right, name) {
+        @base = narrow()
+        out base.branch_not_equal(compiler, left, right, name)
+    }
+
+    skill branch_less(compiler, left, right, name) {
+        @base = narrow()
+        out base.branch_less(compiler, left, right, name)
+    }
+
+    skill branch_greater_equal(compiler, left, right, name) {
+        @base = narrow()
+        out base.branch_greater_equal(compiler, left, right, name)
+    }
+
+    skill branch_less_unsigned(compiler, left, right, name) {
+        @base = narrow()
+        out base.branch_less_unsigned(compiler, left, right, name)
+    }
+
+    skill branch_greater_equal_unsigned(compiler, left, right, name) {
+        @base = narrow()
+        out base.branch_greater_equal_unsigned(compiler, left, right, name)
+    }
+
+    skill branch_zero(compiler, from, name) {
+        @base = narrow()
+        out base.branch_zero(compiler, from, name)
+    }
+
+    skill branch_nonzero(compiler, from, name) {
+        @base = narrow()
+        out base.branch_nonzero(compiler, from, name)
+    }
+
+    skill branch_negative(compiler, from, name) {
+        @base = narrow()
+        out base.branch_negative(compiler, from, name)
+    }
+
+    skill branch_not_negative(compiler, from, name) {
+        @base = narrow()
+        out base.branch_not_negative(compiler, from, name)
+    }
+
+    skill branch_not_positive(compiler, from, name) {
+        @base = narrow()
+        out base.branch_not_positive(compiler, from, name)
+    }
+
+    skill jump(compiler, name) {
+        @base = narrow()
+        out base.jump(compiler, name)
+    }
+
+    skill jump_if_equal(compiler, left, right, name) {
+        @base = narrow()
+        out base.jump_if_equal(compiler, left, right, name)
+    }
+
+    skill jump_if_not_equal(compiler, left, right, name) {
+        @base = narrow()
+        out base.jump_if_not_equal(compiler, left, right, name)
+    }
+
+    skill jump_if_zero(compiler, from, name) {
+        @base = narrow()
+        out base.jump_if_zero(compiler, from, name)
+    }
+
+    skill jump_if_nonzero(compiler, from, name) {
+        @base = narrow()
+        out base.jump_if_nonzero(compiler, from, name)
+    }
+
+    skill jump_far(compiler, name) {
+        @base = narrow()
+        out base.jump_far(compiler, name)
+    }
+
+    skill call(compiler, name) {
+        @base = narrow()
+        out base.call(compiler, name)
+    }
+
+    skill ret(compiler) {
+        @base = narrow()
+        out base.ret(compiler)
+    }
+
+    skill syscall(compiler, number) {
+        @base = narrow()
+        out base.syscall(compiler, number)
+    }
+
+    skill wait(compiler) {
+        @base = narrow()
+        out base.wait(compiler)
+    }
+
+    skill fence(compiler) {
+        @base = narrow()
+        out base.fence(compiler)
+    }
+}
