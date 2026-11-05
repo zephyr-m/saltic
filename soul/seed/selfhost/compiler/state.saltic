@@ -7,8 +7,8 @@
 -- отключён), lines/data/writable не растут.
 --
 -- Symbol { name, kind, node, value, text, slot } / Function { name, slots, end,
---     subject, module, types, next_drum, drum_exit, failure, next_rescue }
--- Names { names, next_drum, next_rescue } / Output { chunks }
+--     subject, module, types, next_drum, drum_exit, failure, next_rescue, next_always }
+-- Names { names, next_drum, next_rescue, next_always } / Output { chunks }
 -- State { …, executor, machine } — executor (Box исполнителя, сейчас
 --     rv32i.Executor) назначает compiler при создании; machine — его программа
 -- symbol_find / symbol_has / symbol_add / symbol_add_text(symbols, name, …)
@@ -18,6 +18,7 @@
 -- safe(text) -> имя для метки; label(compiler, prefix) -> уникальная метка
 -- collect_locals(params, body) -> Names; make_slots(names, first_slot) -> слоты
 -- collect_expression_names / collect_statement_names / collect_block_names
+-- outer_assigned(block) -> имена снаружи блока, которым блок присваивает
 -- expression_uses_beat / statement_uses_beat / block_uses_beat / items_use_beat
 -- slot(compiler, name) / field(compiler, name) -> смещение / id поля
 -- collect_box / collect_enum(compiler, item, module) / collect_top_level(compiler)
@@ -55,13 +56,15 @@ Function = Box {
     next_drum = 1,
     drum_exit = "",
     failure = "",
-    next_rescue = 1
+    next_rescue = 1,
+    next_always = 1
 }
 
 Names = Box {
     names = [],
     next_drum = 1,
-    next_rescue = 1
+    next_rescue = 1,
+    next_always = 1
 }
 
 Output = Box {
@@ -249,7 +252,13 @@ skill collect_statement_names(names, node) {
         names = collect_expression_names(names, group.get(plain, 1))
         drum (group.count(plain) - 2) { names = collect_expression_names(names, ast.part(group.get(plain, beat + 2), 2)) }
     }
-    (tag == "always") { names = collect_block_names(names, group.get(plain, 1)) }
+    (tag == "always") {
+        @always_number = num.text(names.next_always)
+        names.next_always = names.next_always + 1
+        names = name_add(names, "$always_mark:{always_number}")
+        names = name_add(names, "$always_escape:{always_number}")
+        names = collect_block_names(names, group.get(plain, 1))
+    }
     (tag == "drum") {
         @drum_number = num.text(names.next_drum)
         names.next_drum = names.next_drum + 1
@@ -268,6 +277,78 @@ skill collect_block_names(names, block) {
     @plain = ast.plain(block)
     drum (group.count(plain) - 1) { names = collect_statement_names(names, group.get(plain, beat + 1)) }
     out names
+}
+
+skill assigned_in_expression(found, node) {
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "binary") {
+        found = assigned_in_expression(found, group.get(plain, 2))
+        out assigned_in_expression(found, group.get(plain, 3))
+    }
+    (tag == "call") {
+        drum (group.count(plain) - 1) { found = assigned_in_expression(found, group.get(plain, beat + 1)) }
+    }
+    (tag == "group") {
+        drum (group.count(plain) - 1) { found = assigned_in_expression(found, group.get(plain, beat + 1)) }
+    }
+    (tag == "box-new") {
+        drum (group.count(plain) - 2) { found = assigned_in_expression(found, ast.part(group.get(plain, beat + 2), 2)) }
+    }
+    (tag == "rescue") {
+        found = assigned_in_expression(found, group.get(plain, 1))
+        out assigned_in_block(found, group.get(plain, 3))
+    }
+    out found
+}
+
+skill assigned_in_statement(found, node) {
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "assign") {
+        out assigned_in_expression(name_add(found, group.get(plain, 1)), group.get(plain, 2))
+    }
+    (tag == "var") { out assigned_in_expression(found, group.get(plain, 2)) }
+    (tag == "field-assign") { out assigned_in_expression(found, group.get(plain, 2)) }
+    (tag == "out") { out assigned_in_expression(found, group.get(plain, 1)) }
+    (tag == "expr") { out assigned_in_expression(found, group.get(plain, 1)) }
+    (tag == "if") {
+        found = assigned_in_expression(found, group.get(plain, 1))
+        out assigned_in_block(found, group.get(plain, 2))
+    }
+    (tag == "pick") {
+        drum (group.count(plain) - 1) {
+            @choice = ast.plain(group.get(plain, beat + 1))
+            (group.get(choice, 0) == "if") { found = assigned_in_statement(found, choice) }
+            (group.get(choice, 0) == "otherwise") { found = assigned_in_block(found, group.get(choice, 1)) }
+        }
+    }
+    (tag == "switch") {
+        found = assigned_in_expression(found, group.get(plain, 1))
+        drum (group.count(plain) - 2) { found = assigned_in_expression(found, ast.part(group.get(plain, beat + 2), 2)) }
+    }
+    (tag == "always") { out assigned_in_block(found, group.get(plain, 1)) }
+    (tag == "drum") {
+        found = assigned_in_expression(found, group.get(plain, 1))
+        out assigned_in_block(found, group.get(plain, 2))
+    }
+    out found
+}
+
+skill assigned_in_block(found, block) {
+    @plain = ast.plain(block)
+    drum (group.count(plain) - 1) { found = assigned_in_statement(found, group.get(plain, beat + 1)) }
+    out found
+}
+
+skill outer_assigned(block) {
+    @declared = collect_block_names(Names {}, block)
+    @assigned = assigned_in_block(Names {}, block)
+    @outer = []
+    drum (assigned.names) {
+        (symbol_has(declared.names, beat.name) == no) { outer = group.add(outer, beat.name) }
+    }
+    out outer
 }
 
 skill expression_uses_beat(node) {

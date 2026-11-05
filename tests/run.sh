@@ -205,6 +205,25 @@ test_edges() {
     echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i, x86_64 и x86_64-translation"
 }
 
+test_always() {
+    mkdir -p "$work/always"
+    SALTIC_TARGET=rv32i build always-rv32i \
+        tests/always.saltic \
+        "$work/always/rv32i.elf" \
+        1048576
+    SALTIC_TARGET=x86_64 build always-x86_64 \
+        tests/always.saltic \
+        "$work/always/x86_64" \
+        1048576
+    measure run qemu-riscv32 -B 0x100000000 "$work/always/rv32i.elf" \
+        >"$work/always/rv32i.txt"
+    measure run "$work/always/x86_64" \
+        >"$work/always/x86_64.txt"
+    diff -u tests/expected/always.txt "$work/always/rv32i.txt"
+    diff -u tests/expected/always.txt "$work/always/x86_64.txt"
+    echo "always: регион на оборот — 200 000 оборотов в 1 МБ, внешнее переживает уборку, под rv32i и x86_64"
+}
+
 test_x86_encoder() {
     mkdir -p "$work/x86-encoder"
     SALTIC_TARGET=rv32i build x86-encoder-rv32i \
@@ -469,6 +488,7 @@ run_case() {
         groups) test_groups ;;
         bytes) test_bytes ;;
         edges) test_edges ;;
+        always) test_always ;;
         x86-encoder) test_x86_encoder ;;
         dict) test_dict ;;
         seed-contract) test_seed_contract ;;
@@ -509,6 +529,7 @@ elif [[ "$1" == "all" ]]; then
         groups \
         bytes \
         edges \
+        always \
         x86-encoder \
         dict \
         seed-contract \

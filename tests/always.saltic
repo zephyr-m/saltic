@@ -1,0 +1,92 @@
+-- always — регион на каждый оборот вечного цикла: мусор оборота убирается,
+-- а то, что тело записало наружу, переживает уборку. Собирается с кучей 1 МБ:
+-- 200 000 оборотов с Box в теле без уборки в неё не влезут.
+-- Гоняется под rv32i и x86_64, вывод сверяется с одним эталоном.
+--
+-- Game — Box { name, items, score } — внешнее состояние цикла
+-- poll(n) -> Key — свежий Box на каждом обороте
+-- named(n) -> строка; найденное или ошибка — find_big(limit), fail_at(limit)
+-- program() -> итог testing.test_finish
+
+use core.group
+use craft.testing
+
+Key = Box { scan = 0, ready = no }
+
+Game = Box {
+    name = "",
+    items = [],
+    score = 0
+}
+
+skill poll(n) {
+    out Key { scan = n, ready = yes }
+}
+
+skill named(n) {
+    out "игрок {n}"
+}
+
+skill find_big(limit) {
+    @n = 0
+    always {
+        n = n + 1
+        @label = "ищу {n}"
+        (n == limit) { out "нашла {n}" }
+    }
+}
+
+skill fail_at(limit) {
+    @n = 0
+    always {
+        n = n + 1
+        @noise = [n, n, n]
+        (n == limit) { out error.Enough }
+    }
+}
+
+program() {
+    @suite = testing.test_new()
+    @turns = 0
+    always {
+        @key = poll(turns)
+        turns = turns + 1
+        (turns == 200000) { leave }
+    }
+    suite = testing.test_equal(suite, "200 000 оборотов с Box в 1 МБ", turns, 200000)
+    @name = ""
+    @game = Game {}
+    @count = 0
+    always {
+        count = count + 1
+        @noise = "мусор {count}"
+        name = named(count)
+        game.name = "поле {count}"
+        game.score = game.score + 2
+        (count < 4) { game.items = group.add(game.items, "шаг {count}") }
+        (count == 3000) { leave }
+    }
+    suite = testing.test_equal(suite, "внешняя строка из навыка", name, "игрок 3000")
+    suite = testing.test_equal(suite, "строка в поле Box", game.name, "поле 3000")
+    suite = testing.test_equal(suite, "число в поле Box", game.score, 6000)
+    suite = testing.test_equal(suite, "группа в поле Box", group.get(game.items, 2), "шаг 3")
+    suite = testing.test_equal(suite, "out из always", find_big(5000), "нашла 5000")
+    @caught = fail_at(700) rescue |err| { "поймала {err}" }
+    suite = testing.test_equal(suite, "ошибка из always", caught, "поймала Enough")
+    @inner = 0
+    @outer = 0
+    always {
+        outer = outer + 1
+        always {
+            inner = inner + 1
+            @tmp = [inner]
+            (inner == outer * 10) { leave }
+        }
+        drum (3) { @step = "drum {beat}" }
+        @safe = named(outer) rescue |err| { "нет" }
+        (outer == 50) { leave }
+    }
+    suite = testing.test_equal(suite, "вложенный always: внешний", outer, 50)
+    suite = testing.test_equal(suite, "вложенный always: внутренний", inner, 500)
+    out testing.test_finish(suite)
+}

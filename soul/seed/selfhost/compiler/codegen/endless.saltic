@@ -1,0 +1,111 @@
+-- endless — вечный цикл со своим регионом на каждый оборот. В начале оборота
+-- REGION_MARK = HEAP_TOP и ESCAPE_MARK = ESCAPE_BOTTOM (как вход навыка), в
+-- конце — rt_region_exit без значения: мусор оборота уходит, записи в старые
+-- Box переносит барьер. Если внешняя переменная, которой тело присваивает,
+-- указывает в свежую память оборота, уборка этого оборота пропускается —
+-- память остаётся навыку, как было до регионов на оборот.
+-- Метки навыка сохраняются в слотах $always_mark:N / $always_escape:N и
+-- возвращаются на любом выходе из тела: leave (конец цикла), out и ошибка —
+-- через свои трамплины перед общим выходом навыка.
+-- Команды — методами compiler.executor (договор backend).
+--
+-- Frame { mark, escape, start, end, returning, failing, keep, outer_end,
+--     outer_failure, outer_exit, kept }
+-- head(compiler, body) -> Frame; метки навыка сохранены, оборот начат,
+--     выходы тела подменены
+-- tail(compiler, frame) — уборка оборота, переход в начало, трамплины, конец
+
+use core.str
+use core.num
+use selfhost.abi
+use selfhost.compiler.backend
+use selfhost.compiler.state
+use selfhost.compiler.constants
+
+POINTER_TAG_COUNT = abi.TAG_BOX - abi.TAG_STRING + 1
+
+Frame = Box {
+    mark = 0,
+    escape = 0,
+    start = "",
+    end = "",
+    returning = "",
+    failing = "",
+    keep = "",
+    outer_end = "",
+    outer_failure = "",
+    outer_exit = "",
+    kept = []
+}
+
+skill head(compiler, body) {
+    @executor = compiler.executor
+    @number = num.text(compiler.current_function.next_always)
+    compiler.current_function.next_always = compiler.current_function.next_always + 1
+    @frame = Frame {
+        mark = state.slot(compiler, "$always_mark:{number}"),
+        escape = state.slot(compiler, "$always_escape:{number}"),
+        start = state.label(compiler, "always"),
+        end = state.label(compiler, "always_end"),
+        returning = state.label(compiler, "always_out"),
+        failing = state.label(compiler, "always_failure"),
+        keep = state.label(compiler, "always_keep"),
+        outer_end = compiler.current_function.end,
+        outer_failure = compiler.current_function.failure,
+        outer_exit = compiler.current_function.drum_exit,
+        kept = state.outer_assigned(body)
+    }
+    compiler = executor.store(compiler, backend.REGION_MARK, backend.FRAME, frame.mark)
+    compiler = executor.store(compiler, backend.ESCAPE_MARK, backend.FRAME, frame.escape)
+    compiler = executor.label(compiler, frame.start)
+    compiler = executor.move(compiler, backend.REGION_MARK, backend.HEAP_TOP)
+    compiler = executor.move(compiler, backend.ESCAPE_MARK, backend.ESCAPE_BOTTOM)
+    compiler.current_function.drum_exit = frame.end
+    compiler.current_function.end = frame.returning
+    (str.bytes(frame.outer_failure) > 0) { compiler.current_function.failure = frame.failing }
+    out frame
+}
+
+skill restore(compiler, frame) {
+    @executor = compiler.executor
+    compiler = executor.load(compiler, backend.REGION_MARK, backend.FRAME, frame.mark)
+    out executor.load(compiler, backend.ESCAPE_MARK, backend.FRAME, frame.escape)
+}
+
+skill guard(compiler, frame, name) {
+    @executor = compiler.executor
+    @plain = state.label(compiler, "always_plain")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.FRAME, state.slot(compiler, name))
+    compiler = executor.and_immediate(compiler, backend.SCRATCH1, backend.SCRATCH0, abi.TAG_MASK)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, 0 - abi.TAG_STRING)
+    compiler = executor.set_less_unsigned_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, POINTER_TAG_COUNT)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH1, plain)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.PAYLOAD_MASK)
+    compiler = executor.set_less_unsigned(compiler, backend.SCRATCH1, backend.SCRATCH0, backend.REGION_MARK)
+    compiler = executor.jump_if_zero(compiler, backend.SCRATCH1, frame.keep)
+    out executor.label(compiler, plain)
+}
+
+skill tail(compiler, frame) {
+    @executor = compiler.executor
+    compiler.current_function.drum_exit = frame.outer_exit
+    compiler.current_function.end = frame.outer_end
+    compiler.current_function.failure = frame.outer_failure
+    drum (frame.kept) { compiler = guard(compiler, frame, beat) }
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.load_immediate(compiler, backend.ARG2, constants.REGION_VALUE_SKIPPED)
+    compiler = executor.call(compiler, "rt_region_exit")
+    compiler = executor.label(compiler, frame.keep)
+    compiler = executor.jump(compiler, frame.start)
+    compiler = executor.label(compiler, frame.returning)
+    compiler = restore(compiler, frame)
+    compiler = executor.jump(compiler, frame.outer_end)
+    (str.bytes(frame.outer_failure) > 0) {
+        compiler = executor.label(compiler, frame.failing)
+        compiler = restore(compiler, frame)
+        compiler = executor.jump(compiler, frame.outer_failure)
+    }
+    compiler = executor.label(compiler, frame.end)
+    out restore(compiler, frame)
+}
