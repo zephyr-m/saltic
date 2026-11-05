@@ -117,7 +117,7 @@ nix --extra-experimental-features "nix-command flakes" develop
 Собрать свою программу компилятором с полки:
 
 ```bash
-bootstrap/saltic-154-47-128-compiler-x86_64-linux hello.saltic hello 134217728 x86_64
+bootstrap/saltic-*-compiler-x86_64-linux hello.saltic hello 134217728 x86_64
 ```
 
 ## Документы
