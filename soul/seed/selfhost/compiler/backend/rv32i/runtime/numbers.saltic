@@ -13,7 +13,7 @@
 --     rt_equal; Box и bytes — по памяти. Нужны rt_group_count и rt_group_at
 -- EQUAL_YES / EQUAL_NO / LESS_YES — метки ответов rt_equal / rt_less, в них
 --     прыгает и fixed (rt_fixed_equal / rt_fixed_less)
--- GROUP_* — кадр rt_value_equal на стеке; GROUP_STEP — единица в числе с
+-- GROUP_* — кадр rt_value_equal на стеке в словах; GROUP_STEP — единица в числе с
 --     тегом (1 << abi.TAG_SHIFT), шаг индекса
 -- emit_less / emit_greater(compiler) — rt_less / rt_greater -> yes/no
 -- emit_number_text(compiler) — rt_number_text -> строка (rt_alloc)
@@ -23,13 +23,13 @@ use selfhost.compiler.backend
 
 EQUAL_YES = ".L_equal_yes"
 EQUAL_NO = ".L_equal_no"
-GROUP_FRAME_BYTES = 32
+GROUP_FRAME_WORDS = 8
 GROUP_RETURN = 0
-GROUP_LEFT = 4
-GROUP_RIGHT = 8
-GROUP_COUNT = 12
-GROUP_INDEX = 16
-GROUP_ITEM = 20
+GROUP_LEFT = 1
+GROUP_RIGHT = 2
+GROUP_COUNT = 3
+GROUP_INDEX = 4
+GROUP_ITEM = 5
 GROUP_STEP = 8
 LESS_YES = ".L_less_yes"
 
@@ -163,6 +163,7 @@ skill emit_division_by_zero(compiler) {
 
 skill emit_equal(compiler) {
     @executor = compiler.executor
+    @words = compiler.words
     compiler = executor.label(compiler, "rt_equal")
     compiler = executor.branch_equal(compiler, backend.VALUE, backend.ERROR, EQUAL_YES)
     compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.TAG_MASK)
@@ -172,16 +173,16 @@ skill emit_equal(compiler) {
     compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH2, EQUAL_NO)
     compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
     compiler = executor.and_immediate(compiler, backend.ERROR, backend.ERROR, abi.PAYLOAD_MASK)
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET)
-    compiler = executor.load(compiler, backend.SCRATCH1, backend.ERROR, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.VALUE, words.payload)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.ERROR, words.payload)
     compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, EQUAL_NO)
     compiler = executor.load_immediate(compiler, backend.SCRATCH2, 0)
     compiler = executor.label(compiler, ".L_equal_string")
     compiler = executor.branch_equal(compiler, backend.SCRATCH2, backend.SCRATCH0, EQUAL_YES)
     compiler = executor.add(compiler, backend.SCRATCH3, backend.VALUE, backend.SCRATCH2)
     compiler = executor.add(compiler, backend.SCRATCH4, backend.ERROR, backend.SCRATCH2)
-    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH3, abi.OBJECT_PAYLOAD_OFFSET + 4)
-    compiler = executor.load_byte(compiler, backend.SCRATCH4, backend.SCRATCH4, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH3, words.payload + words.bytes)
+    compiler = executor.load_byte(compiler, backend.SCRATCH4, backend.SCRATCH4, words.payload + words.bytes)
     compiler = executor.branch_not_equal(compiler, backend.SCRATCH3, backend.SCRATCH4, EQUAL_NO)
     compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
     compiler = executor.jump(compiler, ".L_equal_string")
@@ -197,6 +198,7 @@ skill emit_equal(compiler) {
 
 skill emit_value_equal(compiler) {
     @executor = compiler.executor
+    @words = compiler.words
     compiler = executor.label(compiler, "rt_value_equal")
     compiler = executor.jump_if_equal(compiler, backend.VALUE, backend.ERROR, EQUAL_YES)
     compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.TAG_MASK)
@@ -204,44 +206,44 @@ skill emit_value_equal(compiler) {
     compiler = executor.load_immediate(compiler, backend.SCRATCH2, abi.TAG_GROUP)
     compiler = executor.jump_if_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH2, "rt_equal")
     compiler = executor.jump_if_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, EQUAL_NO)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - GROUP_FRAME_BYTES)
-    compiler = executor.store(compiler, backend.RETURN, backend.STACK, GROUP_RETURN)
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, GROUP_LEFT)
-    compiler = executor.store(compiler, backend.ERROR, backend.STACK, GROUP_RIGHT)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - words.bytes * GROUP_FRAME_WORDS)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * GROUP_RETURN)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * GROUP_LEFT)
+    compiler = executor.store(compiler, backend.ERROR, backend.STACK, words.bytes * GROUP_RIGHT)
     compiler = executor.call(compiler, "rt_group_count")
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, GROUP_COUNT)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, GROUP_RIGHT)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * GROUP_COUNT)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * GROUP_RIGHT)
     compiler = executor.call(compiler, "rt_group_count")
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, GROUP_COUNT)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * GROUP_COUNT)
     compiler = executor.branch_not_equal(compiler, backend.VALUE, backend.SCRATCH0, ".L_value_equal_no")
-    compiler = executor.store_zero(compiler, backend.STACK, GROUP_INDEX)
+    compiler = executor.store_zero(compiler, backend.STACK, words.bytes * GROUP_INDEX)
     compiler = executor.label(compiler, ".L_value_equal_next")
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, GROUP_INDEX)
-    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, GROUP_COUNT)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * GROUP_INDEX)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, words.bytes * GROUP_COUNT)
     compiler = executor.branch_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_value_equal_yes")
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, GROUP_LEFT)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * GROUP_LEFT)
     compiler = executor.move(compiler, backend.ERROR, backend.SCRATCH0)
     compiler = executor.call(compiler, "rt_group_at")
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, GROUP_ITEM)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, GROUP_RIGHT)
-    compiler = executor.load(compiler, backend.ERROR, backend.STACK, GROUP_INDEX)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * GROUP_ITEM)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * GROUP_RIGHT)
+    compiler = executor.load(compiler, backend.ERROR, backend.STACK, words.bytes * GROUP_INDEX)
     compiler = executor.call(compiler, "rt_group_at")
     compiler = executor.move(compiler, backend.ERROR, backend.VALUE)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, GROUP_ITEM)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * GROUP_ITEM)
     compiler = executor.call(compiler, "rt_value_equal")
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.YES)
     compiler = executor.branch_not_equal(compiler, backend.VALUE, backend.SCRATCH0, ".L_value_equal_no")
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, GROUP_INDEX)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * GROUP_INDEX)
     compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, GROUP_STEP)
-    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, GROUP_INDEX)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes * GROUP_INDEX)
     compiler = executor.jump(compiler, ".L_value_equal_next")
     compiler = executor.label(compiler, ".L_value_equal_yes")
-    compiler = executor.load(compiler, backend.RETURN, backend.STACK, GROUP_RETURN)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, GROUP_FRAME_BYTES)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * GROUP_RETURN)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * GROUP_FRAME_WORDS)
     compiler = executor.jump(compiler, EQUAL_YES)
     compiler = executor.label(compiler, ".L_value_equal_no")
-    compiler = executor.load(compiler, backend.RETURN, backend.STACK, GROUP_RETURN)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, GROUP_FRAME_BYTES)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * GROUP_RETURN)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * GROUP_FRAME_WORDS)
     out executor.jump(compiler, EQUAL_NO)
 }
 
@@ -277,9 +279,10 @@ skill emit_greater(compiler) {
 
 skill emit_number_text(compiler) {
     @executor = compiler.executor
+    @words = compiler.words
     compiler = executor.label(compiler, "rt_number_text")
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -48)
-    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 44)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 11)
     compiler = executor.shift_right_signed(compiler, backend.SCRATCH0, backend.VALUE, abi.TAG_SHIFT)
     compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
     compiler = executor.branch_not_negative(compiler, backend.SCRATCH0, ".L_number_abs")
@@ -314,21 +317,21 @@ skill emit_number_text(compiler) {
     compiler = executor.branch_zero(compiler, backend.SCRATCH1, ".L_number_alloc")
     compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, 1)
     compiler = executor.label(compiler, ".L_number_alloc")
-    compiler = executor.store(compiler, backend.SCRATCH3, backend.STACK, 40)
-    compiler = executor.store(compiler, backend.SCRATCH1, backend.STACK, 36)
-    compiler = executor.store(compiler, backend.SCRATCH2, backend.STACK, 32)
+    compiler = executor.store(compiler, backend.SCRATCH3, backend.STACK, words.bytes * 10)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.STACK, words.bytes * 9)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.STACK, words.bytes * 8)
     compiler = executor.add_immediate(compiler, backend.VALUE, backend.SCRATCH3, 5)
     compiler = executor.call(compiler, "rt_alloc")
-    compiler = executor.load(compiler, backend.SCRATCH3, backend.STACK, 40)
-    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, 36)
-    compiler = executor.load(compiler, backend.SCRATCH2, backend.STACK, 32)
+    compiler = executor.load(compiler, backend.SCRATCH3, backend.STACK, words.bytes * 10)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, words.bytes * 9)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.STACK, words.bytes * 8)
     compiler = executor.load_immediate(compiler, backend.SCRATCH4, abi.OBJECT_KIND_STRING)
-    compiler = executor.store(compiler, backend.SCRATCH4, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = executor.store(compiler, backend.SCRATCH3, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET)
+    compiler = executor.store32(compiler, backend.SCRATCH4, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.store(compiler, backend.SCRATCH3, backend.VALUE, words.payload)
     compiler = executor.load_immediate(compiler, backend.SCRATCH4, 0)
     compiler = executor.branch_zero(compiler, backend.SCRATCH1, ".L_number_copy")
     compiler = executor.load_immediate(compiler, backend.SCRATCH5, 45)
-    compiler = executor.store_byte(compiler, backend.SCRATCH5, backend.VALUE, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.store_byte(compiler, backend.SCRATCH5, backend.VALUE, words.payload + words.bytes)
     compiler = executor.load_immediate(compiler, backend.SCRATCH4, 1)
     compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, -1)
     compiler = executor.label(compiler, ".L_number_copy")
@@ -337,15 +340,15 @@ skill emit_number_text(compiler) {
     compiler = executor.add(compiler, backend.SCRATCH5, backend.SCRATCH2, backend.SCRATCH3)
     compiler = executor.load_byte(compiler, backend.ARG2, backend.SCRATCH5, 0)
     compiler = executor.add(compiler, backend.SCRATCH5, backend.VALUE, backend.SCRATCH4)
-    compiler = executor.store_byte(compiler, backend.ARG2, backend.SCRATCH5, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.store_byte(compiler, backend.ARG2, backend.SCRATCH5, words.payload + words.bytes)
     compiler = executor.add_immediate(compiler, backend.SCRATCH4, backend.SCRATCH4, 1)
     compiler = executor.jump(compiler, ".L_number_copy")
     compiler = executor.label(compiler, ".L_number_done")
     compiler = executor.add(compiler, backend.SCRATCH5, backend.VALUE, backend.SCRATCH4)
-    compiler = executor.store_byte_zero(compiler, backend.SCRATCH5, abi.OBJECT_PAYLOAD_OFFSET + 4)
+    compiler = executor.store_byte_zero(compiler, backend.SCRATCH5, words.payload + words.bytes)
     compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
-    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 44)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 48)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 11)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 12)
     compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
     out executor.ret(compiler)
 }

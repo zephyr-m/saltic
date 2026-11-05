@@ -5,15 +5,19 @@
 -- Константа — пара слов state/value; состояния STATE_EMPTY/INITIALIZING/READY.
 --
 -- can_begin / is_cycle / is_ready(state) -> yes/no
--- stack_bytes(words) / stack_source_offset(count, index) / local_offset(index)
--- frame_bytes(local_count) -> размер кадра навыка
+-- Всё, что зависит от размера слова, берёт words (abi.shape.Words, у
+-- компилятора — compiler.words): RV32I — 4 байта, RV64 — 8.
+-- stack_bytes(words, count) / stack_source_offset(words, count, index) / local_offset(words, index)
+-- frame_bytes(words, local_count) -> размер кадра навыка
 -- return_address_* / previous_frame_* / region_mark_* / region_escape_*
---     _save_offset(frame) и _load_offset() -> смещение от STACK / FRAME
--- constant_frame_bytes() / constant_return_address_offset()
--- string_storage_bytes(length) / group_storage_bytes(count) / group_item_offset(index)
--- box_storage_bytes(count) / box_field_id_offset / box_field_value_offset(index)
+--     _save_offset(words, frame) и _load_offset(words) -> смещение от STACK / FRAME
+-- constant_frame_bytes(words) / constant_return_address_offset(words)
+-- string_storage_bytes(words, length) / group_storage_bytes(words, count) / group_item_offset(words, index)
+-- box_storage_bytes(words, count) / box_field_id_offset / box_field_value_offset(words, index)
 -- getter_label / state_label / value_label(name) -> метка
 -- emit_storage(compiler) — слова state/value всех констант в .data
+-- emit_static_header(compiler, section, kind, payload_bytes) — заголовок
+--     статического объекта: три поля по 32 бита и пустота до compiler.words.header
 
 use core.str
 use selfhost.abi
@@ -22,7 +26,6 @@ use selfhost.memory.model
 use selfhost.compiler.backend
 use selfhost.machine.word
 
-WORD_BYTES = abi.VALUE_WORD_BYTES
 STACK_ALIGNMENT = abi.CALL_STACK_ALIGNMENT
 DATA_ALIGNMENT = abi.OBJECT_ALIGNMENT
 HEAP_BYTES = model.DEFAULT_HEAP_BYTES
@@ -38,35 +41,22 @@ REGION_ESCAPE_WORDS = 4
 CONSTANT_FRAME_WORDS = 4
 
 STRING_LENGTH_OFFSET = 0
-STRING_DATA_OFFSET = WORD_BYTES
 STRING_DATA_LINE_BYTES = 64
 
 GROUP_COUNT_OFFSET = 0
-GROUP_ITEMS_OFFSET = WORD_BYTES
-GROUP_ITEM_BYTES = WORD_BYTES
 GROUP_FLAT_LIMIT = 32
-TREE_LEVELS_OFFSET = WORD_BYTES
-TREE_ROOT_OFFSET = 2 * WORD_BYTES
-TREE_TAIL_OFFSET = 3 * WORD_BYTES
-TREE_PAYLOAD_BYTES = 4 * WORD_BYTES
 TREE_ADD_LABEL = "saltic_core_group_tree_add"
 TREE_ADD_SKILL = "core.group.tree_add"
 
 BOX_COUNT_OFFSET = 0
-BOX_FIELDS_OFFSET = WORD_BYTES
 BOX_FIELD_ID_OFFSET = 0
-BOX_FIELD_VALUE_OFFSET = WORD_BYTES
-BOX_FIELD_BYTES = WORD_BYTES * 2
 BOX_TYPE_FIELD_ID = -1
-BOX_LAST_VALUE_OFFSET = BOX_FIELDS_OFFSET + BOX_FIELD_VALUE_OFFSET - BOX_FIELD_BYTES
 
 STATE_EMPTY = 0
 STATE_INITIALIZING = 1
 STATE_READY = 2
 
 CONSTANT_STATE_OFFSET = 0
-CONSTANT_VALUE_OFFSET = WORD_BYTES
-CONSTANT_STORAGE_BYTES = WORD_BYTES * 2
 
 skill can_begin(value) {
     out value == STATE_EMPTY
@@ -80,99 +70,101 @@ skill is_ready(value) {
     out value == STATE_READY
 }
 
-skill stack_bytes(word_count) {
+skill stack_bytes(words, word_count) {
     (word_count < 0) { out -1 }
-    out word_count * WORD_BYTES
+    out word_count * words.bytes
 }
 
-skill stack_source_offset(count, index) {
+skill stack_source_offset(words, count, index) {
     (count < 0) { out -1 }
     (index < 0) { out -1 }
     (index >= count) { out -1 }
-    out stack_bytes(count - index - 1)
+    out stack_bytes(words, count - index - 1)
 }
 
-skill local_offset(index) {
+skill local_offset(words, index) {
     (index < 0) { out -1 }
-    out 0 - stack_bytes(LOCAL_BASE_WORDS + index)
+    out 0 - stack_bytes(words, LOCAL_BASE_WORDS + index)
 }
 
-skill frame_bytes(local_count) {
-    out abi.frame_bytes(local_count, SAVED_FRAME_WORDS)
+skill frame_bytes(words, local_count) {
+    (local_count < 0) { out -1 }
+    @bytes = (local_count + SAVED_FRAME_WORDS) * words.bytes
+    out (bytes + STACK_ALIGNMENT - 1) / STACK_ALIGNMENT * STACK_ALIGNMENT
 }
 
-skill return_address_save_offset(frame) {
+skill return_address_save_offset(words, frame) {
     (frame < STACK_ALIGNMENT) { out -1 }
-    out frame - stack_bytes(RETURN_ADDRESS_WORDS)
+    out frame - stack_bytes(words, RETURN_ADDRESS_WORDS)
 }
 
-skill previous_frame_save_offset(frame) {
+skill previous_frame_save_offset(words, frame) {
     (frame < STACK_ALIGNMENT) { out -1 }
-    out frame - stack_bytes(PREVIOUS_FRAME_WORDS)
+    out frame - stack_bytes(words, PREVIOUS_FRAME_WORDS)
 }
 
-skill return_address_load_offset() {
-    out 0 - stack_bytes(RETURN_ADDRESS_WORDS)
+skill return_address_load_offset(words) {
+    out 0 - stack_bytes(words, RETURN_ADDRESS_WORDS)
 }
 
-skill previous_frame_load_offset() {
-    out 0 - stack_bytes(PREVIOUS_FRAME_WORDS)
+skill previous_frame_load_offset(words) {
+    out 0 - stack_bytes(words, PREVIOUS_FRAME_WORDS)
 }
 
-skill region_mark_save_offset(frame) {
+skill region_mark_save_offset(words, frame) {
     (frame < STACK_ALIGNMENT) { out -1 }
-    out frame - stack_bytes(REGION_MARK_WORDS)
+    out frame - stack_bytes(words, REGION_MARK_WORDS)
 }
 
-skill region_escape_save_offset(frame) {
+skill region_escape_save_offset(words, frame) {
     (frame < STACK_ALIGNMENT) { out -1 }
-    out frame - stack_bytes(REGION_ESCAPE_WORDS)
+    out frame - stack_bytes(words, REGION_ESCAPE_WORDS)
 }
 
-skill region_mark_load_offset() {
-    out 0 - stack_bytes(REGION_MARK_WORDS)
+skill region_mark_load_offset(words) {
+    out 0 - stack_bytes(words, REGION_MARK_WORDS)
 }
 
-skill region_escape_load_offset() {
-    out 0 - stack_bytes(REGION_ESCAPE_WORDS)
+skill region_escape_load_offset(words) {
+    out 0 - stack_bytes(words, REGION_ESCAPE_WORDS)
 }
 
-skill constant_frame_bytes() {
-    out stack_bytes(CONSTANT_FRAME_WORDS)
+skill constant_frame_bytes(words) {
+    out stack_bytes(words, CONSTANT_FRAME_WORDS)
 }
 
-skill constant_return_address_offset() {
-    out stack_bytes(CONSTANT_FRAME_WORDS - RETURN_ADDRESS_WORDS)
+skill constant_return_address_offset(words) {
+    out stack_bytes(words, CONSTANT_FRAME_WORDS - RETURN_ADDRESS_WORDS)
 }
 
-skill string_storage_bytes(length) {
+skill string_storage_bytes(words, length) {
     (length < 0) { out -1 }
-    out STRING_DATA_OFFSET + length + 1
+    out words.string_data + length + 1
 }
 
-skill group_storage_bytes(count) {
+skill group_storage_bytes(words, count) {
     (count < 0) { out -1 }
-    out GROUP_ITEMS_OFFSET + count * GROUP_ITEM_BYTES
+    out words.group_items + count * words.group_item
 }
 
-skill group_item_offset(index) {
+skill group_item_offset(words, index) {
     (index < 0) { out -1 }
-    out GROUP_ITEMS_OFFSET + index * GROUP_ITEM_BYTES
+    out words.group_items + index * words.group_item
 }
 
-skill box_storage_bytes(count) {
+skill box_storage_bytes(words, count) {
     (count < 0) { out -1 }
-    out BOX_FIELDS_OFFSET + count * BOX_FIELD_BYTES
+    out words.box_fields + count * words.box_field
 }
 
-skill box_field_id_offset(index) {
+skill box_field_id_offset(words, index) {
     (index < 0) { out -1 }
-    out BOX_FIELDS_OFFSET + index * BOX_FIELD_BYTES + BOX_FIELD_ID_OFFSET
+    out words.box_fields + index * words.box_field + BOX_FIELD_ID_OFFSET
 }
 
-skill box_field_value_offset(index) {
+skill box_field_value_offset(words, index) {
     (index < 0) { out -1 }
-    out BOX_FIELDS_OFFSET + index * BOX_FIELD_BYTES + BOX_FIELD_VALUE_OFFSET
+    out words.box_fields + index * words.box_field + words.box_field_value
 }
 
 skill getter_label(name) {
@@ -202,3 +194,13 @@ skill emit_storage(compiler) {
     }
     out compiler
 }
+
+skill emit_static_header(compiler, section, kind, payload_bytes) {
+    @executor = compiler.executor
+    compiler = executor.data32(compiler, section, word.from_number(kind))
+    compiler = executor.data32(compiler, section, word.from_number(payload_bytes))
+    compiler = executor.data32(compiler, section, word.from_number(abi.OBJECT_FLAG_STATIC))
+    drum (compiler.words.header - abi.OBJECT_HEADER_BYTES) { compiler = executor.data_byte(compiler, section, 0) }
+    out compiler
+}
+

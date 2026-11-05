@@ -9,14 +9,15 @@
 -- Symbol { name, kind, node, value, text, slot } / Function { name, slots, end,
 --     subject, module, types, next_drum, drum_exit, failure, next_rescue, next_always }
 -- Names { names, next_drum, next_rescue, next_always } / Output { chunks }
--- State { …, executor, machine } — executor (Box исполнителя, сейчас
+-- State { …, executor, machine, words } — words — раскладка памяти под слово
+--     исполнителя (abi.shape, по умолчанию 4 байта); executor (Box исполнителя, сейчас
 --     rv32i.Executor) назначает compiler при создании; machine — его программа
 -- symbol_find / symbol_has / symbol_add / symbol_add_text(symbols, name, …)
 -- type_find(types, name) / type_set(types, name, type)
 -- output_add(output, text) / output_text(output) — накопитель текста
 -- emit_data / emit_writable(compiler, line) / emit_blank(compiler) — ничего
 -- safe(text) -> имя для метки; label(compiler, prefix) -> уникальная метка
--- collect_locals(params, body) -> Names; make_slots(names, first_slot) -> слоты
+-- collect_locals(params, body) -> Names; make_slots(words, names, first_slot) -> слоты
 -- collect_expression_names / collect_statement_names / collect_block_names
 -- outer_assigned(block) -> имена снаружи блока, которым блок присваивает
 -- expression_uses_beat / statement_uses_beat / block_uses_beat / items_use_beat
@@ -32,6 +33,7 @@ use core.str
 use core.group
 use core.num
 use selfhost.abi
+use selfhost.abi.shape
 use selfhost.ast
 use selfhost.memory.model
 use selfhost.compiler.backend
@@ -78,6 +80,7 @@ State = Box {
     writable = Output {},
     executor = backend.unassigned(),
     machine = backend.unassigned(),
+    words = shape.Words {},
     heap_bytes = word.Word {},
     strings = [],
     serial = 0,
@@ -440,12 +443,12 @@ skill collect_locals(params, body) {
     out collect_block_names(names, body)
 }
 
-skill make_slots(names, first_slot) {
+skill make_slots(words, names, first_slot) {
     @slots = []
     @slot = first_slot
     drum (names) {
         slots = symbol_add(slots, beat.name, "slot", [], slot)
-        slot = slot - abi.VALUE_WORD_BYTES
+        slot = slot - words.bytes
     }
     out slots
 }
@@ -521,6 +524,7 @@ skill header(compiler) {
 
 skill start(compiler) {
     @executor = compiler.executor
+    @words = compiler.words
     @params = ast.part(compiler.entry, 1)
     @param_count = group.count(params)
     compiler = executor.label(compiler, "_start")
@@ -537,15 +541,15 @@ skill start(compiler) {
     compiler = executor.call(compiler, "rt_missing_args")
     compiler = executor.label(compiler, ".L_start_args_ready")
     drum (param_count) {
-        compiler = executor.load(compiler, backend.VALUE, backend.STACK, (2 * beat + 2) * abi.VALUE_WORD_BYTES)
+        compiler = executor.load(compiler, backend.VALUE, backend.STACK, (2 * beat + 2) * words.bytes)
         compiler = executor.call(compiler, "rt_cstring")
         compiler = executor.push(compiler, backend.VALUE)
     }
     drum (param_count) {
-        compiler = executor.load(compiler, backend.argument(beat), backend.STACK, (param_count - beat - 1) * abi.VALUE_WORD_BYTES)
+        compiler = executor.load(compiler, backend.argument(beat), backend.STACK, (param_count - beat - 1) * words.bytes)
     }
     (param_count > 0) {
-        compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, param_count * abi.VALUE_WORD_BYTES)
+        compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, param_count * words.bytes)
     }
     compiler = executor.call(compiler, "saltic_program")
     compiler = executor.branch_zero(compiler, backend.ERROR, ".L_start_done")
