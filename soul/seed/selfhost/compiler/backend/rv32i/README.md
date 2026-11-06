@@ -31,10 +31,10 @@
 только ролями и операциями договора (`executor.load`, `executor.syscall`,
 `executor.branch_less_unsigned`…) — ни одного `instruction.Kind`,
 `registers.*` или `assembler.emit_op` в нём не осталось. Договор для этого
-дорос до 67 операций и 23 ролей (`SCRATCH5`, `SCRATCH6`). Скрытые
+дорос до 21 роли (последняя — `SCRATCH5`). Скрытые
 договорённости между `rt_*` названы: `memory.BARRIER_OBJECT` (адрес Box на
 входе в `rt_region_barrier`), `memory.RELOCATION_DELTA` (сдвиг при переносе
-региона), `numbers.EQUAL_YES / EQUAL_NO / LESS_YES` (метки ответов, в них
+региона), `numbers.EQUAL_YES / EQUAL_NO` (метки ответов, в них
 прыгает `fixed`); провалы меток (`rt_string_upper → rt_string_case`,
 `rt_fixed_mem_load32 → load`, `store32 → store`) — внутри одного навыка.
 Машинный код не изменился, кроме двадцати пересылок `add rd, rs, x0 →

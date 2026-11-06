@@ -74,6 +74,16 @@ test_checker() {
             "soul/canonical/expected/errors/$name.txt" \
             "$work/checker/errors-$name.txt"
     done
+    for case in soul/canonical/errors/parser/*.saltic; do
+        name="$(basename "$case" .saltic)"
+        if run_built "$checker_elf" "$case" >"$work/checker/parser-$name.txt"; then
+            echo "чекер: $case разобрался, а должен упасть с ParseFailed" >&2
+            return 1
+        fi
+        diff -u \
+            "soul/canonical/expected/errors/parser/$name.txt" \
+            "$work/checker/parser-$name.txt"
+    done
     echo "чекер: нативная проверка пройдена"
 }
 
@@ -544,6 +554,8 @@ if (( $# == 0 )); then
     set -- all
 fi
 
+# all — язык; os — модули ОС (jtml, tasks, panels, mrpc), в just hosts;
+# platforms — qemu-virt, UEFI, closure.
 if [[ "$1" == "platforms" ]]; then
     set -- qemu-virt uefi closure
 elif [[ "$1" == "all" ]]; then
@@ -566,11 +578,9 @@ elif [[ "$1" == "all" ]]; then
         abi \
         memory \
         platform \
-        native \
-        jtml \
-        tasks \
-        panels \
-        mrpc
+        native
+elif [[ "$1" == "os" ]]; then
+    set -- jtml tasks panels mrpc
 fi
 
 for name in "$@"; do

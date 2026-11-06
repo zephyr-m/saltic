@@ -48,6 +48,9 @@ bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic":
 global-check:
     bash workbench/global-check.sh
 
+limits:
+    bash workbench/limits.sh
+
 hosts:
     bash workbench/hosts.sh
 

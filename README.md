@@ -23,12 +23,13 @@ Saltic делается одним автором для себя и своих 
 
 ## В цифрах
 
-- Самосборка — **3,2 с и 28 МБ**, компилятор — 1,6 МБ (вечером 02.11.2026 было
-  16,9 с и 1,19 ГБ). Неподвижная точка: второе и третье поколения компилятора
-  совпадают байт в байт.
+- Самосборка — **5,7 с и 89 МБ**, компилятор — 2,6 МБ (эталон rv32i, паспорт
+  полки 172:53:165; вечером 02.11.2026 было 16,9 с и 1,19 ГБ). Неподвижная
+  точка: второе и третье поколения компилятора совпадают байт в байт.
 - **15 ключевых слов** (у Lua — 22, у Go — 25, у C — 32).
-- fib(40) — 2,28 с: быстрее PHP, Lua, Ruby и Python; впереди языки с JIT и C.
-  Таблицы и методика — [docs/numbers/BENCHMARKS.md](docs/numbers/BENCHMARKS.md).
+- fib(40) — 0,88 с на родном x86-64: быстрее Ruby с YJIT, PHP с JIT, Lua и
+  Python; впереди C, LuaJIT и Node. Таблицы и методика —
+  [docs/numbers/BENCHMARKS.md](docs/numbers/BENCHMARKS.md).
 - Запуск программы — 0,2 мс.
 
 ## Как выглядит
@@ -112,7 +113,7 @@ nix --extra-experimental-features "nix-command flakes" develop
   `all` на rv32i, с метриками и «было / стало»;
 - `just rv64` — компилятор RV64 собирает себя под `qemu-riscv64` (минуты;
   перед релизом);
-- `just hosts` — тесты `all` на x86-64 и платформы: qemu-virt, UEFI, closure
+- `just hosts` — тесты `all` на x86-64 и RV64, тесты ОС `os`, платформы: qemu-virt, UEFI, closure
   (группы — [docs/process/TESTING.md](docs/process/TESTING.md));
 - `just qemu-graphics` — ОС с программами в окне QEMU.
 
@@ -170,7 +171,8 @@ GitHub Actions сверит тег с `VERSION`, возьмёт описание
 `saltic-<версия>-compiler-rv32i-linux.elf` (эталон, собирает сам себя) и его
 родная версия `saltic-<версия>-compiler-x86_64-linux`; у каждого паспорт
 `.txt`: кто собрал, из каких исходников, размер, время и пик памяти.
-Компилятор для голого RISC-V (`…-for-qemu_virt.elf`) собирается локально.
+Компилятор для голого RISC-V (`…-for-qemu_virt.elf`) и канон RV64
+(`…-compiler-rv64-linux`, `just rv64`) собираются локально и в git не лежат.
 `SALTIC_NATIVE=0` возвращает запуск под QEMU.
 
 ## Лицензия

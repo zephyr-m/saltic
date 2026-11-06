@@ -30,10 +30,12 @@ saltic_bootstrap_compiler() {
     echo "${found[0]}"
 }
 
-# Хэш исходников, из которых собираются компиляторы.
+# Хэш исходников, из которых собираются компиляторы: язык (soul/seed без
+# тестов) и папки из SALTIC_HASH_EXTRA — у компилятора qemu-virt это
+# os/target/qemu_virt. Правка остальной ОС паспорт не трогает.
 saltic_source_hash() {
-    find soul os/target -name '*.saltic' -type f | LC_ALL=C sort \
-        | xargs sha256sum | sha256sum | cut -c1-16
+    find soul/seed ${SALTIC_HASH_EXTRA:-} -name '*.saltic' -type f -not -path 'soul/seed/tests/*' \
+        | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-16
 }
 
 # saltic_seconds_since <EPOCHREALTIME начала> — прошедшие секунды с одной цифрой после точки
@@ -140,6 +142,7 @@ saltic_native_compiler() {
 # проверяется по sha родителя и по хэшу исходников из паспорта.
 saltic_qemu_virt_compiler() {
     local native toolchain passport
+    local SALTIC_HASH_EXTRA=os/target/qemu_virt
     native="$(saltic_native_compiler)" || return 1
     toolchain="$(saltic_compiler_path rv32i linux-for-qemu_virt .elf)"
     passport="${toolchain%.elf}.txt"

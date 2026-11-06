@@ -1,9 +1,10 @@
 # x86-64 родной — бэкенд
 
 ✅ **Есть (шаг 4, 04.11.2026): Linux.** Вход — `../x86_64_native.saltic`:
-исполнитель договора машины `Executor { firmware }` (все 67 методов
+исполнитель договора машины `Executor { firmware, wide }` (все методы
 `../backend.saltic`) и `write(path, machine)` — ELF64 для Linux. Цель
-`toolchain` — `x86_64` и `x86_64-uefi` (с 04.11.2026; старое имя `x86_64-native` тоже работает). Перевод RV32I → x86-64, бывший
+`toolchain` — `x86_64` и `x86_64-uefi` (с 04.11.2026; старые имена `x86_64-native`
+и `x86_64-uefi-native` убраны 07.11.2026). Перевод RV32I → x86-64, бывший
 оракулом, — на пенсии с 06.11.2026 (`.archive/x86_64_translation/`).
 
 - **Как устроен:** код x86-64 строится прямо из договора машины, без RV32I
@@ -18,14 +19,15 @@
 |---|---|---|
 | Вход: `Executor`, `write` | `../x86_64_native.saltic` | ~330 |
 | Байты команд: REX/ModRM/SIB, ~25 команд; эталоны GNU `as` | `encoder` + `encoder/operand` (`tests/x86-encoder.saltic`, `workbench/x86-encoder-golden.sh`) | ~430 |
-| Роль → регистр или ячейка низкой памяти (`[r14 + 256 + 4·роль]`), временные регистры | `roles` | ~100 |
+| Роль → регистр или ячейка первой страницы кода (`[r14 + SLOTS + size·роль]`, size 8 без окна), временные регистры | `roles` | ~100 |
 | Пересылки, арифметика, сдвиги, сравнения в 0/1; особые случаи `STACK` | `ops` | ~280 |
 | load/store слов, байтов, полуслов; push/pop | `access` | ~170 |
 | Переходы и вызовы (патчи `REL32`/`ABS32` в `layout`), `add_checked`, `syscall` → `call x86_syscall_<n>` | `control` | ~100 |
 | Linux: вход `x86_start` (argv в строки гостя), подпрограммы `x86_syscall_<n>` по таблице `SYSCALLS` | `platform` | ~150 |
 | ELF64: низкая память, код+rodata, data+bss, строки, стек (страж — разрыв) | `image` | ~130 |
 
-Роли в регистрах (решение автора 04.11.2026): `VALUE` eax, `ERROR` edx,
+Роли в регистрах (решение автора 04.11.2026; слово 8 байт — полные 64-битные
+регистры, ниже их 32-битные имена): `VALUE` eax, `ERROR` edx,
 `ARG2` r8d, `ARG3` r9d, `SCRATCH0…5` ecx ebx esi edi r10d r11d, `FRAME`
 ebp, `HEAP_TOP` r15d, `REGION_MARK` r12d, `ESCAPE_MARK` r13d, `STACK` rsp;
 `RETURN` — на родном стеке (store/load пусты); `ARG4…ARG7`, `ESCAPE_BOTTOM`
@@ -38,5 +40,5 @@ ebp, `HEAP_TOP` r15d, `REGION_MARK` r12d, `ESCAPE_MARK` r13d, `STACK` rsp;
 
 UEFI — `pe` (PE32+) и `uefi` (вход и вызовы прошивки). Не сделано: `rel8`,
 символы в ELF64.
-Документация: Intel 64 and IA-32 SDM, AMD64 APM; `docs/PLAN.md` «x86-64»;
+Документация: Intel 64 and IA-32 SDM, AMD64 APM; `docs/plan/PLAN.md`;
 отчёт `.archive/docs/fable/2026-11-04-native-x86.md`.

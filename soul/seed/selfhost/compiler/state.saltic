@@ -3,19 +3,15 @@
 -- Таблицы (constants, boxes, skills, …) — группы Symbol, поиск с конца.
 -- Слоты локальных — смещения от FRAME вниз. Команды — только через методы
 -- исполнителя договора (backend) в executor; machine — его программа.
--- emit_data/emit_writable/emit_blank — пустые заглушки (текстовый вывод
--- отключён), lines/data/writable не растут.
 --
 -- Symbol { name, kind, node, value, text, slot } / Function { name, slots, end,
 --     subject, module, types, next_drum, drum_exit, failure, next_rescue, next_always }
--- Names { names, next_drum, next_rescue, next_always } / Output { chunks }
+-- Names { names, next_drum, next_rescue, next_always }
 -- State { …, executor, machine, words } — words — раскладка памяти под слово
 --     исполнителя (abi.shape, по умолчанию 4 байта); executor (Box исполнителя, сейчас
 --     rv32i.Executor) назначает compiler при создании; machine — его программа
 -- symbol_find / symbol_has / symbol_add / symbol_add_text(symbols, name, …)
 -- type_find(types, name) / type_set(types, name, type)
--- output_add(output, text) / output_text(output) — накопитель текста
--- emit_data / emit_writable(compiler, line) / emit_blank(compiler) — ничего
 -- safe(text) -> имя для метки; label(compiler, prefix) -> уникальная метка
 -- collect_locals(params, body) -> Names; make_slots(words, names, first_slot) -> слоты
 -- collect_expression_names / collect_statement_names / collect_block_names
@@ -70,15 +66,8 @@ Names = Box {
     next_always = 1
 }
 
-Output = Box {
-    chunks = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
-}
-
 State = Box {
     ast = [],
-    lines = Output {},
-    data = Output {},
-    writable = Output {},
     executor = backend.unassigned(),
     machine = backend.unassigned(),
     words = shape.Words {},
@@ -131,49 +120,6 @@ skill type_set(types, name, type) {
     (str.bytes(item.name) == 0) { out group.add(types, Symbol { name = name, kind = "type", text = type }) }
     item.text = type
     out types
-}
-
-skill output_add(output, text) {
-    @carry = text
-    @chunks = []
-    @active = yes
-    drum (output.chunks) {
-        pick {
-            (active == no) { chunks = group.add(chunks, beat) }
-            (str.bytes(beat) == 0) {
-                chunks = group.add(chunks, carry)
-                active = no
-            }
-            {
-                chunks = group.add(chunks, "")
-                carry = str.concat(beat, carry)
-            }
-        }
-    }
-    (active == yes) { chunks = group.add(chunks, carry) }
-    out Output { chunks = chunks }
-}
-
-skill output_text(output) {
-    @result = ""
-    @count = group.count(output.chunks)
-    drum (count) {
-        @chunk = group.get(output.chunks, count - 1 - beat)
-        (str.bytes(chunk) > 0) { result = str.concat(result, chunk) }
-    }
-    out result
-}
-
-skill emit_data(compiler, line) {
-    out compiler
-}
-
-skill emit_writable(compiler, line) {
-    out compiler
-}
-
-skill emit_blank(compiler) {
-    out compiler
 }
 
 skill safe(text) {
@@ -518,9 +464,7 @@ skill header(compiler) {
         compiler.heap_bytes = word.from_number(model.DEFAULT_HEAP_BYTES)
     }
     compiler = executor.new_program(compiler, "_start")
-    compiler = executor.heap_size(compiler, compiler.heap_bytes)
-    compiler = emit_blank(compiler)
-    out compiler
+    out executor.heap_size(compiler, compiler.heap_bytes)
 }
 
 skill start(compiler) {
@@ -561,9 +505,7 @@ skill start(compiler) {
     compiler = executor.call(compiler, "rt_start_failure")
     compiler = executor.label(compiler, ".L_start_done")
     compiler = executor.load_immediate(compiler, backend.VALUE, 0)
-    compiler = executor.call(compiler, "rt_platform_exit")
-    compiler = emit_blank(compiler)
-    out compiler
+    out executor.call(compiler, "rt_platform_exit")
 }
 
 skill finish_data(compiler) {
@@ -572,8 +514,6 @@ skill finish_data(compiler) {
         compiler.heap_bytes = word.from_number(model.DEFAULT_HEAP_BYTES)
     }
     compiler = executor.heap_size(compiler, compiler.heap_bytes)
-    compiler.lines = output_add(compiler.lines, output_text(compiler.writable))
-    compiler.lines = output_add(compiler.lines, output_text(compiler.data))
     compiler = executor.align(compiler, backend.DATA, abi.OBJECT_ALIGNMENT)
     compiler = executor.align(compiler, backend.RODATA, abi.OBJECT_ALIGNMENT)
     compiler = executor.align(compiler, backend.BSS, model.ARENA_ALIGNMENT)

@@ -29,12 +29,19 @@
 `all` — её гоняет `just global-check` на rv32i и `just hosts` на x86_64 и rv64:
 
 - `checker` — случаи `soul/canonical/errors/` против `expected/errors/`;
+  `errors/parser/` — по файлу на ошибку лексера и парсера, каждый обязан
+  упасть с `ParseFailed`;
 - `fixed-types` — `u8…usize`, `bits32`, `address` и их ошибки чекера;
 - `modules` — вложенные модули и ошибки загрузчика;
 - `json-rpc` — `craft.protocols.data.json` и `json_rpc`;
 - `diagnostics` — форма диагностик лексера, парсера, загрузчика и чекера;
 - `groups` — группа-дерево на 40, 1 000 и 50 000 элементов;
 - `bytes` — `core.bytes`: края, ошибки по имени, миллион байтов;
+- `dict` — `core.dict` под rv32i и x86_64;
+- `platform` — договор платформы на Linux (rv32i и x86_64): `NotSupported`
+  по имени, непойманная ошибка, программа без аргументов;
+- `x86-encoder` — байты команд кодировщика x86-64 (эталоны GNU `as`,
+  `workbench/x86-encoder-golden.sh`);
 - `edges` — ошибки рантайма через `rescue`, дерево Box, строки; одинаково
   под rv32i и x86_64;
 - `rv64` — канон, `edges` и `always`, собранные под RV64, под `qemu-riscv64`: тот
@@ -50,6 +57,8 @@
 - `memory` — модель памяти и `MemoryExhausted`;
 - `native` — канон, память, переполнение стека, нажатия, импорт и большие
   числа на родном x86-64;
+`os` — модули ОС, не язык; только в `just hosts` (под x86_64):
+
 - `jtml`, `tasks` — `os.ui.jtml` и `os.apps.tasks`;
 - `panels`, `mrpc` — системная панель и mRPC агента (`mrpc` — всегда под
   x86_64: модули ОС UEFI — 61-битный мир).
