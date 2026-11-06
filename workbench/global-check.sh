@@ -37,7 +37,7 @@ if [[ "$refresh_status" != "0" ]]; then
     exit "$refresh_status"
 fi
 # Скорость: время самосборки против прошлого прогона.
-seconds="$(grep -o 'собрал себя за [0-9.]*' .cache/build/workbench/refresh.log | grep -o '[0-9.]*$')"
+seconds="$(grep -o 'новый компилятор собрал себя за [0-9.]*' .cache/build/workbench/refresh.log | grep -o '[0-9.]*$')"
 last=.cache/build/workbench/self-build-seconds
 [[ -f "$last" ]] && echo "== ⏱️ время самосборки: было $(<"$last") с, стало $seconds с"
 echo "$seconds" > "$last"
