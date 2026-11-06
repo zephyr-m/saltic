@@ -12,9 +12,13 @@
 -- rx_ring(chip) — заполнить кольцо приёма и отдать RX_RING_CFG
 -- setup(chip) -> текст — version, rx_ring
 -- ring_state(chip) -> текст — x готов, o тронут, . пуст; указатели
--- next_frame(chip) -> [адрес кадра, длина, RSSI] или none — любой готовый
---     буфер (карта берёт их не строго по порядку), начиная с последнего
+-- next_frame(chip) -> [адрес кадра, длина, RSSI, целый] или none — любой
+--     готовый буфер (карта берёт их не строго по порядку), начиная с последнего
 --     прочитанного; recycle(chip) — вернуть его в хвост кольца
+-- intact(attention) -> yes/no — нет флагов ошибок слова attention (как
+--     ath10k: кадр испорчен в эфире, ошибка расшифровки, длины, переполнение,
+--     не сошлась сумма UDP/TCP или IP — карта проверяет их сама). Карта кладёт
+--     в кольцо и испорченные кадры, отбрасывать их — наше дело
 
 use core.num
 use core.str
@@ -33,6 +37,7 @@ ALL_FRAMES = 65535
 OFFSETS = [59, 75, 21, 31, 3, 20, 6, 10, 1, 2]
 ATTENTION = 4
 MSDU_DONE = 2147483648
+DAMAGE_BITS = [30, 29, 27, 19, 18, 17, 16]
 MSDU_START = 24
 LENGTH_MASK = 16384
 RSSI_COMB = 100
@@ -108,10 +113,18 @@ skill next_frame(chip) {
             chip.rx_read = slot
             @length = num.mod(firmware.read32(place, chip.base, MSDU_START), LENGTH_MASK)
             @rssi = firmware.read8(place, chip.base, RSSI_COMB)
-            out [firmware.add(place, PAYLOAD), length, rssi]
+            @whole = intact(firmware.read32(place, chip.base, ATTENTION))
+            out [firmware.add(place, PAYLOAD), length, rssi, whole]
         }
     }
     out none
+}
+
+skill intact(attention) {
+    drum (DAMAGE_BITS) {
+        (num.mod(attention / num.power2(beat), 2) == 1) { out no }
+    }
+    out yes
 }
 
 skill ring_state(chip) {
