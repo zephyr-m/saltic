@@ -1,0 +1,73 @@
+-- dhcp — сообщения DHCP (RFC 2131) для клиента: тело UDP, порты 68 → 67.
+-- Тело: заголовок BOOTP 236 байт, «волшебное печенье» 99.130.83.99, опции
+-- (номер, длина, байты), конец — 255. Флаг BROADCAST просит сервер отвечать
+-- на широковещательный адрес: своего IP у нас ещё нет.
+--
+-- Offer { server, address, kind } — разобранный ответ: IP сервера (опция 54),
+-- предложенный адрес (yiaddr), вид сообщения (опция 53: 2 — OFFER, 5 — ACK)
+-- discover(mac, xid) -> тело DHCPDISCOVER
+-- frame(mac, xid) -> кадр Ethernet: широковещательный UDP 0.0.0.0:68 → :67
+-- offer(payload) -> Offer или none — тело ответа сервера
+
+use core.num
+use core.group
+use os.target.uefi_x86_64.network.net
+
+CLIENT_PORT = 68
+SERVER_PORT = 67
+BOOT_REQUEST = 1
+ETHERNET = 1
+BROADCAST = 128
+COOKIE = [99, 130, 83, 99]
+MESSAGE_TYPE = 53
+DISCOVER = 1
+SERVER_ID = 54
+REQUEST_LIST = [55, 3, 1, 3, 6]
+END = 255
+OPTIONS = 240
+ANY = [0, 0, 0, 0]
+EVERYONE = [255, 255, 255, 255]
+
+Offer = Box {
+    server = [],
+    address = [],
+    kind = 0
+}
+
+skill zeros(bytes, count) {
+    drum (count) { bytes = group.add(bytes, 0) }
+    out bytes
+}
+
+skill discover(mac, xid) {
+    @bytes = [BOOT_REQUEST, ETHERNET, 6, 0]
+    bytes = group.concat(bytes, xid)
+    bytes = group.concat(bytes, [0, 0, BROADCAST, 0])
+    bytes = zeros(bytes, 16)
+    bytes = zeros(group.concat(bytes, mac), 10)
+    bytes = zeros(bytes, 192)
+    bytes = group.concat(bytes, COOKIE)
+    bytes = group.concat(bytes, [MESSAGE_TYPE, 1, DISCOVER])
+    bytes = group.concat(bytes, REQUEST_LIST)
+    out group.add(bytes, END)
+}
+
+skill frame(mac, xid) {
+    out net.udp_frame_bytes(mac, ANY, net.BROADCAST_MAC, EVERYONE, CLIENT_PORT, SERVER_PORT, discover(mac, xid))
+}
+
+skill offer(payload) {
+    (group.count(payload) < OPTIONS + 3) { out none }
+    @found = Offer { address = net.slice_bytes(payload, 16, 4) }
+    @at = OPTIONS
+    drum (64) {
+        (at + 2 > group.count(payload)) { leave }
+        @code = group.get(payload, at)
+        (code == END) { leave }
+        @size = group.get(payload, at + 1)
+        (code == MESSAGE_TYPE) { found.kind = group.get(payload, at + 2) }
+        (code == SERVER_ID) { found.server = net.slice_bytes(payload, at + 2, 4) }
+        at = at + 2 + size
+    }
+    out found
+}

@@ -15,12 +15,18 @@
 -- header(chip, kind, network, sequence) -> 24 — заголовок кадра 802.11 в
 --     wifi_tx_frame: тип, адреса (точка, мы, точка), номер
 -- send_frame(chip, length) — кадр из wifi_tx_frame письмом TX_FRM
--- answer(chip, kind, network) -> [слово 26, слово 28] или none — ответ точки
---     вида kind в приёме HTT (не дольше WAITS); буфер сразу уходит обратно
+-- answer(chip, kind, network) -> [слово 24, слово 26, слово 28] или none —
+--     ответ точки вида kind в приёме HTT (не дольше WAITS); буфер сразу
+--     уходит обратно
 -- authenticate(chip, network) -> текст — Authentication, статус ответа
 -- associate(chip, network) -> текст — Association Request (имя, скорости
---     11b/g), статус и номер станции (AID)
--- run(chip, name) -> текст — поиск, сеть по имени, всё по порядку
+--     11b/g), до TRIES попыток; номер станции (AID) и возможности точки — в
+--     chip.station и chip.point_caps
+-- link(chip, network) -> текст — как ath10k_bss_assoc и переход в
+--     AUTHORIZED: PEER_ASSOC (11g, скорости 11b/g), VDEV_UP с номером станции,
+--     PEER_SET_PARAM authorize — без него прошивка не пропускает данные
+-- run(chip, name) -> Network или none — поиск, сеть по имени, всё по
+--     порядку; ход — в chip.journal
 
 use core.num
 use core.str
@@ -37,6 +43,17 @@ TAG_VDEV_START = 88
 VDEV_START_RESP = 20481
 PEER_CREATE = 24577
 TAG_PEER_CREATE = 97
+PEER_ASSOC = 24581
+TAG_PEER_ASSOC = 101
+VDEV_UP = 20485
+TAG_VDEV_UP = 92
+PEER_SET_PARAM = 24580
+TAG_PEER_SET_PARAM = 100
+TAG_VHT_RATES = 102
+PEER_AUTH = 1
+AUTHORIZE = 3
+LEGACY_RATES = [130, 132, 139, 150, 12, 18, 24, 36, 48, 72, 96, 108]
+TRIES = 3
 BEACON_INTERVAL = 100
 TX_FRM = 1
 MGMT_FLAGS = 97
@@ -137,13 +154,20 @@ skill answer(chip, kind, network) {
             @got = htt.next_frame(chip)
             (got == none) { leave }
             @place = group.get(got, 0)
-            @words = [firmware.read16(place, chip.base, 26), firmware.read16(place, chip.base, 28)]
+            @words = [firmware.read16(place, chip.base, 24), firmware.read16(place, chip.base, 26), firmware.read16(place, chip.base, 28)]
             @mine = from_point(chip, got, kind, network)
+            @first = firmware.hex(firmware.read8(place, chip.base, 0), 2)
+            @sender = firmware.read8(place, chip.base, 15)
+            (str.bytes(chip.heard) < 120) {
+                ((first == "80") == no) { chip.heard = "{chip.heard} {first}/{sender}" }
+            }
             htt.recycle(chip)
             (mine == yes) { out words }
         }
         drum (16) {
             (rings.held(chip) == 0) { leave }
+            @event = firmware.hex(wmi.event_id(chip, rings.held_buffer(chip)), 4)
+            (str.bytes(chip.heard) < 120) { chip.heard = "{chip.heard} w{event}" }
             rings.release(chip)
         }
         card.stall(chip, PAUSE)
@@ -165,16 +189,25 @@ skill authenticate(chip, network) {
     }
     @sent = chip.htt_seen
     card.say("   HTT letters:{sent}")
-    @step = group.get(reply, 0)
-    @status = group.get(reply, 1)
+    @step = group.get(reply, 1)
+    @status = group.get(reply, 2)
     card.say("   Authentication reply: step {step}, status {status}")
     out "аутентификация: шаг {step}, статус {status} (письма HTT:{sent})"
 }
 
 skill associate(chip, network) {
+    @told = ""
+    drum (TRIES) {
+        told = ask_association(chip, network, beat + 2)
+        (chip.station > 0) { out told }
+    }
+    out told
+}
+
+skill ask_association(chip, network, sequence) {
     card.say("J4. Association Request: SSID «{network.name}», rates 11b/g")
     chip.htt_seen = ""
-    @at = header(chip, ASSOC_REQUEST, network, 2)
+    @at = header(chip, ASSOC_REQUEST, network, sequence)
     at = bytes(chip, at, group.concat(CAPABILITY, [LISTEN, 0]))
     @size = str.bytes(network.name)
     at = bytes(chip, at, [0, size])
@@ -182,16 +215,50 @@ skill associate(chip, network) {
     at = bytes(chip, at, RATES)
     at = bytes(chip, at, EXTENDED_RATES)
     send_frame(chip, at)
+    chip.heard = ""
     @reply = answer(chip, ASSOC_RESPONSE, network)
     (reply == none) {
         @seen = chip.htt_seen
-        card.say("   no Association Response (HTT letters:{seen})")
-        out "ассоциация: ответа нет (письма HTT:{seen})"
+        @heard = chip.heard
+        card.say("   no Association Response (HTT letters:{seen}; heard:{heard})")
+        out "ассоциация: ответа нет (письма HTT:{seen}; слышно:{heard})"
     }
-    @status = group.get(reply, 0)
-    @station = num.mod(group.get(reply, 1), 16384)
+    @status = group.get(reply, 1)
+    @station = num.mod(group.get(reply, 2), 16384)
     card.say("   Association Response: status {status}, AID {station}")
+    (status == 0) {
+        chip.station = station
+        chip.point_caps = group.get(reply, 0)
+    }
     out "ассоциация: статус {status}, номер станции {station}"
+}
+
+skill link(chip, network) {
+    card.say("J5. PEER_ASSOC: 11g, 12 rates, AID {chip.station}")
+    @at = wmi.tlv(chip, wmi.BODY, TAG_PEER_ASSOC, 76)
+    at = wmi.words(chip, at, wmi.mac_words(network.address))
+    at = wmi.words(chip, at, [0, 1, chip.station, PEER_AUTH, chip.point_caps, 1, 0, 0, 0, 0, 1, 0, scan.MODE_11G, 0, 0])
+    at = wmi.words(chip, at, [group.count(LEGACY_RATES), 0])
+    at = wmi.tlv(chip, at, scan.TAG_ARRAY_BYTE, group.count(LEGACY_RATES))
+    drum (group.count(LEGACY_RATES) / 4) {
+        @four = beat * 4
+        at = wmi.words(chip, at, [group.get(LEGACY_RATES, four) + group.get(LEGACY_RATES, four + 1) * 256 + group.get(LEGACY_RATES, four + 2) * 65536 + group.get(LEGACY_RATES, four + 3) * 16777216])
+    }
+    at = wmi.tlv(chip, at, scan.TAG_ARRAY_BYTE, 0)
+    at = wmi.tlv(chip, at, TAG_VHT_RATES, 16)
+    at = wmi.words(chip, at, [0, 0, 0, 0])
+    wmi.command(chip, PEER_ASSOC, at - wmi.BODY)
+    card.say("J6. VDEV_UP: interface 0 is associated with {network.bssid}")
+    at = wmi.tlv(chip, wmi.BODY, TAG_VDEV_UP, 16)
+    at = wmi.words(chip, at, group.concat([0, chip.station], wmi.mac_words(network.address)))
+    wmi.command(chip, VDEV_UP, at - wmi.BODY)
+    card.say("J7. PEER_SET_PARAM authorize: open network, data may flow")
+    at = wmi.tlv(chip, wmi.BODY, TAG_PEER_SET_PARAM, 20)
+    at = wmi.words(chip, at, group.concat([0], wmi.mac_words(network.address)))
+    at = wmi.words(chip, at, [AUTHORIZE, 1])
+    wmi.command(chip, PEER_SET_PARAM, at - wmi.BODY)
+    wmi.barrier(chip)
+    out "связь: PEER_ASSOC, VDEV_UP, authorize — прошивка приняла (барьер)"
 }
 
 skill named(networks, name) {
@@ -206,11 +273,18 @@ skill run(chip, name) {
     @tally = scan.search(chip)
     @network = named(tally.networks, name)
     @count = group.count(tally.networks)
-    (network == none) { out "сеть «{name}» не найдена (сетей: {count})" }
+    (network == none) {
+        chip.journal = "сеть «{name}» не найдена (сетей: {count})"
+        out none
+    }
     card.say("   found «{name}» on channel {network.channel}, {network.bssid}")
     @tuned = tune(chip, network)
     @peered = peer(chip, network)
     @authenticated = authenticate(chip, network)
     @associated = associate(chip, network)
-    out "сеть «{name}» · {network.bssid} · канал {network.channel}\n{tuned}\n{peered}\n{authenticated}\n{associated}"
+    chip.journal = "сеть «{name}» · {network.bssid} · канал {network.channel}\n{tuned}\n{peered}\n{authenticated}\n{associated}"
+    (chip.station == 0) { out none }
+    @linked = link(chip, network)
+    chip.journal = "{chip.journal}\n{linked}"
+    out network
 }
