@@ -192,19 +192,13 @@ test_edges() {
     SALTIC_TARGET=x86_64 build edges-x86_64 \
         tests/edges.saltic \
         "$work/edges/x86_64"
-    SALTIC_TARGET=x86_64-translation build edges-x86_64-translation \
-        tests/edges.saltic \
-        "$work/edges/x86_64-translation"
     measure run qemu-riscv32 -B 0x100000000 "$work/edges/rv32i.elf" \
         >"$work/edges/rv32i.txt"
     measure run "$work/edges/x86_64" \
         >"$work/edges/x86_64.txt"
-    measure run "$work/edges/x86_64-translation" \
-        >"$work/edges/x86_64-translation.txt"
     diff -u tests/expected/edges.txt "$work/edges/rv32i.txt"
     diff -u tests/expected/edges.txt "$work/edges/x86_64.txt"
-    diff -u tests/expected/edges.txt "$work/edges/x86_64-translation.txt"
-    echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i, x86_64 и x86_64-translation"
+    echo "граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i и x86_64"
 }
 
 test_always() {
@@ -298,7 +292,7 @@ test_dict() {
 test_platform() {
     mkdir -p "$work/platform"
     local target host_run
-    for target in rv32i x86_64 x86_64-translation; do
+    for target in rv32i x86_64; do
         SALTIC_TARGET=$target build platform-$target tests/platform.saltic "$work/platform/$target"
         SALTIC_TARGET=$target build uncaught-$target tests/fixtures/uncaught.saltic "$work/platform/uncaught-$target"
         SALTIC_TARGET=$target build needs-args-$target tests/fixtures/needs-args.saltic "$work/platform/needs-args-$target"
@@ -317,7 +311,7 @@ test_platform() {
         test "$(<"$work/platform/needs-args-$target.txt")" = "нужно 2 аргументов"
         test "$("${host_run[@]}" "$work/platform/needs-args-$target" раз два)" = "раз два"
     done
-    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются — одинаково под rv32i, x86_64 и x86_64-translation"
+    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются — одинаково под rv32i и x86_64"
 }
 
 test_memory() {
@@ -332,7 +326,7 @@ test_memory() {
 }
 
 test_native() {
-    local target="${SALTIC_NATIVE_TARGET:-x86_64}"
+    local target=x86_64
     mkdir -p "$work/native"
     SALTIC_TARGET=$target build native-canonical \
         soul/canonical/main.saltic \
@@ -443,10 +437,6 @@ test_uefi() {
     SALTIC_UEFI_DIR="$work/uefi" bash os/target/uefi_x86_64/run.sh --check
 }
 
-test_uefi_translation() {
-    SALTIC_TARGET=x86_64-uefi-translation SALTIC_UEFI_DIR="$work/uefi-translation" bash os/target/uefi_x86_64/build.sh
-    SALTIC_UEFI_DIR="$work/uefi-translation" bash os/target/uefi_x86_64/run.sh --check
-}
 
 test_jtml() {
     mkdir -p "$work/jtml"
@@ -536,8 +526,6 @@ run_case() {
         memory) test_memory ;;
         platform) test_platform ;;
         native) test_native ;;
-        native-translation) SALTIC_NATIVE_TARGET=x86_64-translation test_native ;;
-        uefi-translation) test_uefi_translation ;;
         qemu-virt) test_qemu_virt ;;
         uefi) test_uefi ;;
         jtml) test_jtml ;;
@@ -557,7 +545,7 @@ if (( $# == 0 )); then
 fi
 
 if [[ "$1" == "platforms" ]]; then
-    set -- qemu-virt uefi uefi-translation closure
+    set -- qemu-virt uefi closure
 elif [[ "$1" == "all" ]]; then
     set -- \
         checker \
@@ -579,7 +567,6 @@ elif [[ "$1" == "all" ]]; then
         memory \
         platform \
         native \
-        native-translation \
         jtml \
         tasks \
         panels \

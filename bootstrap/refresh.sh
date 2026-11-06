@@ -44,10 +44,8 @@ rm -f "$work/previous/"* "$work"/stage-*/toolchain*
 previous="$work/previous/$(basename "$bootstrap_compiler")"
 cp "$bootstrap_compiler" "$previous"
 
-# Самосборка идёт на x86-64. Компилятор, собравший исходники под x86_64, —
-# это перевод той же RV-программы, которую он выдал бы под rv32i, поэтому
-# x86-версия каждого поколения получается одной сборкой, без отдельного шага.
-# Сравниваются по-прежнему rv32i-байты stage-2 и stage-3. Самосборка на RV64
+# Самосборка идёт на x86-64: каждое поколение собирается родным x86-64
+# и под rv32i; fixed point — rv32i-байты stage-2 и stage-3. Самосборка на RV64
 # (под qemu-riscv64, долго) — отдельно: bootstrap/refresh-rv64.sh, just rv64.
 stage_time="$(type -P time || true)"
 stage() {
@@ -86,17 +84,11 @@ fi
 echo "bootstrap refresh: проверяю fixed point"
 cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
 
-echo "bootstrap refresh: оракул — stage-1 собирает stage-2 переводом (x86_64-translation), тот собирает rv32i"
-stage "$work/stage-1/toolchain" x86_64-translation "$work/stage-2/toolchain-translation"
-stage "$work/stage-2/toolchain-translation" rv32i "$work/stage-3/toolchain-translation.elf"
-cmp "$work/stage-3/toolchain.elf" "$work/stage-3/toolchain-translation.elf"
-echo "bootstrap refresh: перевод даёт те же байты rv32i, что родной x86-64"
-
 compiler="$(saltic_compiler_path rv32i linux .elf)"
 if cmp -s "$work/stage-3/toolchain.elf" "$compiler" && [[ -f "${compiler%.elf}.txt" ]]; then
     echo "bootstrap refresh: $(basename "$compiler") не изменился"
-    # Родная версия могла остаться переведённой (сбой прошлой самосборки):
-    # тогда её место занимает stage-2 этой самосборки, байт в байт та же.
+    # Паспорт родной версии мог остаться от другой сборки (сбой прошлой
+    # самосборки): если она байт в байт stage-2 — паспорт переписывается.
     native_path="$(saltic_compiler_path x86_64 linux)"
     if cmp -s "$work/stage-2/toolchain" "$native_path" \
         && ! grep -q "stage-2 самосборки" "$native_path.txt"; then

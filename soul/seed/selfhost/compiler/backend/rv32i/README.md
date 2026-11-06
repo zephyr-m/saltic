@@ -3,8 +3,7 @@
 ✅ **Есть.** Здесь живёт всё, что в компиляторе знает про RV32I. Вход —
 `../rv32i.saltic`: исполнитель договора машины `Executor` (Box с методами
 `../backend.saltic`, роль → регистр по `REGISTER_OF_ROLE`) и фасад над
-`machine/layout` и `machine/image` для платформ и тестов, так же, как
-`x86_64_translation.saltic` рядом со своей папкой.
+`machine/layout` и `machine/image` для платформ и тестов.
 
 | Что | Где | Строк |
 |---|---|---|
@@ -44,9 +43,9 @@ addi rd, rs, 0` (`.archive/docs/fable/2026-11-03-runtime.md`). Рантайм л
 решит автор. Thumb-2, Xtensa и ARM64 получают codegen и рантайм бесплатно,
 им нужны только исполнитель, образ и платформа.
 
-Перевод в x86-64 (`../x86_64_translation/`) берёт готовую машину RV32I и
-потому зависит от `machine/{layout,image,instruction,decoder,profile,buffer}`
-отсюда.
+`machine/layout` и `machine/buffer` отсюда берут и другие исполнители
+(родной x86-64, RV64). Перевод RV32I → x86-64 — на пенсии с 06.11.2026
+(`.archive/x86_64_translation/`).
 
 RV32I останется бэкендом и после того, как перестанет быть центром
 (машина-максимум, эпоха 5): RP2350 на ядрах Hazard3, дальше — RV64.

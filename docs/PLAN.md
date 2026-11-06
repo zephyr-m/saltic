@@ -1041,6 +1041,13 @@ RTL8111 (`10ec:8168`) → свой стек (ARP, IPv4, UDP) → приёмни�
   CareOS, jumper, tasks, chat, wire; агент 14 стоит на диске (тот же
   cube.efi принимает за 1,2 с вместо 2,0). Упрощение `Phys` → число
   (−250…−300 строк ОС) — отдельно, позже.
+  **Шаг 6 (06.11.2026):** перевод RV32I → x86-64 — на пенсии (Q-012):
+  бэкенд, `oracle.sh` и куски из `toolchain`, `tests/run.sh`, `refresh.sh`
+  (оракул самосборки) — в `.archive/x86_64_translation/` (решение автора:
+  ничего не удалять, только в архив). Платформа `stub.Uefi` стала
+  `compiler/platform/uefi.saltic`. Цели `x86_64-translation` и
+  `x86_64-uefi-translation` — `UnknownTarget`. Перекрёстная проверка теперь —
+  RV64 (`just rv64`) против rv32i и x86-64.
   **Ждут перехода (06.11.2026):** bash → Saltic (окно x86-64 и `execve`),
   `io.show` одним шаблоном (фиксированные в подстановке), `mem.*` → `arena.*`
   и `mem.*` (`hi/lo` → `address`), кодирование команд RV32I через `bits32`

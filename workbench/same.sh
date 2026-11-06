@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Проверка рефакторинга без изменения смысла: текущие исходники собираются
 # компилятором с полки bootstrap/ и компилятором из этих же исходников (stage-1)
-# под три цели, rv32i, x86_64 и x86_64-translation. Результаты обязаны совпасть побайтово, а набор
+# под две цели, rv32i и x86_64. Результаты обязаны совпасть побайтово, а набор
 # ошибок канона — с эталоном. Оба компилятора работают родными x86-версиями.
 source "$(dirname "$0")/../bootstrap/stamp.sh"
 saltic_stamp_output "$0" "$@"
@@ -23,7 +23,7 @@ chmod +x "$W/stage-1"
 
 for source in soul/seed/selfhost/toolchain.saltic soul/canonical/main.saltic soul/seed/tests/contract.saltic "$@"; do
     name="$(basename "$source" .saltic)"
-    for target in rv32i x86_64 x86_64-translation; do
+    for target in rv32i x86_64; do
         "$shelf" "$source" "$W/old-$name-$target.out" $HEAP $target > /dev/null 2>&1
         "$W/stage-1" "$source" "$W/new-$name-$target.out" $HEAP $target > "$W/new-$name-$target.log" 2>&1
         if cmp -s "$W/old-$name-$target.out" "$W/new-$name-$target.out"; then

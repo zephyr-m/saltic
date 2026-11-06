@@ -2,5 +2,5 @@
 
 - **Расширение:** `.efi`, `.exe`.
 - **Где запускается:** прошивка UEFI; Windows.
-- **Состояние:** ✅ `.efi` есть, но не здесь: `soul/seed/selfhost/compiler/backend/x86_64_translation/pe.saltic`. Переедет сюда. ⬜ `.exe` — почти даром.
+- **Состояние:** ✅ `.efi` есть, но не здесь: `soul/seed/selfhost/compiler/backend/x86_64_native/pe.saltic`. Переедет сюда. ⬜ `.exe` — почти даром.
 - **Заметка:** `.exe` — тот же PE, только вместо служб прошивки вызовы Windows (`kernel32`: вывод, файлы, выход) через таблицу импорта; у большинства людей Windows. Тот же PE для ARM64 даёт `arm64-uefi`.

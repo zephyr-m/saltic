@@ -12,7 +12,7 @@ pattern='итог|проверка:|error|подтвержд|ок$|ok$|прой�
 : > "$log"
 status=0
 aborted=0
-for step in "x86_64 all" "x86_64-translation all" "rv32i platforms"; do
+for step in "x86_64 all" "rv32i platforms"; do
     read -r host group <<< "$step"
     echo "== $host: $group"
     SALTIC_TEST_HOST="$host" nix --extra-experimental-features "nix-command flakes" develop \
