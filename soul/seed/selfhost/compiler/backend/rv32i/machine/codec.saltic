@@ -1,145 +1,184 @@
 -- codec — кодирует команду RV32I в 32-битное слово (word.Word) по форме
--- R/I/S/B/U/J; все поля проверяются.
+-- R/I/S/B/U/J; все поля проверяются. Поля считаются обычной арифметикой:
+-- деление на константу даёт старшие биты, вычитание — младшие. Пределы —
+-- числа, не ширины: *_LIMIT — 2^ширины у беззнаковых (BYTE_LIMIT 256,
+-- U16_LIMIT, OPCODE_LIMIT, FUNCT3/FUNCT7_LIMIT, SHIFT_LIMIT, IMMEDIATE20_LIMIT)
+-- и 2^(ширины-1) у знаковых (IMMEDIATE12/13/21_LIMIT); *_MODULUS — 2^ширины.
 -- Ошибки: InvalidOpcode, InvalidRegister, InvalidFunction, InvalidImmediate,
 -- InvalidShift, UnknownInstruction, UnknownInstructionForm.
 --
--- bits(value, start, width) -> поле битов; signed_value(value, width) -> без знака
--- valid_unsigned / valid_signed / valid_even_signed(value, width) -> yes/no
+-- signed_value(value, modulus) -> value без знака (value + modulus, если < 0)
+-- valid_unsigned / valid_signed / valid_even_signed(value, limit) -> yes/no
 -- encode_r / encode_i / encode_i_unsigned / encode_s / encode_b / encode_u /
 --     encode_j(opcode, …) -> Word
--- is_shift(kind) -> yes/no
--- encode(definition, rd, rs1, rs2, immediate) -> Word по форме из Definition
--- encode_kind(kind, rd, rs1, rs2, immediate) -> Word
+-- is_shift(kind) -> yes/no; encode(definition, rd, rs1, rs2, immediate) -> Word
+--     по форме из Definition; encode_kind(kind, rd, rs1, rs2, immediate) -> Word
 
 use selfhost.compiler.backend.rv32i.machine.instruction
-use core.num
 use selfhost.compiler.backend.rv32i.machine.registers
 use selfhost.machine.word
 
-skill bits(value, start, width) {
-    out num.mod(value / num.power2(start), num.power2(width))
+BYTE_LIMIT = 256
+U16_LIMIT = 65536
+OPCODE_LIMIT = 128
+FUNCT3_LIMIT = 8
+FUNCT7_LIMIT = 128
+IMMEDIATE12_LIMIT = 2048
+IMMEDIATE12_MODULUS = 4096
+IMMEDIATE13_LIMIT = 4096
+IMMEDIATE13_MODULUS = 8192
+IMMEDIATE20_LIMIT = 1048576
+IMMEDIATE21_LIMIT = 1048576
+IMMEDIATE21_MODULUS = 2097152
+SHIFT_LIMIT = 32
+
+skill signed_value(value, modulus) {
+    (value < 0) { out value + modulus }
+    out value
 }
 
-skill signed_value(value, width) {
-    @result = value
-    (result < 0) { result = result + num.power2(width) }
-    out result
-}
-
-skill valid_unsigned(value, width) {
+skill valid_unsigned(value, limit) {
     (value < 0) { out no }
-    (value >= num.power2(width)) { out no }
+    (value >= limit) { out no }
     out yes
 }
 
-skill valid_signed(value, width) {
-    @limit = num.power2(width - 1)
+skill valid_signed(value, limit) {
     (value < 0 - limit) { out no }
     (value >= limit) { out no }
     out yes
 }
 
-skill valid_even_signed(value, width) {
-    (valid_signed(value, width) == no) { out no }
-    out num.mod(value, 2) == 0
+skill valid_even_signed(value, limit) {
+    (valid_signed(value, limit) == no) { out no }
+    out value / 2 * 2 == value
 }
 
 skill encode_r(opcode, rd, funct3, rs1, rs2, funct7) {
-    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_unsigned(opcode, OPCODE_LIMIT) == no) { out error.InvalidOpcode }
     (registers.valid(rd) == no) { out error.InvalidRegister }
-    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_unsigned(funct3, FUNCT3_LIMIT) == no) { out error.InvalidFunction }
     (registers.valid(rs1) == no) { out error.InvalidRegister }
     (registers.valid(rs2) == no) { out error.InvalidRegister }
-    (valid_unsigned(funct7, 7) == no) { out error.InvalidFunction }
+    (valid_unsigned(funct7, FUNCT7_LIMIT) == no) { out error.InvalidFunction }
+    @rd_high = rd / 2
+    @rs1_high = rs1 / 2
+    @rs2_high = rs2 / 16
     out word.from_bytes(
-        opcode + bits(rd, 0, 1) * 128,
-        bits(rd, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
-        bits(rs1, 1, 4) + bits(rs2, 0, 4) * 16,
-        bits(rs2, 4, 1) + funct7 * 2
-    )
-}
-
-skill encode_i(opcode, rd, funct3, rs1, immediate) {
-    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
-    (registers.valid(rd) == no) { out error.InvalidRegister }
-    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
-    (registers.valid(rs1) == no) { out error.InvalidRegister }
-    (valid_signed(immediate, 12) == no) { out error.InvalidImmediate }
-    @value = signed_value(immediate, 12)
-    out word.from_bytes(
-        opcode + bits(rd, 0, 1) * 128,
-        bits(rd, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
-        bits(rs1, 1, 4) + bits(value, 0, 4) * 16,
-        bits(value, 4, 8)
+        opcode + (rd - rd_high * 2) * 128,
+        rd_high + funct3 * 16 + (rs1 - rs1_high * 2) * 128,
+        rs1_high + (rs2 - rs2_high * 16) * 16,
+        rs2_high + funct7 * 2
     )
 }
 
 skill encode_i_unsigned(opcode, rd, funct3, rs1, immediate) {
-    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_unsigned(opcode, OPCODE_LIMIT) == no) { out error.InvalidOpcode }
     (registers.valid(rd) == no) { out error.InvalidRegister }
-    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_unsigned(funct3, FUNCT3_LIMIT) == no) { out error.InvalidFunction }
     (registers.valid(rs1) == no) { out error.InvalidRegister }
-    (valid_unsigned(immediate, 12) == no) { out error.InvalidImmediate }
+    (valid_unsigned(immediate, IMMEDIATE12_MODULUS) == no) { out error.InvalidImmediate }
+    @rd_high = rd / 2
+    @rs1_high = rs1 / 2
+    @immediate_high = immediate / 16
     out word.from_bytes(
-        opcode + bits(rd, 0, 1) * 128,
-        bits(rd, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
-        bits(rs1, 1, 4) + bits(immediate, 0, 4) * 16,
-        bits(immediate, 4, 8)
+        opcode + (rd - rd_high * 2) * 128,
+        rd_high + funct3 * 16 + (rs1 - rs1_high * 2) * 128,
+        rs1_high + (immediate - immediate_high * 16) * 16,
+        immediate_high
     )
 }
 
+skill encode_i(opcode, rd, funct3, rs1, immediate) {
+    (valid_unsigned(opcode, OPCODE_LIMIT) == no) { out error.InvalidOpcode }
+    (registers.valid(rd) == no) { out error.InvalidRegister }
+    (valid_unsigned(funct3, FUNCT3_LIMIT) == no) { out error.InvalidFunction }
+    (registers.valid(rs1) == no) { out error.InvalidRegister }
+    (valid_signed(immediate, IMMEDIATE12_LIMIT) == no) { out error.InvalidImmediate }
+    out encode_i_unsigned(opcode, rd, funct3, rs1, signed_value(immediate, IMMEDIATE12_MODULUS))
+}
+
 skill encode_s(opcode, funct3, rs1, rs2, immediate) {
-    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
-    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_unsigned(opcode, OPCODE_LIMIT) == no) { out error.InvalidOpcode }
+    (valid_unsigned(funct3, FUNCT3_LIMIT) == no) { out error.InvalidFunction }
     (registers.valid(rs1) == no) { out error.InvalidRegister }
     (registers.valid(rs2) == no) { out error.InvalidRegister }
-    (valid_signed(immediate, 12) == no) { out error.InvalidImmediate }
-    @value = signed_value(immediate, 12)
+    (valid_signed(immediate, IMMEDIATE12_LIMIT) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, IMMEDIATE12_MODULUS)
+    @value_high = value / 32
+    @value_low = value - value_high * 32
+    @value_low_high = value_low / 2
+    @rs1_high = rs1 / 2
+    @rs2_high = rs2 / 16
     out word.from_bytes(
-        opcode + bits(value, 0, 1) * 128,
-        bits(value, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
-        bits(rs1, 1, 4) + bits(rs2, 0, 4) * 16,
-        bits(rs2, 4, 1) + bits(value, 5, 7) * 2
+        opcode + (value_low - value_low_high * 2) * 128,
+        value_low_high + funct3 * 16 + (rs1 - rs1_high * 2) * 128,
+        rs1_high + (rs2 - rs2_high * 16) * 16,
+        rs2_high + value_high * 2
     )
 }
 
 skill encode_b(opcode, funct3, rs1, rs2, immediate) {
-    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
-    (valid_unsigned(funct3, 3) == no) { out error.InvalidFunction }
+    (valid_unsigned(opcode, OPCODE_LIMIT) == no) { out error.InvalidOpcode }
+    (valid_unsigned(funct3, FUNCT3_LIMIT) == no) { out error.InvalidFunction }
     (registers.valid(rs1) == no) { out error.InvalidRegister }
     (registers.valid(rs2) == no) { out error.InvalidRegister }
-    (valid_even_signed(immediate, 13) == no) { out error.InvalidImmediate }
-    @value = signed_value(immediate, 13)
+    (valid_even_signed(immediate, IMMEDIATE13_LIMIT) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, IMMEDIATE13_MODULUS)
+    @bit12 = value / 4096
+    @bits11_0 = value - bit12 * 4096
+    @bit11 = bits11_0 / 2048
+    @bits10_0 = bits11_0 - bit11 * 2048
+    @bits10_5 = bits10_0 / 32
+    @bits4_0 = bits10_0 - bits10_5 * 32
+    @bits4_1 = bits4_0 / 2
+    @rs1_high = rs1 / 2
+    @rs2_high = rs2 / 16
     out word.from_bytes(
-        opcode + bits(value, 11, 1) * 128,
-        bits(value, 1, 4) + funct3 * 16 + bits(rs1, 0, 1) * 128,
-        bits(rs1, 1, 4) + bits(rs2, 0, 4) * 16,
-        bits(rs2, 4, 1) + bits(value, 5, 6) * 2 + bits(value, 12, 1) * 128
+        opcode + bit11 * 128,
+        bits4_1 + funct3 * 16 + (rs1 - rs1_high * 2) * 128,
+        rs1_high + (rs2 - rs2_high * 16) * 16,
+        rs2_high + bits10_5 * 2 + bit12 * 128
     )
 }
 
 skill encode_u(opcode, rd, immediate) {
-    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_unsigned(opcode, OPCODE_LIMIT) == no) { out error.InvalidOpcode }
     (registers.valid(rd) == no) { out error.InvalidRegister }
-    (valid_unsigned(immediate, 20) == no) { out error.InvalidImmediate }
+    (valid_unsigned(immediate, IMMEDIATE20_LIMIT) == no) { out error.InvalidImmediate }
+    @rd_high = rd / 2
+    @bits19_12 = immediate / 4096
+    @bits11_0 = immediate - bits19_12 * 4096
+    @bits11_4 = bits11_0 / 16
     out word.from_bytes(
-        opcode + bits(rd, 0, 1) * 128,
-        bits(rd, 1, 4) + bits(immediate, 0, 4) * 16,
-        bits(immediate, 4, 8),
-        bits(immediate, 12, 8)
+        opcode + (rd - rd_high * 2) * 128,
+        rd_high + (bits11_0 - bits11_4 * 16) * 16,
+        bits11_4,
+        bits19_12
     )
 }
 
 skill encode_j(opcode, rd, immediate) {
-    (valid_unsigned(opcode, 7) == no) { out error.InvalidOpcode }
+    (valid_unsigned(opcode, OPCODE_LIMIT) == no) { out error.InvalidOpcode }
     (registers.valid(rd) == no) { out error.InvalidRegister }
-    (valid_even_signed(immediate, 21) == no) { out error.InvalidImmediate }
-    @value = signed_value(immediate, 21)
+    (valid_even_signed(immediate, IMMEDIATE21_LIMIT) == no) { out error.InvalidImmediate }
+    @value = signed_value(immediate, IMMEDIATE21_MODULUS)
+    @bit20 = value / 1048576
+    @bits19_0 = value - bit20 * 1048576
+    @bits19_12 = bits19_0 / 4096
+    @bits11_0 = bits19_0 - bits19_12 * 4096
+    @bit11 = bits11_0 / 2048
+    @bits10_0 = bits11_0 - bit11 * 2048
+    @bits10_4 = bits10_0 / 16
+    @bits3_0 = bits10_0 - bits10_4 * 16
+    @bits3_1 = bits3_0 / 2
+    @bits19_16 = bits19_12 / 16
+    @rd_high = rd / 2
     out word.from_bytes(
-        opcode + bits(rd, 0, 1) * 128,
-        bits(rd, 1, 4) + bits(value, 12, 4) * 16,
-        bits(value, 16, 4) + bits(value, 11, 1) * 16 + bits(value, 1, 3) * 32,
-        bits(value, 4, 7) + bits(value, 20, 1) * 128
+        opcode + (rd - rd_high * 2) * 128,
+        rd_high + (bits19_12 - bits19_16 * 16) * 16,
+        bits19_16 + bit11 * 16 + bits3_1 * 32,
+        bits10_4 + bit20 * 128
     )
 }
 
@@ -162,7 +201,7 @@ skill encode(item, rd, rs1, rs2, immediate) {
             out encode_i_unsigned(item.opcode, registers.ZERO, item.funct3, registers.ZERO, item.system)
         }
         (is_shift(item.kind) == yes) {
-            (valid_unsigned(immediate, 5) == no) { out error.InvalidShift }
+            (valid_unsigned(immediate, SHIFT_LIMIT) == no) { out error.InvalidShift }
             out encode_i_unsigned(item.opcode, rd, item.funct3, rs1, item.funct7 * 32 + immediate)
         }
         (item.kind == instruction.Kind.CSRRW) { out encode_i_unsigned(item.opcode, rd, item.funct3, rs1, immediate) }
@@ -177,4 +216,3 @@ skill encode_kind(kind, rd, rs1, rs2, immediate) {
     @item = instruction.find_kind(kind)
     out encode(item, rd, rs1, rs2, immediate)
 }
-
