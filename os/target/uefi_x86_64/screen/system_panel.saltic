@@ -7,14 +7,19 @@
 -- memory(base) -> Memory; NoMemoryMap
 -- measure_disk(base) — размер и свободное место тома Saltic в netlog
 --     (агент зовёт при старте и после записи на диск); нет тома — нули
--- tick(base, card) — раз в секунду: счётчики карты в netlog и show без
---     принуждения; чаще — ничего не делает; звать из цикла сети
+-- Meter { rounds, mark, rates } — кадры программы: rounds — сколько раз она
+--     позвала сеть (раз в кадр), rates — кадров в секунду за последние RATES
+--     секунд; у агента rounds = 0, и графика нет
+-- tick(base, card, meter) — раз в секунду: счётчики карты в netlog, кадры в
+--     meter и show без принуждения; чаще — ничего не делает; звать из цикла сети
 -- flush(base, card) — счётчики карты в итоги netlog и в ноль (перед сменой образа)
--- draw(base, card) — перерисовать панель / show(base, card, forced) — то же,
---     но при forced = no — только если подписи изменились; рисует в задний
+-- draw(base, card) — перерисовать панель / show(base, card, forced, rates) —
+--     то же, но при forced = no — только если подписи изменились; rates — график
+--     кадров (пусто — без графика); рисует в задний
 --     буфер (netlog.canvas) и кладёт на экран одним копированием
 -- link_speed(status) -> «100 Мбит/с» или «нет»
--- Внутри: gauge — подпись, полоса и «занято X из Y»; add_bytes — КБ и остаток;
+-- Внутри: gauge — подпись, полоса и «занято X из Y»; frames — график кадров;
+--     record — кадры за секунду в meter; add_bytes — КБ и остаток;
 --     signature — отпечаток подписей
 
 use core.num
@@ -55,6 +60,15 @@ MARGIN = 16
 ROW = 18
 BAR = 8
 FACE = lettering.FACE_SMALL
+RATES = 40
+GRAPH = 56
+FLOOR_RATE = 30
+
+Meter = Box {
+    rounds = 0,
+    mark = 0,
+    rates = []
+}
 
 Memory = Box {
     total_mb = 0,
@@ -117,7 +131,16 @@ skill flush(base, card) {
     out none
 }
 
-skill tick(base, card) {
+skill record(meter, elapsed) {
+    @rate = (meter.rounds - meter.mark) / elapsed
+    meter.mark = meter.rounds
+    @rates = group.add(meter.rates, rate)
+    (group.count(rates) > RATES) { rates = group.slice(rates, group.count(rates) - RATES, group.count(rates)) }
+    meter.rates = rates
+    out none
+}
+
+skill tick(base, card, meter) {
     @log = netlog.find(base)
     @moment = uefi.now(base)
     @mark = moment.minute * 60 + moment.second
@@ -127,7 +150,8 @@ skill tick(base, card) {
     netlog.set_number(base, log, RX_SPEED, card.received_bytes / elapsed)
     netlog.set_number(base, log, TX_SPEED, card.sent_bytes / elapsed)
     flush(base, card)
-    out show(base, card, no)
+    (meter.rounds > 0) { record(meter, elapsed) }
+    out show(base, card, no, meter.rates)
 }
 
 skill link_speed(status) {
@@ -159,11 +183,32 @@ skill signature(text) {
     out mark
 }
 
-skill draw(base, card) {
-    out show(base, card, yes)
+skill frames(screen, x, y, width, rates) {
+    @last = group.get(rates, group.count(rates) - 1)
+    lettering.paint_text(screen, FACE, x, y, "кадры: {last} в секунду", graphics.color(screen, 228, 228, 231))
+    @top = y + ROW + 4
+    @most = FLOOR_RATE
+    drum (group.count(rates)) {
+        @rate = group.get(rates, beat)
+        (rate > most) { most = rate }
+    }
+    graphics.fill(screen, x, top, width, GRAPH, graphics.color(screen, 39, 39, 42))
+    @bar = width / RATES
+    @first = RATES - group.count(rates)
+    @orange = graphics.color(screen, 251, 146, 60)
+    drum (group.count(rates)) {
+        @tall = group.get(rates, beat) * GRAPH / most
+        (tall > 0) { graphics.fill(screen, x + (first + beat) * bar, top + GRAPH - tall, bar - 1, tall, orange) }
+    }
+    lettering.paint_text(screen, FACE, x, top + GRAPH + 6, "за {RATES} с, шкала до {most}", graphics.color(screen, 161, 161, 170))
+    out none
 }
 
-skill show(base, card, forced) {
+skill draw(base, card) {
+    out show(base, card, yes, [])
+}
+
+skill show(base, card, forced, rates) {
     @log = netlog.find(base)
     @known = memory(base) rescue |err| { Memory {} }
     @memory_used = known.total_mb - known.free_mb
@@ -175,7 +220,10 @@ skill show(base, card, forced) {
     @outgoing = sizes.speed_text(netlog.number_at(base, log, TX_SPEED))
     @received = sizes.kb_text(netlog.number_at(base, log, RX_KB))
     @sent = sizes.kb_text(netlog.number_at(base, log, TX_KB))
-    @mark = signature("{memory_used}/{memory_total}/{disk_used}/{disk_total}/{link}/{incoming}/{outgoing}/{received}/{sent}")
+    @shown = group.count(rates)
+    @latest = 0
+    (shown > 0) { latest = group.get(rates, shown - 1) }
+    @mark = signature("{memory_used}/{memory_total}/{disk_used}/{disk_total}/{link}/{incoming}/{outgoing}/{received}/{sent}/{shown}/{latest}")
     (forced == no) {
         (mark == netlog.number_at(base, log, SIGNATURE)) { out none }
     }
@@ -196,5 +244,6 @@ skill show(base, card, forced) {
     lettering.paint_text(panel, FACE, MARGIN, y + ROW * 3, "отправка {outgoing}", grey)
     lettering.paint_text(panel, FACE, MARGIN, y + ROW * 4, "принято всего {received}", grey)
     lettering.paint_text(panel, FACE, MARGIN, y + ROW * 5, "отправлено всего {sent}", grey)
+    (shown > 0) { frames(panel, MARGIN, y + ROW * 7, width, rates) }
     out graphics.put(base, panel, whole, whole.width - side)
 }
