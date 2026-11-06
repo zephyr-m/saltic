@@ -1,0 +1,234 @@
+-- mesh — движок сеток для «Пластилина»: тела из четырёхугольников, камера
+-- «смотреть из точки на точку», перспектива, отбрасывание задних граней,
+-- заливка граней построчно. Свет неподвижен в мире, поэтому цвет грани
+-- (мягкий «пластилиновый» свет: тёплый на свету, холодная подсветка в тени)
+-- считается один раз, при постройке. Векторы направлений — в долях UNIT,
+-- координаты мира — целые.
+--
+-- UNIT — длина единичного вектора; LIGHT — направление на солнце
+-- Quad { a, b, c, d, nx, ny, nz, cx, cy, cz, color } — грань: номера вершин,
+--     нормаль, центр, готовый пиксель
+-- Body { points, quads, center, flat } — тело; flat — рисовать без
+--     отбрасывания (тени на земле)
+-- unit(x, y, z) -> [x, y, z] длины UNIT
+-- clay(screen, tint, normal) -> пиксель грани с цветом tint (canvas.Rgb)
+-- face(screen, body, a, b, c, d, normal, tint) -> body с новой гранью
+-- Camera { x, y, z, right, up, forward, width, height, focal }
+-- look(camera, from, to) — поставить камеру в from глазами на to
+-- project(camera, point) -> [x, y, глубина]; глубина < NEAR — за камерой
+-- draw(screen, camera, body) — тело в screen; ground(…) — земля рядами
+-- order(camera, bodies) -> тела от дальних к ближним
+-- fill_quad(screen, points) — заливка выпуклого четырёхугольника цветом
+
+use core.num
+use core.group
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.programs.web.geometry
+
+UNIT = 1024
+NEAR = 40
+LIGHT = [-430, 790, -440]
+
+Quad = Box {
+    a = 0,
+    b = 0,
+    c = 0,
+    d = 0,
+    nx = 0,
+    ny = 0,
+    nz = 0,
+    cx = 0,
+    cy = 0,
+    cz = 0,
+    color = 0
+}
+
+Body = Box {
+    points = [],
+    quads = [],
+    center = [0, 0, 0],
+    flat = no
+}
+
+Camera = Box {
+    x = 0,
+    y = 0,
+    z = 0,
+    right = [UNIT, 0, 0],
+    up = [0, UNIT, 0],
+    forward = [0, 0, UNIT],
+    width = 0,
+    height = 0,
+    focal = 520
+}
+
+skill unit(x, y, z) {
+    @length = geometry.root(x * x + y * y + z * z)
+    (length == 0) { out [0, UNIT, 0] }
+    out [x * UNIT / length, y * UNIT / length, z * UNIT / length]
+}
+
+skill dot(a, b) {
+    out (group.get(a, 0) * group.get(b, 0) + group.get(a, 1) * group.get(b, 1) + group.get(a, 2) * group.get(b, 2)) / UNIT
+}
+
+skill cross(a, b) {
+    @ax = group.get(a, 0)
+    @ay = group.get(a, 1)
+    @az = group.get(a, 2)
+    @bx = group.get(b, 0)
+    @by = group.get(b, 1)
+    @bz = group.get(b, 2)
+    out unit(ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx)
+}
+
+skill limit(value) {
+    (value > 255) { out 255 }
+    out value
+}
+
+skill clay(screen, tint, normal) {
+    @wrap = (dot(normal, unit(group.get(LIGHT, 0), group.get(LIGHT, 1), group.get(LIGHT, 2))) + UNIT / 2) * UNIT / (UNIT + UNIT / 2)
+    (wrap < 0) { wrap = 0 }
+    (wrap > UNIT) { wrap = UNIT }
+    @shade = 430 + 650 * wrap / UNIT
+    @cool = (UNIT - wrap) * 34 / UNIT
+    out graphics.color(screen, limit(tint.red * shade / UNIT), limit(tint.green * shade / UNIT + cool / 3), limit(tint.blue * shade / UNIT + cool))
+}
+
+skill face(screen, body, a, b, c, d, normal, tint) {
+    @pa = group.get(body.points, a)
+    @pc = group.get(body.points, c)
+    @quad = Quad { a = a, b = b, c = c, d = d, nx = group.get(normal, 0), ny = group.get(normal, 1), nz = group.get(normal, 2), cx = (group.get(pa, 0) + group.get(pc, 0)) / 2, cy = (group.get(pa, 1) + group.get(pc, 1)) / 2, cz = (group.get(pa, 2) + group.get(pc, 2)) / 2, color = clay(screen, tint, normal) }
+    body.quads = group.add(body.quads, quad)
+    out body
+}
+
+skill look(camera, from, to) {
+    camera.x = group.get(from, 0)
+    camera.y = group.get(from, 1)
+    camera.z = group.get(from, 2)
+    @forward = unit(group.get(to, 0) - camera.x, group.get(to, 1) - camera.y, group.get(to, 2) - camera.z)
+    @right = cross([0, UNIT, 0], forward)
+    camera.forward = forward
+    camera.right = right
+    camera.up = cross(forward, right)
+    out none
+}
+
+skill project(camera, point) {
+    @v = [group.get(point, 0) - camera.x, group.get(point, 1) - camera.y, group.get(point, 2) - camera.z]
+    @depth = dot(v, camera.forward)
+    (depth < NEAR) { out [0, 0, depth] }
+    out [camera.width / 2 + dot(v, camera.right) * camera.focal / depth, camera.height / 2 - dot(v, camera.up) * camera.focal / depth, depth]
+}
+
+skill fill_quad(screen, points, color) {
+    @low = screen.height
+    @high = 0
+    drum (4) {
+        @y = group.get(group.get(points, beat), 1)
+        (y < low) { low = y }
+        (y > high) { high = y }
+    }
+    (low < 0) { low = 0 }
+    (high > screen.height - 1) { high = screen.height - 1 }
+    drum (high - low + 1) {
+        @y = low + beat
+        @left = screen.width
+        @right = -1
+        drum (4) {
+            @a = group.get(points, beat)
+            @b = group.get(points, num.mod(beat + 1, 4))
+            @ay = group.get(a, 1)
+            @by = group.get(b, 1)
+            @inside = no
+            (ay < by) {
+                (y >= ay) {
+                    (y < by) { inside = yes }
+                }
+            }
+            (by < ay) {
+                (y >= by) {
+                    (y < ay) { inside = yes }
+                }
+            }
+            (inside == yes) {
+                @ax = group.get(a, 0)
+                @x = ax + (y - ay) * (group.get(b, 0) - ax) / (by - ay)
+                (x < left) { left = x }
+                (x > right) { right = x }
+            }
+        }
+        (left < 0) { left = 0 }
+        (right > screen.width - 1) { right = screen.width - 1 }
+        (right >= left) { graphics.fill(screen, left, y, right - left + 1, 1, color) }
+    }
+    out none
+}
+
+skill draw_quad(screen, camera, body, quad, seen) {
+    ((body.flat == yes) == no) {
+        @toward = (camera.x - quad.cx) * quad.nx + (camera.y - quad.cy) * quad.ny + (camera.z - quad.cz) * quad.nz
+        (toward <= 0) { out none }
+    }
+    @corners = [group.get(seen, quad.a), group.get(seen, quad.b), group.get(seen, quad.c), group.get(seen, quad.d)]
+    drum (4) {
+        (group.get(group.get(corners, beat), 2) < NEAR) { out none }
+    }
+    out fill_quad(screen, corners, quad.color)
+}
+
+skill seen_points(camera, body) {
+    @seen = []
+    drum (group.count(body.points)) { seen = group.add(seen, project(camera, group.get(body.points, beat))) }
+    out seen
+}
+
+skill draw(screen, camera, body) {
+    @seen = seen_points(camera, body)
+    drum (group.count(body.quads)) { draw_quad(screen, camera, body, group.get(body.quads, beat), seen) }
+    out none
+}
+
+skill ground(screen, camera, body, cells) {
+    @seen = seen_points(camera, body)
+    @rows_down = camera.z < group.get(body.center, 2)
+    @columns_down = camera.x < group.get(body.center, 0)
+    drum (cells) {
+        @row = beat
+        (rows_down == yes) { row = cells - 1 - beat }
+        drum (cells) {
+            @column = beat
+            (columns_down == yes) { column = cells - 1 - beat }
+            draw_quad(screen, camera, body, group.get(body.quads, row * cells + column), seen)
+        }
+    }
+    out none
+}
+
+skill distance(camera, body) {
+    @dx = group.get(body.center, 0) - camera.x
+    @dy = group.get(body.center, 1) - camera.y
+    @dz = group.get(body.center, 2) - camera.z
+    out dx * dx + dy * dy + dz * dz
+}
+
+skill order(camera, bodies) {
+    @left = bodies
+    @sorted = []
+    drum (group.count(bodies)) {
+        @far = 0
+        @far_distance = -1
+        drum (group.count(left)) {
+            @d = distance(camera, group.get(left, beat))
+            (d > far_distance) {
+                far = beat
+                far_distance = d
+            }
+        }
+        sorted = group.add(sorted, group.get(left, far))
+        left = group.concat(group.slice(left, 0, far), group.slice(left, far + 1, group.count(left)))
+    }
+    out sorted
+}
