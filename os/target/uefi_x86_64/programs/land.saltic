@@ -1,0 +1,252 @@
+-- land — программа «Пейзаж»: полёт над воксельной землёй. Карта высот
+-- «ромб-квадрат» (programs/land/terrain), рисование столбцами: для каждого
+-- столбца экрана луч идёт вглубь, ближние полосы перекрывают дальние
+-- (нижняя граница столбца — в ybuffer), даль тонет в дымке через палитру.
+-- Небо рисуется один раз в свой буфер и копируется в кадр прошивкой
+-- построчно. Стрелки ← → — поворот, ↑ ↓ — выше и ниже, пробел — пауза,
+-- Esc — назад; по сети — quit, state, key, shot. Только x86_64-uefi.
+--
+-- Flight { x, y, angle, lift, paused, quit, frames, second, rate } — камера
+--     (x, y — в долях geometry.ONE), счёт кадров в секунду
+-- Scene { front, sky, back, land, colors, ybuffer, columns } — экран и память;
+--     ybuffer — та же память, что у карты, с YBUFFER (за высотами и цветами)
+-- draw_sky(screen) — градиент неба
+-- blend(h00, h10, h01, h11, fx, fy) -> смесь четырёх соседей, доли SMOOTH;
+--     fx, fy — дробная часть положения луча, 0…255
+-- render(scene, flight, base) — кадр в back и на экран: высота и оттенок —
+--     смесь четырёх соседних клеток (склоны гладкие), полоса — по смеси
+-- steer(flight, key) / tick(scene, flight, base, link) — шаг полёта
+-- broken(scene, flight, base, link, problem) — ошибка кадра на экран и в state
+-- program() — вход
+
+use core.mem
+use core.num
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.remote
+use os.target.uefi_x86_64.programs.web.geometry
+use os.target.uefi_x86_64.programs.land.terrain
+use os.uiengine.canvas
+use os.uiengine.fonts
+
+COLUMN = 2
+YBUFFER = 131072
+SMOOTH = 65536
+BIAS = 134217728
+WATER_LEVEL = 4718592
+FAR = 520
+SCALE = 260
+LIFT = 70
+LIFT_STEP = 12
+TURN_STEP = 8000
+SPEED = 3
+PAUSE = 1000
+SCAN_UP = 1
+SCAN_DOWN = 2
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+SCAN_ESCAPE = 23
+SPACE = 32
+TOP = canvas.Rgb { red = 46, green = 98, blue = 176 }
+
+Flight = Box {
+    x = 0,
+    y = 0,
+    angle = 0,
+    lift = LIFT,
+    paused = no,
+    quit = no,
+    frames = 0,
+    second = -1,
+    counted = 0,
+    rate = 0
+}
+
+Scene = Box {
+    front = graphics.Screen {},
+    sky = graphics.Screen {},
+    back = graphics.Screen {},
+    land = terrain.Land {},
+    colors = [],
+    ybuffer = [],
+    columns = 0
+}
+
+skill draw_sky(screen) {
+    @horizon = screen.height / 2
+    @top = TOP
+    @haze = terrain.FOG
+    drum (screen.height) {
+        @y = beat
+        @mix = y * 100 / horizon
+        (mix > 100) { mix = 100 }
+        @red = top.red + (haze.red - top.red) * mix / 100
+        @green = top.green + (haze.green - top.green) * mix / 100
+        @blue = top.blue + (haze.blue - top.blue) * mix / 100
+        graphics.fill(screen, 0, y, screen.width, 1, graphics.color(screen, red, green, blue))
+    }
+    out none
+}
+
+skill blend(h00, h10, h01, h11, fx, fy) {
+    @upper = h00 * 256 + (h10 - h00) * fx
+    @lower = h01 * 256 + (h11 - h01) * fx
+    out upper * 256 + (lower - upper) * fy
+}
+
+skill render(scene, flight, base) {
+    @back = scene.back
+    @height = back.height
+    drum (height) { graphics.copy_span(base, back, scene.sky, beat, 0, back.width) }
+    @columns = scene.columns
+    drum (columns) { mem.store32(scene.ybuffer, YBUFFER + beat * 4, height) }
+    @sine = geometry.sine(flight.angle)
+    @cosine = geometry.cosine(flight.angle)
+    @ground = terrain.height(scene.land, flight.x / geometry.ONE, flight.y / geometry.ONE)
+    (ground < terrain.WATER) { ground = terrain.WATER }
+    @eye = ground + flight.lift
+    @horizon = height / 2
+    @shades = terrain.BANDS * terrain.SHADES
+    @z = 2
+    always {
+        (z >= FAR) { leave }
+        @left_x = flight.x + (0 - cosine - sine) * z
+        @left_y = flight.y + (sine - cosine) * z
+        @right_x = flight.x + (cosine - sine) * z
+        @right_y = flight.y + (0 - sine - cosine) * z
+        @dx = (right_x - left_x) / columns
+        @dy = (right_y - left_y) / columns
+        @fog = z * terrain.FOG_STEPS / FAR * shades
+        @px = left_x
+        @py = left_y
+        drum (columns) {
+            @bx = px + BIAS
+            @by = py + BIAS
+            @fx = num.mod(bx, geometry.ONE) / 256
+            @fy = num.mod(by, geometry.ONE) / 256
+            @x0 = num.mod(bx / geometry.ONE, terrain.SIZE)
+            @x1 = num.mod(x0 + 1, terrain.SIZE)
+            @r0 = num.mod(by / geometry.ONE, terrain.SIZE) * terrain.SIZE
+            @r1 = num.mod(r0 + terrain.SIZE, terrain.CELLS)
+            @memory = scene.land.memory
+            @value = blend(mem.load8(memory, r0 + x0), mem.load8(memory, r0 + x1), mem.load8(memory, r1 + x0), mem.load8(memory, r1 + x1), fx, fy)
+            (value < WATER_LEVEL) { value = WATER_LEVEL }
+            @top = (eye * SMOOTH - value) * SCALE / z / SMOOTH + horizon
+            (top < 0) { top = 0 }
+            @lowest = mem.load32(scene.ybuffer, YBUFFER + beat * 4)
+            (top < lowest) {
+                @c = terrain.CELLS
+                @shade = blend(num.mod(mem.load8(memory, c + r0 + x0), terrain.SHADES), num.mod(mem.load8(memory, c + r0 + x1), terrain.SHADES), num.mod(mem.load8(memory, c + r1 + x0), terrain.SHADES), num.mod(mem.load8(memory, c + r1 + x1), terrain.SHADES), fx, fy) / SMOOTH
+                @band = mem.load8(memory, terrain.BAND_TABLE + value / SMOOTH)
+                @color = group.get(scene.colors, fog + band * terrain.SHADES + shade)
+                graphics.fill(back, beat * COLUMN, top, COLUMN, lowest - top, color)
+                mem.store32(scene.ybuffer, YBUFFER + beat * 4, top)
+            }
+            px = px + dx
+            py = py + dy
+        }
+        z = z + 1 + z / 48
+    }
+    drum (height) { graphics.copy_span(base, scene.front, back, beat, 0, back.width) }
+    out none
+}
+
+skill steer(flight, key) {
+    (key.scan == SCAN_ESCAPE) { flight.quit = yes }
+    (key.scan == SCAN_LEFT) { flight.angle = flight.angle + TURN_STEP }
+    (key.scan == SCAN_RIGHT) { flight.angle = flight.angle - TURN_STEP }
+    (flight.angle < 0) { flight.angle = flight.angle + geometry.TURN }
+    (flight.angle >= geometry.TURN) { flight.angle = flight.angle - geometry.TURN }
+    (key.scan == SCAN_UP) { flight.lift = flight.lift + LIFT_STEP }
+    (key.scan == SCAN_DOWN) { flight.lift = flight.lift - LIFT_STEP }
+    (flight.lift < 12) { flight.lift = 12 }
+    (flight.lift > 400) { flight.lift = 400 }
+    (key.char == SPACE) { flight.paused = flight.paused == no }
+    out none
+}
+
+skill count_rate(flight, base) {
+    flight.frames = flight.frames + 1
+    flight.counted = flight.counted + 1
+    @moment = uefi.now(base)
+    ((moment.second == flight.second) == no) {
+        flight.rate = flight.counted
+        flight.counted = 0
+        flight.second = moment.second
+    }
+    out none
+}
+
+skill tick(scene, flight, base, link) {
+    remote.serve(link)
+    steer(flight, uefi.poll_key(base, PAUSE))
+    (flight.paused == no) {
+        flight.x = flight.x - geometry.sine(flight.angle) * SPEED
+        flight.y = flight.y - geometry.cosine(flight.angle) * SPEED
+        flight.x = terrain.wrap(flight.x / geometry.ONE) * geometry.ONE + num.mod(flight.x, geometry.ONE)
+        flight.y = terrain.wrap(flight.y / geometry.ONE) * geometry.ONE + num.mod(flight.y, geometry.ONE)
+    }
+    render(scene, flight, base)
+    count_rate(flight, base)
+    @rate = flight.rate
+    @frames = flight.frames
+    @lift = flight.lift
+    out remote.tell(link, "пейзаж: кадров {frames}, в секунду {rate}, высота {lift}")
+}
+
+skill broken(scene, flight, base, link, problem) {
+    @front = scene.front
+    graphics.fill(front, 0, 0, front.width, 40, graphics.color(front, 20, 22, 28))
+    fonts.draw_text(front, 16, 12, "Пейзаж упал: {problem} · Esc — выход", canvas.Rgb { red = 250, green = 204, blue = 21 }, fonts.SMALL)
+    remote.tell(link, "пейзаж упал: {problem}")
+    always {
+        remote.serve(link)
+        @key = uefi.poll_key(base, PAUSE)
+        (key.scan == SCAN_ESCAPE) {
+            flight.quit = yes
+            out none
+        }
+    }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    @front = graphics.open(base)
+    uefi.forget_keys(base)
+    @link = remote.open_remote()
+    @sky = graphics.buffer_like(base, front)
+    @back = graphics.buffer_like(base, front)
+    @pages = graphics.buffer_pages(front)
+    remote.own(link, sky.frame, pages)
+    remote.own(link, back.frame, pages)
+    @columns = front.width / COLUMN
+    @map_pages = (terrain.BAND_TABLE + 256) / 4096 + 1
+    @map = uefi.pages_in_window(base, map_pages)
+    remote.own(link, map, map_pages)
+    @memory = firmware.guest(map, base)
+    @moment = uefi.now(base)
+    @land = terrain.Land { place = map, memory = memory, seed = moment.minute * 60 + moment.second + 1 }
+    fonts.draw_text(front, 16, 12, "Пейзаж: расту горы…", canvas.ZINC_900, fonts.REGULAR)
+    terrain.grow(land)
+    terrain.paint(land)
+    terrain.bands(land)
+    draw_sky(sky)
+    @scene = Scene { front = front, sky = sky, back = back, land = land, colors = terrain.palette(front), ybuffer = memory, columns = columns }
+    @flight = Flight { x = 128 * geometry.ONE, y = 128 * geometry.ONE }
+    always {
+        tick(scene, flight, base, link) rescue |problem| { broken(scene, flight, base, link, problem) }
+        (flight.quit == yes) {
+            uefi.free_pages(base, sky.frame, pages)
+            uefi.free_pages(base, back.frame, pages)
+            uefi.free_pages(base, map, map_pages)
+            @frames = flight.frames
+            reply.home("пейзаж: кадров {frames}")
+            out none
+        }
+    }
+    out none
+}

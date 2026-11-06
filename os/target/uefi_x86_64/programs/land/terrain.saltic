@@ -1,0 +1,152 @@
+-- terrain — земля для пейзажа: карта высот «ромб-квадрат» 256 × 256 с
+-- переходом через края (по ней можно лететь бесконечно), цвет каждой клетки
+-- и палитра с туманом. Карта лежит в сырой памяти программы: SIZE × SIZE
+-- байтов высот, за ними столько же байтов цвета, с BAND_TABLE — таблица
+-- полос; читается mem.load8 по паре
+-- [hi, lo] — без проверок на каждый шаг луча.
+-- Цвет клетки — BAND × 16 + оттенок: полоса по высоте (вода, песок, трава,
+-- лес, скалы, снег), оттенок — по склону к свету с северо-запада.
+--
+-- SIZE, CELLS, WATER, SHADES, FOG_STEPS — размеры и уровни
+-- Land { place, memory, seed } — карта в памяти (memory — [hi, lo] для core.mem)
+-- random(land, limit) -> число 0…limit-1
+-- wrap(value) -> 0…SIZE-1 для любого целого, и отрицательного
+-- at(x, y) -> номер клетки; height(land, x, y) -> 0…255, x и y любые
+-- grow(land) — высоты «ромб-квадрат»; paint(land) — цвета клеток
+-- bands(land) — таблица «высота → полоса» на 256 байт с BAND_TABLE
+-- palette(screen) -> группа пикселей [туман × цвет]: FOG_STEPS × BANDS × SHADES
+-- FOG — canvas.Rgb дымки (цвет неба у горизонта)
+
+use core.num
+use core.mem
+use core.group
+use os.uiengine.canvas
+use os.target.uefi_x86_64.screen.graphics
+
+SIZE = 256
+CELLS = 65536
+BAND_TABLE = 135168
+WATER = 72
+SHADES = 16
+BANDS = 6
+FOG_STEPS = 8
+ROUGH = 120
+LEVELS = [72, 80, 138, 172, 206]
+BASE = [[44, 96, 150], [204, 186, 132], [92, 146, 64], [56, 104, 52], [128, 118, 108], [236, 240, 246]]
+FOG = canvas.Rgb { red = 186, green = 212, blue = 234 }
+
+Land = Box {
+    place = 0,
+    memory = [],
+    seed = 1
+}
+
+skill random(land, limit) {
+    land.seed = num.mod(land.seed * 75 + 74, 65537)
+    out num.mod(land.seed, limit)
+}
+
+skill wrap(value) {
+    out num.mod(num.mod(value, SIZE) + SIZE, SIZE)
+}
+
+skill at(x, y) {
+    out wrap(y) * SIZE + wrap(x)
+}
+
+skill height(land, x, y) {
+    out mem.load8(land.memory, at(x, y))
+}
+
+skill put(land, x, y, value) {
+    @kept = value
+    (kept < 0) { kept = 0 }
+    (kept > 255) { kept = 255 }
+    out mem.store8(land.memory, at(x, y), kept)
+}
+
+skill jitter(land, amount) {
+    out random(land, 2 * amount + 1) - amount
+}
+
+skill grow(land) {
+    put(land, 0, 0, 120)
+    @step = SIZE
+    @amount = ROUGH
+    drum (8) {
+        @half = step / 2
+        drum (SIZE / step) {
+            @y = beat * step
+            drum (SIZE / step) {
+                @x = beat * step
+                @sum = height(land, x, y) + height(land, x + step, y) + height(land, x, y + step) + height(land, x + step, y + step)
+                put(land, x + half, y + half, sum / 4 + jitter(land, amount))
+            }
+        }
+        drum (SIZE / half) {
+            @y = beat * half
+            @shift = half - num.mod(beat, 2) * half
+            drum (SIZE / step) {
+                @x = beat * step + shift
+                @sum = height(land, x - half, y) + height(land, x + half, y) + height(land, x, y - half) + height(land, x, y + half)
+                put(land, x, y, sum / 4 + jitter(land, amount))
+            }
+        }
+        step = half
+        amount = amount * 5 / 9
+    }
+    out none
+}
+
+skill band_of(value) {
+    drum (group.count(LEVELS)) {
+        (value < group.get(LEVELS, beat)) { out beat }
+    }
+    out group.count(LEVELS)
+}
+
+skill bands(land) {
+    drum (256) { mem.store8(land.memory, BAND_TABLE + beat, band_of(beat)) }
+    out none
+}
+
+skill paint(land) {
+    drum (SIZE) {
+        @y = beat
+        drum (SIZE) {
+            @x = beat
+            @value = height(land, x, y)
+            @shade = 8 + (value - height(land, x + 2, y + 2)) / 2
+            (value < WATER) { shade = 12 - (WATER - value) / 4 }
+            (shade < 0) { shade = 0 }
+            (shade > SHADES - 1) { shade = SHADES - 1 }
+            mem.store8(land.memory, CELLS + y * SIZE + x, band_of(value) * SHADES + shade)
+        }
+    }
+    out none
+}
+
+skill palette(screen) {
+    @haze = FOG
+    @colors = []
+    drum (FOG_STEPS) {
+        @fog = beat * 11
+        drum (BANDS) {
+            @base = group.get(BASE, beat)
+            drum (SHADES) {
+                @light = 62 + beat * 4
+                @red = group.get(base, 0) * light / 100
+                @green = group.get(base, 1) * light / 100
+                @blue = group.get(base, 2) * light / 100
+                (red > 255) { red = 255 }
+                (green > 255) { green = 255 }
+                (blue > 255) { blue = 255 }
+                red = red + (haze.red - red) * fog / 100
+                green = green + (haze.green - green) * fog / 100
+                blue = blue + (haze.blue - blue) * fog / 100
+                colors = group.add(colors, graphics.color(screen, red, green, blue))
+            }
+        }
+    }
+    out colors
+}
