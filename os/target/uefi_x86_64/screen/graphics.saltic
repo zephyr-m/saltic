@@ -4,7 +4,9 @@
 -- в видеопамять только изменившиеся куски строк (CopyMem прошивки). Запись в
 -- видеопамять в разы дороже записи в ОЗУ, и экран не мигает.
 --
--- Screen — ширина, высота, stride, формат, frame (адрес), memory (для core.mem)
+-- Screen — ширина, высота, stride, формат, frame (адрес), memory (для core.mem),
+--     accel — [видеокарта] у заднего буфера, размеченного для её блиттера
+--     (drivers/intel_gpu), иначе []
 -- open(base) -> Screen видеопамяти — средняя половина ширины; NoGraphics.
 --     Левая четверть — сетевой журнал (network/netlog), правая — системная
 --     панель (screen/system_panel); программы их не видят и рисуют от нуля
@@ -18,7 +20,11 @@
 -- format_name(screen) -> текст
 -- Frames — front (видеопамять), back (рисовать сюда), last (что сейчас на экране)
 -- open_frames(base) -> Frames; MemoryExhausted
--- present(frames) -> текст «строк N, пикселей M» — показать дельту
+-- present(frames) -> текст «строк N, пикселей M» — показать дельту; с
+--     видеокартой — «видеокарта»: весь кадр одной командой блиттера, без
+--     сравнения пикселей
+-- push(base, to, from) — задний буфер from на экран to целиком: блиттером,
+--     если from размечен для видеокарты, иначе по строкам (copy_span)
 -- close_frames(frames) — вернуть буферы прошивке (перед выходом)
 -- Буферы берутся в окне программы (uefi.pages_in_window): ниже базы их не видно.
 
@@ -26,6 +32,7 @@ use core.mem
 use core.group
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.drivers.intel_gpu
 
 BOOT_LOCATE_PROTOCOL = 320
 GOP_GUID = [222, 169, 66, 144, 220, 35, 56, 74, 150, 251, 122, 222, 208, 128, 81, 106]
@@ -49,7 +56,8 @@ Screen = Box {
     stride = 0,
     format = 0,
     frame = 0,
-    memory = []
+    memory = [],
+    accel = []
 }
 
 skill open(base) {
@@ -131,7 +139,23 @@ skill buffer_pages(front) {
 
 skill buffer_like(base, front) {
     @place = uefi.pages_in_window(base, buffer_pages(front))
-    out Screen { width = front.width, height = front.height, stride = front.stride, format = front.format, frame = place, memory = firmware.guest(place, base) }
+    @accel = []
+    @gpu = intel_gpu.open(base) rescue |err| { none }
+    ((gpu == none) == no) {
+        @mapped = intel_gpu.map_identity(gpu, place, buffer_pages(front)) rescue |err| { -1 }
+        (mapped == place) { accel = [gpu] }
+    }
+    out Screen { width = front.width, height = front.height, stride = front.stride, format = front.format, frame = place, memory = firmware.guest(place, base), accel = accel }
+}
+
+skill push(base, to, from) {
+    (group.count(from.accel) == 0) {
+        drum (from.height) { copy_span(base, to, from, beat, 0, from.width) }
+        out none
+    }
+    @gpu = group.get(from.accel, 0)
+    intel_gpu.copy(gpu, from.frame, intel_gpu.screen_at(gpu, to.frame), to.stride * PIXEL_BYTES, 0, 0, from.width, from.height)
+    out intel_gpu.wait(gpu)
 }
 
 skill copy_span(base, to, from, y, left, count) {
@@ -151,6 +175,10 @@ skill open_frames(base) {
 skill present(frames) {
     @base = firmware.guest_base()
     @back = frames.back
+    (group.count(back.accel) > 0) {
+        push(base, frames.front, back)
+        out "видеокарта"
+    }
     @last = frames.last
     @rows = 0
     @pixels = 0

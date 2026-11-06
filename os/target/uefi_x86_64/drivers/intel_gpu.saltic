@@ -1,0 +1,177 @@
+-- intel_gpu — блиттер встроенной видеокарты Intel HD 620 (Kaby Lake, Gen9.5;
+-- 8086:5916), по документации Intel (PRM) и i915 в Linux. Видеокарта сама
+-- заливает прямоугольники и копирует картинки: процессор только кладёт
+-- команды в кольцо. Старый режим кольца (без execlists) у этого поколения
+-- работает (как i915.enable_execlists=0).
+--
+-- Адреса видеокарты — свои (GGTT): таблица страниц GTT лежит в окне регистров
+-- с 8 МБ, запись — 64 бита: физический адрес страницы | 1. Прошивка
+-- разметила первые 64 МБ (там экран, GOP: GGTT 0 = окно BAR2, aperture);
+-- выше — мусор. Наши буферы размечаются «один в один»: адрес GGTT = свой
+-- физический адрес (map_identity) — одна и та же страница всегда на одном
+-- месте, и запомненный видеокартой перевод не устаревает. Кольцо и страница
+-- отметок — у верха таблицы (REGION, около 4 ГБ: там нет ОЗУ).
+-- Видеокарта запоминает перевод адресов (TLB): страницы кольца поэтому
+-- постоянные на всё включение — первая программа выделяет их и кладёт в
+-- таблицу конфигурации UEFI (GUID ниже), остальные берут те же. Данные
+-- (задние буферы) переразмечаются, и каждая порция команд начинается со
+-- сброса TLB (MI_FLUSH_DW с MI_INVALIDATE_TLB и записью отметки).
+--
+-- Gpu { base, mmio, aperture, ring, ring_at, mark_at } — открытая видеокарта;
+--     aperture — адрес окна BAR2 (экран GOP в нём)
+-- open(base) -> Gpu или none — нет видеокарты Intel / не проснулась
+-- map(gpu, slot, place, pages) -> адрес GGTT — свои страницы place на
+--     участке данных с номера slot (страницы по 4 КБ)
+-- map_identity(gpu, place, pages) -> place — разметить «один в один»
+-- screen_at(gpu, frame) -> адрес GGTT точки экрана GOP по её адресу в окне
+-- fill(gpu, at, pitch, x, y, width, height, color) — залить прямоугольник
+--     поверхности at (шаг строки pitch байт, 32 бита на пиксель)
+-- copy(gpu, from, to, pitch, x, y, width, height) — скопировать прямоугольник
+--     (те же x, y и шаг строки в обеих поверхностях: задний буфер и экран)
+-- submit(gpu, words) — порция команд в кольцо (сброс TLB впереди)
+-- wait(gpu) -> yes, если видеокарта дочитала кольцо (не дольше WAITS);
+--     в HEAD выше HEAD_OFFSET — счётчик оборотов, ниже — смещение
+-- SCREEN — адрес GGTT экрана GOP; DATA — первый слот участка данных
+
+use core.num
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+
+VENDOR_INTEL = 32902
+MODEL_HD620 = 22806
+GTT = 8388608
+FORCEWAKE_BLITTER = 41352
+FORCEWAKE_ACK = 1245252
+WAKE = 65537
+FLUSH_GTT = 1052680
+TAIL = 139312
+HEAD = 139316
+START = 139320
+CONTROL = 139324
+RING_PAGES = 4
+RING_BYTES = 16384
+RING_ON = 12289
+HEAD_OFFSET = 2097152
+REGION = 1046528
+DATA = 1046784
+LOWEST = 16384
+SCREEN = 0
+PAGE = 4096
+WAITS = 200000
+COLOR_BLT = 1412431877
+COPY_BLT = 1425014792
+DEPTH_32 = 50331648
+ROP_COPY = 13369344
+ROP_FILL = 15728640
+FLUSH_TLB = 319045634
+USE_GTT = 4
+NOOP = 0
+GUID = [83, 65, 76, 84, 73, 67, 45, 71, 80, 85, 0, 0, 0, 0, 0, 1]
+
+Gpu = Box {
+    base = 0,
+    mmio = 0,
+    aperture = 0,
+    ring = 0,
+    ring_at = 0,
+    mark_at = 0
+}
+
+skill open(base) {
+    @config = firmware.find_device(base, firmware.ecam(base), VENDOR_INTEL, MODEL_HD620) rescue |err| { out none }
+    @bar = firmware.read32(config, base, 16)
+    @mmio = bar - num.mod(bar, 16)
+    firmware.write_phys32(mmio, base, FORCEWAKE_BLITTER, WAKE)
+    @awake = no
+    drum (1000) {
+        (awake == no) {
+            awake = num.mod(firmware.read32(mmio, base, FORCEWAKE_ACK), 2) == 1
+            uefi.poll_key(base, 10)
+        }
+    }
+    (awake == no) { out none }
+    @window = firmware.read32(config, base, 24)
+    @gpu = Gpu { base = base, mmio = mmio, aperture = window - num.mod(window, 16), ring_at = REGION * PAGE, mark_at = (REGION + RING_PAGES) * PAGE }
+    @kept = uefi.find_table(base, GUID)
+    (kept > 0) {
+        gpu.ring = firmware.read32(kept, base, 0)
+        out gpu
+    }
+    out start_ring(gpu)
+}
+
+skill start_ring(gpu) {
+    @base = gpu.base
+    @ring = uefi.pages_below_4g(base, RING_PAGES + 1)
+    drum ((RING_PAGES + 1) * PAGE / 4) { firmware.write_phys32(ring, base, beat * 4, NOOP) }
+    map_slots(gpu, REGION, ring, RING_PAGES + 1)
+    @mmio = gpu.mmio
+    firmware.write_phys32(mmio, base, CONTROL, 0)
+    firmware.write_phys32(mmio, base, HEAD, 0)
+    firmware.write_phys32(mmio, base, TAIL, 0)
+    firmware.write_phys32(mmio, base, START, gpu.ring_at)
+    firmware.write_phys32(mmio, base, CONTROL, RING_ON)
+    @kept = uefi.pages_below_4g(base, 1)
+    firmware.write_phys32(kept, base, 0, ring)
+    uefi.add_table(base, GUID, kept)
+    gpu.ring = ring
+    out gpu
+}
+
+skill map_slots(gpu, slot, place, pages) {
+    @gtt = firmware.add(gpu.mmio, GTT)
+    drum (pages) { firmware.write64(gtt, gpu.base, (slot + beat) * 8, firmware.number(firmware.add(place, beat * PAGE) + 1)) }
+    firmware.write_phys32(gpu.mmio, gpu.base, FLUSH_GTT, 1)
+    firmware.read32(gpu.mmio, gpu.base, FLUSH_GTT)
+    out slot * PAGE
+}
+
+skill map_identity(gpu, place, pages) {
+    @slot = place / PAGE
+    (slot < LOWEST) { out error.BufferTooLow }
+    (slot + pages > REGION) { out error.BufferTooHigh }
+    map_slots(gpu, slot, place, pages)
+    out place
+}
+
+skill screen_at(gpu, frame) {
+    out frame - gpu.aperture
+}
+
+skill map(gpu, slot, place, pages) {
+    out map_slots(gpu, DATA + slot, place, pages)
+}
+
+skill wait(gpu) {
+    @tail = firmware.read32(gpu.mmio, gpu.base, TAIL)
+    drum (WAITS) {
+        @head = num.mod(firmware.read32(gpu.mmio, gpu.base, HEAD), HEAD_OFFSET)
+        (head - num.mod(head, 4) == tail) { out yes }
+    }
+    out no
+}
+
+skill submit(gpu, words) {
+    @all = group.concat([FLUSH_TLB, gpu.mark_at + USE_GTT, 0, 0], words)
+    (num.mod(group.count(all), 2) == 1) { all = group.add(all, NOOP) }
+    wait(gpu)
+    @base = gpu.base
+    @tail = firmware.read32(gpu.mmio, base, TAIL)
+    (tail + group.count(all) * 4 > RING_BYTES) {
+        drum ((RING_BYTES - tail) / 4) { firmware.write_phys32(gpu.ring, base, tail + beat * 4, NOOP) }
+        firmware.write_phys32(gpu.mmio, base, TAIL, 0)
+        wait(gpu)
+        tail = 0
+    }
+    drum (group.count(all)) { firmware.write_phys32(gpu.ring, base, tail + beat * 4, group.get(all, beat)) }
+    out firmware.write_phys32(gpu.mmio, base, TAIL, tail + group.count(all) * 4)
+}
+
+skill fill(gpu, at, pitch, x, y, width, height, color) {
+    out submit(gpu, [COLOR_BLT, DEPTH_32 + ROP_FILL + pitch, y * 65536 + x, (y + height) * 65536 + x + width, at, 0, color])
+}
+
+skill copy(gpu, from, to, pitch, x, y, width, height) {
+    out submit(gpu, [COPY_BLT, DEPTH_32 + ROP_COPY + pitch, y * 65536 + x, (y + height) * 65536 + x + width, to, 0, y * 65536 + x, pitch, from, 0])
+}
