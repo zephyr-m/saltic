@@ -1,0 +1,169 @@
+-- wmi — язык команд прошивки (WMI в формате TLV, как wmi-tlv.c в ath10k).
+-- Команда — письмо HTC в канал WMI (CE3): заголовок HTC 8 байт, номер
+-- команды 4 байта, дальше TLV: 2 байта длины, 2 байта тега, значение.
+-- События приходят в CE2: номер события — 4 байта после заголовка HTC.
+-- Команда собирается в участке wifi_frame (256 байт).
+--
+-- command(chip, id, length) — отправить команду id, тело уже в wifi_frame с 12
+-- tlv(chip, at, tag, length) -> at + 4 — заголовок TLV в wifi_frame
+-- words(chip, at, values) -> at после значений — 32-битные числа подряд
+-- find_event(chip, id) -> номер буфера CE2 с событием id; NoEvent через 3 с
+-- inbox(chip) -> текст — что лежит в 8 буферах CE2 и где индексы CE2/CE3
+-- init(chip) -> текст — ждёт SERVICE_READY, потом WMI_INIT с настройками
+--     ресурсов, ждёт READY, MAC карты
+
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.rings
+use os.target.uefi_x86_64.drivers.qca9377.boot
+
+INIT = 1
+SERVICE_READY = 1
+READY = 2
+ECHO = 118785
+ECHO_EVENT_LOW = 53249
+TAG_ECHO = 149
+ECHO_VALUE = 1234567
+BODY = 12
+NEED_CREDIT_UPDATE = 1
+TAG_INIT = 74
+TAG_RESOURCES = 75
+TAG_ARRAY_STRUCT = 18
+ABI = [16777216, 53, 1598112593, 19533, 0, 0]
+RESOURCES = [4, 33, 4, 4, 2, 66, 16, 7, 7, 100, 100, 100, 40, 1, 4, 4, 4, 8, 0, 0, 0, 1024, 32, 0, 0, 0, 0, 2, 1056, 2, 1, 32, 2, 5, 22, 6, 0, 1, 1, 0, 0, 0, 0, 512]
+READY_MAC = 40
+READY_STATUS = 48
+
+skill frame(chip) {
+    out rings.at(chip, "wifi_frame")
+}
+
+skill tlv(chip, at, tag, length) {
+    firmware.write_phys32(frame(chip), chip.base, at, tag * firmware.PAGE + length)
+    out at + 4
+}
+
+skill words(chip, at, values) {
+    drum (group.count(values)) { firmware.write_phys32(frame(chip), chip.base, at + beat * 4, group.get(values, beat)) }
+    out at + group.count(values) * 4
+}
+
+skill command(chip, id, length) {
+    @letter = frame(chip)
+    firmware.write_phys32(letter, chip.base, 0, (length + 4) * firmware.PAGE + NEED_CREDIT_UPDATE * 256 + chip.wmi_endpoint)
+    firmware.write_phys32(letter, chip.base, 4, 0)
+    firmware.write_phys32(letter, chip.base, 8, id)
+    out rings.command(chip, letter, BODY + length, chip.wmi_endpoint)
+}
+
+skill find_event(chip, id) {
+    drum (300) {
+        drum (rings.EVENT_SLOTS) {
+            (rings.event_slot(chip, beat) > 0) {
+                (firmware.read16(rings.event_buffer(chip, beat), chip.base, 8) == id) { out beat }
+            }
+        }
+        card.stall(chip, 10000)
+    }
+    out error.NoEvent
+}
+
+skill inbox(chip) {
+    @text = ""
+    drum (rings.EVENT_SLOTS) {
+        @got = rings.event_slot(chip, beat)
+        @id = firmware.hex(firmware.read16(rings.event_buffer(chip, beat), chip.base, 8), 4)
+        (got > 0) { text = "{text} [{beat}: {got} б, id {id}]" }
+    }
+    @read2 = firmware.read16(chip.bar, chip.base, rings.CE2 + 72)
+    @write2 = firmware.read16(chip.bar, chip.base, rings.CE2 + 64)
+    @read3 = firmware.read16(chip.bar, chip.base, rings.CE3 + 68)
+    @write3 = firmware.read16(chip.bar, chip.base, rings.CE3 + 60)
+    @read1 = firmware.read16(chip.bar, chip.base, rings.CE1 + 72)
+    @write1 = firmware.read16(chip.bar, chip.base, rings.CE1 + 64)
+    @letters = chip.receive_at - chip.letters_from
+    text = "{text}; CE1 чтение {read1} запись {write1}, писем взято {letters}"
+    @read5 = firmware.read16(chip.bar, chip.base, rings.CE5 + 72)
+    @write5 = firmware.read16(chip.bar, chip.base, rings.CE5 + 64)
+    text = "{text}; CE5 чтение {read5} запись {write5}"
+    @fourth = boot.letter(chip, 3)
+    @bytes_hex = ""
+    drum (6) {
+        @word = firmware.hex(firmware.read32(fourth, chip.base, beat * 4), 8)
+        bytes_hex = "{bytes_hex} {word}"
+    }
+    text = "{text}; письмо 4:{bytes_hex}"
+    @indicator = card.hex32(chip, card.FW_INDICATOR)
+    out "FW_INDICATOR {indicator};{text}; CE2 чтение {read2} запись {write2}; CE3 чтение {read3} запись {write3}"
+}
+
+skill mac_text(chip, event) {
+    @text = ""
+    drum (6) {
+        @part = firmware.hex(firmware.read8(event, chip.base, READY_MAC + beat), 2)
+        (beat == 0) { text = part }
+        (beat > 0) { text = "{text}:{part}" }
+    }
+    out text
+}
+
+skill init(chip) {
+    card.say("T0. waiting for SERVICE_READY before WMI_INIT (as ath10k does) ...")
+    @passport = find_event(chip, SERVICE_READY) rescue |err| {
+        @seen = inbox(chip)
+        out "нет SERVICE_READY:{seen}"
+    }
+    @passport_at = rings.event_buffer(chip, passport)
+    @first_tag = firmware.read16(passport_at, chip.base, 14)
+    @first_length = firmware.read16(passport_at, chip.base, 12)
+    @available = rings.event_buffer(chip, find_event(chip, 3))
+    @other_tag = firmware.read16(available, chip.base, 14)
+    card.say("   SERVICE_READY first TLV: tag {first_tag} (expect 32), length {first_length}; SERVICE_AVAILABLE tag {other_tag}")
+    @size = rings.event_slot(chip, passport)
+    @walk = ""
+    @at_tlv = 12
+    drum (24) {
+        (at_tlv + 4 > size) { leave }
+        @tlv_length = firmware.read16(passport_at, chip.base, at_tlv)
+        @tlv_tag = firmware.read16(passport_at, chip.base, at_tlv + 2)
+        walk = "{walk} {tlv_tag}/{tlv_length}"
+        at_tlv = at_tlv + 4 + tlv_length
+    }
+    card.say("   SERVICE_READY TLVs (tag/length):{walk}")
+    card.say("T1. ECHO {ECHO_VALUE}: does any WMI command reach the firmware?")
+    @at_echo = tlv(chip, BODY, TAG_ECHO, 4)
+    at_echo = words(chip, at_echo, [ECHO_VALUE])
+    command(chip, ECHO, at_echo - BODY)
+    @echo_text = "эха нет"
+    @echoed = find_event(chip, ECHO_EVENT_LOW) rescue |err| { -1 }
+    (echoed >= 0) {
+        @back = firmware.read32(rings.event_buffer(chip, echoed), chip.base, 16)
+        echo_text = "эхо {back}"
+    }
+    card.say("   {echo_text}")
+    card.say("T2. CE1 is full (4 letters read): give the 4 letter buffers back to the card")
+    drum (boot.LETTER_SLOTS) {
+        @buffer = boot.letter(chip, beat)
+        firmware.write_phys32(buffer, chip.base, 8, 0)
+        rings.expect(chip, buffer)
+    }
+    card.say("T. WMI_INIT: ABI 1.53, resources for 4 interfaces and 33 peers, no host memory")
+    @at = tlv(chip, BODY, TAG_INIT, (group.count(ABI) + 1) * 4)
+    at = words(chip, at, group.add(ABI, 0))
+    at = tlv(chip, at, TAG_RESOURCES, group.count(RESOURCES) * 4)
+    at = words(chip, at, RESOURCES)
+    at = tlv(chip, at, TAG_ARRAY_STRUCT, 0)
+    command(chip, INIT, at - BODY)
+    card.say("   sent {at} bytes into CE3, waiting for READY ...")
+    @slot = find_event(chip, READY) rescue |err| {
+        @seen = inbox(chip)
+        card.say("   no READY: {seen}")
+        out "нет READY ({echo_text}):{seen}"
+    }
+    @event = rings.event_buffer(chip, slot)
+    @mac = mac_text(chip, event)
+    @status = firmware.read32(event, chip.base, READY_STATUS)
+    card.say("   READY in buffer {slot}: MAC {mac}, status {status}")
+    out "READY: MAC {mac}, статус {status}"
+}

@@ -6,8 +6,14 @@
 --
 -- descriptor(ring, base, index, buffer, length, flags) — записать дескриптор
 -- prepare(chip) — CE0 (отправка), CE1 (приём), CE7 (память карты); -> индекс CE0
--- event_rings(chip) — CE2 (события WMI) с 8 буферами и CE3 (команды WMI)
+-- event_rings(chip) — CE2 (события WMI) с 8 буферами, CE3 (команды WMI) и
+--     CE5 (сообщения HTT от карты) с 8 буферами по 512 байт — как rx_post в
+--     ath10k: без буферов во входящем кольце прошивка может встать
 -- send(chip, buffer, length, flags) -> buffer; CE0, ждёт, пока карта заберёт; SendTimeout
+-- command(chip, buffer, length, endpoint) -> buffer; CE3 (команды WMI), ждёт,
+--     пока карта заберёт; SendTimeout. Номер канала HTC — в метаданных
+--     дескриптора (флаги со 2-го бита, как transfer_id в ath10k): без него
+--     прошивка принимает письмо за канал 0 и молча выбрасывает
 -- expect(chip, buffer) — подложить буфер в CE1 под ответ
 -- arrived(chip, slot) -> байт в слоте CE1, 0 — пока пусто
 -- at(chip, name) -> адрес участка арены wifi_* по имени; UnknownRegion
@@ -22,8 +28,12 @@ CE0 = 214016
 CE1 = 215040
 CE2 = 216064
 CE3 = 217088
+CE5 = 219136
 CE7 = 221184
+HTT_SLOTS = 8
+HTT_BYTES = 512
 ENTRIES = 16
+META = 4
 DIAG_ENTRIES = 2
 SEND_LARGEST = 256
 DIAG_LARGEST = 2048
@@ -72,13 +82,16 @@ skill prepare(chip) {
 
 skill event_rings(chip) {
     ring_in(chip, CE2, at(chip, "wifi_event_ring"), ENTRIES)
-    ring_out(chip, CE3, at(chip, "wifi_command_ring"), ENTRIES, DIAG_LARGEST)
+    chip.command_at = ring_out(chip, CE3, at(chip, "wifi_command_ring"), ENTRIES, DIAG_LARGEST)
     drum (EVENT_SLOTS) {
         @buffer = event_buffer(chip, beat)
         firmware.write_phys32(buffer, chip.base, 0, 0)
         descriptor(at(chip, "wifi_event_ring"), chip.base, beat, buffer, 0, 0)
     }
-    out card.put(chip, CE2 + 64, EVENT_SLOTS)
+    card.put(chip, CE2 + 64, EVENT_SLOTS)
+    ring_in(chip, CE5, at(chip, "wifi_htt_ring"), ENTRIES)
+    drum (HTT_SLOTS) { descriptor(at(chip, "wifi_htt_ring"), chip.base, beat, firmware.add(at(chip, "wifi_htt"), beat * HTT_BYTES), 0, 0) }
+    out card.put(chip, CE5 + 64, HTT_SLOTS)
 }
 
 skill send(chip, buffer, length, flags) {
@@ -88,6 +101,18 @@ skill send(chip, buffer, length, flags) {
     card.put(chip, CE0 + 60, target)
     drum (20000) {
         (firmware.read16(chip.bar, chip.base, CE0 + 68) == target) { out buffer }
+        card.stall(chip, 50)
+    }
+    out error.SendTimeout
+}
+
+skill command(chip, buffer, length, endpoint) {
+    descriptor(at(chip, "wifi_command_ring"), chip.base, num.mod(chip.command_at, ENTRIES), buffer, length, endpoint * META)
+    chip.command_at = chip.command_at + 1
+    @target = num.mod(chip.command_at, ENTRIES)
+    card.put(chip, CE3 + 60, target)
+    drum (20000) {
+        (firmware.read16(chip.bar, chip.base, CE3 + 68) == target) { out buffer }
         card.stall(chip, 50)
     }
     out error.SendTimeout

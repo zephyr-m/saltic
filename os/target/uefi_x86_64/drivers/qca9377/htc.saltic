@@ -3,17 +3,22 @@
 -- 2 байта тела — номер сообщения. Канал WMI: команды — CE3, события — CE2.
 -- Письма канала 0 приходят в CE1, в 4 буфера с начала писем (boot.launch).
 --
--- connect(chip) -> текст — CONNECT_SERVICE для WMI, SETUP_COMPLETE_EX
+-- connect(chip) -> текст — CONNECT_SERVICE для HTT (данные, без кредитов) и
+--     WMI, затем SETUP_COMPLETE_EX — порядок как в ath10k_core_start
+-- open_service(chip, service, flags) -> [статус, канал, размер письма]
 -- events(chip) -> текст — список событий WMI в 8 буферах CE2
 -- event_at(chip, index) -> адрес события; event_bytes(chip, index) -> байт
 
 use core.num
+use core.group
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.drivers.qca9377.card
 use os.target.uefi_x86_64.drivers.qca9377.rings
 use os.target.uefi_x86_64.drivers.qca9377.boot
 
 SERVICE_WMI = 256
+SERVICE_HTT = 768
+NO_CREDIT_FLOW = 8
 WMI_CREDITS = 2
 MSG_CONNECT = 2
 MSG_SETUP_COMPLETE_EX = 5
@@ -38,12 +43,10 @@ skill next_letter(chip) {
     out error.NoLetter
 }
 
-skill connect(chip) {
-    chip.receive_at = chip.letters_from + 1
-    card.say("P. CONNECT_SERVICE: open a channel for WMI (service 0x0100), give it 2 credits")
+skill open_service(chip, service, flags) {
     @frame = rings.at(chip, "wifi_frame")
-    firmware.write_phys32(frame, chip.base, 8, SERVICE_WMI * firmware.PAGE + MSG_CONNECT)
-    firmware.write_phys32(frame, chip.base, 12, WMI_CREDITS * 256)
+    firmware.write_phys32(frame, chip.base, 8, service * firmware.PAGE + MSG_CONNECT)
+    firmware.write_phys32(frame, chip.base, 12, flags)
     control(chip, 8)
     @answer = next_letter(chip)
     @message = firmware.read16(answer, chip.base, 8)
@@ -51,12 +54,27 @@ skill connect(chip) {
     @endpoint = firmware.read8(answer, chip.base, 13)
     @largest = firmware.read16(answer, chip.base, 14)
     card.say("   answer: message {message} (3 = CONNECT_RESP), status {status} (0 = ok), channel {endpoint}, letters up to {largest} bytes")
+    out [status, endpoint, largest]
+}
+
+skill connect(chip) {
+    chip.receive_at = chip.letters_from + 1
+    card.say("P0. CONNECT_SERVICE: open the HTT data channel (service 0x0300), no credit flow")
+    @data = open_service(chip, SERVICE_HTT, NO_CREDIT_FLOW)
+    card.say("P. CONNECT_SERVICE: open a channel for WMI (service 0x0100), give it 2 credits")
+    @opened = open_service(chip, SERVICE_WMI, WMI_CREDITS * 256)
+    @status = group.get(opened, 0)
+    @endpoint = group.get(opened, 1)
+    @largest = group.get(opened, 2)
+    chip.wmi_endpoint = endpoint
+    @data_endpoint = group.get(data, 1)
     card.say("Q. SETUP_COMPLETE_EX: channels are open, go")
+    @frame = rings.at(chip, "wifi_frame")
     firmware.write_phys32(frame, chip.base, 8, MSG_SETUP_COMPLETE_EX)
     firmware.write_phys32(frame, chip.base, 12, 0)
     firmware.write_phys32(frame, chip.base, 16, 0)
     control(chip, 11)
-    out "канал WMI: статус {status}, номер {endpoint}, письма до {largest} байт"
+    out "канал HTT: номер {data_endpoint}; канал WMI: статус {status}, номер {endpoint}, письма до {largest} байт"
 }
 
 skill event_at(chip, index) {
