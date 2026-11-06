@@ -10,4 +10,4 @@
 - **Когда:** эпоха 3, порядок работ — п. 3.
 - **Документация:** Xtensa ISA Reference Manual (Cadence), ESP32 и ESP32-S3
   Technical Reference Manual (Espressif).
-- **Подробно:** `docs/PLAN.md, раздел «Железо и бэкенды»`.
+- **Подробно:** `docs/plan/PLAN-3.md`, раздел «Железо и бэкенды».

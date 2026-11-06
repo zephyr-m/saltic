@@ -132,7 +132,9 @@ qemu-riscv64 -B 0x100000000 ./hello
 
 ## Документы
 
-- [docs/plan/PLAN.md](docs/plan/PLAN.md) — чек-лист задач сверху вниз;
+- [docs/plan/PLAN.md](docs/plan/PLAN.md) — чек-лист задач сверху вниз (План 2);
+  [docs/plan/PLAN-3.md](docs/plan/PLAN-3.md) — ОС, инструменты, скорость, железо: ждёт, пока
+  План 2 не завершён;
   [docs/plan/QUESTIONS.md](docs/plan/QUESTIONS.md) и [docs/plan/ANSWERS.md](docs/plan/ANSWERS.md) —
   вопросы к автору и его ответы; прежний план с дорогой по эпохам и двумя
   свистками — [.archive/docs/PLAN-1.md](.archive/docs/PLAN-1.md);
