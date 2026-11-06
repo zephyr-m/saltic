@@ -1,0 +1,114 @@
+-- htt — канал данных HTT (как htt_tx.c / htt_rx.c в ath10k для 32-битной
+-- карты). К карте — через CE4 письмами HTC в канал HTT (eid 1), от карты —
+-- письма в CE1 (rings.drain_letters отмечает их типы в chip.htt_seen).
+-- Приём: кольцо RX_SLOTS адресов буферов в нашей памяти (участок wifi_rx_ring,
+-- с INDEX — индекс заполнения, его читает карта) и буферы по 2048 байт
+-- (wifi_rx_buffers). Карта кладёт в буфер дескриптор приёма htt_rx_desc_v1
+-- (300 байт) и следом кадр; готовность — бит MSDU_DONE в слове attention.
+-- Без кольца приёма железу некуда класть кадры — ни маяков, ни данных.
+--
+-- send(chip, length) — письмо HTT из участка wifi_htt_command (тело с 8)
+-- version(chip) -> текст — VERSION_REQ, ждём VERSION_CONF в CE1
+-- rx_ring(chip) — заполнить кольцо приёма и отдать RX_RING_CFG
+-- setup(chip) -> текст — version, rx_ring
+-- next_frame(chip) -> [адрес кадра, длина, RSSI] или none — очередной
+--     готовый буфер; recycle(chip) — вернуть его в кольцо
+
+use core.num
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.rings
+
+ENDPOINT = 1
+VERSION_REQ = 0
+RX_RING_CFG = 2
+RX_SLOTS = 16
+INDEX = 128
+BUFFER = 2048
+ALL_FRAMES = 65535
+OFFSETS = [59, 75, 21, 31, 3, 20, 6, 10, 1, 2]
+ATTENTION = 4
+MSDU_DONE = 2147483648
+MSDU_START = 24
+LENGTH_MASK = 16384
+RSSI_COMB = 100
+PAYLOAD = 300
+WAITS = 200
+PAUSE = 10000
+
+skill letter(chip) {
+    out rings.at(chip, "wifi_htt_command")
+}
+
+skill send(chip, length) {
+    firmware.write_phys32(letter(chip), chip.base, 0, length * firmware.PAGE + ENDPOINT)
+    firmware.write_phys32(letter(chip), chip.base, 4, 0)
+    out rings.htt_send(chip, letter(chip), 8 + length, ENDPOINT)
+}
+
+skill version(chip) {
+    card.say("V1. HTT VERSION_REQ through CE4, waiting for VERSION_CONF in CE1 ...")
+    firmware.write_phys32(letter(chip), chip.base, 8, VERSION_REQ)
+    send(chip, 4)
+    drum (WAITS) {
+        rings.drain_letters(chip)
+        (str.contains(chip.htt_seen, " 0") == yes) {
+            card.say("   VERSION_CONF came")
+            out "версия HTT подтверждена"
+        }
+        card.stall(chip, PAUSE)
+    }
+    @seen = chip.htt_seen
+    out "VERSION_CONF не пришёл (HTT в CE1:{seen})"
+}
+
+skill buffer(chip, index) {
+    out firmware.add(rings.at(chip, "wifi_rx_buffers"), num.mod(index, RX_SLOTS) * BUFFER)
+}
+
+skill post(chip, index) {
+    @place = buffer(chip, index)
+    firmware.write_phys32(place, chip.base, ATTENTION, 0)
+    out firmware.write_phys32(rings.at(chip, "wifi_rx_ring"), chip.base, num.mod(index, RX_SLOTS) * 4, place)
+}
+
+skill rx_ring(chip) {
+    card.say("V2. HTT RX_RING_CFG: {RX_SLOTS} buffers of {BUFFER} bytes, all frame kinds incl. management")
+    @ring = rings.at(chip, "wifi_rx_ring")
+    drum (RX_SLOTS - 1) { post(chip, beat) }
+    chip.rx_read = 0
+    chip.rx_fill = RX_SLOTS - 1
+    firmware.write_phys32(ring, chip.base, INDEX, chip.rx_fill)
+    @at = letter(chip)
+    firmware.write_phys32(at, chip.base, 8, RX_RING_CFG + 256)
+    firmware.write_phys32(at, chip.base, 12, firmware.add(ring, INDEX))
+    firmware.write_phys32(at, chip.base, 16, ring)
+    firmware.write_phys32(at, chip.base, 20, RX_SLOTS + BUFFER * firmware.PAGE)
+    firmware.write_phys32(at, chip.base, 24, ALL_FRAMES + chip.rx_fill * firmware.PAGE)
+    drum (5) { firmware.write_phys32(at, chip.base, 28 + beat * 4, group.get(OFFSETS, beat * 2) + group.get(OFFSETS, beat * 2 + 1) * firmware.PAGE) }
+    out send(chip, 40)
+}
+
+skill setup(chip) {
+    rings.htt_rings(chip)
+    @told = version(chip)
+    rx_ring(chip)
+    out "{told}; кольцо приёма HTT: {RX_SLOTS} буферов"
+}
+
+skill next_frame(chip) {
+    @place = buffer(chip, chip.rx_read)
+    (firmware.read32(place, chip.base, ATTENTION) < MSDU_DONE) { out none }
+    @length = num.mod(firmware.read32(place, chip.base, MSDU_START), LENGTH_MASK)
+    @rssi = firmware.read8(place, chip.base, RSSI_COMB)
+    out [firmware.add(place, PAYLOAD), length, rssi]
+}
+
+skill recycle(chip) {
+    post(chip, chip.rx_fill)
+    chip.rx_fill = chip.rx_fill + 1
+    chip.rx_read = chip.rx_read + 1
+    out firmware.write_phys32(rings.at(chip, "wifi_rx_ring"), chip.base, INDEX, num.mod(chip.rx_fill, RX_SLOTS))
+}

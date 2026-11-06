@@ -1,0 +1,271 @@
+-- scan — поиск сетей Wi-Fi: пассивный, 2,4 ГГц, каналы 1–13. Порядок как в
+-- ath10k: список каналов (SCAN_CHAN_LIST), интерфейс-станция (VDEV_CREATE),
+-- START_SCAN со временами ath10k_wmi_start_scan_init; номера поиска и
+-- запросившего — с приставкой хоста 0xA000 (ath10k_wmi_put_start_scan_common):
+-- без неё прошивка считает поиск своим и ни событий, ни маяков не отдаёт; маяки приходят
+-- событиями MGMT_RX, конец — событием SCAN с COMPLETED.
+-- MGMT_RX: TLV заголовка приёма с 12-го байта (канал, SNR, …), кадр 802.11 —
+-- с 60-го: тип в байте 0 (0x80 маяк, 0x50 ответ на пробу), BSSID с 16-го,
+-- поля с 36-го (ID, длина, данные): 0 — имя сети, 3 — номер канала.
+--
+-- Network { bssid, name, channel, snr } — найденная сеть
+-- reset_filter(chip) — фиктивный интерфейс создать и удалить, затем барьер:
+--     у QCA9377 (hw_filter_reset_required) так прошивка настраивает фильтр приёма
+-- region(chip) — PDEV_SET_REGDOMAIN: домен из EEPROM карты (WOR9_WORLD), как
+--     ath10k_regd_update
+-- channels(chip) — SCAN_CHAN_LIST: 13 каналов, 11g, пассивные
+-- interface(chip) — VDEV_CREATE: vdev 0, станция, MAC карты
+-- start(chip) — START_SCAN по всем 13 каналам, широковещательный BSSID
+-- beacon(chip, buffer) -> Network или none — разбор MGMT_RX
+-- parse_frame(chip, frame, length, snr, channel) -> Network или none — маяк
+--     или ответ на пробу по адресу кадра 802.11 (из MGMT_RX или кольца HTT)
+-- Tally { networks, frames, scans, others, done } — итог поиска: сети, кадры
+--     MGMT_RX, события SCAN (вид/причина), номера прочих событий, дошёл ли до конца
+-- collect(chip) -> Tally — события до COMPLETED (не дольше LIMIT)
+-- run(chip) -> текст — всё по порядку, список сетей
+
+use core.num
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.rings
+use os.target.uefi_x86_64.drivers.qca9377.wmi
+use os.target.uefi_x86_64.drivers.qca9377.htt
+
+SET_REGDOMAIN = 16385
+TAG_REGDOMAIN = 81
+WORLD = 105
+NO_LIMIT = 255
+SCAN_CHAN_LIST = 12291
+VDEV_CREATE = 20481
+VDEV_DELETE = 20482
+TAG_VDEV_DELETE = 87
+START_SCAN = 12289
+SCAN_EVENT = 12289
+MGMT_RX = 28673
+CHAN_INFO = 16386
+TAG_CHAN_LIST = 79
+TAG_CHANNEL = 80
+TAG_START_SCAN = 77
+TAG_VDEV_CREATE = 86
+TAG_ARRAY_UINT32 = 16
+TAG_ARRAY_BYTE = 17
+TAG_FIXED_STRUCT = 19
+TAG_ARRAY_STRUCT = 18
+CHANNELS = 13
+FIRST_MHZ = 2412
+STEP_MHZ = 5
+MODE_11G = 1
+PASSIVE = 128
+POWER = 40
+VDEV_STA = 2
+COMMON = [40960, 40961, 0, 1, 287, 50, 150, 50, 500, 0, 0, 0, 20000, 5, 49]
+COMPLETED = 2
+FRAME = 60
+BEACON = 128
+PROBE_RESPONSE = 80
+FIELDS = 36
+LIMIT = 1500
+PAUSE = 10000
+
+Tally = Box {
+    networks = [],
+    frames = 0,
+    received = 0,
+    infos = 0,
+    scans = "",
+    others = "",
+    done = no
+}
+
+Network = Box {
+    bssid = "",
+    name = "",
+    channel = 0,
+    snr = 0
+}
+
+skill mhz(index) {
+    out FIRST_MHZ + index * STEP_MHZ
+}
+
+skill region(chip) {
+    card.say("U0. PDEV_SET_REGDOMAIN: world domain 0x69 (WOR9_WORLD) from the card's own eeprom")
+    @at = wmi.tlv(chip, wmi.BODY, TAG_REGDOMAIN, 24)
+    at = wmi.words(chip, at, [0, WORLD, WORLD, WORLD, NO_LIMIT, NO_LIMIT])
+    out wmi.command(chip, SET_REGDOMAIN, at - wmi.BODY)
+}
+
+skill channels(chip) {
+    card.say("U1. SCAN_CHAN_LIST: 13 channels of 2.4 GHz, passive")
+    @at = wmi.tlv(chip, wmi.BODY, TAG_CHAN_LIST, 4)
+    at = wmi.words(chip, at, [CHANNELS])
+    at = wmi.tlv(chip, at, TAG_ARRAY_STRUCT, CHANNELS * 28)
+    drum (CHANNELS) {
+        @freq = mhz(beat)
+        at = wmi.tlv(chip, at, TAG_CHANNEL, 24)
+        at = wmi.words(chip, at, [freq, freq, 0, MODE_11G + PASSIVE, POWER * 256 + POWER * 65536, POWER * 256])
+    }
+    out wmi.command(chip, SCAN_CHAN_LIST, at - wmi.BODY)
+}
+
+skill reset_filter(chip) {
+    card.say("U-1. dummy VDEV_CREATE + VDEV_DELETE + barrier: QCA9377 needs it to set the rx filter (ath10k_core_reset_rx_filter)")
+    interface(chip)
+    @at = wmi.tlv(chip, wmi.BODY, TAG_VDEV_DELETE, 4)
+    at = wmi.words(chip, at, [0])
+    wmi.command(chip, VDEV_DELETE, at - wmi.BODY)
+    out wmi.barrier(chip)
+}
+
+skill interface(chip) {
+    @shown = wmi.mac_text(chip.mac)
+    card.say("U2. VDEV_CREATE: interface 0, station, MAC {shown}")
+    @at = wmi.tlv(chip, wmi.BODY, TAG_VDEV_CREATE, 20)
+    at = wmi.words(chip, at, group.concat([0, VDEV_STA, 0], wmi.mac_words(chip.mac)))
+    out wmi.command(chip, VDEV_CREATE, at - wmi.BODY)
+}
+
+skill start(chip) {
+    card.say("U3. START_SCAN: passive, 150 ms per channel, all 13 channels")
+    @at = wmi.tlv(chip, wmi.BODY, TAG_START_SCAN, 100)
+    at = wmi.words(chip, at, COMMON)
+    at = wmi.words(chip, at, [0, CHANNELS, 1, 0, 0, 3, 0, 0, 0, 0])
+    at = wmi.tlv(chip, at, TAG_ARRAY_UINT32, CHANNELS * 4)
+    drum (CHANNELS) { at = wmi.words(chip, at, [mhz(beat)]) }
+    at = wmi.tlv(chip, at, TAG_FIXED_STRUCT, 0)
+    at = wmi.tlv(chip, at, TAG_FIXED_STRUCT, 8)
+    at = wmi.words(chip, at, [4294967295, 65535])
+    at = wmi.tlv(chip, at, TAG_ARRAY_BYTE, 0)
+    out wmi.command(chip, START_SCAN, at - wmi.BODY)
+}
+
+skill bssid_text(chip, frame) {
+    @text = ""
+    drum (6) {
+        @part = firmware.hex(firmware.read8(frame, chip.base, 16 + beat), 2)
+        (beat == 0) { text = part }
+        (beat > 0) { text = "{text}:{part}" }
+    }
+    out text
+}
+
+skill beacon(chip, buffer) {
+    out parse_frame(chip, firmware.add(buffer, FRAME), firmware.read32(buffer, chip.base, 32), firmware.read32(buffer, chip.base, 20), firmware.read32(buffer, chip.base, 16))
+}
+
+skill parse_frame(chip, frame, length, snr, channel) {
+    @kind = firmware.read8(frame, chip.base, 0)
+    @known = no
+    (kind == BEACON) { known = yes }
+    (kind == PROBE_RESPONSE) { known = yes }
+    (known == no) { out none }
+    @found = Network { bssid = bssid_text(chip, frame), snr = snr, channel = channel }
+    @at = FIELDS
+    drum (64) {
+        (at + 2 > length) { leave }
+        @id = firmware.read8(frame, chip.base, at)
+        @size = firmware.read8(frame, chip.base, at + 1)
+        (id == 0) {
+            @name = ""
+            drum (size) { name = str.concat(name, str.from_byte(firmware.read8(frame, chip.base, at + 2 + beat))) }
+            found.name = name
+        }
+        (id == 3) { found.channel = firmware.read8(frame, chip.base, at + 2) }
+        at = at + 2 + size
+    }
+    out found
+}
+
+skill remember(networks, found) {
+    drum (group.count(networks)) {
+        @known = group.get(networks, beat)
+        (known.bssid == found.bssid) {
+            (found.snr > known.snr) { known.snr = found.snr }
+            out networks
+        }
+    }
+    out group.add(networks, found)
+}
+
+skill collect(chip) {
+    @tally = Tally {}
+    drum (LIMIT) {
+        rings.drain_letters(chip)
+        drum (16) {
+            @got = htt.next_frame(chip)
+            (got == none) { leave }
+            tally.received = tally.received + 1
+            @found = parse_frame(chip, group.get(got, 0), group.get(got, 1), group.get(got, 2), 0)
+            ((found == none) == no) { tally.networks = remember(tally.networks, found) }
+            htt.recycle(chip)
+        }
+        drum (16) {
+            (rings.held(chip) == 0) { leave }
+            @buffer = rings.held_buffer(chip)
+            @id = wmi.event_id(chip, buffer)
+            @counted = no
+            (id == MGMT_RX) {
+                counted = yes
+                tally.frames = tally.frames + 1
+                @found = beacon(chip, buffer)
+                ((found == none) == no) { tally.networks = remember(tally.networks, found) }
+            }
+            (id == SCAN_EVENT) {
+                counted = yes
+                @kind = firmware.read32(buffer, chip.base, 16)
+                @reason = firmware.read32(buffer, chip.base, 20)
+                (str.bytes(tally.scans) < 120) { tally.scans = "{tally.scans} {kind}/{reason}" }
+                (kind == COMPLETED) {
+                    rings.release(chip)
+                    tally.done = yes
+                    out tally
+                }
+            }
+            (id == CHAN_INFO) {
+                counted = yes
+                tally.infos = tally.infos + 1
+                @freq = firmware.read32(buffer, chip.base, 20)
+                (freq == 0) {
+                    @clear = firmware.read32(buffer, chip.base, 32)
+                    @cycles = firmware.read32(buffer, chip.base, 36)
+                    @received = firmware.read32(buffer, chip.base, 48)
+                    tally.scans = "{tally.scans} [{freq}: занято {clear} циклов {cycles} кадров {received}]"
+                }
+            }
+            (counted == no) {
+                @other = firmware.hex(id, 4)
+                @w0 = firmware.hex(firmware.read32(buffer, chip.base, 12), 8)
+                @w1 = firmware.hex(firmware.read32(buffer, chip.base, 16), 8)
+                @w2 = firmware.hex(firmware.read32(buffer, chip.base, 20), 8)
+                (str.bytes(tally.others) < 160) { tally.others = "{tally.others} {other}" }
+            }
+            rings.release(chip)
+        }
+        card.stall(chip, PAUSE)
+    }
+    out tally
+}
+
+skill run(chip) {
+    reset_filter(chip)
+    @link = htt.setup(chip)
+    region(chip)
+    channels(chip)
+    interface(chip)
+    start(chip)
+    @tally = collect(chip)
+    @networks = tally.networks
+    @count = group.count(networks)
+    @rings_state = wmi.inbox(chip)
+    @text = "сетей: {count}; кадров MGMT_RX {tally.frames}, через HTT {tally.received}; конец {tally.done}; {link}; HTT в CE1:{chip.htt_seen}"
+    drum (count) {
+        @found = group.get(networks, beat)
+        @name = found.name
+        (str.bytes(name) == 0) { name = "(скрытая)" }
+        text = "{text}\n  {name} · канал {found.channel} · SNR {found.snr} · {found.bssid}"
+        card.say("   {name}  channel {found.channel}  snr {found.snr}  {found.bssid}")
+    }
+    out text
+}

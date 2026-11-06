@@ -16,9 +16,22 @@
 -- arrived(chip, slot) -> байт в слоте CE1, 0 — пока пусто
 -- at(chip, name) -> адрес участка арены wifi_* по имени; UnknownRegion
 -- event_slot(chip, index) -> байт в слоте CE2, 0 — пока пусто
+-- letters_reset(chip, first) — CE1 после загрузки: 4 буфера писем по кругу с
+--     индекса first — сразу за письмами загрузки (letters_from + 4); пришедшее письмо — по ненулевой
+--     длине в дескрипторе; drain_letters(chip) -> сколько писем
+--     прочитано и отдано обратно (до letters_reset — ничего: кольцо ещё
+--     в руках загрузки) (письма канала 0 и HTT — отчёты о кредитах и
+--     прочее; без возврата кольцо забивается, и прошивка встаёт)
+-- htt_rings(chip) — CE4 (сообщения HTT к карте); htt_send(chip, buffer,
+--     length, endpoint) -> buffer — как command, но через CE4; SendTimeout.
+--     Письма канала HTT в CE1 drain_letters отмечает в chip.htt_seen (тип)
+-- held(chip) -> байт в очередном событии CE2 по порядку (0 — пока нет);
+--     held_buffer(chip) — его буфер; release(chip) — прочитано: буфер снова
+--     карте, кольцо событий бесконечно (EVENT_SLOTS буферов по кругу)
 -- event_buffer(chip, index) -> адрес буфера события index в участке wifi_events
 
 use core.num
+use core.str
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.drivers.qca9377.card
 
@@ -26,7 +39,10 @@ CE0 = 214016
 CE1 = 215040
 CE2 = 216064
 CE3 = 217088
+CE4 = 218112
 CE5 = 219136
+LETTERS = 4
+HTT_ENDPOINT = 1
 CE7 = 221184
 ENTRIES = 16
 META = 4
@@ -111,6 +127,23 @@ skill command(chip, buffer, length, endpoint) {
     out error.SendTimeout
 }
 
+skill htt_rings(chip) {
+    chip.htt_at = ring_out(chip, CE4, at(chip, "wifi_htt_ring"), ENTRIES, SEND_LARGEST)
+    out chip.htt_at
+}
+
+skill htt_send(chip, buffer, length, endpoint) {
+    descriptor(at(chip, "wifi_htt_ring"), chip.base, num.mod(chip.htt_at, ENTRIES), buffer, length, endpoint * META)
+    chip.htt_at = chip.htt_at + 1
+    @target = num.mod(chip.htt_at, ENTRIES)
+    card.put(chip, CE4 + 60, target)
+    drum (20000) {
+        (firmware.read16(chip.bar, chip.base, CE4 + 68) == target) { out buffer }
+        card.stall(chip, 50)
+    }
+    out error.SendTimeout
+}
+
 skill expect(chip, buffer) {
     descriptor(at(chip, "wifi_destination_ring"), chip.base, num.mod(chip.receive_at, ENTRIES), buffer, 0, 0)
     chip.receive_at = chip.receive_at + 1
@@ -127,4 +160,56 @@ skill event_slot(chip, index) {
 
 skill event_buffer(chip, index) {
     out firmware.add(at(chip, "wifi_events"), index * BUFFER_BYTES)
+}
+
+skill letters_reset(chip, first) {
+    @ring = at(chip, "wifi_destination_ring")
+    chip.letter_read = first
+    drum (LETTERS) {
+        @index = chip.letter_read + beat
+        @buffer = firmware.add(at(chip, "wifi_letters"), num.mod(index, LETTERS) * BUFFER_BYTES)
+        descriptor(ring, chip.base, num.mod(index, ENTRIES), buffer, 0, 0)
+    }
+    chip.receive_at = chip.letter_read + LETTERS
+    chip.letters_live = yes
+    out card.put(chip, CE1 + 64, num.mod(chip.receive_at, ENTRIES))
+}
+
+skill drain_letters(chip) {
+    (chip.letters_live == no) { out 0 }
+    @ring = at(chip, "wifi_destination_ring")
+    @drained = 0
+    drum (ENTRIES) {
+        (arrived(chip, chip.letter_read) == 0) { leave }
+        @buffer = firmware.add(at(chip, "wifi_letters"), num.mod(chip.letter_read, LETTERS) * BUFFER_BYTES)
+        (firmware.read8(buffer, chip.base, 0) == HTT_ENDPOINT) {
+            @kind = firmware.read8(buffer, chip.base, 8)
+            (str.bytes(chip.htt_seen) < 60) { chip.htt_seen = "{chip.htt_seen} {kind}" }
+        }
+        descriptor(ring, chip.base, num.mod(chip.letter_read, ENTRIES), 0, 0, 0)
+        descriptor(ring, chip.base, num.mod(chip.receive_at, ENTRIES), buffer, 0, 0)
+        chip.letter_read = chip.letter_read + 1
+        chip.receive_at = chip.receive_at + 1
+        drained = drained + 1
+    }
+    (drained > 0) { card.put(chip, CE1 + 64, num.mod(chip.receive_at, ENTRIES)) }
+    chip.letters_seen = chip.letters_seen + drained
+    out drained
+}
+
+skill held(chip) {
+    out firmware.read16(at(chip, "wifi_event_ring"), chip.base, num.mod(chip.event_read, ENTRIES) * 8 + 4)
+}
+
+skill held_buffer(chip) {
+    out event_buffer(chip, num.mod(chip.event_read, EVENT_SLOTS))
+}
+
+skill release(chip) {
+    @ring = at(chip, "wifi_event_ring")
+    firmware.write16(ring, chip.base, num.mod(chip.event_read, ENTRIES) * 8 + 4, 0)
+    descriptor(ring, chip.base, num.mod(chip.event_write, ENTRIES), held_buffer(chip), 0, 0)
+    chip.event_read = chip.event_read + 1
+    chip.event_write = chip.event_write + 1
+    out card.put(chip, CE2 + 64, num.mod(chip.event_write, ENTRIES))
 }
