@@ -20,10 +20,13 @@
 -- от прежнего драйвера), остальные берут те же. Порции блиттера начинаются со сброса TLB
 -- (MI_FLUSH_DW с MI_INVALIDATE_TLB и записью отметки).
 --
--- Gpu { base, mmio, aperture, ring, render, blit_seq, render_seq } — открытая
---     видеокарта; aperture — адрес окна BAR2 (экран GOP в нём); ring / render —
---     физические адреса колец блиттера и рендера; *_seq — номер последней
---     отметки (fence) движка
+-- Gpu { base, mmio, aperture, ring, render, kept, blit_seq, render_seq } —
+--     открытая видеокарта; aperture — адрес окна BAR2 (экран GOP в нём); ring
+--     / render — физические адреса колец блиттера и рендера; kept — страница
+--     таблицы UEFI; *_seq — номер последней отметки (fence) этой копии. Сам
+--     счётчик номеров — общий, в kept (BLIT_SEQ_KEPT, RENDER_SEQ_KEPT): копий
+--     Gpu у программы несколько (у каждого буфера своя), номера не должны
+--     повторяться
 -- Отметки: «движок дочитал кольцо» ещё не значит «сделал» — команды могут
 --     исполняться дальше. Поэтому каждая порция кончается записью номера в
 --     память (блиттер — MI_FLUSH_DW, рендер — PIPE_CONTROL после сброса
@@ -99,6 +102,8 @@ RENDER_FENCE = 2046820356
 RENDER_FENCE_FLAGS = 17846304
 SEQ_LIMIT = 1073741824
 RENDER_KEPT = 4
+BLIT_SEQ_KEPT = 12
+RENDER_SEQ_KEPT = 16
 RESET_CONTROL = 208
 REQUEST_RESET = 65537
 READY_TO_RESET = 2
@@ -116,6 +121,7 @@ Gpu = Box {
     aperture = 0,
     ring = 0,
     render = 0,
+    kept = 0,
     blit_seq = 0,
     render_seq = 0
 }
@@ -150,6 +156,8 @@ skill open(base) {
     }
     ((firmware.read32(kept, base, MAGIC_KEPT) == MAGIC) == no) {
         firmware.write_phys32(kept, base, RENDER_KEPT, 0)
+        firmware.write_phys32(kept, base, BLIT_SEQ_KEPT, firmware.read32(gpu.ring, base, RING_PAGES * PAGE + FENCE))
+        firmware.write_phys32(kept, base, RENDER_SEQ_KEPT, 0)
         firmware.write_phys32(kept, base, MAGIC_KEPT, MAGIC)
     }
     gpu.render = firmware.read32(kept, base, RENDER_KEPT)
@@ -157,6 +165,7 @@ skill open(base) {
         gpu.render = start_ring(gpu, RENDER, REGION + RENDER_SLOTS)
         firmware.write_phys32(kept, base, RENDER_KEPT, gpu.render)
     }
+    gpu.kept = kept
     gpu.blit_seq = firmware.read32(gpu.ring, base, RING_PAGES * PAGE + FENCE)
     gpu.render_seq = firmware.read32(gpu.render, base, RING_PAGES * PAGE + FENCE)
     out gpu
@@ -241,9 +250,15 @@ skill push(gpu, engine, ring, words) {
     out firmware.write_phys32(gpu.mmio, base, engine + TAIL, tail + group.count(all) * 4)
 }
 
+skill next_seq(gpu, at) {
+    @seq = num.mod(firmware.read32(gpu.kept, gpu.base, at) + 1, SEQ_LIMIT)
+    firmware.write_phys32(gpu.kept, gpu.base, at, seq)
+    out seq
+}
+
 skill submit(gpu, words) {
     @mark = (REGION + RING_PAGES) * PAGE
-    gpu.blit_seq = num.mod(gpu.blit_seq + 1, SEQ_LIMIT)
+    gpu.blit_seq = next_seq(gpu, BLIT_SEQ_KEPT)
     @fence = [FLUSH_FENCE, mark + FENCE + USE_GTT, 0, gpu.blit_seq, 0]
     out push(gpu, BLITTER, gpu.ring, group.concat(group.concat([FLUSH_TLB, mark + USE_GTT, 0, 0], words), fence))
 }
@@ -285,7 +300,7 @@ skill reset_render(gpu) {
 
 skill submit_render(gpu, words) {
     @mark = (REGION + RENDER_SLOTS + RING_PAGES) * PAGE
-    gpu.render_seq = num.mod(gpu.render_seq + 1, SEQ_LIMIT)
+    gpu.render_seq = next_seq(gpu, RENDER_SEQ_KEPT)
     @fence = [RENDER_FENCE, RENDER_FENCE_FLAGS, mark + FENCE, 0, gpu.render_seq, 0]
     out push(gpu, RENDER, gpu.render, group.concat(words, fence))
 }
