@@ -108,8 +108,9 @@ pip устал
 nix --extra-experimental-features "nix-command flakes" develop
 ```
 
-- `just global-check` — самосборка с паспортами и тесты `all` на rv32i, с
-  метриками и «было / стало»;
+- `just global-check` — самосборка с паспортами (rv32i и x86-64, затем RV64
+  собирает себя под `qemu-riscv64`) и тесты `all` на rv32i, с метриками и
+  «было / стало»;
 - `just hosts` — тесты `all` на x86-64 и платформы: qemu-virt, UEFI, closure
   (группы — [docs/TESTING.md](docs/TESTING.md));
 - `just qemu-graphics` — ОС с программами в окне QEMU.
@@ -118,6 +119,13 @@ nix --extra-experimental-features "nix-command flakes" develop
 
 ```bash
 bootstrap/saltic-*-compiler-x86_64-linux hello.saltic hello 134217728 x86_64
+```
+
+Под RISC-V 64 (канон RVA23) — та же команда с целью `rv64`, запуск под QEMU:
+
+```bash
+bootstrap/saltic-*-compiler-x86_64-linux hello.saltic hello 134217728 rv64
+qemu-riscv64 -B 0x100000000 ./hello
 ```
 
 ## Документы

@@ -22,7 +22,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Хост, на котором исполняются тестовые программы: x86_64 — прямо на процессоре,
-# rv32i — под qemu-riscv32. Код RISC-V как результат (гость VM, цель трассера,
+# rv32i — под qemu-riscv32, rv64 — под qemu-riscv64. Код RISC-V как результат (гость VM, цель трассера,
 # ELF машинного слоя) всегда исполняется в QEMU.
 host="${SALTIC_TEST_HOST:-rv32i}"
 
@@ -31,6 +31,8 @@ source tests/metrics.sh
 run_built() {
     if [[ "$host" == x86_64* ]]; then
         measure run "$@"
+    elif [[ "$host" == rv64 ]]; then
+        measure run qemu-riscv64 -B 0x100000000 "$@"
     else
         measure run qemu-riscv32 -B 0x100000000 "$@"
     fi
