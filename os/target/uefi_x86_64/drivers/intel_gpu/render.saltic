@@ -5,7 +5,8 @@
 --     R, G, B, A и запись в цель).
 -- Порция лежит в своём буфере (размечен «один в один»), драйвер вписывает в
 -- неё адреса, размеры и число вершин; кольцо рендера переходит в неё
--- (MI_BATCH_BUFFER_START) между сбросом кэшей и сбросом цели (PIPE_CONTROL).
+-- (MI_BATCH_BUFFER_START) после сброса кэшей (PIPE_CONTROL), а сброс цели с
+-- записью отметки ставит intel_gpu.submit_render.
 -- Вершина треугольника — 2 слова: x | y·65536 (int16) и цвет RGBA8.
 --
 -- Surface { at, pitch, width, height } — поверхность: адрес GGTT, шаг строки
@@ -19,9 +20,12 @@
 -- draw(painter, target, texture, x, y, width, height) -> yes, если движок
 --     дочитал кольцо: прямоугольник цели с x, y, растянутая на него текстура
 -- begin(painter) — пустой список треугольников
--- add_quad(painter, corners, pixel) — четырёхугольник (углы [x, y, …]
---     экрана) двумя треугольниками цвета pixel (0xRRGGBB); вне FAR — мимо
---     (у растеризатора есть предел координат: за ним движок зависал)
+-- add_quad(painter, corners, pixel, width, height) — четырёхугольник (углы
+--     [x, y, …] экрана) цвета pixel (0xRRGGBB), обрезанный по экрану с запасом
+--     MARGIN (у растеризатора есть предел координат: за ним движок зависал),
+--     веером треугольников
+-- clip(points, edge, limit, keep_below) -> многоугольник, обрезанный по
+--     прямой x = limit (edge 0) или y = limit (edge 1) — Сазерленд — Ходжман
 -- triangles(painter, target) -> yes — нарисовать накопленные треугольники;
 --     не дождались — сброс движка (intel_gpu.reset_render) и broken = yes
 -- Внутри: put / load(…) — слово в буфер, шаблон в буфер с адресами;
@@ -43,7 +47,7 @@ VERTEX_BYTES = 8
 ONE = 1065353216
 HALF_WORD = 65536
 OPAQUE = 4278190080
-FAR = 4000
+MARGIN = 1000
 KIND_BATCH = 1
 KIND_TARGET = 2
 KIND_TEXTURE = 3
@@ -104,7 +108,7 @@ skill surface(painter, place, at, words, area) {
 skill run(painter, place) {
     (painter.broken == yes) { out no }
     @gpu = painter.gpu
-    intel_gpu.submit_render(gpu, group.concat(group.concat(rect.BEFORE, [rect.START, place, 0]), rect.AFTER))
+    intel_gpu.submit_render(gpu, group.concat(rect.BEFORE, [rect.START, place, 0]))
     (intel_gpu.wait_render(gpu) == yes) { out yes }
     painter.broken = yes
     intel_gpu.reset_render(gpu)
@@ -137,35 +141,56 @@ skill vertex(painter, point, rgba) {
     out none
 }
 
-skill near(point) {
-    @x = group.get(point, 0)
-    @y = group.get(point, 1)
-    (x < 0 - FAR) { out no }
-    (x > FAR) { out no }
-    (y < 0 - FAR) { out no }
-    (y > FAR) { out no }
-    out yes
+skill inside(point, edge, limit, keep_below) {
+    @value = group.get(point, edge)
+    (keep_below == yes) { out value <= limit }
+    out value >= limit
 }
 
-skill add_quad(painter, corners, pixel) {
-    (painter.count + 6 > VERTEX_LIMIT) { out none }
-    drum (corners) {
-        (near(beat) == no) { out none }
+skill crossing(a, b, edge, limit) {
+    @other = 1 - edge
+    @av = group.get(a, edge)
+    @bv = group.get(b, edge)
+    @ao = group.get(a, other)
+    @bo = group.get(b, other)
+    @cut = ao + (bo - ao) * (limit - av) / (bv - av)
+    (edge == 0) { out [limit, cut] }
+    out [cut, limit]
+}
+
+skill clip(points, edge, limit, keep_below) {
+    @kept = []
+    @count = group.count(points)
+    drum (count) {
+        @a = group.get(points, beat)
+        @b = group.get(points, num.mod(beat + 1, count))
+        @a_in = inside(a, edge, limit, keep_below)
+        @b_in = inside(b, edge, limit, keep_below)
+        (a_in == yes) { kept = group.add(kept, a) }
+        ((a_in == b_in) == no) { kept = group.add(kept, crossing(a, b, edge, limit)) }
     }
+    out kept
+}
+
+skill add_quad(painter, corners, pixel, width, height) {
+    @shape = clip(corners, 0, 0 - MARGIN, no)
+    shape = clip(shape, 0, width + MARGIN, yes)
+    shape = clip(shape, 1, 0 - MARGIN, no)
+    shape = clip(shape, 1, height + MARGIN, yes)
+    @count = group.count(shape)
+    (count < 3) { out none }
+    (painter.count + (count - 2) * 3 > VERTEX_LIMIT) { out none }
     @red = num.mod(pixel / 65536, 256)
     @green = num.mod(pixel / 256, 256)
     @blue = num.mod(pixel, 256)
     @rgba = red + green * 256 + blue * 65536 + OPAQUE
-    @a = group.get(corners, 0)
-    @b = group.get(corners, 1)
-    @c = group.get(corners, 2)
-    @d = group.get(corners, 3)
-    vertex(painter, a, rgba)
-    vertex(painter, b, rgba)
-    vertex(painter, c, rgba)
-    vertex(painter, a, rgba)
-    vertex(painter, c, rgba)
-    out vertex(painter, d, rgba)
+    @first = group.get(shape, 0)
+    drum (count - 2) {
+        vertex(painter, first, rgba)
+        vertex(painter, group.get(shape, beat + 1), rgba)
+        vertex(painter, group.get(shape, beat + 2), rgba)
+    }
+    out none
 }
 
 skill triangles(painter, target) {

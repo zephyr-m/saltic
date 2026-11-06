@@ -20,9 +20,15 @@
 -- от прежнего драйвера), остальные берут те же. Порции блиттера начинаются со сброса TLB
 -- (MI_FLUSH_DW с MI_INVALIDATE_TLB и записью отметки).
 --
--- Gpu { base, mmio, aperture, ring, render } — открытая видеокарта; aperture
---     — адрес окна BAR2 (экран GOP в нём); ring / render — физические адреса
---     колец блиттера и рендера
+-- Gpu { base, mmio, aperture, ring, render, blit_seq, render_seq } — открытая
+--     видеокарта; aperture — адрес окна BAR2 (экран GOP в нём); ring / render —
+--     физические адреса колец блиттера и рендера; *_seq — номер последней
+--     отметки (fence) движка
+-- Отметки: «движок дочитал кольцо» ещё не значит «сделал» — команды могут
+--     исполняться дальше. Поэтому каждая порция кончается записью номера в
+--     память (блиттер — MI_FLUSH_DW, рендер — PIPE_CONTROL после сброса
+--     цели), и wait ждёт этот номер (как fence в i915). Слово отметки — на
+--     странице за кольцом, по FENCE; номер растёт и между программами.
 -- open(base) -> Gpu или none — нет видеокарты Intel / не проснулась
 -- map(gpu, slot, place, pages) -> адрес GGTT — свои страницы place на
 --     участке данных с номера slot (страницы по 4 КБ)
@@ -33,14 +39,15 @@
 -- copy(gpu, from, to, pitch, x, y, width, height) — скопировать прямоугольник
 --     (те же x, y и шаг строки в обеих поверхностях: задний буфер и экран)
 -- submit(gpu, words) — порция команд блиттеру (сброс TLB впереди)
--- submit_render(gpu, words) — порция команд в кольцо рендера как есть
+-- submit_render(gpu, words) — порция команд рендеру, в конце — отметка
 -- wait_vblank(gpu) -> yes, когда начался обратный ход луча (vblank) дисплея A:
 --     счётчик кадров PIPE_FRMCOUNT сменился (не дольше VBLANK_WAITS опросов)
 -- reset_render(gpu) -> yes, если сброс прошёл: зависший движок рендера —
 --     «готов к сбросу» (RESET_CTL), сброс домена рендера (GDRST), кольцо
 --     заново на том же месте (как i915 gen8_reset_engines)
--- wait(gpu) / wait_render(gpu) -> yes, если движок дочитал кольцо (не дольше
---     WAITS); в HEAD выше HEAD_OFFSET — счётчик оборотов, ниже — смещение
+-- wait(gpu) / wait_render(gpu) -> yes, если движок записал последнюю отметку
+--     (не дольше WAITS опросов); drained — дочитал ли кольцо (в HEAD выше
+--     HEAD_OFFSET — счётчик оборотов, ниже — смещение)
 -- Внутри: wake(…) — пробуждение (forcewake); start_ring / push / drained —
 --     общее для обоих колец; ENGINE + TAIL/HEAD/START/CONTROL — регистры
 -- SCREEN — адрес GGTT экрана GOP; DATA — первый слот участка данных
@@ -86,6 +93,11 @@ ROP_FILL = 15728640
 FLUSH_TLB = 319045634
 USE_GTT = 4
 NOOP = 0
+FENCE = 64
+FLUSH_FENCE = 318783491
+RENDER_FENCE = 2046820356
+RENDER_FENCE_FLAGS = 17846304
+SEQ_LIMIT = 1073741824
 RENDER_KEPT = 4
 RESET_CONTROL = 208
 REQUEST_RESET = 65537
@@ -103,7 +115,9 @@ Gpu = Box {
     mmio = 0,
     aperture = 0,
     ring = 0,
-    render = 0
+    render = 0,
+    blit_seq = 0,
+    render_seq = 0
 }
 
 skill wake(mmio, base, register, ack) {
@@ -143,6 +157,8 @@ skill open(base) {
         gpu.render = start_ring(gpu, RENDER, REGION + RENDER_SLOTS)
         firmware.write_phys32(kept, base, RENDER_KEPT, gpu.render)
     }
+    gpu.blit_seq = firmware.read32(gpu.ring, base, RING_PAGES * PAGE + FENCE)
+    gpu.render_seq = firmware.read32(gpu.render, base, RING_PAGES * PAGE + FENCE)
     out gpu
 }
 
@@ -194,12 +210,19 @@ skill drained(gpu, engine) {
     out no
 }
 
+skill fenced(gpu, ring, seq) {
+    drum (WAITS) {
+        (firmware.read32(ring, gpu.base, RING_PAGES * PAGE + FENCE) == seq) { out yes }
+    }
+    out no
+}
+
 skill wait(gpu) {
-    out drained(gpu, BLITTER)
+    out fenced(gpu, gpu.ring, gpu.blit_seq)
 }
 
 skill wait_render(gpu) {
-    out drained(gpu, RENDER)
+    out fenced(gpu, gpu.render, gpu.render_seq)
 }
 
 skill push(gpu, engine, ring, words) {
@@ -220,7 +243,9 @@ skill push(gpu, engine, ring, words) {
 
 skill submit(gpu, words) {
     @mark = (REGION + RING_PAGES) * PAGE
-    out push(gpu, BLITTER, gpu.ring, group.concat([FLUSH_TLB, mark + USE_GTT, 0, 0], words))
+    gpu.blit_seq = num.mod(gpu.blit_seq + 1, SEQ_LIMIT)
+    @fence = [FLUSH_FENCE, mark + FENCE + USE_GTT, 0, gpu.blit_seq, 0]
+    out push(gpu, BLITTER, gpu.ring, group.concat(group.concat([FLUSH_TLB, mark + USE_GTT, 0, 0], words), fence))
 }
 
 skill wait_vblank(gpu) {
@@ -259,7 +284,10 @@ skill reset_render(gpu) {
 }
 
 skill submit_render(gpu, words) {
-    out push(gpu, RENDER, gpu.render, words)
+    @mark = (REGION + RENDER_SLOTS + RING_PAGES) * PAGE
+    gpu.render_seq = num.mod(gpu.render_seq + 1, SEQ_LIMIT)
+    @fence = [RENDER_FENCE, RENDER_FENCE_FLAGS, mark + FENCE, 0, gpu.render_seq, 0]
+    out push(gpu, RENDER, gpu.render, group.concat(words, fence))
 }
 
 skill fill(gpu, at, pitch, x, y, width, height, color) {
