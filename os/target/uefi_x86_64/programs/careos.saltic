@@ -1,27 +1,271 @@
 -- careos — программа: рабочий стол CareOS из JTML (uiengine) на Acer с мышью.
--- Наведение и клик по иконкам, звук клика, команды агента через remote;
--- Esc — возврат в агент с итогом (reply.home). Только x86_64-uefi.
+-- С видеокартой стол собирается каждый кадр: обои, плитки и капля — в буфере
+-- desk, окно «О CareOS» — стекло видеокарты (тень и полупрозрачное тело) и
+-- его содержимое из буфера pane поверх по альфе; окно таскается за заголовок.
+-- Без видеокарты — прежний стол, нарисованный один раз. V — vsync, Esc — назад.
 --
--- Session { quit, clicks, chosen } — состояние сеанса
--- tick_desktop(base, screen, mouse, cursor, voice, link, session) — один круг
+-- Session { quit, clicks, chosen } — итог сеанса
+-- Desk { desk, back, pane, painter, x, y, width, height, grab_x, grab_y,
+--     dragging, cursor, frames, second, counted, rate, vsync } — стол
+--     видеокарты: окно x, y, width, height; painter — [render.Painter];
+--     cursor — кольцо плитки под мышью
+-- open_desk(base, front, props) -> Desk или none (нет видеокарты)
+-- tick_gpu(…) / tick_desktop(…) — круг стола видеокарты / прежнего стола
 -- program() — вход
+-- Внутри: rounded(…) — углы скруглённого прямоугольника для 3D, clear_key
+--     — альфа pane, compose — кадр, drag — перетаскивание, count_rate
 
+use core.mem
+use core.group
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.network.reply
 use os.target.uefi_x86_64.network.remote
 use os.target.uefi_x86_64.drivers.pointer
+use os.target.uefi_x86_64.drivers.intel_gpu
+use os.target.uefi_x86_64.drivers.intel_gpu.render
 use os.uiengine
+use os.uiengine.canvas
+use os.uiengine.jtml
+use os.uiengine.layout
+use os.uiengine.components.desktop
+use os.uiengine.components.desktop.bar
+use os.uiengine.components.desktop.glass
 use os.uiengine.demo.generated.careos_jtml
 
 SCAN_ESCAPE = 23
 PAUSE = 2000
+LETTER_V = 118
+LETTER_V_UPPER = 86
+MARGIN = 24
+RADIUS = 18
+SHADOW = 7
+BODY = 196
+OPAQUE = 4278190080
+ARC = [1000, 966, 866, 707, 500, 259, 0]
 
 Session = Box {
     quit = no,
     clicks = 0,
     chosen = ""
+}
+
+Desk = Box {
+    desk = graphics.Screen {},
+    back = graphics.Screen {},
+    pane = graphics.Screen {},
+    painter = [],
+    x = 0,
+    y = 0,
+    width = 0,
+    height = 0,
+    grab_x = 0,
+    grab_y = 0,
+    dragging = no,
+    cursor = uiengine.Cursor {},
+    frames = 0,
+    second = -1,
+    counted = 0,
+    rate = 0,
+    vsync = yes,
+    failed = "",
+    vertices = 0,
+    before = 0,
+    after = 0,
+    solid = no
+}
+
+skill rounded(x, y, width, height, radius) {
+    @points = []
+    @corners = [[x + width - radius, y + height - radius, 1, 1], [x + radius, y + height - radius, -1, 1], [x + radius, y + radius, -1, -1], [x + width - radius, y + radius, 1, -1]]
+    drum (4) {
+        @corner = group.get(corners, beat)
+        @cx = group.get(corner, 0)
+        @cy = group.get(corner, 1)
+        @sx = group.get(corner, 2)
+        @sy = group.get(corner, 3)
+        @turn = beat
+        drum (group.count(ARC)) {
+            @along = group.get(ARC, beat)
+            @across = group.get(ARC, group.count(ARC) - 1 - beat)
+            (num_odd(turn) == yes) {
+                along = group.get(ARC, group.count(ARC) - 1 - beat)
+                across = group.get(ARC, beat)
+            }
+            points = group.add(points, [cx + sx * radius * along / 1000, cy + sy * radius * across / 1000])
+        }
+    }
+    out points
+}
+
+skill num_odd(value) {
+    out (value - value / 2 * 2) == 1
+}
+
+skill clear_key(pane, width, height) {
+    @key = canvas.paint(pane, canvas.CREAM)
+    drum (pane.height) {
+        @row = beat
+        @inside_y = row >= MARGIN
+        (row >= MARGIN + height) { inside_y = no }
+        @start = row * pane.stride * graphics.PIXEL_BYTES
+        drum (pane.width) {
+            @at = start + beat * graphics.PIXEL_BYTES
+            @value = mem.load32(pane.memory, at)
+            @keep = inside_y
+            (beat < MARGIN) { keep = no }
+            (beat >= MARGIN + width) { keep = no }
+            (value == key) { keep = no }
+            pick {
+                (keep == yes) { mem.store32(pane.memory, at, value + OPAQUE) }
+                { mem.store32(pane.memory, at, 0) }
+            }
+        }
+    }
+    out none
+}
+
+skill open_desk(base, front, props) {
+    @back = graphics.buffer_like(base, front)
+    (group.count(back.accel) == 0) { out none }
+    @gpu = group.get(back.accel, 0)
+    @made = render.painter(gpu, base) rescue |err| { none }
+    (made == none) { out none }
+    @desk = graphics.buffer_like(base, front)
+    desktop.paint_desktop(desk, props)
+    @window = group.get(jtml.prop_children(props), 0)
+    @width = canvas.width_of(jtml.prop_words(jtml.props_of(window), "width", "md"))
+    @size = layout.measure_node(window)
+    @pane_width = width + 2 * MARGIN
+    @pane_height = size.height + 2 * MARGIN
+    @pages = (pane_width * pane_height * graphics.PIXEL_BYTES + 4095) / 4096
+    @place = uefi.pages_in_window(base, pages)
+    intel_gpu.map_identity(gpu, place, pages)
+    @pane = graphics.canvas(base, place, pane_width, pane_height, front)
+    graphics.fill(pane, 0, 0, pane_width, pane_height, canvas.paint(pane, canvas.CREAM))
+    layout.draw_node(pane, window, MARGIN, MARGIN, width, canvas.CREAM)
+    clear_key(pane, width, size.height)
+    out Desk { desk = desk, back = back, pane = pane, painter = [made], x = (front.width - width) / 2, y = bar.HEIGHT + 40, width = width, height = size.height }
+}
+
+skill surface_of(screen) {
+    out render.Surface { at = screen.frame, pitch = screen.stride * graphics.PIXEL_BYTES, width = screen.width, height = screen.height }
+}
+
+skill compose(base, front, world, mouse) {
+    @back = world.back
+    back.vsync = world.vsync
+    graphics.copy_rect(base, back, world.desk, 0, 0, back.width, back.height)
+    @painter = group.get(world.painter, 0)
+    @target = surface_of(back)
+    render.begin(painter)
+    drum (SHADOW) {
+        @spread = (SHADOW - beat) * 3
+        render.add_shape(painter, rounded(world.x - spread, world.y - spread + 8, world.width + 2 * spread, world.height + 2 * spread, RADIUS + spread), 0, 14, back.width, back.height)
+    }
+    @cream = canvas.CREAM
+    @tint = cream.red * 65536 + cream.green * 256 + cream.blue
+    render.add_shape(painter, rounded(world.x, world.y, world.width, world.height, RADIUS), tint, BODY, back.width, back.height)
+    world.vertices = painter.count
+    @probe = ((world.y + 100) * back.stride + world.x + 100) * graphics.PIXEL_BYTES
+    world.before = mem.load32(back.memory, probe)
+    @drawn = no
+    pick {
+        (world.solid == yes) { drawn = render.triangles(painter, target) }
+        { drawn = render.blended(painter, target) }
+    }
+    (drawn == no) { (world.failed == "") { world.failed = "стекло" } }
+    @pane = world.pane
+    @laid = render.draw_over(painter, target, render.Surface { at = pane.frame, pitch = pane.stride * graphics.PIXEL_BYTES, width = pane.width, height = pane.height }, world.x - MARGIN, world.y - MARGIN, pane.width, pane.height)
+    world.after = mem.load32(back.memory, probe)
+    (laid == no) { (world.failed == "") { world.failed = "наложение" } }
+    uiengine.arrow_on(back, mouse.x, mouse.y)
+    out graphics.push(base, front, back)
+}
+
+skill over_window(world, x, y) {
+    (x < world.x) { out no }
+    (y < world.y) { out no }
+    (x >= world.x + world.width) { out no }
+    out y < world.y + world.height
+}
+
+skill drag(world, mouse, front) {
+    (mouse.clicked == yes) {
+        (over_window(world, mouse.x, mouse.y) == yes) {
+            (mouse.y < world.y + glass.TITLE) {
+                world.dragging = yes
+                world.grab_x = mouse.x - world.x
+                world.grab_y = mouse.y - world.y
+            }
+        }
+    }
+    (mouse.held == no) { world.dragging = no }
+    (world.dragging == no) { out none }
+    world.x = mouse.x - world.grab_x
+    world.y = mouse.y - world.grab_y
+    (world.x < MARGIN) { world.x = MARGIN }
+    (world.y < MARGIN) { world.y = MARGIN }
+    (world.x > front.width - world.width - MARGIN) { world.x = front.width - world.width - MARGIN }
+    (world.y > front.height - world.height - MARGIN) { world.y = front.height - world.height - MARGIN }
+    out none
+}
+
+skill count_rate(world, base) {
+    world.frames = world.frames + 1
+    world.counted = world.counted + 1
+    @moment = uefi.now(base)
+    ((moment.second == world.second) == no) {
+        world.rate = world.counted
+        world.counted = 0
+        world.second = moment.second
+    }
+    out none
+}
+
+skill tick_gpu(base, front, world, props, mouse, voice, link, session) {
+    @before_x = mouse.x
+    @before_y = mouse.y
+    pointer.poll_mouse(base, mouse, front.width, front.height)
+    drag(world, mouse, front)
+    @cursor = world.cursor
+    @under = cursor.hover
+    @moved = (before_x == mouse.x) == no
+    ((before_y == mouse.y) == no) { moved = yes }
+    (moved == yes) {
+        @x = mouse.x
+        (over_window(world, mouse.x, mouse.y) == yes) { x = -1000 }
+        under = uiengine.hover_on(world.desk, careos_jtml.JTML, cursor, x, mouse.y)
+    }
+    (mouse.clicked == yes) {
+        session.clicks = session.clicks + 1
+        (desktop.voice_hit(world.desk, mouse.x, mouse.y) == yes) { desktop.toggle_voice(world.desk, voice) }
+        (under > -1) {
+            session.chosen = uiengine.app_name(careos_jtml.JTML, under)
+            desktop.repaint_bar(world.desk, jtml.with_words(props, "window", session.chosen))
+        }
+    }
+    desktop.voice_frame(world.desk, voice)
+    compose(base, front, world, mouse)
+    count_rate(world, base)
+    remote.serve(link)
+    @key = uefi.poll_key(base, PAUSE)
+    (key.scan == SCAN_ESCAPE) { session.quit = yes }
+    (key.char == LETTER_V) { world.vsync = world.vsync == no }
+    (key.char == LETTER_V_UPPER) { world.vsync = world.vsync == no }
+    (key.char == 116) { world.solid = world.solid == no }
+    @frames = world.frames
+    @rate = world.rate
+    @sync = "vsync"
+    (world.vsync == no) { sync = "без vsync" }
+    (render_broken(world) == yes) { sync = "{sync}, 3D сломан на: {world.failed}" }
+    out remote.tell(link, "CareOS: кадров {frames}, в секунду {rate}, окно {world.x}×{world.y}, вершин {world.vertices}, пиксель {world.before} → {world.after}, непрозрачно {world.solid}, {sync}")
+}
+
+skill render_broken(world) {
+    @painter = group.get(world.painter, 0)
+    out painter.broken
 }
 
 skill tick_desktop(base, screen, mouse, cursor, voice, link, session) {
@@ -47,26 +291,38 @@ skill tick_desktop(base, screen, mouse, cursor, voice, link, session) {
     out none
 }
 
+skill finish(voice, session) {
+    uiengine.voice_off(voice)
+    @clicks = session.clicks
+    @chosen = session.chosen
+    out reply.home("CareOS: кликов {clicks}, последний выбор {chosen}")
+}
+
 program() {
     @base = firmware.guest_base()
     @screen = graphics.open(base)
     uefi.forget_keys(base)
     @link = remote.open_remote()
-    uiengine.show(careos_jtml.JTML)
+    @props = jtml.props_of(jtml.read_tree(careos_jtml.JTML))
     @mouse = pointer.open_mouse(base)
-    @cursor = uiengine.Cursor {}
-    uiengine.point(careos_jtml.JTML, cursor, mouse.x, mouse.y)
     @voice = uiengine.new_voice()
     @session = Session {}
+    @world = open_desk(base, screen, props)
+    ((world == none) == no) {
+        @pages = graphics.buffer_pages(screen)
+        remote.own(link, world.desk.frame, pages)
+        remote.own(link, world.back.frame, pages)
+        always {
+            tick_gpu(base, screen, world, props, mouse, voice, link, session)
+            (session.quit == yes) { out finish(voice, session) }
+        }
+    }
+    uiengine.show(careos_jtml.JTML)
+    @cursor = uiengine.Cursor {}
+    uiengine.point(careos_jtml.JTML, cursor, mouse.x, mouse.y)
     always {
         tick_desktop(base, screen, mouse, cursor, voice, link, session)
-        (session.quit == yes) {
-            uiengine.voice_off(voice)
-            @clicks = session.clicks
-            @chosen = session.chosen
-            reply.home("CareOS: кликов {clicks}, последний выбор {chosen}")
-            out none
-        }
+        (session.quit == yes) { out finish(voice, session) }
     }
     out none
 }

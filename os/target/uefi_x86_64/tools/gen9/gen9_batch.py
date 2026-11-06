@@ -1,6 +1,6 @@
 """Порция команд Gen9 «прямоугольник с текстурой» по igt rendercopy_gen9.c.
 
-Запуск: python3 tools/gen9/gen9_batch.py <папка>/gen90.xml >
+Запуск: python3 tools/gen9/gen9_batch.py <папка>/gen90.xml [rect|tris|blend|overlay] >
 drivers/intel_gpu/generated/rect.saltic, где в папке — описания Mesa
 src/intel/genxml: gen90.xml и всё, что он подключает (gen80, gen75, gen70,
 gen60, gen50, gen45, gen40). Шейдер — ps_kernel_gen9 из igt (выборка из
@@ -16,7 +16,8 @@ import genxml
 
 XML = sys.argv[1]
 SHAPE = sys.argv[2] if len(sys.argv) > 2 else "rect"
-TRIS = SHAPE == "tris"
+BLEND = SHAPE in ("blend", "overlay")
+TRIS = SHAPE in ("tris", "blend")
 p = genxml.Packer(XML)
 
 BATCH_BYTES = 8192
@@ -92,7 +93,13 @@ vertices = put_state([0] * 9, 8) if not TRIS else 0
 cc_state = put_state(p.pack("COLOR_CALC_STATE"), 64)
 blend = [0] * p.length("BLEND_STATE")
 for i in range(16):
-    blend += p.pack("BLEND_STATE_ENTRY", DestinationBlendFactor=17, SourceBlendFactor=1, ColorBlendFunction=0, PreBlendColorClampEnable=1)
+    if BLEND and i == 0:
+        # Прозрачность: цвет = src·alpha + dst·(1 − alpha) (SRC_ALPHA 3, INV_SRC_ALPHA 19);
+        # только у цели 0 — остальные не подключены
+        blend += p.pack("BLEND_STATE_ENTRY", ColorBufferBlendEnable=1, SourceBlendFactor=3, DestinationBlendFactor=19, ColorBlendFunction=0,
+                        SourceAlphaBlendFactor=1, DestinationAlphaBlendFactor=19, AlphaBlendFunction=0, PreBlendColorClampEnable=1, PostBlendColorClampEnable=1)
+    else:
+        blend += p.pack("BLEND_STATE_ENTRY", DestinationBlendFactor=17, SourceBlendFactor=1, ColorBlendFunction=0, PreBlendColorClampEnable=1)
 blend_state = put_state(blend, 64)
 cc_viewport = put_state(p.pack("CC_VIEWPORT", MinimumDepth=-1e35, MaximumDepth=1e35), 32)
 sf_clip = put_state(p.pack("SF_CLIP_VIEWPORT", XMinClipGuardband=0.0, XMaxClipGuardband=1.0, YMinClipGuardband=0.0, YMaxClipGuardband=1.0), 64)
@@ -155,7 +162,11 @@ emit(p.pack("3DSTATE_WM", BarycentricInterpolationMode=1))
 emit(p.pack("3DSTATE_CONSTANT_PS"))
 emit(p.pack("3DSTATE_PS", KernelStartPointer0=kernel, BindingTableEntryCount=1 if TRIS else 2, SamplerCount=0 if TRIS else 1, **{"16PixelDispatchEnable": 1},
             MaximumNumberofThreadsPerPSD=62, DispatchGRFStartRegisterForConstantSetupData0=6))
-emit(p.pack("3DSTATE_PS_BLEND", HasWriteableRT=1))
+if BLEND:
+    emit(p.pack("3DSTATE_PS_BLEND", HasWriteableRT=1, ColorBufferBlendEnable=1, SourceBlendFactor=3, DestinationBlendFactor=19,
+                SourceAlphaBlendFactor=1, DestinationAlphaBlendFactor=19))
+else:
+    emit(p.pack("3DSTATE_PS_BLEND", HasWriteableRT=1))
 emit(p.pack("3DSTATE_PS_EXTRA", PixelShaderValid=1, AttributeEnable=1))
 emit(p.pack("3DSTATE_BINDING_TABLE_POINTERS_PS", PointertoPSBindingTable=binding_at))
 emit(p.pack("3DSTATE_SAMPLER_STATE_POINTERS_PS", PointertoPSSamplerState=sampler))
@@ -227,6 +238,8 @@ if TRIS:
 else:
     lines.append("-- Порция команд Gen9 «прямоугольник с текстурой»: команды с 0, состояние")
 lines.append(f"-- с {SPLIT}; RELOCS — [слово, вид]: 1 — адрес порции, 2 — цели, 3 — текстуры, 4 — вершин.")
+if BLEND:
+    lines.append("-- Цвет смешивается с целью по альфе (вершины или текстуры): src·a + dst·(1 − a).")
 lines.append("-- Ширина, высота и шаг поверхностей (SIZE_WORD, PITCH_WORD от начала их")
 lines.append("-- состояния: (высота−1)·65536 + (ширина−1); шаг−1) и вершины (VERTICES,")
 lines.append("-- 9 слов: на вершину x | y·65536 и две доли текстуры float) и правый нижний")
