@@ -51,7 +51,8 @@
 --     он, больше — страницы в окне агента ровно по размеру; свои страницы того
 --     же размера остаются на месте (snippet.py узнаёт адрес до сборки), иные
 --     отдаются; NoUploadRoom / trim_bay(agent, size) — отдать хвост
--- run() — открыть карту, линк, проверить arena_map, serve; причал — по заливке
+-- run() — открыть карту, проверить arena_map, сразу главный экран, под ним
+--     поднять Wi-Fi (драйвер молчит), линк кабеля — watch_link, serve
 -- program() — вход: run с баннером при сбое, затем вечное ожидание
 
 use io
@@ -91,7 +92,7 @@ use os.target.uefi_x86_64.network.mrpc
 use os.target.uefi_x86_64.network.mrpc.data
 use os.target.uefi_x86_64.platform.utf8
 
-VERSION = 22
+VERSION = 23
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -771,6 +772,7 @@ skill wifi_start(agent, name, place) {
         out "Wi-Fi: нет прошивки на диске ({err}); залей посылку и скажи wifi-keep"
     }
     @chip = qca9377.open()
+    chip.quiet = yes
     @told = qca9377.bring_up(chip, place, name) rescue |err| {
         qca9377.quiet(chip)
         agent.wifi_text = "ошибка: {err}"
@@ -881,34 +883,18 @@ skill run() {
     @screen = uefi.wide_console(firmware.guest_base())
     @columns = screen.columns
     @rows = screen.rows
-    io.show("Saltic agent: screen {columns} x {rows} characters")
     @card = rtl8111.open()
-    @mac = net.mac_text(card.mac)
-    io.show("[1] card {mac}")
     rtl8111.configure(card)
-    io.show("[2] card configured, waiting for link...")
-    @link = rtl8111.wait_link(card) rescue |err| { "none yet: agent keeps running and waits for the cable" }
-    io.show("[3] link {link}")
-    @linked = has_link(card)
-    (linked == yes) { greet(card) }
-    io.show("[4] listening on 10.0.0.2:5555 (arp + udp commands)")
-    @regions = arena_map.check()
-    @arena_used = arena_map.used()
-    io.show("[5] arena map: {regions} regions, {arena_used} bytes, no overlap")
-    io.show("")
+    arena_map.check()
     @bay = firmware.region(card.base, "bay")
-    io.show("[6] upload bay taken per upload, limit {UPLOAD_LIMIT} bytes")
-    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = UPLOAD_LIMIT, linked = linked }
+    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = UPLOAD_LIMIT }
     agent.active_at = day_second(card.base)
     system_panel.measure_disk(card.base) rescue |err| { none }
-    io.show("[7] Wi-Fi: firmware from disk, open network «{WIFI_NETWORK}» ...")
-    wifi_up(agent, WIFI_NETWORK) rescue |err| { none }
-    (agent.wifi == none) { io.show("    Wi-Fi is not up (say wifi for details)") }
-    ((agent.wifi == none) == no) {
-        @address = wifi_address(agent)
-        io.show("    Wi-Fi up: {address}:5555")
-    }
     clear_screen(agent)
+    feed.show_reply(agent, feed.text_bytes("поднимаю Wi-Fi «{WIFI_NETWORK}» …", 200))
+    @wifi = wifi_up(agent, WIFI_NETWORK) rescue |err| { "Wi-Fi: {err}" }
+    feed.show_reply(agent, feed.text_bytes(wifi, 200))
+    watch_link(agent)
     netlog.say_text(card.base, "агент Saltic {VERSION} слушает 10.0.0.2:5555")
     serve(agent) rescue |err| {
         last_cry(card, "агент остановился: {err}")
