@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Проверка всех поддерживаемых хостов перед релизом: тесты на x86-64 Linux
-# прямо на процессоре, затем qemu-virt (графика), x86-64 UEFI и rv32i Linux
+# прямо на процессоре, все тесты компилятором RV64 под qemu-riscv64 (канон),
+# затем qemu-virt (графика), x86-64 UEFI и rv32i Linux
 # (closure: канон собирается и исполняется в QEMU). rv32i Linux целиком проверяет
 # global-check.sh. Полный лог: .cache/build/workbench/hosts.log
 source "$(dirname "$0")/../bootstrap/stamp.sh"
@@ -12,7 +13,7 @@ pattern='итог|проверка:|error|подтвержд|ок$|ok$|прой�
 : > "$log"
 status=0
 aborted=0
-for step in "x86_64 all" "rv32i platforms"; do
+for step in "x86_64 all" "rv64 all" "rv32i platforms"; do
     read -r host group <<< "$step"
     echo "== $host: $group"
     SALTIC_TEST_HOST="$host" nix --extra-experimental-features "nix-command flakes" develop \
