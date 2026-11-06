@@ -4,7 +4,9 @@
 -- экран прошивкой построчно. Камера смотрит на LOOK с орбиты радиуса RADIUS.
 -- Берут программа clay и хранитель экрана агента (agent/saver).
 --
--- Stage { front, sky, back, camera, scene, faces }
+-- Stage { front, sky, back, camera, scene, faces, painter } — painter —
+--     [intel_gpu/render.Painter], если задний буфер размечен для видеокарты:
+--     грани рисует её 3D-движок, иначе процессор
 -- open_stage(base, front) -> Stage — буферы неба и кадра (страницы), сцена
 -- pages(stage) -> страниц одного буфера; close_stage(base, stage) — отдать буферы
 -- draw_sky(screen) — градиент неба
@@ -16,6 +18,7 @@ use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.screen.geometry
 use os.target.uefi_x86_64.screen.clay.mesh
 use os.target.uefi_x86_64.screen.clay.scene
+use os.target.uefi_x86_64.drivers.intel_gpu.render
 use os.uiengine.canvas
 
 RADIUS = 1150
@@ -29,7 +32,8 @@ Stage = Box {
     back = graphics.Screen {},
     camera = mesh.Camera {},
     scene = scene.Scene {},
-    faces = 0
+    faces = 0,
+    painter = []
 }
 
 skill draw_sky(screen) {
@@ -50,7 +54,12 @@ skill open_stage(base, front) {
     @back = graphics.buffer_like(base, front)
     draw_sky(sky)
     @world = scene.build(front)
-    out Stage { front = front, sky = sky, back = back, camera = mesh.Camera { width = front.width, height = front.height }, scene = world, faces = scene.quads(world) }
+    @painter = []
+    (group.count(back.accel) > 0) {
+        @made = render.painter(group.get(back.accel, 0), base) rescue |err| { none }
+        ((made == none) == no) { painter = [made] }
+    }
+    out Stage { front = front, sky = sky, back = back, camera = mesh.Camera { width = front.width, height = front.height }, scene = world, faces = scene.quads(world), painter = painter }
 }
 
 skill pages(stage) {
@@ -71,9 +80,18 @@ skill render(stage, angle, lift, base) {
     @from = [RADIUS * geometry.cosine(angle) / geometry.ONE, lift, RADIUS * geometry.sine(angle) / geometry.ONE]
     mesh.look(camera, from, LOOK)
     @world = stage.scene
+    @bodies = mesh.order(camera, world.bodies)
+    (group.count(stage.painter) > 0) {
+        @painter = group.get(stage.painter, 0)
+        render.begin(painter)
+        mesh.collect_ground(painter, camera, world.ground, scene.CELLS)
+        drum (group.count(world.blots)) { mesh.collect(painter, camera, group.get(world.blots, beat)) }
+        drum (group.count(bodies)) { mesh.collect(painter, camera, group.get(bodies, beat)) }
+        render.triangles(painter, render.Surface { at = back.frame, pitch = back.stride * graphics.PIXEL_BYTES, width = back.width, height = back.height })
+        out graphics.push(base, stage.front, back)
+    }
     mesh.ground(back, camera, world.ground, scene.CELLS)
     drum (group.count(world.blots)) { mesh.draw(back, camera, group.get(world.blots, beat)) }
-    @bodies = mesh.order(camera, world.bodies)
     drum (group.count(bodies)) { mesh.draw(back, camera, group.get(bodies, beat)) }
     out graphics.push(base, stage.front, back)
 }

@@ -19,10 +19,16 @@
 -- draw(screen, camera, body) — тело в screen; ground(…) — земля рядами
 -- order(camera, bodies) -> тела от дальних к ближним
 -- fill_quad(screen, points) — заливка выпуклого четырёхугольника цветом
+-- visible(camera, body, quad, seen) -> углы на экране или none (грань
+--     спиной или за камерой)
+-- collect(painter, camera, body) / collect_ground(…) — как draw / ground, но
+--     грани не красит, а складывает треугольниками для видеокарты
+--     (intel_gpu/render.add_quad); рисует потом render.triangles
 
 use core.num
 use core.group
 use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.drivers.intel_gpu.render
 use os.target.uefi_x86_64.screen.geometry
 
 UNIT = 1024
@@ -167,7 +173,7 @@ skill fill_quad(screen, points, color) {
     out none
 }
 
-skill draw_quad(screen, camera, body, quad, seen) {
+skill visible(camera, body, quad, seen) {
     ((body.flat == yes) == no) {
         @toward = (camera.x - quad.cx) * quad.nx + (camera.y - quad.cy) * quad.ny + (camera.z - quad.cz) * quad.nz
         (toward <= 0) { out none }
@@ -176,7 +182,41 @@ skill draw_quad(screen, camera, body, quad, seen) {
     drum (4) {
         (group.get(group.get(corners, beat), 2) < NEAR) { out none }
     }
+    out corners
+}
+
+skill draw_quad(screen, camera, body, quad, seen) {
+    @corners = visible(camera, body, quad, seen)
+    (corners == none) { out none }
     out fill_quad(screen, corners, quad.color)
+}
+
+skill collect_quad(painter, camera, body, quad, seen) {
+    @corners = visible(camera, body, quad, seen)
+    (corners == none) { out none }
+    out render.add_quad(painter, corners, quad.color)
+}
+
+skill collect(painter, camera, body) {
+    @seen = seen_points(camera, body)
+    drum (group.count(body.quads)) { collect_quad(painter, camera, body, group.get(body.quads, beat), seen) }
+    out none
+}
+
+skill collect_ground(painter, camera, body, cells) {
+    @seen = seen_points(camera, body)
+    @rows_down = camera.z < group.get(body.center, 2)
+    @columns_down = camera.x < group.get(body.center, 0)
+    drum (cells) {
+        @row = beat
+        (rows_down == yes) { row = cells - 1 - beat }
+        drum (cells) {
+            @column = beat
+            (columns_down == yes) { column = cells - 1 - beat }
+            collect_quad(painter, camera, body, group.get(body.quads, row * cells + column), seen)
+        }
+    }
+    out none
 }
 
 skill seen_points(camera, body) {

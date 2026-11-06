@@ -1,31 +1,50 @@
--- intel_gpu/render — 3D-движок Intel Gen9: порция команд «прямоугольник с
--- текстурой» (шаблон generated/rect, собран по igt rendercopy_gen9 и Mesa
--- genxml): конвейер 3D рисует прямоугольник цели, каждую точку красит
--- пиксельный шейдер выборкой из текстуры. Порция лежит в своём буфере
--- (размечен «один в один»), кольцо рендера переходит в неё
+-- intel_gpu/render — 3D-движок Intel Gen9. Две порции команд — шаблоны,
+-- собранные tools/gen9 по igt rendercopy_gen9 и Mesa genxml:
+--   generated/rect — прямоугольник с текстурой (шейдер igt: выборка);
+--   generated/tris — треугольники с цветом по вершинам (свой шейдер: PLN по
+--     R, G, B, A и запись в цель).
+-- Порция лежит в своём буфере (размечен «один в один»), драйвер вписывает в
+-- неё адреса, размеры и число вершин; кольцо рендера переходит в неё
 -- (MI_BATCH_BUFFER_START) между сбросом кэшей и сбросом цели (PIPE_CONTROL).
+-- Вершина треугольника — 2 слова: x | y·65536 (int16) и цвет RGBA8.
 --
 -- Surface { at, pitch, width, height } — поверхность: адрес GGTT, шаг строки
 --     в байтах, размеры в пикселях (32 бита на пиксель, BGRA)
--- Painter { gpu, batch } — видеокарта и буфер порции (BATCH_PAGES страниц)
--- painter(gpu, base) -> Painter — буфер порции; MemoryExhausted
+-- Painter { gpu, batch, strip, vertices, memory, count } — видеокарта, буферы
+--     порций (прямоугольник, треугольники), буфер вершин (memory — он же для
+--     core.mem: вершины пишутся прямо в память, без вызова на слово) и
+--     сколько в нём вершин
+-- painter(gpu, base) -> Painter — буферы; MemoryExhausted
 -- draw(painter, target, texture, x, y, width, height) -> yes, если движок
 --     дочитал кольцо: прямоугольник цели с x, y, растянутая на него текстура
--- Внутри: put(…) — слово в буфер порции; ONE — 1.0 в битах float
+-- begin(painter) — пустой список треугольников
+-- add_quad(painter, corners, pixel) — четырёхугольник (углы [x, y, …]
+--     экрана) двумя треугольниками цвета pixel (0xRRGGBB); вне FAR — мимо
+-- triangles(painter, target) -> yes — нарисовать накопленные треугольники
+-- Внутри: put / load(…) — слово в буфер, шаблон в буфер с адресами;
+--     ONE — 1.0 в битах float; VERTEX_LIMIT — вершин в буфере
 
 use core.num
 use core.group
+use core.mem
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.drivers.intel_gpu
 use os.target.uefi_x86_64.drivers.intel_gpu.generated.rect
+use os.target.uefi_x86_64.drivers.intel_gpu.generated.tris
 
 BATCH_PAGES = 2
+VERTEX_PAGES = 64
+VERTEX_LIMIT = 32760
+VERTEX_BYTES = 8
 ONE = 1065353216
 HALF_WORD = 65536
+OPAQUE = 4278190080
+FAR = 16000
 KIND_BATCH = 1
 KIND_TARGET = 2
 KIND_TEXTURE = 3
+KIND_VERTICES = 4
 
 Surface = Box {
     at = 0,
@@ -36,41 +55,118 @@ Surface = Box {
 
 Painter = Box {
     gpu = intel_gpu.Gpu {},
-    batch = 0
+    batch = 0,
+    strip = 0,
+    vertices = 0,
+    memory = [],
+    count = 0
 }
 
 skill painter(gpu, base) {
     @batch = uefi.pages_in_window(base, BATCH_PAGES)
     intel_gpu.map_identity(gpu, batch, BATCH_PAGES)
-    out Painter { gpu = gpu, batch = batch }
+    @strip = uefi.pages_in_window(base, BATCH_PAGES)
+    intel_gpu.map_identity(gpu, strip, BATCH_PAGES)
+    @vertices = uefi.pages_in_window(base, VERTEX_PAGES)
+    intel_gpu.map_identity(gpu, vertices, VERTEX_PAGES)
+    out Painter { gpu = gpu, batch = batch, strip = strip, vertices = vertices, memory = firmware.guest(vertices, base) }
 }
 
-skill put(painter, index, value) {
-    out firmware.write_phys32(painter.batch, painter.gpu.base, index * 4, value)
+skill put(painter, place, index, value) {
+    out firmware.write_phys32(place, painter.gpu.base, index * 4, value)
 }
 
-skill surface(painter, at, area) {
-    put(painter, at / 4 + rect.SIZE_WORD, group.get(rect.BATCH, at / 4 + rect.SIZE_WORD) + (area.height - 1) * HALF_WORD + area.width - 1)
-    out put(painter, at / 4 + rect.PITCH_WORD, group.get(rect.BATCH, at / 4 + rect.PITCH_WORD) + area.pitch - 1)
+skill load(painter, place, words, relocs, target, extra) {
+    drum (group.count(words)) { put(painter, place, beat, group.get(words, beat)) }
+    drum (relocs) {
+        @index = group.get(beat, 0)
+        @kind = group.get(beat, 1)
+        @add = place
+        (kind == KIND_TARGET) { add = target.at }
+        (kind == KIND_TEXTURE) { add = extra }
+        (kind == KIND_VERTICES) { add = extra }
+        put(painter, place, index, group.get(words, index) + add)
+    }
+    out none
+}
+
+skill surface(painter, place, at, words, area) {
+    @size = at / 4 + rect.SIZE_WORD
+    @pitch = at / 4 + rect.PITCH_WORD
+    put(painter, place, size, group.get(words, size) + (area.height - 1) * HALF_WORD + area.width - 1)
+    out put(painter, place, pitch, group.get(words, pitch) + area.pitch - 1)
+}
+
+skill run(painter, place) {
+    @gpu = painter.gpu
+    intel_gpu.submit_render(gpu, group.concat(group.concat(rect.BEFORE, [rect.START, place, 0]), rect.AFTER))
+    out intel_gpu.wait_render(gpu)
 }
 
 skill draw(painter, target, texture, x, y, width, height) {
-    @words = group.count(rect.BATCH)
-    drum (words) { put(painter, beat, group.get(rect.BATCH, beat)) }
-    drum (rect.RELOCS) {
-        @index = group.get(beat, 0)
-        @kind = group.get(beat, 1)
-        @add = painter.batch
-        (kind == KIND_TARGET) { add = target.at }
-        (kind == KIND_TEXTURE) { add = texture.at }
-        put(painter, index, group.get(rect.BATCH, index) + add)
-    }
-    surface(painter, rect.DESTINATION, target)
-    surface(painter, rect.SOURCE, texture)
-    put(painter, rect.DRAWING_WORD, (target.height - 1) * HALF_WORD + target.width - 1)
+    @place = painter.batch
+    load(painter, place, rect.BATCH, rect.RELOCS, target, texture.at)
+    surface(painter, place, rect.DESTINATION, rect.BATCH, target)
+    surface(painter, place, rect.SOURCE, rect.BATCH, texture)
+    put(painter, place, rect.DRAWING_WORD, (target.height - 1) * HALF_WORD + target.width - 1)
     @corners = [(x + width) + (y + height) * HALF_WORD, ONE, ONE, x + (y + height) * HALF_WORD, 0, ONE, x + y * HALF_WORD, 0, 0]
-    drum (9) { put(painter, rect.VERTICES / 4 + beat, group.get(corners, beat)) }
-    @gpu = painter.gpu
-    intel_gpu.submit_render(gpu, group.concat(group.concat(rect.BEFORE, [rect.START, painter.batch, 0]), rect.AFTER))
-    out intel_gpu.wait_render(gpu)
+    drum (9) { put(painter, place, rect.VERTICES / 4 + beat, group.get(corners, beat)) }
+    out run(painter, place)
+}
+
+skill begin(painter) {
+    painter.count = 0
+    out none
+}
+
+skill vertex(painter, point, rgba) {
+    @x = group.get(point, 0)
+    @y = group.get(point, 1)
+    @at = painter.count * VERTEX_BYTES
+    mem.store32(painter.memory, at, num.mod(x + HALF_WORD, HALF_WORD) + num.mod(y + HALF_WORD, HALF_WORD) * HALF_WORD)
+    mem.store32(painter.memory, at + 4, rgba)
+    painter.count = painter.count + 1
+    out none
+}
+
+skill near(point) {
+    @x = group.get(point, 0)
+    @y = group.get(point, 1)
+    (x < 0 - FAR) { out no }
+    (x > FAR) { out no }
+    (y < 0 - FAR) { out no }
+    (y > FAR) { out no }
+    out yes
+}
+
+skill add_quad(painter, corners, pixel) {
+    (painter.count + 6 > VERTEX_LIMIT) { out none }
+    drum (corners) {
+        (near(beat) == no) { out none }
+    }
+    @red = num.mod(pixel / 65536, 256)
+    @green = num.mod(pixel / 256, 256)
+    @blue = num.mod(pixel, 256)
+    @rgba = red + green * 256 + blue * 65536 + OPAQUE
+    @a = group.get(corners, 0)
+    @b = group.get(corners, 1)
+    @c = group.get(corners, 2)
+    @d = group.get(corners, 3)
+    vertex(painter, a, rgba)
+    vertex(painter, b, rgba)
+    vertex(painter, c, rgba)
+    vertex(painter, a, rgba)
+    vertex(painter, c, rgba)
+    out vertex(painter, d, rgba)
+}
+
+skill triangles(painter, target) {
+    (painter.count == 0) { out yes }
+    @place = painter.strip
+    load(painter, place, tris.BATCH, tris.RELOCS, target, painter.vertices)
+    surface(painter, place, tris.DESTINATION, tris.BATCH, target)
+    put(painter, place, tris.DRAWING_WORD, (target.height - 1) * HALF_WORD + target.width - 1)
+    put(painter, place, tris.VERTEX_SIZE_WORD, painter.count * VERTEX_BYTES)
+    put(painter, place, tris.COUNT_WORD, painter.count)
+    out run(painter, place)
 }

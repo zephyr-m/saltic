@@ -15,6 +15,8 @@ import sys
 import genxml
 
 XML = sys.argv[1]
+SHAPE = sys.argv[2] if len(sys.argv) > 2 else "rect"
+TRIS = SHAPE == "tris"
 p = genxml.Packer(XML)
 
 BATCH_BYTES = 8192
@@ -23,7 +25,8 @@ B8G8R8A8_UNORM = 0x0C0
 R16G16_SSCALED = 0x0F6
 R32G32_FLOAT = 0x085
 R32G32B32A32_FLOAT = 0x000
-BATCH, TARGET, TEXTURE = 1, 2, 3
+R8G8B8A8_UNORM = 0x0C7
+BATCH, TARGET, TEXTURE, VERTS = 1, 2, 3, 4
 
 words = [0] * (BATCH_BYTES // 4)
 relocs = []
@@ -76,8 +79,16 @@ KERNEL = [0x0080005a, 0x2f403ae8, 0x3a0000c0, 0x008d0040,
           0x0080005a, 0x2f803ae8, 0x3a0000d0, 0x008d0040,
           0x02800031, 0x2e203a48, 0x0e8d0f40, 0x08840001,
           0x05800031, 0x20003a40, 0x0e8d0e20, 0x90031000]
+if TRIS:
+    # Свой шейдер: PLN igt (протянуть атрибут по треугольнику) четыре раза —
+    # R, G, B, A атрибута 0 (g6.0, g6.4, g7.0, g7.4) в g113…g120, затем та же
+    # запись в цель igt (SIMD16, данные с g113).
+    KERNEL = []
+    for dst, src in ((0x2e20, 0xc0), (0x2e60, 0xd0), (0x2ea0, 0xe0), (0x2ee0, 0xf0)):
+        KERNEL += [0x0080005a, (dst << 16) | 0x3ae8, 0x3a000000 | src, 0x008d0040]
+    KERNEL += [0x05800031, 0x20003a40, 0x0e8d0e20, 0x90031000]
 kernel = put_state(KERNEL, 64)
-vertices = put_state([0] * 9, 8)
+vertices = put_state([0] * 9, 8) if not TRIS else 0
 cc_state = put_state(p.pack("COLOR_CALC_STATE"), 64)
 blend = [0] * p.length("BLEND_STATE")
 for i in range(16):
@@ -142,7 +153,7 @@ emit(p.pack("3DSTATE_RASTER", FrontWinding=1, CullMode=1))
 emit(p.pack("3DSTATE_SF"))
 emit(p.pack("3DSTATE_WM", BarycentricInterpolationMode=1))
 emit(p.pack("3DSTATE_CONSTANT_PS"))
-emit(p.pack("3DSTATE_PS", KernelStartPointer0=kernel, BindingTableEntryCount=2, SamplerCount=1, **{"16PixelDispatchEnable": 1},
+emit(p.pack("3DSTATE_PS", KernelStartPointer0=kernel, BindingTableEntryCount=1 if TRIS else 2, SamplerCount=0 if TRIS else 1, **{"16PixelDispatchEnable": 1},
             MaximumNumberofThreadsPerPSD=62, DispatchGRFStartRegisterForConstantSetupData0=6))
 emit(p.pack("3DSTATE_PS_BLEND", HasWriteableRT=1))
 emit(p.pack("3DSTATE_PS_EXTRA", PixelShaderValid=1, AttributeEnable=1))
@@ -159,8 +170,10 @@ emit(p.pack("3DSTATE_DRAWING_RECTANGLE"))
 vb_header = p.pack("3DSTATE_VERTEX_BUFFERS")
 vb_header[0] = (vb_header[0] & ~0xFF) | (1 + p.length("VERTEX_BUFFER_STATE") - 2)
 emit(vb_header)
-vbs = p.pack("VERTEX_BUFFER_STATE", VertexBufferIndex=0, AddressModifyEnable=1, MOCS=0, BufferPitch=12, BufferStartingAddress=vertices, BufferSize=36)
-emit(vbs, [(word_of("VERTEX_BUFFER_STATE", "BufferStartingAddress"), BATCH)])
+vb_at = cmd_at
+vbs = p.pack("VERTEX_BUFFER_STATE", VertexBufferIndex=0, AddressModifyEnable=1, MOCS=0, BufferPitch=8 if TRIS else 12, BufferStartingAddress=vertices, BufferSize=0 if TRIS else 36)
+emit(vbs, [(word_of("VERTEX_BUFFER_STATE", "BufferStartingAddress"), VERTS if TRIS else BATCH)])
+vb_size_word = vb_at // 4 + word_of("VERTEX_BUFFER_STATE", "BufferSize")
 ve_header = p.pack("3DSTATE_VERTEX_ELEMENTS")
 ve_header[0] = (ve_header[0] & ~0xFF) | (1 + 3 * p.length("VERTEX_ELEMENT_STATE") - 2)
 emit(ve_header)
@@ -168,12 +181,18 @@ emit(p.pack("VERTEX_ELEMENT_STATE", VertexBufferIndex=0, Valid=1, SourceElementF
             Component0Control=2, Component1Control=2, Component2Control=2, Component3Control=2))
 emit(p.pack("VERTEX_ELEMENT_STATE", VertexBufferIndex=0, Valid=1, SourceElementFormat=R16G16_SSCALED, SourceElementOffset=0,
             Component0Control=1, Component1Control=1, Component2Control=2, Component3Control=3))
-emit(p.pack("VERTEX_ELEMENT_STATE", VertexBufferIndex=0, Valid=1, SourceElementFormat=R32G32_FLOAT, SourceElementOffset=4,
-            Component0Control=1, Component1Control=1, Component2Control=2, Component3Control=3))
-emit(p.pack("3DSTATE_VF_TOPOLOGY", PrimitiveTopologyType=15))
+if TRIS:
+    emit(p.pack("VERTEX_ELEMENT_STATE", VertexBufferIndex=0, Valid=1, SourceElementFormat=R8G8B8A8_UNORM, SourceElementOffset=4,
+                Component0Control=1, Component1Control=1, Component2Control=1, Component3Control=1))
+else:
+    emit(p.pack("VERTEX_ELEMENT_STATE", VertexBufferIndex=0, Valid=1, SourceElementFormat=R32G32_FLOAT, SourceElementOffset=4,
+                Component0Control=1, Component1Control=1, Component2Control=2, Component3Control=3))
+emit(p.pack("3DSTATE_VF_TOPOLOGY", PrimitiveTopologyType=4 if TRIS else 15))
 emit(p.pack("3DSTATE_VF"))
 emit(p.pack("3DSTATE_VF_INSTANCING"))
+prim_at = cmd_at
 emit(p.pack("3DPRIMITIVE", VertexCountPerInstance=3, InstanceCount=1))
+count_word = prim_at // 4 + word_of("3DPRIMITIVE", "VertexCountPerInstance")
 emit(p.pack("MI_BATCH_BUFFER_END"))
 assert cmd_at <= SPLIT, cmd_at
 
@@ -183,10 +202,11 @@ src = p.pack("RENDER_SURFACE_STATE", **surface_common)
 for i, w in enumerate(dst):
     words[dst_ss // 4 + i] = w
 for i, w in enumerate(src):
-    words[src_ss // 4 + i] = w
+    words[src_ss // 4 + i] = w if not TRIS else 0
 base_word = word_of("RENDER_SURFACE_STATE", "SurfaceBaseAddress")
 relocs.append((dst_ss // 4 + base_word, TARGET))
-relocs.append((src_ss // 4 + base_word, TEXTURE))
+if not TRIS:
+    relocs.append((src_ss // 4 + base_word, TEXTURE))
 size_word = word_of("RENDER_SURFACE_STATE", "Width")
 pitch_word = word_of("RENDER_SURFACE_STATE", "SurfacePitch")
 used = state_at
@@ -197,10 +217,16 @@ before = p.pack("PIPE_CONTROL", CommandStreamerStallEnable=1, StateCacheInvalida
 after = p.pack("PIPE_CONTROL", CommandStreamerStallEnable=1, RenderTargetCacheFlushEnable=1, DCFlushEnable=1)
 
 lines = []
-lines.append("-- intel_gpu/generated/rect — СГЕНЕРИРОВАНО tools/gen9/gen9_batch.py по igt")
+lines.append(f"-- intel_gpu/generated/{SHAPE} — СГЕНЕРИРОВАНО tools/gen9/gen9_batch.py по igt")
 lines.append("-- rendercopy_gen9.c и описаниям Mesa genxml (gen90.xml); руками не править.")
-lines.append("-- Порция команд Gen9 «прямоугольник с текстурой»: команды с 0, состояние")
-lines.append(f"-- с {SPLIT}; RELOCS — [слово, вид]: 1 — адрес порции, 2 — цели, 3 — текстуры.")
+if TRIS:
+    lines.append("-- Порция команд Gen9 «треугольники с цветом по вершинам» (TRILIST, свой")
+    lines.append("-- шейдер: PLN по R, G, B, A и запись в цель): вершина — 8 байт, x | y·65536")
+    lines.append("-- (int16) и цвет r | g·256 | b·65536 | a·16777216 (RGBA8); буфер вершин —")
+    lines.append("-- отдельно (вид 4). Число вершин — COUNT_WORD, байт — VERTEX_SIZE_WORD.")
+else:
+    lines.append("-- Порция команд Gen9 «прямоугольник с текстурой»: команды с 0, состояние")
+lines.append(f"-- с {SPLIT}; RELOCS — [слово, вид]: 1 — адрес порции, 2 — цели, 3 — текстуры, 4 — вершин.")
 lines.append("-- Ширина, высота и шаг поверхностей (SIZE_WORD, PITCH_WORD от начала их")
 lines.append("-- состояния: (высота−1)·65536 + (ширина−1); шаг−1) и вершины (VERTICES,")
 lines.append("-- 9 слов: на вершину x | y·65536 и две доли текстуры float) и правый нижний")
@@ -215,6 +241,8 @@ lines.append(f"SIZE_WORD = {size_word}")
 lines.append(f"PITCH_WORD = {pitch_word}")
 lines.append(f"VERTICES = {vertices}")
 lines.append(f"DRAWING_WORD = {drawing_word}")
+lines.append(f"VERTEX_SIZE_WORD = {vb_size_word}")
+lines.append(f"COUNT_WORD = {count_word}")
 lines.append(f"START = {start[0]}")
 lines.append("BEFORE = [" + ", ".join(str(w) for w in before) + "]")
 lines.append("AFTER = [" + ", ".join(str(w) for w in after) + "]")
