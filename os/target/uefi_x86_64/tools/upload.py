@@ -3,8 +3,9 @@ import struct
 import sys
 import time
 
+from acer_address import route
+
 CHUNK = 1024
-AGENT = "10.0.0.2"
 COMMAND_PORT, DATA_PORT = 5555, 5556
 
 if len(sys.argv) < 2:
@@ -15,7 +16,8 @@ run = "--run" in sys.argv[2:]
 data = open(path, "rb").read()
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(("10.0.0.1", 0))
+LOCAL, AGENT = route()
+sock.bind((LOCAL, 0))
 
 
 def ask(text, timeout=5):

@@ -9,11 +9,13 @@
   acer_upload  — залить .efi (tools/upload.py), по желанию запустить
   acer_shot    — снимок экрана (tools/shot.py), отдаётся картинкой
   acer_snippet — собрать и запустить кусок Saltic (tools/snippet.py)
-Транспорт к агенту — UDP 10.0.0.2:5555, одна датаграмма — один JSON.
+Транспорт к агенту — UDP :5555 (кабель 10.0.0.2 или Wi-Fi, acer_address.route;
+путь ищется заново после молчания), одна датаграмма — один JSON.
 """
 
 import base64
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -21,8 +23,10 @@ import tempfile
 import time
 from pathlib import Path
 
-AGENT = ("10.0.0.2", 5555)
-LOCAL = "10.0.0.1"
+from acer_address import route
+
+PORT = 5555
+found = None
 TOOLS = Path(__file__).resolve().parent
 PREFIX = "acer_"
 counter = 0
@@ -32,15 +36,31 @@ def log(text):
     print(f"mrpc_bridge: {text}", file=sys.stderr, flush=True)
 
 
+def path():
+    global found
+    if found is None:
+        found = route(say=False)
+        os.environ["SALTIC_ACER"] = "%s,%s" % found
+        log("агент: %s -> %s" % found)
+    return found
+
+
+def forget_path():
+    global found
+    found = None
+    os.environ.pop("SALTIC_ACER", None)
+
+
 def ask(cmd, params=None, timeout=8):
     global counter
     counter += 1
+    local, agent = path()
     request = {"cmd": cmd, "id": counter, **(params or {})}
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.bind((LOCAL, 0))
+        sock.bind((local, 0))
         sock.settimeout(timeout)
-        sock.sendto(json.dumps(request, ensure_ascii=False).encode(), AGENT)
+        sock.sendto(json.dumps(request, ensure_ascii=False).encode(), (agent, PORT))
         started = time.time()
         while True:
             data, _ = sock.recvfrom(65535)
@@ -58,8 +78,9 @@ def ask(cmd, params=None, timeout=8):
 
 def fire(text):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((LOCAL, 0))
-    sock.sendto(text.encode(), AGENT)
+    local, agent = path()
+    sock.bind((local, 0))
+    sock.sendto(text.encode(), (agent, PORT))
     sock.close()
 
 
@@ -161,10 +182,11 @@ def handle(message, commands):
                 content, failed = call_extra(name, args)
             else:
                 cmd = next((key for key in commands if key.replace("-", "_") == name), name)
-                reply = ask(cmd, args, timeout=30 if cmd in ("volumes", "install", "keep", "usb", "pci") else 8)
+                reply = ask(cmd, args, timeout=60 if cmd in ("volumes", "install", "keep", "usb", "pci", "wifi", "wifi-keep") else 8)
                 content, failed = reply_text(reply), reply.get("ok") is not True
         except (OSError, subprocess.TimeoutExpired) as err:
-            content, failed = f"агент не ответил: {err}", True
+            forget_path()
+            content, failed = f"агент не ответил: {err} (путь поищу заново)", True
         if isinstance(content, str):
             content = [{"type": "text", "text": content}]
         return {"content": content, "isError": failed}

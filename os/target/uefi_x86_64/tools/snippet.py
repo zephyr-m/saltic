@@ -16,6 +16,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from acer_address import route
+
 ROOT = Path(__file__).resolve().parents[4]
 TOOLS = Path(__file__).resolve().parent
 HEAP = "67108864"
@@ -37,10 +39,10 @@ def bay_address(total):
     нужного размера, upload.py потом получит те же."""
     asked = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     asked.settimeout(5)
-    asked.bind(("10.0.0.1", 0))
-    asked.sendto(f"upload {total}".encode(), ("10.0.0.2", 5555))
+    asked.bind((LOCAL, 0))
+    asked.sendto(f"upload {total}".encode(), (AGENT, 5555))
     asked.recvfrom(65535)
-    asked.sendto(b"info", ("10.0.0.2", 5555))
+    asked.sendto(b"info", (AGENT, 5555))
     said = asked.recvfrom(65535)[0].decode(errors="replace")
     return int(said.split("приём программ ", 1)[1].split(",", 1)[0], 16)
 
@@ -63,13 +65,15 @@ def program(snippet, constants=""):
 if len(sys.argv) < 2:
     sys.exit(__doc__)
 snippet = Path(sys.argv[2]).read_text() if sys.argv[1] == "-f" else " ".join(sys.argv[1:])
+LOCAL, AGENT = route()
+os.environ["SALTIC_ACER"] = f"{LOCAL},{AGENT}"
 shown = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 shown.settimeout(5)
-shown.bind(("10.0.0.1", 0))
+shown.bind((LOCAL, 0))
 # Код уходит одним кадром: длинный разлетается на куски, а у агента 4 места
 # в кольце приёма — переполнение глушит приём карты насовсем.
 shown_bytes = ("code " + snippet).encode()[:1400].decode(errors="ignore").encode()
-shown.sendto(shown_bytes, ("10.0.0.2", 5555))
+shown.sendto(shown_bytes, (AGENT, 5555))
 print(f"snippet: агент: {shown.recvfrom(65535)[0].decode(errors='replace')}", flush=True)
 work = Path(tempfile.mkdtemp(prefix="snippet-"))
 source, image = work / "snippet.saltic", work / "snippet.efi"

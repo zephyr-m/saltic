@@ -1,5 +1,9 @@
--- agent — программа-агент для Acer: слушает команды по UDP (10.0.0.2:5555),
--- принимает программы по порту 5556, запускает их, держит полку на диске.
+-- agent — программа-агент для Acer: слушает команды по UDP (10.0.0.2:5555 по
+-- кабелю и адрес по DHCP в Wi-Fi), принимает программы по порту 5556,
+-- запускает их, держит полку на диске. Wi-Fi: посылка прошивки лежит в
+-- \SALTIC\FIRMWARE\QCA9377.BIN (команда wifi-keep), при старте агент
+-- грузит её в причал и подключается к открытой сети WIFI_NETWORK; ответ уходит
+-- тем же входом, откуда пришла команда (via).
 -- Только x86_64-uefi; куча 1073741824. Никогда не выходит. Команды — реестр
 -- agent.commands; на том же порту — mRPC/1.0 (пакет-объект JSON, network.mrpc).
 -- Agent — всё состояние цикла; card.base — guest_base. Ответ на команду —
@@ -8,7 +12,11 @@
 -- Agent { card, frames, commands, arp, expected, received, total, columns,
 --     rows, line, cursor, console, shown_second, rounds, failures, last_error,
 --     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, limit,
---     linked, opening, saver, active_at }
+--     linked, opening, saver, active_at, wifi, wifi_text, via }
+-- my_ip(agent) -> наш IP на входе via / transmit(agent, frame) — кадр в via
+-- wifi_up(agent, name) -> текст — прошивка с диска в причал, qca9377.bring_up;
+--     greet по Wi-Fi / wifi_keep(agent) -> текст — посылку из причала на диск
+-- poll_wifi(agent) — до WIFI_FRAMES кадров из Wi-Fi в handle с via = wifi
 -- day_second(base) -> секунда суток / wake(agent) -> yes, если снят хранитель;
 --     отмечает активность / doze(agent) — хранитель после SAVER_AFTER секунд простоя
 -- log(agent, message) — в консоль, пока console = yes
@@ -50,6 +58,8 @@ use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.arena_map
 use os.target.uefi_x86_64.platform.pci
 use os.target.uefi_x86_64.drivers.rtl8111
+use os.target.uefi_x86_64.drivers.qca9377
+use os.target.uefi_x86_64.drivers.qca9377.traffic
 use os.target.uefi_x86_64.network.net
 use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.screen.graphics
@@ -75,7 +85,7 @@ use os.target.uefi_x86_64.network.mrpc
 use os.target.uefi_x86_64.network.mrpc.data
 use os.target.uefi_x86_64.platform.utf8
 
-VERSION = 15
+VERSION = 16
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -87,6 +97,12 @@ UPLOAD_LIMIT = 33554432
 PAGE_BYTES = 4096
 REPORT_EVERY = 32768
 MY_IP = [10, 0, 0, 2]
+WIFI_NETWORK = "POCO X6 Pro 5G"
+WIFI_FOLDER = "FIRMWARE"
+WIFI_FILE = "QCA9377.BIN"
+WIFI_EVERY = 8
+WIFI_FRAMES = 4
+WIFI_ROOM = 1048576
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -117,7 +133,10 @@ Agent = Box {
     linked = no,
     opening = "",
     saver = no,
-    active_at = 0
+    active_at = 0,
+    wifi = none,
+    wifi_text = "выключен",
+    via = "cable"
 }
 
 COUNTDOWN = 5
@@ -258,7 +277,8 @@ Info = Box {
     columns = 0,
     rows = 0,
     failures = 0,
-    last_error = ""
+    last_error = "",
+    wifi = ""
 }
 
 skill gather(agent) {
@@ -284,13 +304,14 @@ skill gather(agent) {
         columns = agent.columns,
         rows = agent.rows,
         failures = agent.failures,
-        last_error = agent.last_error
+        last_error = agent.last_error,
+        wifi = agent.wifi_text
     }
 }
 
 skill information(agent) {
     @info = gather(agent)
-    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {info.mac}, ip {info.ip}, udp-порт 5555\nлинк {info.link}\nарена DMA {info.arena}, приём программ {info.bay}, своих страниц {info.held} КБ, предел {info.limit} байт\nкадров {info.frames}, команд {info.handled}, ответов ARP {info.arp}\nэкран {info.columns} × {info.rows} символов\nсбоев в цикле {info.failures}, последний: {info.last_error}"
+    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {info.mac}, ip {info.ip}, udp-порт 5555\nлинк {info.link}\nWi-Fi {info.wifi}\nарена DMA {info.arena}, приём программ {info.bay}, своих страниц {info.held} КБ, предел {info.limit} байт\nкадров {info.frames}, команд {info.handled}, ответов ARP {info.arp}\nэкран {info.columns} × {info.rows} символов\nсбоев в цикле {info.failures}, последний: {info.last_error}"
 }
 
 skill info_fields(info) {
@@ -312,7 +333,8 @@ skill info_fields(info) {
         data.number("arp", info.arp),
         data.object("screen", screen),
         data.number("failures", info.failures),
-        data.text("last_error", info.last_error)
+        data.text("last_error", info.last_error),
+        data.text("wifi", info.wifi)
     ]
 }
 
@@ -510,6 +532,12 @@ skill execute(agent, text, payload) {
     }
     (name == "prepare-disk") { out prepare_disk(agent, words) }
     (name == "install") { out install_image(agent) }
+    (name == "wifi") {
+        @network = WIFI_NETWORK
+        (group.count(words) > 1) { network = str.slice(text, 5, str.bytes(text)) }
+        out wifi_up(agent, network)
+    }
+    (name == "wifi-keep") { out wifi_keep(agent) }
     (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
     @help = commands.help_text()
     out "не знаю команду '{name}'. {help}"
@@ -571,6 +599,7 @@ skill restart_later(agent) {
 skill answer(agent, bytes) {
     @packet = net.udp(bytes)
     (str.starts_with(packet.text, SHOT_PREFIX) == yes) {
+        (agent.via == "wifi") { out agent }
         shot.send_chunk(agent.card, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(SHOT_PREFIX), str.bytes(packet.text))))
         out agent
     }
@@ -591,8 +620,8 @@ skill answer(agent, bytes) {
     }
     feed.show_reply(agent, reply_bytes)
     netlog.say(agent.card.base, reply_bytes)
-    @frame = net.udp_frame_bytes(agent.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply_bytes)
-    @sent = rtl8111.send(agent.card, frame)
+    @frame = net.udp_frame_bytes(our_mac(agent), my_ip(agent), packet.from_mac, packet.from_ip, PORT, packet.from_port, reply_bytes)
+    @sent = transmit(agent, frame)
     log(agent, "  replied {sent} bytes")
     agent.commands = agent.commands + 1
     ((agent.opening == "") == no) {
@@ -637,14 +666,20 @@ skill store_chunk(agent, bytes) {
     @said = "ok {agent.received}"
     @to_mac = net.slice_bytes(bytes, 6, 6)
     @to_ip = net.slice_bytes(bytes, 26, 4)
-    rtl8111.send(agent.card, net.udp_frame(agent.card.mac, MY_IP, to_mac, to_ip, DATA_PORT, net.word(bytes, 34), said))
+    transmit(agent, net.udp_frame(our_mac(agent), my_ip(agent), to_mac, to_ip, DATA_PORT, net.word(bytes, 34), said))
     out agent
 }
 
 skill handle(agent, bytes) {
     agent.frames = agent.frames + 1
+    (agent.via == "wifi") {
+        traffic.answer_arp(agent.wifi, agent.wifi.point, bytes)
+        (net.is_udp_to(bytes, PORT) == yes) { out answer(agent, bytes) }
+        (net.is_udp_to(bytes, DATA_PORT) == yes) { out store_chunk(agent, bytes) }
+        out agent
+    }
     (net.is_arp_request_for(bytes, MY_IP) == yes) {
-        rtl8111.send(agent.card, net.arp_reply(agent.card.mac, MY_IP, bytes))
+        transmit(agent, net.arp_reply(agent.card.mac, MY_IP, bytes))
         agent.arp = agent.arp + 1
         @asker = net.ip_text(net.slice_bytes(bytes, 28, 4))
         log(agent, "arp: told {asker} that 10.0.0.2 is us")
@@ -653,6 +688,81 @@ skill handle(agent, bytes) {
     (net.is_udp_to(bytes, PORT) == yes) { out answer(agent, bytes) }
     (net.is_udp_to(bytes, DATA_PORT) == yes) { out store_chunk(agent, bytes) }
     out agent
+}
+
+skill my_ip(agent) {
+    (agent.via == "wifi") { out agent.wifi.ip }
+    out MY_IP
+}
+
+skill our_mac(agent) {
+    (agent.via == "wifi") { out agent.wifi.mac }
+    out agent.card.mac
+}
+
+skill wifi_address(agent) {
+    out net.ip_text(agent.wifi.ip)
+}
+
+skill transmit(agent, frame) {
+    (agent.via == "wifi") {
+        traffic.send(agent.wifi, agent.wifi.point, frame)
+        out group.count(frame)
+    }
+    out rtl8111.send(agent.card, frame)
+}
+
+skill wifi_keep(agent) {
+    (agent.expected == 0) { out "сначала upload посылки (tools/wifi_pack.py)" }
+    ((agent.received == agent.expected) == no) { out str.concat("приём не закончен: ", upload_state(agent)) }
+    @written = programs.keep_file(agent.card.base, agent.bay, agent.expected, WIFI_FOLDER, WIFI_FILE)
+    out "сохранил прошивку Wi-Fi: {written} байт в \\SALTIC\\{WIFI_FOLDER}\\{WIFI_FILE}"
+}
+
+skill wifi_up(agent, name) {
+    @started = day_second(agent.card.base)
+    agent.wifi = none
+    agent.wifi_text = "поднимаю"
+    agent.expected = 0
+    take_bay(agent, WIFI_ROOM)
+    @size = programs.load_file(agent.card.base, "{WIFI_FOLDER}\\{WIFI_FILE}", agent.bay, WIFI_ROOM) rescue |err| {
+        agent.wifi_text = "нет прошивки на диске"
+        out "Wi-Fi: нет прошивки на диске ({err}); залей посылку и скажи wifi-keep"
+    }
+    @chip = qca9377.open()
+    @told = qca9377.bring_up(chip, agent.bay, name) rescue |err| {
+        qca9377.quiet(chip)
+        agent.wifi_text = "ошибка: {err}"
+        out "Wi-Fi: ошибка {err}"
+    }
+    @took = day_second(agent.card.base) - started
+    (chip.point == none) {
+        qca9377.quiet(chip)
+        agent.wifi_text = "не подключился"
+        out "Wi-Fi «{name}» не поднялся за {took} с: {told}"
+    }
+    agent.wifi = chip
+    @address = net.ip_text(chip.ip)
+    agent.wifi_text = "{address} в «{name}»"
+    agent.via = "wifi"
+    transmit(agent, net.udp_frame(chip.mac, chip.ip, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic {VERSION} слушает {address}:5555 по Wi-Fi"))
+    agent.via = "cable"
+    out "Wi-Fi: {address} в «{name}» за {took} с ({size} байт прошивки)"
+}
+
+skill poll_wifi(agent) {
+    (agent.wifi == none) { out none }
+    drum (WIFI_FRAMES) {
+        @bytes = traffic.poll(agent.wifi)
+        (bytes == none) { leave }
+        agent.via = "wifi"
+        handle(agent, bytes) rescue |err| {
+            agent.via = "cable"
+            out none
+        }
+        agent.via = "cable"
+    }
+    out none
 }
 
 skill has_link(card) {
@@ -687,6 +797,7 @@ skill tick(agent) {
         }
     }
     agent.rounds = agent.rounds + 1
+    (num.mod(agent.rounds, WIFI_EVERY) == 0) { poll_wifi(agent) }
     (num.mod(agent.rounds, KEY_EVERY) == 0) { press(agent, uefi.poll_key(agent.card.base, 0)) }
     (agent.rounds == CLOCK_EVERY) {
         agent.rounds = 0
@@ -748,6 +859,13 @@ skill run() {
     @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = UPLOAD_LIMIT, linked = linked }
     agent.active_at = day_second(card.base)
     system_panel.measure_disk(card.base) rescue |err| { none }
+    io.show("[7] Wi-Fi: firmware from disk, open network «{WIFI_NETWORK}» ...")
+    wifi_up(agent, WIFI_NETWORK) rescue |err| { none }
+    (agent.wifi == none) { io.show("    Wi-Fi is not up (say wifi for details)") }
+    ((agent.wifi == none) == no) {
+        @address = wifi_address(agent)
+        io.show("    Wi-Fi up: {address}:5555")
+    }
     clear_screen(agent)
     netlog.say_text(card.base, "агент Saltic {VERSION} слушает 10.0.0.2:5555")
     serve(agent) rescue |err| {
