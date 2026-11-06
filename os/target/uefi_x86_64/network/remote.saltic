@@ -9,14 +9,18 @@
 -- state и quit понимает и mRPC (пакет-объект JSON, network.mrpc); прочие
 -- cmd — unknown_cmd со списком.
 -- Остальные пакеты UDP на 5555 отдаются программе — у неё свои команды.
+-- Вход — кабель (rtl8111) и Wi-Fi, поднятый агентом (qca9377.handoff): ответ
+-- уходит тем входом, откуда пришёл последний пакет (via); счётчики колец
+-- Wi-Fi — обратно на страницу передачи каждый круг serve.
 -- Каждый запрос и каждый ответ (и программы тоже) пишется в netlog — панель
 -- слева; куски снимка shot-part не пишутся. Раз в PANEL_EVERY вызовов serve —
 -- system_panel.tick (панель справа) со счётчиком кадров программы: один
 -- вызов serve — один кадр, панель рисует их график.
 --
--- Remote — карта, состояние программы текстом, байты последнего снимка,
---     meter — счётчик кадров для системной панели
--- open_remote() -> Remote; без кабеля — NoLink
+-- Remote — карта, Wi-Fi (или none), via, состояние программы текстом, байты
+--     последнего снимка, meter — счётчик кадров для системной панели
+-- open_remote() -> Remote; нет ни кабеля, ни Wi-Fi от агента — NoLink
+-- my_ip(remote) / our_mac(remote) / transmit(remote, frame) — по входу via
 -- serve(remote) -> группа пакетов Udp для программы
 -- tell(remote, text) — сообщить своё состояние (отвечает на state)
 -- own(remote, place, pages) — страницы прошивки, которые вернуть при quit
@@ -30,6 +34,8 @@ use core.num
 use core.str
 use core.group
 use os.target.uefi_x86_64.drivers.rtl8111
+use os.target.uefi_x86_64.drivers.qca9377.handoff
+use os.target.uefi_x86_64.drivers.qca9377.traffic
 use os.target.uefi_x86_64.network.net
 use os.target.uefi_x86_64.network.shot
 use os.target.uefi_x86_64.platform.parse
@@ -47,6 +53,7 @@ PORT = 5555
 PART = "shot-part "
 
 PANEL_EVERY = 8
+WIFI_FRAMES = 4
 REPLY_LIMIT = 1400
 QUIET_STATE = "программа не рассказала о себе (нет remote.tell)"
 COMMANDS = [
@@ -61,29 +68,64 @@ Remote = Box {
     state = "",
     owned = [],
     rounds = 0,
-    meter = system_panel.Meter {}
+    meter = system_panel.Meter {},
+    wifi = none,
+    cabled = no,
+    via = "cable"
 }
 
 skill open_remote() {
     @card = rtl8111.open()
     rtl8111.configure(card)
-    rtl8111.wait_link(card)
-    out Remote { card = card }
+    rtl8111.wait_link(card) rescue |err| { none }
+    @cabled = rtl8111.has_bit(rtl8111.status(card), rtl8111.PHY_LINK)
+    @remote = Remote { card = card, cabled = cabled }
+    @wifi = handoff.adopt(card.base) rescue |err| { none }
+    remote.wifi = wifi
+    (cabled == no) {
+        (wifi == none) { out error.NoLink }
+        remote.via = "wifi"
+    }
+    out remote
+}
+
+skill my_ip(remote) {
+    (remote.via == "wifi") { out remote.wifi.ip }
+    out MY_IP
+}
+
+skill our_mac(remote) {
+    (remote.via == "wifi") { out remote.wifi.mac }
+    out remote.card.mac
+}
+
+skill transmit(remote, frame) {
+    (remote.via == "wifi") {
+        traffic.send(remote.wifi, remote.wifi.point, frame)
+        out group.count(frame)
+    }
+    out rtl8111.send(remote.card, frame)
 }
 
 skill reply_text(remote, packet, text) {
     netlog.say_text(remote.card.base, text)
-    out rtl8111.send(remote.card, net.udp_frame(remote.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, packet.from_port, text))
+    out transmit(remote, net.udp_frame(our_mac(remote), my_ip(remote), packet.from_mac, packet.from_ip, PORT, packet.from_port, text))
 }
 
 skill answer(remote, bytes) {
+    (remote.via == "wifi") { traffic.answer_arp(remote.wifi, remote.wifi.point, bytes) }
     (net.is_arp_request_for(bytes, MY_IP) == yes) {
-        rtl8111.send(remote.card, net.arp_reply(remote.card.mac, MY_IP, bytes))
+        (remote.via == "cable") { rtl8111.send(remote.card, net.arp_reply(remote.card.mac, MY_IP, bytes)) }
         out none
     }
     (net.is_udp_to(bytes, PORT) == no) { out none }
     @packet = net.udp(bytes)
     (str.starts_with(packet.text, PART) == yes) {
+        (remote.via == "wifi") {
+            @piece = shot.chunk_frame(remote.wifi.mac, remote.wifi.ip, remote.card.base, remote.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(PART), str.bytes(packet.text))))
+            ((piece == none) == no) { transmit(remote, piece) }
+            out none
+        }
         shot.send_chunk(remote.card, remote.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(PART), str.bytes(packet.text))))
         out none
     }
@@ -158,16 +200,26 @@ skill serve(remote) {
         (rtl8111.received(remote.card, beat) == yes) {
             @bytes = rtl8111.read_frame(remote.card, beat)
             rtl8111.release(remote.card, beat)
+            remote.via = "cable"
             @packet = answer(remote, bytes)
             ((packet == none) == no) { packets = group.add(packets, packet) }
         }
     }
+    (remote.wifi == none) { out packets }
+    drum (WIFI_FRAMES) {
+        @bytes = traffic.poll(remote.wifi)
+        (bytes == none) { leave }
+        remote.via = "wifi"
+        @packet = answer(remote, bytes)
+        ((packet == none) == no) { packets = group.add(packets, packet) }
+    }
+    handoff.write_counters(remote.wifi)
     out packets
 }
 
 skill send_to(remote, packet, port, text_bytes) {
     netlog.say(remote.card.base, text_bytes)
-    out rtl8111.send(remote.card, net.udp_frame_bytes(remote.card.mac, MY_IP, packet.from_mac, packet.from_ip, PORT, port, text_bytes))
+    out transmit(remote, net.udp_frame_bytes(our_mac(remote), my_ip(remote), packet.from_mac, packet.from_ip, PORT, port, text_bytes))
 }
 
 skill tell(remote, text) {

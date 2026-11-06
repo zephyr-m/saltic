@@ -18,6 +18,9 @@
 -- pages_at_address(base, place, pages) -> yes/no
 -- pages_in_window(base, pages) -> адрес в окне выше base; MemoryExhausted
 -- free_pages(base, place, pages) -> Answer
+-- find_table(base, guid) -> адрес из таблицы конфигурации UEFI по GUID (16
+--     байт группой), 0 — нет или вне окна; add_table(base, guid, place) —
+--     записать. Так страницы находят друг у друга агент и его программы
 -- forget_keys(base) — сброс буфера клавиш
 -- poll_key(base, pause) -> Key; pause — микросекунды ожидания после промаха;
 --     сначала нажатие из очереди keys (прислано по сети), потом клавиатура
@@ -55,6 +58,12 @@ WINDOW_STEP = 256
 TOP_HALF = 65535
 LOADER_DATA = 2
 PAGE_AT = 48
+SYSTEM_TABLE_COUNT = 104
+SYSTEM_TABLE_ENTRIES = 112
+TABLE_ENTRY = 24
+TABLE_POINTER = 16
+BOOT_INSTALL_CONFIGURATION_TABLE = 192
+SCRATCH_GUID = 2048
 EXIT_SIZE_AT = 32
 EXIT_DATA_AT = 40
 OUTPUT_LIMIT = 1200
@@ -182,6 +191,33 @@ skill pages_below_4g(base, pages) {
         out err
     }
     out pages_at
+}
+
+skill same_guid(base, entry, guid) {
+    drum (16) {
+        ((firmware.read8(entry, base, beat) == group.get(guid, beat)) == no) { out no }
+    }
+    out yes
+}
+
+skill find_table(base, guid) {
+    @table = firmware.system_table()
+    @entries = firmware.pointer(table, base, SYSTEM_TABLE_ENTRIES)
+    drum (firmware.read16(table, base, SYSTEM_TABLE_COUNT)) {
+        @entry = firmware.add(entries, beat * TABLE_ENTRY)
+        (same_guid(base, entry, guid) == yes) {
+            @place = firmware.pointer(entry, base, TABLE_POINTER)
+            firmware.guest(place, base) rescue |err| { out 0 }
+            out place
+        }
+    }
+    out 0
+}
+
+skill add_table(base, guid, place) {
+    @guid_at = firmware.scratch(base, SCRATCH_GUID)
+    drum (16) { firmware.write8(guid_at, base, beat, group.get(guid, beat)) }
+    out firmware.call(base, firmware.pointer(boot_services(base), base, BOOT_INSTALL_CONFIGURATION_TABLE), [guid_at, place])
 }
 
 skill free_pages(base, place, pages) {

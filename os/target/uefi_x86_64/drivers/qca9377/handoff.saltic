@@ -1,0 +1,127 @@
+-- handoff — передача поднятого Wi-Fi между агентом и его программами. Агент
+-- поднимает карту один раз (10 с); программа берёт её готовой. Состояние —
+-- страница из таблицы конфигурации UEFI (GUID ниже, как журнал netlog):
+-- адрес колец (chip.memory), окна карты, счётчики колец, MAC, IP, точка.
+-- Кольца лежат в chip.memory — ниже 4 ГБ и выше начала программ, их видят
+-- обе стороны. Кто последним трогал карту, тот пишет счётчики обратно: программа —
+-- каждый круг remote.serve, агент забирает их после программы.
+--
+-- Страница: VALID (1 — Wi-Fi поднят), MEMORY, BAR, CONFIG, затем COUNTERS
+-- слов по 4 байта (порядок — как в write_counters), затем MAC 6 байт, IP 4,
+-- BSSID 6, канал.
+--
+-- share(chip) — записать всё (агент после подъёма); забыть: forget(base)
+-- adopt(base) -> Card или none — карта по странице, сеть — в chip.point
+-- write_counters(chip) — счётчики колец на страницу (программа, каждый круг)
+-- take_back(chip) — счётчики со страницы в chip (агент после программы)
+
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.drivers.qca9377.card
+use os.target.uefi_x86_64.drivers.qca9377.scan
+
+GUID = [83, 65, 76, 84, 73, 67, 45, 87, 73, 70, 73, 0, 0, 0, 0, 1]
+VALID = 0
+MEMORY = 4
+BAR = 8
+CONFIG = 12
+COUNTERS = 16
+COUNTER_COUNT = 17
+MAC = 96
+IP = 104
+BSSID = 108
+CHANNEL = 116
+
+skill page(base) {
+    @place = uefi.find_table(base, GUID)
+    (place > 0) { out place }
+    place = uefi.pages_below_4g(base, 1)
+    uefi.add_table(base, GUID, place)
+    out place
+}
+
+skill bytes_at(base, place, offset, values) {
+    drum (group.count(values)) { firmware.write8(place, base, offset + beat, group.get(values, beat)) }
+    out none
+}
+
+skill read_bytes(base, place, offset, count) {
+    @values = []
+    drum (count) { values = group.add(values, firmware.read8(place, base, offset + beat)) }
+    out values
+}
+
+skill write_counters(chip) {
+    @place = page(chip.base)
+    @live = 0
+    (chip.letters_live == yes) { live = 1 }
+    @values = [chip.send_at, chip.receive_at, chip.letters_from, chip.diag_send, chip.diag_receive, chip.command_at, chip.wmi_endpoint, chip.event_read, chip.event_write, chip.letter_read, chip.letters_seen, chip.htt_at, chip.rx_read, chip.rx_fill, chip.frames_damaged, chip.station, live]
+    drum (COUNTER_COUNT) { firmware.write_phys32(place, chip.base, COUNTERS + beat * 4, group.get(values, beat)) }
+    out place
+}
+
+skill share(chip) {
+    @place = write_counters(chip)
+    firmware.write_phys32(place, chip.base, MEMORY, chip.memory)
+    firmware.write_phys32(place, chip.base, BAR, chip.bar)
+    firmware.write_phys32(place, chip.base, CONFIG, chip.config)
+    bytes_at(chip.base, place, MAC, chip.mac)
+    bytes_at(chip.base, place, IP, chip.ip)
+    @network = chip.point
+    bytes_at(chip.base, place, BSSID, network.address)
+    firmware.write_phys32(place, chip.base, CHANNEL, network.channel)
+    out firmware.write_phys32(place, chip.base, VALID, 1)
+}
+
+skill forget(base) {
+    @place = uefi.find_table(base, GUID)
+    (place == 0) { out none }
+    out firmware.write_phys32(place, base, VALID, 0)
+}
+
+skill counter(base, place, index) {
+    out firmware.read32(place, base, COUNTERS + index * 4)
+}
+
+skill take_back(chip) {
+    @base = chip.base
+    @place = uefi.find_table(base, GUID)
+    (place == 0) { out none }
+    chip.send_at = counter(base, place, 0)
+    chip.receive_at = counter(base, place, 1)
+    chip.command_at = counter(base, place, 5)
+    chip.event_read = counter(base, place, 7)
+    chip.event_write = counter(base, place, 8)
+    chip.letter_read = counter(base, place, 9)
+    chip.letters_seen = counter(base, place, 10)
+    chip.htt_at = counter(base, place, 11)
+    chip.rx_read = counter(base, place, 12)
+    chip.rx_fill = counter(base, place, 13)
+    chip.frames_damaged = counter(base, place, 14)
+    out none
+}
+
+skill adopt(base) {
+    @place = uefi.find_table(base, GUID)
+    (place == 0) { out none }
+    ((firmware.read32(place, base, VALID) == 1) == no) { out none }
+    @memory = firmware.read32(place, base, MEMORY)
+    firmware.guest(memory, base) rescue |err| { out none }
+    out fill(card.Card { base = base, memory = memory, bar = firmware.read32(place, base, BAR), config = firmware.read32(place, base, CONFIG) }, place)
+}
+
+skill fill(chip, place) {
+    @base = chip.base
+    chip.letters_from = counter(base, place, 2)
+    chip.diag_send = counter(base, place, 3)
+    chip.diag_receive = counter(base, place, 4)
+    chip.wmi_endpoint = counter(base, place, 6)
+    chip.station = counter(base, place, 15)
+    chip.letters_live = counter(base, place, 16) == 1
+    take_back(chip)
+    chip.mac = read_bytes(base, place, MAC, 6)
+    chip.ip = read_bytes(base, place, IP, 4)
+    chip.point = scan.Network { address = read_bytes(base, place, BSSID, 6), channel = firmware.read32(place, base, CHANNEL) }
+    out chip
+}

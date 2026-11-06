@@ -1,8 +1,11 @@
 -- rings — копирующие движки (CE): кольца дескрипторов в нашей памяти.
 -- Дескриптор — 8 байт: адрес 32, длина 16, флаги 16. Отправка — сдвинуть
 -- индекс записи; приём — карта сама вписывает длину в дескриптор. Наши кольца
--- по 16 мест (CE7 — 2). Где что лежит в арене — участки wifi_* в arena_map,
--- at(chip, name) отдаёт место участка.
+-- по 16 мест (CE7 — 2). Кольца и буферы — в своих страницах ниже 4 ГБ
+-- (chip.memory, MEMORY_PAGES страниц, раскладка MEMORY — [имя, смещение,
+-- байт]), а не в арене: их должна видеть и программа, которой агент отдаёт
+-- Wi-Fi (handoff), — она видит память только выше своего начала, а арена
+-- агента ниже. at(chip, name) отдаёт место участка.
 --
 -- descriptor(ring, base, index, buffer, length, flags) — записать дескриптор
 -- prepare(chip) — CE0 (отправка), CE1 (приём), CE7 (память карты); -> индекс CE0
@@ -14,7 +17,7 @@
 --     прошивка принимает письмо за канал 0 и молча выбрасывает
 -- expect(chip, buffer) — подложить буфер в CE1 под ответ
 -- arrived(chip, slot) -> байт в слоте CE1, 0 — пока пусто
--- at(chip, name) -> адрес участка арены wifi_* по имени; UnknownRegion
+-- at(chip, name) -> адрес участка wifi_* по имени в chip.memory; UnknownRegion
 -- event_slot(chip, index) -> байт в слоте CE2, 0 — пока пусто
 -- letters_reset(chip, first) — CE1 после загрузки: 4 буфера писем по кругу с
 --     индекса first — сразу за письмами загрузки (letters_from + 4); пришедшее письмо — по ненулевой
@@ -32,9 +35,31 @@
 
 use core.num
 use core.str
+use core.group
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.drivers.qca9377.card
 
+MEMORY = [
+    ["wifi_source_ring", 0, 256],
+    ["wifi_destination_ring", 256, 256],
+    ["wifi_diag_source", 512, 256],
+    ["wifi_diag_destination", 768, 256],
+    ["wifi_event_ring", 1024, 256],
+    ["wifi_command_ring", 1280, 256],
+    ["wifi_request", 1536, 256],
+    ["wifi_frame", 1792, 256],
+    ["wifi_response", 2048, 2048],
+    ["wifi_diag_buffer", 4096, 2048],
+    ["wifi_letters", 6144, 8192],
+    ["wifi_events", 14336, 16384],
+    ["wifi_command", 30720, 2048],
+    ["wifi_htt_ring", 32768, 256],
+    ["wifi_htt_command", 33024, 256],
+    ["wifi_rx_ring", 33280, 256],
+    ["wifi_rx_buffers", 33536, 32768],
+    ["wifi_tx_frame", 66304, 2048]
+]
+MEMORY_PAGES = 17
 CE0 = 214016
 CE1 = 215040
 CE2 = 216064
@@ -61,7 +86,10 @@ skill descriptor(ring, base, index, buffer, length, flags) {
 }
 
 skill at(chip, name) {
-    out firmware.region(chip.base, name)
+    drum (MEMORY) {
+        (group.get(beat, 0) == name) { out firmware.add(chip.memory, group.get(beat, 1)) }
+    }
+    out error.UnknownRegion
 }
 
 skill ring_out(chip, engine, ring, entries, largest) {
