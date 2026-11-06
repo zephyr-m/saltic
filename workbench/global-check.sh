@@ -33,12 +33,6 @@ seconds="$(grep -o 'собрал себя за [0-9.]*' .cache/build/workbench/r
 last=.cache/build/workbench/self-build-seconds
 [[ -f "$last" ]] && echo "== ⏱️ время самосборки: было $(<"$last") с, стало $seconds с"
 echo "$seconds" > "$last"
-rv64_seconds="$(grep -o 'самосборка под qemu-riscv64 за [0-9.]*' .cache/build/workbench/refresh.log | grep -o '[0-9.]*$')"
-last_rv64=.cache/build/workbench/self-build-rv64-seconds
-if [[ -n "$rv64_seconds" ]]; then
-    [[ -f "$last_rv64" ]] && echo "== ⏱️ самосборка на RV64: было $(<"$last_rv64") с, стало $rv64_seconds с"
-    echo "$rv64_seconds" > "$last_rv64"
-fi
 memory="$(grep -o 'память самосборки [0-9]*' .cache/build/workbench/refresh.log | grep -o '[0-9]*$')"
 last_memory=.cache/build/workbench/self-build-memory
 if [[ -n "$memory" ]]; then

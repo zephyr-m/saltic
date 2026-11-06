@@ -108,9 +108,10 @@ pip устал
 nix --extra-experimental-features "nix-command flakes" develop
 ```
 
-- `just global-check` — самосборка с паспортами (rv32i и x86-64, затем RV64
-  собирает себя под `qemu-riscv64`) и тесты `all` на rv32i, с метриками и
-  «было / стало»;
+- `just global-check` — самосборка с паспортами (rv32i и x86-64) и тесты
+  `all` на rv32i, с метриками и «было / стало»;
+- `just rv64` — компилятор RV64 собирает себя под `qemu-riscv64` (минуты;
+  перед релизом);
 - `just hosts` — тесты `all` на x86-64 и платформы: qemu-virt, UEFI, closure
   (группы — [docs/TESTING.md](docs/TESTING.md));
 - `just qemu-graphics` — ОС с программами в окне QEMU.

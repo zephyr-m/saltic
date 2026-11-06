@@ -2,23 +2,24 @@
 -- Четырнадцать ролей живут в регистрах (карта REGISTER_OF_ROLE, порядок —
 -- номера ролей backend), STACK — rsp, RETURN регистра не имеет (адрес
 -- возврата на родном стеке), остальные (ARG4…ARG7, ESCAPE_BOTTOM) — слова
--- первой страницы кода [r14 + SLOTS + 4·роль] (SLOTS = адрес загрузки; страницу
+-- первой страницы кода [r14 + SLOTS + size·роль] (SLOTS = адрес загрузки; страницу
 -- резервирует Executor.new_program, образ делает её записываемой; там же —
--- слова прошивки uefi). Значение роли — 32 бита,
--- старшая половина регистра всегда ноль, поэтому [r14 + регистр + смещение]
--- — готовый адрес гостя.
+-- слова прошивки uefi). size — ширина слова: 4 в окне гостя (значение роли —
+-- 32 бита, старшая половина регистра ноль, [r14 + регистр + смещение] —
+-- готовый адрес гостя), 8 без окна (r14 = 0, адреса настоящие, роли 64-битные).
 -- Код пишется в compiler.machine.code (buffer) командами encoder; временный
 -- регистр для ролей в памяти берётся из TEMPS и сохраняется push/pop.
 --
 -- MEMORY — отметка «роль в памяти»; register(role) -> регистр или MEMORY
--- in_memory(role) -> yes/no; slot(role) -> адрес ячейки; SLOTS_BYTES — страница
+-- in_memory(role) -> yes/no; slot(role, size) -> адрес ячейки; SLOTS_BYTES — страница
 -- temp(a, b, c) -> регистр из TEMPS, не равный a, b, c
--- from_memory(op) / to_memory(op) -> форма encoder.memory: op r, [m] / op [m], r
--- CMP_MEMORY_BYTE — форма cmp dword [m], imm8 (байт дописывает вызывающий)
+-- load_form / store_form(size) -> encoder.LOAD(64) / STORE(64)
+-- from_memory(op, size) / to_memory(op, size) -> форма encoder.memory: op r, [m] / op [m], r
+-- cmp_memory_byte(size) — форма cmp [m], imm8 (байт дописывает вызывающий)
 -- emit(compiler, code) -> compiler с новым кодом
--- move_into(code, register, role) — регистр = роль (mov или load из ячейки)
--- operate_from(code, op, register, role) — регистр = регистр op роль
--- store_into(code, role, register) — роль = регистр (mov или store в ячейку)
+-- move_into(code, size, register, role) — регистр = роль (mov или load из ячейки)
+-- operate_from(code, size, op, register, role) — регистр = регистр op роль
+-- store_into(code, size, role, register) — роль = регистр (mov или store в ячейку)
 -- fetch_base(code, role) / slot_address — части адресации
 
 use core.group
@@ -40,7 +41,6 @@ REGISTER_OF_ROLE = [
 
 TEMPS = [encoder.EAX, encoder.ECX, encoder.EDX, encoder.EBX, encoder.ESI]
 
-CMP_MEMORY_BYTE = [0, 0, 0, 7, 131]
 
 skill register(role) {
     out group.get(REGISTER_OF_ROLE, role)
@@ -51,8 +51,27 @@ skill in_memory(role) {
     out no
 }
 
-skill slot(role) {
-    out SLOTS + role * 4
+skill slot(role, size) {
+    out SLOTS + role * size
+}
+
+skill wide(size) {
+    (size == 8) { out 1 }
+    out 0
+}
+
+skill load_form(size) {
+    (size == 8) { out encoder.LOAD64 }
+    out encoder.LOAD
+}
+
+skill store_form(size) {
+    (size == 8) { out encoder.STORE64 }
+    out encoder.STORE
+}
+
+skill cmp_memory_byte(size) {
+    out [0, wide(size), 0, 7, 131]
 }
 
 skill temp(a, b, c) {
@@ -66,12 +85,12 @@ skill temp(a, b, c) {
     out encoder.EAX
 }
 
-skill from_memory(op) {
-    out [0, 0, 0, encoder.NONE, op * 8 + 3]
+skill from_memory(op, size) {
+    out [0, wide(size), 0, encoder.NONE, op * 8 + 3]
 }
 
-skill to_memory(op) {
-    out [0, 0, 0, encoder.NONE, op * 8 + 1]
+skill to_memory(op, size) {
+    out [0, wide(size), 0, encoder.NONE, op * 8 + 1]
 }
 
 skill emit(compiler, code) {
@@ -79,21 +98,21 @@ skill emit(compiler, code) {
     out compiler
 }
 
-skill move_into(code, target, role) {
-    (in_memory(role) == yes) { out encoder.memory(code, encoder.LOAD, target, encoder.R14, encoder.NONE, slot(role)) }
+skill move_into(code, size, target, role) {
+    (in_memory(role) == yes) { out encoder.memory(code, load_form(size), target, encoder.R14, encoder.NONE, slot(role, size)) }
     @source = register(role)
     (source == target) { out code }
-    out encoder.operate(code, 4, encoder.MOVE, target, source)
+    out encoder.operate(code, size, encoder.MOVE, target, source)
 }
 
-skill operate_from(code, op, target, role) {
-    (in_memory(role) == yes) { out encoder.memory(code, from_memory(op), target, encoder.R14, encoder.NONE, slot(role)) }
-    out encoder.operate(code, 4, op, target, register(role))
+skill operate_from(code, size, op, target, role) {
+    (in_memory(role) == yes) { out encoder.memory(code, from_memory(op, size), target, encoder.R14, encoder.NONE, slot(role, size)) }
+    out encoder.operate(code, size, op, target, register(role))
 }
 
-skill store_into(code, role, source) {
-    (in_memory(role) == yes) { out encoder.memory(code, encoder.STORE, source, encoder.R14, encoder.NONE, slot(role)) }
+skill store_into(code, size, role, source) {
+    (in_memory(role) == yes) { out encoder.memory(code, store_form(size), source, encoder.R14, encoder.NONE, slot(role, size)) }
     @target = register(role)
     (target == source) { out code }
-    out encoder.operate(code, 4, encoder.MOVE, target, source)
+    out encoder.operate(code, size, encoder.MOVE, target, source)
 }

@@ -12,6 +12,9 @@
 --     append_segment(target, Segment) — заголовки
 -- executable(machine) -> buffer с готовым ELF; UnresolvedPatch
 -- write(path, machine) — записать файл; WriteFailed
+-- executable_wide / write_wide(…) — без окна (слово 8 байт): адреса настоящие
+--     (старшая половина ноль), сегменты — страница ячеек ролей (RW), код +
+--     rodata (RX), data + bss (RW); стек и аргументы — ядра, низкой памяти нет
 
 use selfhost.compiler.backend.rv32i.machine.layout
 use selfhost.compiler.backend.rv32i.machine.image
@@ -51,6 +54,34 @@ skill append_identity(target) {
     @items = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     drum (items) { target = buffer.append_byte(target, beat) }
     out target
+}
+
+skill append_file_header_at(target, entry, segment_count, high) {
+    target = append_identity(target)
+    target = buffer.append_u16(target, TYPE_EXECUTABLE)
+    target = buffer.append_u16(target, MACHINE_X86_64)
+    target = append_u32(target, 1)
+    target = append_u64(target, entry, high)
+    target = append_u64(target, word.from_number(HEADER_BYTES), 0)
+    target = append_u64(target, word.from_bytes(0, 0, 0, 0), 0)
+    target = append_u32(target, 0)
+    target = buffer.append_u16(target, HEADER_BYTES)
+    target = buffer.append_u16(target, PROGRAM_HEADER_BYTES)
+    target = buffer.append_u16(target, segment_count)
+    target = buffer.append_u16(target, 64)
+    target = buffer.append_u16(target, 0)
+    out buffer.append_u16(target, 0)
+}
+
+skill append_segment_at(target, segment, high) {
+    target = append_u32(target, SEGMENT_LOAD)
+    target = append_u32(target, segment.flags)
+    target = append_u64(target, word.from_number(segment.offset), 0)
+    target = append_u64(target, segment.address, high)
+    target = append_u64(target, segment.address, high)
+    target = append_u64(target, word.from_number(segment.file_bytes), 0)
+    target = append_u64(target, segment.memory_bytes, 0)
+    out append_u64(target, word.from_number(PAGE_BYTES), 0)
 }
 
 skill append_file_header(target, entry, segment_count) {
@@ -136,3 +167,42 @@ skill write(path, machine) {
     @output = executable(machine)
     out image.write_buffer(path, output)
 }
+
+skill executable_wide(machine) {
+    (machine.resolved == no) { out error.UnresolvedPatch }
+    @current = layout.layout(machine)
+    @body = image.payload(machine, current)
+    @data_file_bytes = current.file_size - current.data_offset
+    @entry = layout.label_address(machine, current, machine.entry, 0)
+    @result = buffer.empty()
+    result = append_file_header_at(result, entry, 3, 0)
+    result = append_segment_at(result, Segment {
+        offset = PAGE_BYTES,
+        address = machine.load_address,
+        file_bytes = roles.SLOTS_BYTES,
+        memory_bytes = word.from_number(roles.SLOTS_BYTES),
+        flags = READ_WRITE
+    }, 0)
+    result = append_segment_at(result, Segment {
+        offset = PAGE_BYTES + roles.SLOTS_BYTES,
+        address = layout.address_add(machine.load_address, roles.SLOTS_BYTES),
+        file_bytes = current.data_offset - roles.SLOTS_BYTES,
+        memory_bytes = word.from_number(current.data_offset - roles.SLOTS_BYTES),
+        flags = READ_EXECUTE
+    }, 0)
+    result = append_segment_at(result, Segment {
+        offset = PAGE_BYTES + current.data_offset,
+        address = layout.address_add(machine.load_address, current.data_offset),
+        file_bytes = data_file_bytes,
+        memory_bytes = word.add_number(machine.bss_size, data_file_bytes),
+        flags = READ_WRITE
+    }, 0)
+    result = image.pad_to(result, PAGE_BYTES)
+    out buffer.append_buffer(result, body)
+}
+
+skill write_wide(path, machine) {
+    @output = executable_wide(machine)
+    out image.write_buffer(path, output)
+}
+

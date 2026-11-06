@@ -34,9 +34,6 @@ fi
 
 work="${SALTIC_BOOTSTRAP_REFRESH_DIR:-.cache/build/bootstrap-refresh}"
 heap_bytes="${SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES:-4026531840}"
-# Компилятору под RV64 — 1 ГБ: адреса программы на RV64 пока ниже 4 ГБ
-# (раскладка на 32-битных word), а 4 ГБ кучи туда не влезают.
-rv64_heap_bytes="${SALTIC_BOOTSTRAP_RV64_HEAP_BYTES:-1073741824}"
 source_path="${1:-soul/seed/selfhost/toolchain.saltic}"
 
 mkdir -p "$work/stage-1" "$work/stage-2" "$work/stage-3"
@@ -50,17 +47,14 @@ cp "$bootstrap_compiler" "$previous"
 # Самосборка идёт на x86-64. Компилятор, собравший исходники под x86_64, —
 # это перевод той же RV-программы, которую он выдал бы под rv32i, поэтому
 # x86-версия каждого поколения получается одной сборкой, без отдельного шага.
-# Сравниваются по-прежнему rv32i-байты stage-2 и stage-3. Затем stage-2 собирает
-# компилятор под RV64, тот под qemu-riscv64 собирает себя: stage-2 = stage-3 на
-# RV64 — четвёртый компилятор полки (saltic-<версия>-compiler-rv64-linux).
+# Сравниваются по-прежнему rv32i-байты stage-2 и stage-3. Самосборка на RV64
+# (под qemu-riscv64, долго) — отдельно: bootstrap/refresh-rv64.sh, just rv64.
 stage_time="$(type -P time || true)"
-# stage <компилятор> <цель> <результат> [куча] — компилятор RV64 идёт под qemu-riscv64
 stage() {
-    local compiler="$1" target="$2" output="$3" heap="${4:-$heap_bytes}"
-    local measured=() runner=()
+    local compiler="$1" target="$2" output="$3"
+    local measured=()
     [[ -n "$stage_time" ]] && measured=("$stage_time" -o "$output.time" -f "%M %U %S")
-    [[ "$compiler" == *rv64* ]] && runner=(qemu-riscv64 -B 0x100000000)
-    if ! "${measured[@]}" "${runner[@]}" "$compiler" "$source_path" "$output" "$heap" "$target" > "$output.log" 2>&1; then
+    if ! "${measured[@]}" "$compiler" "$source_path" "$output" "$heap_bytes" "$target" > "$output.log" 2>&1; then
         grep -v "^warning" "$output.log" | tail -5 >&2
         exit 1
     fi
@@ -138,30 +132,6 @@ sha256sum "$compiler"
 
 native="$(saltic_native_compiler)"
 echo "bootstrap refresh: $(basename "$native") готов"
-
-echo "bootstrap refresh: stage-2 (x86-64) собирает компилятор под RV64"
-stage "$work/stage-2/toolchain" rv64 "$work/stage-2/toolchain-rv64" "$rv64_heap_bytes"
-echo "bootstrap refresh: компилятор RV64 собирает себя под qemu-riscv64"
-rv64_started=$EPOCHREALTIME
-stage "$work/stage-2/toolchain-rv64" rv64 "$work/stage-3/toolchain-rv64" "$rv64_heap_bytes"
-rv64_seconds="$(saltic_seconds_since "$rv64_started")"
-echo "bootstrap refresh: проверяю fixed point на RV64 (stage-2 = stage-3)"
-cmp "$work/stage-2/toolchain-rv64" "$work/stage-3/toolchain-rv64"
-echo "bootstrap refresh: новый компилятор RV64: самосборка под qemu-riscv64 за $rv64_seconds с"
-rv64_path="$(saltic_compiler_path rv64 linux)"
-if cmp -s "$work/stage-3/toolchain-rv64" "$rv64_path" && [[ -f "$rv64_path.txt" ]]; then
-    echo "bootstrap refresh: $(basename "$rv64_path") не изменился"
-else
-    for old in bootstrap/saltic-*-compiler-rv64-linux; do
-        if [[ -f "$old" && "$old" != "$rv64_path" ]]; then rm -f "$old" "$old.txt"; fi
-    done
-    cp "$work/stage-3/toolchain-rv64" "$rv64_path"
-    chmod +x "$rv64_path"
-    saltic_write_passport "$rv64_path" "rv64, linux (qemu-riscv64 -B 0x100000000)" "rv32i, rv64, x86_64" \
-        "$native" "$rv64_heap_bytes" "сходится на RV64 (stage-2 = stage-3 под qemu-riscv64)" "$rv64_seconds" \
-        самосборки "$work/stage-3/toolchain-rv64.time"
-    echo "bootstrap refresh: $(basename "$rv64_path") обновлён"
-fi
 
 qemu_virt="$(saltic_qemu_virt_compiler)"
 echo "bootstrap refresh: $(basename "$qemu_virt") готов"

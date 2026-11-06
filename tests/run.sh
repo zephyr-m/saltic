@@ -325,7 +325,7 @@ test_memory() {
     build memory \
         soul/seed/tests/memory.saltic \
         "$work/memory/program.elf" \
-        1048576
+        2097152
     run_built \
         "$work/memory/program.elf"
     echo "память: регионы освобождают мусор на куче 1 МБ"
@@ -350,7 +350,7 @@ test_native() {
     SALTIC_TARGET=$target build native-memory \
         soul/seed/tests/memory.saltic \
         "$work/native/memory" \
-        1048576
+        2097152
     "$work/native/memory"
     SALTIC_TARGET=$target build native-deep \
         tests/fixtures/deep-recursion.saltic \

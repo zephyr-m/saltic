@@ -1,5 +1,5 @@
 -- ops — операции договора над ролями: пересылки, арифметика, логика, сдвиги,
--- сравнения в 0/1. Все команды 32-битные; роли в памяти (roles.MEMORY)
+-- сравнения в 0/1. Ширина команд — compiler.words.bytes: 4 в окне гостя, 8 без окна; роли в памяти (roles.MEMORY)
 -- проходят через временный регистр с push/pop. STACK (rsp) — особые случаи:
 -- move(to, STACK) = mov r64, rsp; sub r64, r14; move(STACK, from) = lea rsp,
 -- [r14 + from]; add_immediate(STACK, STACK, n) = add rsp, n.
@@ -10,22 +10,37 @@
 -- immediate(compiler, op, to, from, value) — add/and/or/xor с числом
 -- add_immediate(compiler, to, from, value) — с особыми случаями STACK
 -- shift(compiler, op, to, from, amount) / shift_by(compiler, op, to, from, count)
--- compare(code, left, right) -> code — cmp ролей (флаги)
--- compare_immediate(code, role, value) -> code — cmp роли с числом
--- test(code, role) -> code — test роли на ноль
+-- compare(code, size, left, right) -> code — cmp ролей (флаги)
+-- compare_immediate(code, size, role, value) -> code — cmp роли с числом
+-- test(code, size, role) -> code — test роли на ноль
 -- set(compiler, condition, to) — setcc + movzx в роль
--- load_immediate(compiler, to, value) / load_word(compiler, to, word)
+-- load_immediate(compiler, to, value) / load_word(compiler, to, word) — слово
+--     со знаком (без окна — movabs с расширением знака); move_word(code, size, r, word)
+-- wide_arith(compiler, kind, to, left, right) — без окна: WIDE_MULTIPLY (imul),
+--     _HIGH / _HIGH_UNSIGNED (imul / mul → rdx), WIDE_DIVIDE / REMAINDER (cqo +
+--     idiv), _UNSIGNED (div); rax, rdx, rcx сохраняются на стеке
+-- load_wide(compiler, to, wide) — movabs 64-битной константы
 
 use selfhost.compiler.backend
+use selfhost.machine.word
 use selfhost.compiler.backend.rv32i.machine.buffer
 use selfhost.compiler.backend.x86_64_native.encoder
 use selfhost.compiler.backend.x86_64_native.roles
+
+WIDE_MULTIPLY = 0
+WIDE_MULTIPLY_HIGH = 1
+WIDE_MULTIPLY_HIGH_UNSIGNED = 2
+WIDE_DIVIDE = 3
+WIDE_REMAINDER = 4
+WIDE_DIVIDE_UNSIGNED = 5
+WIDE_REMAINDER_UNSIGNED = 6
 
 skill with_temp(code, avoid1, avoid2) {
     out roles.temp(avoid1, avoid2, encoder.NONE)
 }
 
 skill move(compiler, to, from) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     (to == from) { out compiler }
     (from == backend.STACK) {
@@ -35,7 +50,7 @@ skill move(compiler, to, from) {
             code = encoder.register64(code, encoder.PUSH, x)
             code = encoder.memory(code, encoder.ADDRESS64, x, encoder.RSP, encoder.NONE, 8)
             code = encoder.operate(code, 8, encoder.SUB, x, encoder.R14)
-            code = roles.store_into(code, to, x)
+            code = roles.store_into(code, size, to, x)
             out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
         }
         code = encoder.operate(code, 8, encoder.MOVE, target, encoder.RSP)
@@ -43,7 +58,7 @@ skill move(compiler, to, from) {
     }
     (to == backend.STACK) {
         (roles.in_memory(from) == yes) {
-            code = encoder.memory(code, encoder.LOAD, encoder.RSP, encoder.R14, encoder.NONE, roles.slot(from))
+            code = encoder.memory(code, roles.load_form(size), encoder.RSP, encoder.R14, encoder.NONE, roles.slot(from, size))
             out roles.emit(compiler, encoder.operate(code, 8, encoder.ADD, encoder.RSP, encoder.R14))
         }
         out roles.emit(compiler, encoder.memory(code, encoder.ADDRESS64, encoder.RSP, encoder.R14, roles.register(from), 0))
@@ -53,31 +68,33 @@ skill move(compiler, to, from) {
         (roles.in_memory(from) == yes) {
             @x = with_temp(code, encoder.NONE, encoder.NONE)
             code = encoder.register64(code, encoder.PUSH, x)
-            code = roles.move_into(code, x, from)
-            code = roles.store_into(code, to, x)
+            code = roles.move_into(code, size, x, from)
+            code = roles.store_into(code, size, to, x)
             out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
         }
-        out roles.emit(compiler, roles.store_into(code, to, roles.register(from)))
+        out roles.emit(compiler, roles.store_into(code, size, to, roles.register(from)))
     }
-    out roles.emit(compiler, roles.move_into(code, target, from))
+    out roles.emit(compiler, roles.move_into(code, size, target, from))
 }
 
 skill negate(compiler, to, from) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @target = roles.register(to)
     (target == roles.MEMORY) {
         @x = with_temp(code, roles.register(from), encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = roles.move_into(code, x, from)
-        code = encoder.unary(code, 4, encoder.NEGATE, x)
-        code = roles.store_into(code, to, x)
+        code = roles.move_into(code, size, x, from)
+        code = encoder.unary(code, size, encoder.NEGATE, x)
+        code = roles.store_into(code, size, to, x)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
-    code = roles.move_into(code, target, from)
-    out roles.emit(compiler, encoder.unary(code, 4, encoder.NEGATE, target))
+    code = roles.move_into(code, size, target, from)
+    out roles.emit(compiler, encoder.unary(code, size, encoder.NEGATE, target))
 }
 
 skill stack_plus(compiler, to, right) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @target = roles.register(to)
     @second = roles.register(right)
@@ -87,18 +104,18 @@ skill stack_plus(compiler, to, right) {
         pick {
             (second == roles.MEMORY) {
                 code = encoder.memory(code, encoder.ADDRESS64, x, encoder.RSP, encoder.NONE, 8)
-                code = roles.operate_from(code, encoder.ADD, x, right)
+                code = roles.operate_from(code, size, encoder.ADD, x, right)
             }
             { code = encoder.memory(code, encoder.ADDRESS64, x, encoder.RSP, second, 8) }
         }
         code = encoder.operate(code, 8, encoder.SUB, x, encoder.R14)
-        code = roles.store_into(code, to, x)
+        code = roles.store_into(code, size, to, x)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
     pick {
         (second == roles.MEMORY) {
             code = encoder.operate(code, 8, encoder.MOVE, target, encoder.RSP)
-            code = roles.operate_from(code, encoder.ADD, target, right)
+            code = roles.operate_from(code, size, encoder.ADD, target, right)
         }
         { code = encoder.memory(code, encoder.ADDRESS64, target, encoder.RSP, second, 0) }
     }
@@ -106,6 +123,7 @@ skill stack_plus(compiler, to, right) {
 }
 
 skill binary(compiler, op, to, left, right, commutative) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @target = roles.register(to)
     @first = roles.register(left)
@@ -115,37 +133,39 @@ skill binary(compiler, op, to, left, right, commutative) {
     (target == roles.MEMORY) {
         @x = with_temp(code, first, second)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = roles.move_into(code, x, left)
-        code = roles.operate_from(code, op, x, right)
-        code = roles.store_into(code, to, x)
+        code = roles.move_into(code, size, x, left)
+        code = roles.operate_from(code, size, op, x, right)
+        code = roles.store_into(code, size, to, x)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
-    (target == first) { out roles.emit(compiler, roles.operate_from(code, op, target, right)) }
+    (target == first) { out roles.emit(compiler, roles.operate_from(code, size, op, target, right)) }
     (target == second) {
-        (commutative == yes) { out roles.emit(compiler, roles.operate_from(code, op, target, left)) }
-        code = encoder.unary(code, 4, encoder.NEGATE, target)
-        out roles.emit(compiler, roles.operate_from(code, encoder.ADD, target, left))
+        (commutative == yes) { out roles.emit(compiler, roles.operate_from(code, size, op, target, left)) }
+        code = encoder.unary(code, size, encoder.NEGATE, target)
+        out roles.emit(compiler, roles.operate_from(code, size, encoder.ADD, target, left))
     }
-    code = roles.move_into(code, target, left)
-    out roles.emit(compiler, roles.operate_from(code, op, target, right))
+    code = roles.move_into(code, size, target, left)
+    out roles.emit(compiler, roles.operate_from(code, size, op, target, right))
 }
 
 skill immediate(compiler, op, to, from, value) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @target = roles.register(to)
     (target == roles.MEMORY) {
         @x = with_temp(code, roles.register(from), encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = roles.move_into(code, x, from)
-        code = encoder.operate_immediate(code, 4, op, x, value)
-        code = roles.store_into(code, to, x)
+        code = roles.move_into(code, size, x, from)
+        code = encoder.operate_immediate(code, size, op, x, value)
+        code = roles.store_into(code, size, to, x)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
-    code = roles.move_into(code, target, from)
-    out roles.emit(compiler, encoder.operate_immediate(code, 4, op, target, value))
+    code = roles.move_into(code, size, target, from)
+    out roles.emit(compiler, encoder.operate_immediate(code, size, op, target, value))
 }
 
 skill add_immediate(compiler, to, from, value) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     (to == backend.STACK) {
         (from == backend.STACK) { out roles.emit(compiler, encoder.operate_immediate(code, 8, encoder.ADD, encoder.RSP, value)) }
@@ -158,7 +178,7 @@ skill add_immediate(compiler, to, from, value) {
             code = encoder.register64(code, encoder.PUSH, x)
             code = encoder.memory(code, encoder.ADDRESS64, x, encoder.RSP, encoder.NONE, value + 8)
             code = encoder.operate(code, 8, encoder.SUB, x, encoder.R14)
-            code = roles.store_into(code, to, x)
+            code = roles.store_into(code, size, to, x)
             out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
         }
         code = encoder.memory(code, encoder.ADDRESS64, target, encoder.RSP, encoder.NONE, value)
@@ -168,110 +188,194 @@ skill add_immediate(compiler, to, from, value) {
 }
 
 skill shift(compiler, op, to, from, amount) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @target = roles.register(to)
     (target == roles.MEMORY) {
         @x = with_temp(code, roles.register(from), encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = roles.move_into(code, x, from)
-        code = encoder.shift(code, 4, op, x, amount)
-        code = roles.store_into(code, to, x)
+        code = roles.move_into(code, size, x, from)
+        code = encoder.shift(code, size, op, x, amount)
+        code = roles.store_into(code, size, to, x)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
-    code = roles.move_into(code, target, from)
-    out roles.emit(compiler, encoder.shift(code, 4, op, target, amount))
+    code = roles.move_into(code, size, target, from)
+    out roles.emit(compiler, encoder.shift(code, size, op, target, amount))
 }
 
 skill shift_by(compiler, op, to, from, count) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @target = roles.register(to)
     @counter = roles.register(count)
     (counter == encoder.ECX) {
         (target == roles.MEMORY) { out shift_by_memory(compiler, op, to, from, count) }
-        code = roles.move_into(code, target, from)
-        out roles.emit(compiler, encoder.shift(code, 4, op, target, encoder.BY_CL))
+        code = roles.move_into(code, size, target, from)
+        out roles.emit(compiler, encoder.shift(code, size, op, target, encoder.BY_CL))
     }
     (target == encoder.ECX) { out shift_by_memory(compiler, op, to, from, count) }
     (target == roles.MEMORY) { out shift_by_memory(compiler, op, to, from, count) }
     code = encoder.register64(code, encoder.PUSH, encoder.ECX)
-    code = roles.move_into(code, target, from)
-    code = roles.move_into(code, encoder.ECX, count)
-    code = encoder.shift(code, 4, op, target, encoder.BY_CL)
+    code = roles.move_into(code, size, target, from)
+    code = roles.move_into(code, size, encoder.ECX, count)
+    code = encoder.shift(code, size, op, target, encoder.BY_CL)
     out roles.emit(compiler, encoder.register64(code, encoder.POP, encoder.ECX))
 }
 
 skill shift_by_memory(compiler, op, to, from, count) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @x = roles.temp(encoder.ECX, roles.register(count), roles.register(to))
     code = encoder.register64(code, encoder.PUSH, x)
     code = encoder.register64(code, encoder.PUSH, encoder.ECX)
-    code = roles.move_into(code, x, from)
-    code = roles.move_into(code, encoder.ECX, count)
-    code = encoder.shift(code, 4, op, x, encoder.BY_CL)
+    code = roles.move_into(code, size, x, from)
+    code = roles.move_into(code, size, encoder.ECX, count)
+    code = encoder.shift(code, size, op, x, encoder.BY_CL)
     code = encoder.register64(code, encoder.POP, encoder.ECX)
-    code = roles.store_into(code, to, x)
+    code = roles.store_into(code, size, to, x)
     out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
 }
 
-skill compare(code, left, right) {
+skill compare(code, size, left, right) {
     @first = roles.register(left)
     (first == roles.MEMORY) {
         @second = roles.register(right)
         (second == roles.MEMORY) {
             @x = with_temp(code, encoder.NONE, encoder.NONE)
             code = encoder.register64(code, encoder.PUSH, x)
-            code = roles.move_into(code, x, left)
-            code = roles.operate_from(code, encoder.CMP, x, right)
+            code = roles.move_into(code, size, x, left)
+            code = roles.operate_from(code, size, encoder.CMP, x, right)
             out encoder.register64(code, encoder.POP, x)
         }
-        out encoder.memory(code, roles.to_memory(encoder.CMP), second, encoder.R14, encoder.NONE, roles.slot(left))
+        out encoder.memory(code, roles.to_memory(encoder.CMP, size), second, encoder.R14, encoder.NONE, roles.slot(left, size))
     }
-    out roles.operate_from(code, encoder.CMP, first, right)
+    out roles.operate_from(code, size, encoder.CMP, first, right)
 }
 
-skill compare_immediate(code, role, value) {
+skill compare_immediate(code, size, role, value) {
     (roles.in_memory(role) == yes) {
-        code = encoder.memory(code, roles.CMP_MEMORY_BYTE, 0, encoder.R14, encoder.NONE, roles.slot(role))
+        code = encoder.memory(code, roles.cmp_memory_byte(size), 0, encoder.R14, encoder.NONE, roles.slot(role, size))
         out buffer.append_byte(code, value)
     }
-    out encoder.operate_immediate(code, 4, encoder.CMP, roles.register(role), value)
+    out encoder.operate_immediate(code, size, encoder.CMP, roles.register(role), value)
 }
 
-skill test(code, role) {
-    (roles.in_memory(role) == yes) { out compare_immediate(code, role, 0) }
+skill test(code, size, role) {
+    (roles.in_memory(role) == yes) { out compare_immediate(code, size, role, 0) }
     @target = roles.register(role)
-    out encoder.operate(code, 4, encoder.TEST, target, target)
+    out encoder.operate(code, size, encoder.TEST, target, target)
 }
 
 skill set(compiler, condition, to) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @target = roles.register(to)
     (target == roles.MEMORY) {
         @x = with_temp(code, encoder.NONE, encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
         code = encoder.set_condition(code, condition, x)
-        code = roles.store_into(code, to, x)
+        code = roles.store_into(code, size, to, x)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
     out roles.emit(compiler, encoder.set_condition(code, condition, target))
 }
 
 skill load_immediate(compiler, to, value) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     (roles.in_memory(to) == yes) {
-        out roles.emit(compiler, encoder.store_immediate(code, 4, encoder.R14, encoder.NONE, roles.slot(to), value))
+        out roles.emit(compiler, encoder.store_immediate(code, size, encoder.R14, encoder.NONE, roles.slot(to, size), value))
     }
-    out roles.emit(compiler, encoder.operate_immediate(code, 4, encoder.MOVE, roles.register(to), value))
+    out roles.emit(compiler, encoder.operate_immediate(code, size, encoder.MOVE, roles.register(to), value))
 }
 
 skill load_word(compiler, to, data) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     (roles.in_memory(to) == yes) {
         @x = with_temp(code, encoder.NONE, encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = encoder.move_word(code, x, data)
-        code = roles.store_into(code, to, x)
+        code = move_word(code, size, x, data)
+        code = roles.store_into(code, size, to, x)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
-    out roles.emit(compiler, encoder.move_word(code, roles.register(to), data))
+    out roles.emit(compiler, move_word(code, size, roles.register(to), data))
 }
+
+skill move_word(code, size, target, data) {
+    (size == 4) { out encoder.move_word(code, target, data) }
+    @fill = word.from_number(0)
+    (data.b3 > 127) { fill = word.from_bytes(255, 255, 255, 255) }
+    out encoder.move_quad(code, target, data, fill)
+}
+
+skill saved_offset(register) {
+    (register == encoder.EAX) { out 0 }
+    (register == encoder.EDX) { out 8 }
+    (register == encoder.ECX) { out 16 }
+    out -1
+}
+
+skill wide_operand(code, target, role) {
+    @source = roles.register(role)
+    @offset = saved_offset(source)
+    pick {
+        (source == target) { }
+        (offset >= 0) { code = encoder.memory(code, encoder.LOAD64, target, encoder.RSP, encoder.NONE, offset) }
+        { code = roles.move_into(code, 8, target, role) }
+    }
+    out code
+}
+
+skill wide_arith(compiler, kind, to, left, right) {
+    @code = compiler.machine.code
+    code = encoder.register64(code, encoder.PUSH, encoder.ECX)
+    code = encoder.register64(code, encoder.PUSH, encoder.EDX)
+    code = encoder.register64(code, encoder.PUSH, encoder.EAX)
+    code = wide_operand(code, encoder.ECX, right)
+    code = wide_operand(code, encoder.EAX, left)
+    @result = encoder.EAX
+    pick {
+        (kind == WIDE_MULTIPLY) { code = encoder.operate(code, 8, encoder.MULTIPLY, encoder.EAX, encoder.ECX) }
+        (kind == WIDE_MULTIPLY_HIGH) {
+            code = encoder.unary(code, 8, encoder.MULTIPLY_WIDE_SIGNED, encoder.ECX)
+            result = encoder.EDX
+        }
+        (kind == WIDE_MULTIPLY_HIGH_UNSIGNED) {
+            code = encoder.unary(code, 8, encoder.MULTIPLY_WIDE_UNSIGNED, encoder.ECX)
+            result = encoder.EDX
+        }
+        (kind < WIDE_DIVIDE_UNSIGNED) {
+            code = encoder.single(code, encoder.CQO)
+            code = encoder.unary(code, 8, encoder.DIVIDE, encoder.ECX)
+            (kind == WIDE_REMAINDER) { result = encoder.EDX }
+        }
+        {
+            code = encoder.operate(code, 4, encoder.XOR, encoder.EDX, encoder.EDX)
+            code = encoder.unary(code, 8, encoder.DIVIDE_UNSIGNED, encoder.ECX)
+            (kind == WIDE_REMAINDER_UNSIGNED) { result = encoder.EDX }
+        }
+    }
+    @target = roles.register(to)
+    @offset = saved_offset(target)
+    pick {
+        (offset >= 0) { code = encoder.memory(code, encoder.STORE64, result, encoder.RSP, encoder.NONE, offset) }
+        { code = roles.store_into(code, 8, to, result) }
+    }
+    code = encoder.register64(code, encoder.POP, encoder.EAX)
+    code = encoder.register64(code, encoder.POP, encoder.EDX)
+    out roles.emit(compiler, encoder.register64(code, encoder.POP, encoder.ECX))
+}
+
+skill load_wide(compiler, to, value) {
+    @code = compiler.machine.code
+    (roles.in_memory(to) == yes) {
+        @x = with_temp(code, encoder.NONE, encoder.NONE)
+        code = encoder.register64(code, encoder.PUSH, x)
+        code = encoder.move_quad(code, x, value.low, value.high)
+        code = roles.store_into(code, 8, to, x)
+        out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
+    }
+    out roles.emit(compiler, encoder.move_quad(code, roles.register(to), value.low, value.high))
+}
+

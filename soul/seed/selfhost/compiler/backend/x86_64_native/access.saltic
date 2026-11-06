@@ -9,16 +9,16 @@
 --     LOAD_ZERO_BYTE / LOAD_ZERO_HALF
 -- store(compiler, form, from, base, offset) — encoder.STORE / STORE_BYTE / STORE_HALF
 -- store_zero(compiler, size, base, offset) — size 4 или 1
--- push(compiler, from) / pop(compiler, to) — ячейка 4 байта на стеке гостя
+-- push(compiler, from) / pop(compiler, to) — ячейка в слово (4 или 8 байт) на стеке
 
 use selfhost.compiler.backend
 use selfhost.compiler.backend.x86_64_native.encoder
 use selfhost.compiler.backend.x86_64_native.roles
 
-CELL_BYTES = 4
 TEMP_BYTES = 8
 
 skill load(compiler, form, to, base, offset, firmware) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @target = roles.register(to)
     (base == backend.STACK) {
@@ -26,7 +26,7 @@ skill load(compiler, form, to, base, offset, firmware) {
             @x = roles.temp(encoder.NONE, encoder.NONE, encoder.NONE)
             code = encoder.register64(code, encoder.PUSH, x)
             code = encoder.memory(code, form, x, encoder.RSP, encoder.NONE, offset + TEMP_BYTES)
-            code = roles.store_into(code, to, x)
+            code = roles.store_into(code, size, to, x)
             out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
         }
         out roles.emit(compiler, encoder.memory(code, form, target, encoder.RSP, encoder.NONE, offset))
@@ -35,11 +35,11 @@ skill load(compiler, form, to, base, offset, firmware) {
     (bases == roles.MEMORY) {
         @x = roles.temp(target, encoder.NONE, encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = roles.move_into(code, x, base)
+        code = roles.move_into(code, size, x, base)
         pick {
             (target == roles.MEMORY) {
                 code = encoder.memory(code, form, x, encoder.R14, x, offset)
-                code = roles.store_into(code, to, x)
+                code = roles.store_into(code, size, to, x)
             }
             { code = encoder.memory(code, form, target, encoder.R14, x, offset) }
         }
@@ -56,13 +56,14 @@ skill load(compiler, form, to, base, offset, firmware) {
         @x = roles.temp(bases, encoder.NONE, encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
         code = encoder.memory(code, form, x, encoder.R14, bases, offset)
-        code = roles.store_into(code, to, x)
+        code = roles.store_into(code, size, to, x)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
     out roles.emit(compiler, encoder.memory(code, form, target, encoder.R14, bases, offset))
 }
 
 skill store(compiler, form, from, base, offset) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @source = roles.register(from)
     @bases = roles.register(base)
@@ -76,7 +77,7 @@ skill store(compiler, form, from, base, offset) {
             (bases == roles.MEMORY) {
                 @y = roles.temp(x, encoder.NONE, encoder.NONE)
                 code = encoder.register64(code, encoder.PUSH, y)
-                code = roles.move_into(code, y, base)
+                code = roles.move_into(code, size, y, base)
                 code = encoder.memory(code, form, x, encoder.R14, y, offset)
                 code = encoder.register64(code, encoder.POP, y)
             }
@@ -88,7 +89,7 @@ skill store(compiler, form, from, base, offset) {
         (source == roles.MEMORY) {
             @x = roles.temp(encoder.NONE, encoder.NONE, encoder.NONE)
             code = encoder.register64(code, encoder.PUSH, x)
-            code = roles.move_into(code, x, from)
+            code = roles.move_into(code, size, x, from)
             code = encoder.memory(code, form, x, encoder.RSP, encoder.NONE, offset + TEMP_BYTES)
             out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
         }
@@ -97,12 +98,12 @@ skill store(compiler, form, from, base, offset) {
     (bases == roles.MEMORY) {
         @x = roles.temp(source, encoder.NONE, encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = roles.move_into(code, x, base)
+        code = roles.move_into(code, size, x, base)
         pick {
             (source == roles.MEMORY) {
                 @y = roles.temp(x, encoder.NONE, encoder.NONE)
                 code = encoder.register64(code, encoder.PUSH, y)
-                code = roles.move_into(code, y, from)
+                code = roles.move_into(code, size, y, from)
                 code = encoder.memory(code, form, y, encoder.R14, x, offset)
                 code = encoder.register64(code, encoder.POP, y)
             }
@@ -113,7 +114,7 @@ skill store(compiler, form, from, base, offset) {
     (source == roles.MEMORY) {
         @x = roles.temp(bases, encoder.NONE, encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = roles.move_into(code, x, from)
+        code = roles.move_into(code, size, x, from)
         code = encoder.memory(code, form, x, encoder.R14, bases, offset)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
@@ -121,13 +122,14 @@ skill store(compiler, form, from, base, offset) {
 }
 
 skill store_zero(compiler, size, base, offset) {
+    @word = compiler.words.bytes
     @code = compiler.machine.code
     (base == backend.STACK) { out roles.emit(compiler, encoder.store_immediate(code, size, encoder.RSP, encoder.NONE, offset, 0)) }
     @bases = roles.register(base)
     (bases == roles.MEMORY) {
         @x = roles.temp(encoder.NONE, encoder.NONE, encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = roles.move_into(code, x, base)
+        code = roles.move_into(code, word, x, base)
         code = encoder.store_immediate(code, size, encoder.R14, x, offset, 0)
         out roles.emit(compiler, encoder.register64(code, encoder.POP, x))
     }
@@ -135,31 +137,33 @@ skill store_zero(compiler, size, base, offset) {
 }
 
 skill push(compiler, from) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @source = roles.register(from)
     (source == roles.MEMORY) {
         @x = roles.temp(encoder.NONE, encoder.NONE, encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = roles.move_into(code, x, from)
-        code = encoder.memory(code, encoder.STORE, x, encoder.RSP, encoder.NONE, TEMP_BYTES - CELL_BYTES)
+        code = roles.move_into(code, size, x, from)
+        code = encoder.memory(code, roles.store_form(size), x, encoder.RSP, encoder.NONE, TEMP_BYTES - size)
         code = encoder.register64(code, encoder.POP, x)
-        out roles.emit(compiler, encoder.operate_immediate(code, 8, encoder.SUB, encoder.RSP, CELL_BYTES))
+        out roles.emit(compiler, encoder.operate_immediate(code, 8, encoder.SUB, encoder.RSP, size))
     }
-    code = encoder.operate_immediate(code, 8, encoder.SUB, encoder.RSP, CELL_BYTES)
-    out roles.emit(compiler, encoder.memory(code, encoder.STORE, source, encoder.RSP, encoder.NONE, 0))
+    code = encoder.operate_immediate(code, 8, encoder.SUB, encoder.RSP, size)
+    out roles.emit(compiler, encoder.memory(code, roles.store_form(size), source, encoder.RSP, encoder.NONE, 0))
 }
 
 skill pop(compiler, to) {
+    @size = compiler.words.bytes
     @code = compiler.machine.code
     @target = roles.register(to)
     (target == roles.MEMORY) {
         @x = roles.temp(encoder.NONE, encoder.NONE, encoder.NONE)
         code = encoder.register64(code, encoder.PUSH, x)
-        code = encoder.memory(code, encoder.LOAD, x, encoder.RSP, encoder.NONE, TEMP_BYTES)
-        code = roles.store_into(code, to, x)
+        code = encoder.memory(code, roles.load_form(size), x, encoder.RSP, encoder.NONE, TEMP_BYTES)
+        code = roles.store_into(code, size, to, x)
         code = encoder.register64(code, encoder.POP, x)
-        out roles.emit(compiler, encoder.operate_immediate(code, 8, encoder.ADD, encoder.RSP, CELL_BYTES))
+        out roles.emit(compiler, encoder.operate_immediate(code, 8, encoder.ADD, encoder.RSP, size))
     }
-    code = encoder.memory(code, encoder.LOAD, target, encoder.RSP, encoder.NONE, 0)
-    out roles.emit(compiler, encoder.operate_immediate(code, 8, encoder.ADD, encoder.RSP, CELL_BYTES))
+    code = encoder.memory(code, roles.load_form(size), target, encoder.RSP, encoder.NONE, 0)
+    out roles.emit(compiler, encoder.operate_immediate(code, 8, encoder.ADD, encoder.RSP, size))
 }

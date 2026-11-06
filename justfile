@@ -51,6 +51,9 @@ global-check:
 hosts:
     bash workbench/hosts.sh
 
+rv64:
+    bash bootstrap/refresh-rv64.sh
+
 release-draft *base:
     bash workbench/release-draft.sh "$@"
 

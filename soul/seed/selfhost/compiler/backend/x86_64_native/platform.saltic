@@ -14,6 +14,10 @@
 -- map(machine) -> Map по layout.layout(machine)
 -- append(machine) -> machine с входом и подпрограммами в коде (метки
 --     x86_start, x86_syscall_<n>); адреса строк и аргументов вписаны
+-- append_wide(machine) — то же без окна (слово 8 байт): вход — r14 = 0 и
+--     прыжок на _start со стеком ядра ([argc, argv…] по 8 байт); подпрограмма
+--     syscall — 64-битные пересылки, указатели как есть
+-- append_wide_entry / append_wide_syscall(machine, entry) — части
 
 use core.group
 use core.num
@@ -125,8 +129,8 @@ skill append_syscall(machine, entry) {
     code = encoder.operate(code, 4, encoder.MOVE, encoder.ESI, encoder.EDX)
     code = encoder.operate(code, 4, encoder.MOVE, encoder.EDX, encoder.R8D)
     code = encoder.operate(code, 4, encoder.MOVE, encoder.R10D, encoder.R9D)
-    code = encoder.memory(code, encoder.LOAD, encoder.R8D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG4))
-    code = encoder.memory(code, encoder.LOAD, encoder.R9D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG5))
+    code = encoder.memory(code, encoder.LOAD, encoder.R8D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG4, 4))
+    code = encoder.memory(code, encoder.LOAD, encoder.R9D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG5, 4))
     (num.mod(pointers, 2) == SECOND_IS_POINTER) { code = encoder.memory(code, encoder.ADDRESS64, encoder.ESI, encoder.R14D, encoder.ESI, 0) }
     (pointers == THIRD_IS_POINTER) { code = encoder.memory(code, encoder.ADDRESS64, encoder.EDX, encoder.R14D, encoder.EDX, 0) }
     code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, host)
@@ -145,3 +149,41 @@ skill append(machine) {
     machine.entry = "x86_start"
     out machine
 }
+
+skill append_wide_entry(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_start")
+    @code = machine.code
+    code = encoder.operate(code, 4, encoder.XOR, encoder.R14D, encoder.R14D)
+    code = encoder.relative(code, encoder.JUMP, 0)
+    machine.code = code
+    out layout.note_patch(machine, layout.Patch { kind = layout.PatchKind.REL32, label = "_start", offset = code.length - REL32_BYTES })
+}
+
+skill append_wide_syscall(machine, entry) {
+    @number = group.get(entry, 0)
+    @host = group.get(entry, 1)
+    machine = layout.define_label(machine, layout.Section.CODE, "x86_syscall_{number}")
+    @code = machine.code
+    drum (SAVED) { code = encoder.register64(code, encoder.PUSH, beat) }
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.EDI, encoder.EAX)
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.ESI, encoder.EDX)
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.EDX, encoder.R8D)
+    code = encoder.operate(code, 8, encoder.MOVE, encoder.R10D, encoder.R9D)
+    code = encoder.memory(code, encoder.LOAD64, encoder.R8D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG4, 8))
+    code = encoder.memory(code, encoder.LOAD64, encoder.R9D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG5, 8))
+    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, host)
+    code = encoder.single(code, encoder.SYSCALL)
+    @count = group.count(SAVED)
+    drum (count) { code = encoder.register64(code, encoder.POP, group.get(SAVED, count - 1 - beat)) }
+    code = encoder.single(code, encoder.RET)
+    machine.code = code
+    out machine
+}
+
+skill append_wide(machine) {
+    machine = append_wide_entry(machine)
+    drum (SYSCALLS) { machine = append_wide_syscall(machine, beat) }
+    machine.entry = "x86_start"
+    out machine
+}
+

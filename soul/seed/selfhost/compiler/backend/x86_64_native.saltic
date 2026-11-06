@@ -7,9 +7,13 @@
 -- firmware = yes — исполнитель для прошивки (UEFI): wait — hlt, load в STACK
 -- под cli/sti.
 --
--- Executor { firmware } — все 67 методов договора backend.saltic
+-- wide = yes — без окна (Linux): слово 8 байт (compiler.words = abi.shape.of(8)),
+--     r14 = 0, адреса настоящие, числа 61-битные; плюс multiply… / divide… /
+--     load_wide для рантайма 8-байтного слова. UEFI пока в окне (wide = no).
+-- Executor { firmware, wide } — все методы договора backend.saltic
 -- write(path, machine) — ELF64 для Linux: платформа (вход, syscall) дописана,
 --     патчи разрешены, образ записан; UnresolvedPatch, WriteFailed
+-- write_wide(path, machine) — ELF64 для Linux без окна (platform.append_wide)
 -- write_uefi(path, machine) — PE32+ для UEFI: вход и вызовы прошивки (uefi)
 --
 -- Дети: encoder (байты команд), roles (роль → регистр / ячейка), ops
@@ -28,9 +32,11 @@ use selfhost.compiler.backend.x86_64_native.platform
 use selfhost.compiler.backend.x86_64_native.image
 use selfhost.compiler.backend.x86_64_native.uefi
 use selfhost.compiler.backend.x86_64_native.pe
+use selfhost.abi.shape
 
 Executor = Box {
-    firmware = no
+    firmware = no,
+    wide = no
 
     skill section(value) {
         (value == backend.CODE) { out layout.Section.CODE }
@@ -40,6 +46,7 @@ Executor = Box {
     }
 
     skill new_program(compiler, entry) {
+        (wide == yes) { compiler.words = shape.of(8) }
         compiler.machine = layout.host(entry)
         compiler.machine = layout.append_section_byte(compiler.machine, layout.Section.CODE, 0)
         compiler.machine = layout.align_section(compiler.machine, layout.Section.CODE, roles.SLOTS_BYTES)
@@ -72,11 +79,16 @@ Executor = Box {
     }
 
     skill data32(compiler, where, value) {
-        out data_word(compiler, where, value)
+        compiler.machine = layout.append_section_word(compiler.machine, section(where), value)
+        out compiler
     }
 
     skill data_word(compiler, where, value) {
         compiler.machine = layout.append_section_word(compiler.machine, section(where), value)
+        (wide == no) { out compiler }
+        @fill = 0
+        (value.b3 > 127) { fill = 255 }
+        drum (4) { compiler.machine = layout.append_section_byte(compiler.machine, section(where), fill) }
         out compiler
     }
 
@@ -167,27 +179,27 @@ Executor = Box {
     }
 
     skill set_less(compiler, to, left, right) {
-        compiler = roles.emit(compiler, ops.compare(compiler.machine.code, left, right))
+        compiler = roles.emit(compiler, ops.compare(compiler.machine.code, compiler.words.bytes, left, right))
         out ops.set(compiler, encoder.LESS, to)
     }
 
     skill set_less_unsigned(compiler, to, left, right) {
-        compiler = roles.emit(compiler, ops.compare(compiler.machine.code, left, right))
+        compiler = roles.emit(compiler, ops.compare(compiler.machine.code, compiler.words.bytes, left, right))
         out ops.set(compiler, encoder.BELOW, to)
     }
 
     skill set_less_unsigned_immediate(compiler, to, from, value) {
-        compiler = roles.emit(compiler, ops.compare_immediate(compiler.machine.code, from, value))
+        compiler = roles.emit(compiler, ops.compare_immediate(compiler.machine.code, compiler.words.bytes, from, value))
         out ops.set(compiler, encoder.BELOW, to)
     }
 
     skill set_zero(compiler, to, from) {
-        compiler = roles.emit(compiler, ops.test(compiler.machine.code, from))
+        compiler = roles.emit(compiler, ops.test(compiler.machine.code, compiler.words.bytes, from))
         out ops.set(compiler, encoder.EQUAL, to)
     }
 
     skill set_nonzero(compiler, to, from) {
-        compiler = roles.emit(compiler, ops.test(compiler.machine.code, from))
+        compiler = roles.emit(compiler, ops.test(compiler.machine.code, compiler.words.bytes, from))
         out ops.set(compiler, encoder.NOT_EQUAL, to)
     }
 
@@ -201,15 +213,15 @@ Executor = Box {
 
     skill load(compiler, to, base, offset) {
         (to == backend.RETURN) { out compiler }
-        out access.load(compiler, encoder.LOAD, to, base, offset, firmware)
+        out access.load(compiler, roles.load_form(compiler.words.bytes), to, base, offset, firmware)
     }
 
     skill load32(compiler, to, base, offset) {
-        out load(compiler, to, base, offset)
+        out access.load(compiler, encoder.LOAD, to, base, offset, firmware)
     }
 
     skill store32(compiler, from, base, offset) {
-        out store(compiler, from, base, offset)
+        out access.store(compiler, encoder.STORE, from, base, offset)
     }
 
     skill load_byte(compiler, to, base, offset) {
@@ -222,7 +234,7 @@ Executor = Box {
 
     skill store(compiler, from, base, offset) {
         (from == backend.RETURN) { out compiler }
-        out access.store(compiler, encoder.STORE, from, base, offset)
+        out access.store(compiler, roles.store_form(compiler.words.bytes), from, base, offset)
     }
 
     skill store_byte(compiler, from, base, offset) {
@@ -234,7 +246,7 @@ Executor = Box {
     }
 
     skill store_zero(compiler, base, offset) {
-        out access.store_zero(compiler, 4, base, offset)
+        out access.store_zero(compiler, compiler.words.bytes, base, offset)
     }
 
     skill store_byte_zero(compiler, base, offset) {
@@ -336,12 +348,50 @@ Executor = Box {
     skill fence(compiler) {
         out control.fence(compiler)
     }
+
+    skill multiply(compiler, to, left, right) {
+        out ops.wide_arith(compiler, ops.WIDE_MULTIPLY, to, left, right)
+    }
+
+    skill multiply_high(compiler, to, left, right) {
+        out ops.wide_arith(compiler, ops.WIDE_MULTIPLY_HIGH, to, left, right)
+    }
+
+    skill multiply_high_unsigned(compiler, to, left, right) {
+        out ops.wide_arith(compiler, ops.WIDE_MULTIPLY_HIGH_UNSIGNED, to, left, right)
+    }
+
+    skill divide(compiler, to, left, right) {
+        out ops.wide_arith(compiler, ops.WIDE_DIVIDE, to, left, right)
+    }
+
+    skill remainder(compiler, to, left, right) {
+        out ops.wide_arith(compiler, ops.WIDE_REMAINDER, to, left, right)
+    }
+
+    skill divide_unsigned(compiler, to, left, right) {
+        out ops.wide_arith(compiler, ops.WIDE_DIVIDE_UNSIGNED, to, left, right)
+    }
+
+    skill remainder_unsigned(compiler, to, left, right) {
+        out ops.wide_arith(compiler, ops.WIDE_REMAINDER_UNSIGNED, to, left, right)
+    }
+
+    skill load_wide(compiler, to, value) {
+        out ops.load_wide(compiler, to, value)
+    }
 }
 
 skill write(path, machine) {
     machine = platform.append(machine)
     machine = layout.resolve(machine) rescue |failure| { out error.UnresolvedPatch }
     out image.write(path, machine)
+}
+
+skill write_wide(path, machine) {
+    machine = platform.append_wide(machine)
+    machine = layout.resolve(machine) rescue |failure| { out error.UnresolvedPatch }
+    out image.write_wide(path, machine)
 }
 
 skill write_uefi(path, machine) {
