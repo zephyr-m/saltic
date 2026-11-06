@@ -99,13 +99,18 @@ EOF
 }
 
 # Родной x86-64 компилятор свежий, если его паспорт ссылается на текущий
-# загрузочный по sha256. Иначе он переведён из старого и его надо пересобрать.
+# загрузочный по sha256 или говорит, что он сам сошёлся на x86-64 из нынешних
+# исходников. Иначе его надо пересобрать из эталона rv32i.
 saltic_native_fresh() {
     local native compiler
     native="$(saltic_compiler_path x86_64 linux)"
     compiler="$(saltic_bootstrap_compiler)" || return 1
     [[ -x "$native" && -f "$native.txt" ]] || return 1
-    grep -q "sha256 $(sha256sum "$compiler" | cut -c1-16))" "$native.txt"
+    # Свежий — либо переведён из нынешнего эталона rv32i, либо сам сошёлся
+    # на x86-64 (stage-2 = stage-3, refresh.sh) из нынешних исходников.
+    grep -q "sha256 $(sha256sum "$compiler" | cut -c1-16))" "$native.txt" && return 0
+    grep -q "сходится на x86-64" "$native.txt" \
+        && grep -q "исходники: *$(saltic_source_hash)$" "$native.txt"
 }
 
 # Путь к свежему родному компилятору; при необходимости переводит его заново.
@@ -142,8 +147,10 @@ saltic_native_compiler() {
 # проверяется по sha родителя и по хэшу исходников из паспорта.
 saltic_qemu_virt_compiler() {
     local native toolchain passport
-    local SALTIC_HASH_EXTRA=os/target/qemu_virt
     native="$(saltic_native_compiler)" || return 1
+    # Отпечаток с os/target/qemu_virt — только для этого компилятора: родной
+    # выше проверяется по отпечатку языка.
+    local SALTIC_HASH_EXTRA=os/target/qemu_virt
     toolchain="$(saltic_compiler_path rv32i linux-for-qemu_virt .elf)"
     passport="${toolchain%.elf}.txt"
     if [[ -x "$toolchain" && -f "$passport" ]] \

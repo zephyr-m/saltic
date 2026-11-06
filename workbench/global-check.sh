@@ -29,7 +29,7 @@ if [[ "$limits_status" != "0" ]]; then
 fi
 echo "== 🔨 самосборка"
 bash bootstrap/refresh.sh 2>&1 | tee .cache/build/workbench/refresh.log \
-    | grep "^bootstrap refresh: \(saltic\|прове\|новый\|памят\)\|^[0-9a-f]\{64\}" | decorate
+    | grep "^bootstrap refresh: \(saltic\|прове\|новый\|родной\|памят\)\|^[0-9a-f]\{64\}" | decorate
 refresh_status=${PIPESTATUS[0]}
 if [[ "$refresh_status" != "0" ]]; then
     echo "== 🚨 САМОСБОРКА УПАЛА (код $refresh_status), последние строки лога:"
