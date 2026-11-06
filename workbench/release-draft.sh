@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Черновик релиза по Football Versioning (docs/FOOTBALL.md): читает коммиты с
+# Черновик релиза по Football Versioning (docs/process/FOOTBALL.md): читает коммиты с
 # последнего тега v*, раскладывает их по префиксам и предлагает счёт и раздел
 # CHANGELOG. feat: — фича (F), fix: — баг (B), refactor:/docs:/perf:/chore:/
 # style:/test:/build:/ci: — уборка (C); release: пропускается; коммиты без

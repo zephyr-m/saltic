@@ -15,7 +15,7 @@ UEFI — с драйвером сети, своим сетевым стеком,
 Имя — от **Salticidae**, пауков-скакунов: маленьких, с лучшим зрением среди
 пауков, точных в прыжке. Латинское *saltare* — «прыгать» и «танцевать»,
 поэтому цикл в Saltic — барабан (`drum`), а шаг — удар (`beat`). Подробнее —
-[docs/ORIGIN.md](docs/ORIGIN.md).
+[docs/laws/ORIGIN.md](docs/laws/ORIGIN.md).
 
 Saltic делается одним автором для себя и своих агентов: автор принимает
 решения, агенты их исполняют. Один способ сделать каждую вещь, никаких тихих
@@ -28,7 +28,7 @@ Saltic делается одним автором для себя и своих 
   совпадают байт в байт.
 - **15 ключевых слов** (у Lua — 22, у Go — 25, у C — 32).
 - fib(40) — 2,28 с: быстрее PHP, Lua, Ruby и Python; впереди языки с JIT и C.
-  Таблицы и методика — [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+  Таблицы и методика — [docs/numbers/BENCHMARKS.md](docs/numbers/BENCHMARKS.md).
 - Запуск программы — 0,2 мс.
 
 ## Как выглядит
@@ -113,7 +113,7 @@ nix --extra-experimental-features "nix-command flakes" develop
 - `just rv64` — компилятор RV64 собирает себя под `qemu-riscv64` (минуты;
   перед релизом);
 - `just hosts` — тесты `all` на x86-64 и платформы: qemu-virt, UEFI, closure
-  (группы — [docs/TESTING.md](docs/TESTING.md));
+  (группы — [docs/process/TESTING.md](docs/process/TESTING.md));
 - `just qemu-graphics` — ОС с программами в окне QEMU.
 
 Собрать свою программу компилятором с полки:
@@ -131,27 +131,29 @@ qemu-riscv64 -B 0x100000000 ./hello
 
 ## Документы
 
-- [docs/PLAN.md](docs/PLAN.md) — план и решения автора, дорога по эпохам и
-  два свистка;
+- [docs/plan/PLAN.md](docs/plan/PLAN.md) — чек-лист задач сверху вниз;
+  [docs/plan/QUESTIONS.md](docs/plan/QUESTIONS.md) и [docs/plan/ANSWERS.md](docs/plan/ANSWERS.md) —
+  вопросы к автору и его ответы; прежний план с дорогой по эпохам и двумя
+  свистками — [.archive/docs/PLAN-1.md](.archive/docs/PLAN-1.md);
 - [CHANGELOG.md](CHANGELOG.md) — история релизов, [VERSION](VERSION) — номер;
-- [docs/FOOTBALL.md](docs/FOOTBALL.md) — версия как счёт матча «фичи : баги :
+- [docs/process/FOOTBALL.md](docs/process/FOOTBALL.md) — версия как счёт матча «фичи : баги :
   уборка»;
-- [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — скорость среди других языков и
+- [docs/numbers/BENCHMARKS.md](docs/numbers/BENCHMARKS.md) — скорость среди других языков и
   наши компиляторы;
-- [docs/MISSION.md](docs/MISSION.md), [docs/ORIGIN.md](docs/ORIGIN.md),
-  [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) — зачем и откуда;
-- [docs/OS-core.md](docs/OS-core.md) — понимание ОС;
-- [docs/Code_Architecture_канон_для_агентов.md](docs/Code_Architecture_канон_для_агентов.md)
+- [docs/laws/MISSION.md](docs/laws/MISSION.md), [docs/laws/ORIGIN.md](docs/laws/ORIGIN.md),
+  [docs/laws/PHILOSOPHY.md](docs/laws/PHILOSOPHY.md) — зачем и откуда;
+- [docs/os/OS-core.md](docs/os/OS-core.md) — понимание ОС;
+- [docs/process/Code_Architecture_канон_для_агентов.md](docs/process/Code_Architecture_канон_для_агентов.md)
   и [AGENTS.md](AGENTS.md) — правила для агентов;
 - [.archive/docs/history/](.archive/docs/history/) — летопись по дням,
-  [docs/fable/](docs/fable/) — отчёты агента Fable в работе, выполненные —
-  в [.archive/docs/fable/](.archive/docs/fable/); разведка — [docs/RECON.md](docs/RECON.md),
-  открытые вопросы — [docs/QUESTIONS.md](docs/QUESTIONS.md).
+  [.archive/docs/fable/](.archive/docs/fable/) — отчёты агента Fable (разобраны,
+  несделанное — в чек-листе); разведка — [docs/plan/RECON.md](docs/plan/RECON.md),
+  открытые вопросы — [docs/plan/QUESTIONS.md](docs/plan/QUESTIONS.md).
 
 ## Релиз
 
 1. `just release-draft` предложит счёт и черновик по префиксам коммитов;
-   проверить по [docs/FOOTBALL.md](docs/FOOTBALL.md) — фичи, баги и уборку —
+   проверить по [docs/process/FOOTBALL.md](docs/process/FOOTBALL.md) — фичи, баги и уборку —
    и записать счёт в `VERSION`, `README.md` и `CHANGELOG.md`.
 2. `just global-check` — компиляторы на полке получат имя новой версии и
    паспорта; `just hosts` — платформы.

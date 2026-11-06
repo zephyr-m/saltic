@@ -18,8 +18,8 @@ files=(
     CHANGELOG.md
     LICENSE
     LICENSE.ru
-    docs/OS-core.md
-    docs/PRINCIPLES.md
+    docs/os/OS-core.md
+    docs/laws/PRINCIPLES.md
     docs/images
     README.md
     VERSION

@@ -24,9 +24,9 @@
 
 `tests/run.sh <группа>` (или `just test <группа>`) запускает одну группу;
 без имени — `all`. Хост тестовых программ — `SALTIC_TEST_HOST`: `rv32i`
-(по умолчанию, под `qemu-riscv32`) или `x86_64`.
+(по умолчанию, под `qemu-riscv32`), `x86_64` или `rv64` (под `qemu-riscv64`).
 
-`all` — её гоняет `just global-check` на rv32i и `just hosts` на x86_64:
+`all` — её гоняет `just global-check` на rv32i и `just hosts` на x86_64 и rv64:
 
 - `checker` — случаи `soul/canonical/errors/` против `expected/errors/`;
 - `fixed-types` — `u8…usize`, `bits32`, `address` и их ошибки чекера;
@@ -50,7 +50,9 @@
 - `memory` — модель памяти и `MemoryExhausted`;
 - `native` — канон, память, переполнение стека, нажатия, импорт и большие
   числа на родном x86-64;
-- `jtml`, `tasks` — `os.ui.jtml` и `os.apps.tasks`.
+- `jtml`, `tasks` — `os.ui.jtml` и `os.apps.tasks`;
+- `panels`, `mrpc` — системная панель и mRPC агента (`mrpc` — всегда под
+  x86_64: модули ОС UEFI — 61-битный мир).
 
 `platforms` — только в `just hosts`:
 
@@ -59,5 +61,5 @@
 - `closure` — канон через `bootstrap/build.sh` в ELF rv32i и запуск в QEMU.
 
 Пока `platforms` не входит в `global-check`, принцип 5 нарушен. Решение
-автора 03.11.2026 — папка `tests/` переезжает в канон (PLAN, «Два уровня
-проверок»); этот список уйдёт вместе с ней.
+автора 03.11.2026 — папка `tests/` переезжает в канон (чек-лист
+[PLAN.md](../plan/PLAN.md), «Надёжность»); этот список уйдёт вместе с ней.
