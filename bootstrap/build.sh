@@ -61,11 +61,11 @@ fi
 mkdir -p "$work" "$(dirname "$output_path")"
 rm -f "$compiler_output"
 
-# Загрузочный компилятор с полки работает своей родной x86-версией: те же байты,
-# в разы быстрее. Любой другой rv32i-компилятор (stage-1 и т. п.) — под QEMU.
-# Компилятор, подставленный через SALTIC_BOOTSTRAP_COMPILER и собранный для
-# x86-64 (ELF64), запускается прямо; собранный для RISC-V 64 (ELF64, машина 243) —
-# под qemu-riscv64.
+# Загрузочный компилятор с полки (канон RV64) работает своей родной x86-версией:
+# те же байты, в разы быстрее. При SALTIC_NATIVE=0 или с другим компилятором
+# (SALTIC_BOOTSTRAP_COMPILER, stage-1 и т. п.) раннер — по заголовку файла:
+# RISC-V 64 (ELF64, машина 243) — под qemu-riscv64, x86-64 (ELF64) — прямо,
+# RISC-V 32 (ELF32) — под qemu-riscv32.
 runner=(qemu-riscv32 -B 0x100000000 "$compiler")
 if [[ "${SALTIC_NATIVE:-1}" != "0" && "$compiler" == "$(saltic_bootstrap_compiler)" ]]; then
     runner=("$(saltic_native_compiler)")

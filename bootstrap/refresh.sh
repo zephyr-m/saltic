@@ -44,10 +44,11 @@ rm -f "$work/previous/"* "$work"/stage-*/toolchain*
 previous="$work/previous/$(basename "$bootstrap_compiler")"
 cp "$bootstrap_compiler" "$previous"
 
-# Самосборка идёт на x86-64: каждое поколение собирается родным x86-64
-# и под rv32i; fixed point — у обоих: rv32i-байты stage-2 и stage-3 и
-# x86-64-байты stage-2 и stage-3 (родной собирает сам себя). Самосборка на RV64
-# (под qemu-riscv64, долго) — отдельно: bootstrap/refresh-rv64.sh, just rv64.
+# Самосборка идёт на x86-64: каждое поколение собирается родным x86-64 и
+# под rv64 и rv32i; fixed point — у всех трёх: байты stage-2 и stage-3 для
+# rv64 (эталон в git), x86-64 (родной собирает сам себя) и rv32i (вторая
+# сверка). Самосборка на самом RV64 (под qemu-riscv64, ~минута) — отдельно:
+# bootstrap/refresh-rv64.sh, just rv64 — доказывает, что эталон собирает себя.
 stage_time="$(type -P time || true)"
 stage() {
     local compiler="$1" target="$2" output="$3"
@@ -68,17 +69,18 @@ cp "$native" "$previous_native"
 echo "bootstrap refresh: текущее поколение собирает stage-1 (x86-64)"
 stage "$native" x86_64 "$work/stage-1/toolchain"
 
-echo "bootstrap refresh: stage-1 собирает stage-2 (rv32i и x86-64)"
-stage "$work/stage-1/toolchain" rv32i "$work/stage-2/toolchain.elf"
+echo "bootstrap refresh: stage-1 собирает stage-2 (rv64, x86-64 и rv32i)"
+stage "$work/stage-1/toolchain" rv64 "$work/stage-2/toolchain-rv64"
 stage "$work/stage-1/toolchain" x86_64 "$work/stage-2/toolchain"
+stage "$work/stage-1/toolchain" rv32i "$work/stage-2/toolchain.elf"
 
-echo "bootstrap refresh: stage-2 собирает stage-3 (rv32i)"
+echo "bootstrap refresh: stage-2 собирает stage-3 (rv64)"
 started=$EPOCHREALTIME
-stage "$work/stage-2/toolchain" rv32i "$work/stage-3/toolchain.elf"
+stage "$work/stage-2/toolchain" rv64 "$work/stage-3/toolchain-rv64"
 self_build_seconds="$(saltic_seconds_since "$started")"
 echo "bootstrap refresh: новый компилятор собрал себя за $self_build_seconds с"
-if [[ -f "$work/stage-3/toolchain.elf.time" ]]; then
-    read -r self_kb self_user self_sys <"$work/stage-3/toolchain.elf.time"
+if [[ -f "$work/stage-3/toolchain-rv64.time" ]]; then
+    read -r self_kb self_user self_sys <"$work/stage-3/toolchain-rv64.time"
     echo "bootstrap refresh: память самосборки $((self_kb / 1024)) МБ, процессор $(awk -v u="$self_user" -v s="$self_sys" 'BEGIN { printf "%.1f", u + s }') с"
 fi
 
@@ -88,47 +90,69 @@ stage "$work/stage-2/toolchain" x86_64 "$work/stage-3/toolchain"
 native_seconds="$(saltic_seconds_since "$native_started")"
 echo "bootstrap refresh: родной x86-64 собрал себя за $native_seconds с"
 
-echo "bootstrap refresh: проверяю fixed point (rv32i и x86-64)"
-cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
-cmp "$work/stage-2/toolchain" "$work/stage-3/toolchain"
+echo "bootstrap refresh: stage-2 собирает stage-3 (rv32i, вторая сверка)"
+narrow_started=$EPOCHREALTIME
+stage "$work/stage-2/toolchain" rv32i "$work/stage-3/toolchain.elf"
+narrow_seconds="$(saltic_seconds_since "$narrow_started")"
 
-compiler="$(saltic_compiler_path rv32i linux .elf)"
-if cmp -s "$work/stage-3/toolchain.elf" "$compiler" && [[ -f "${compiler%.elf}.txt" ]]; then
+echo "bootstrap refresh: проверяю fixed point (rv64, x86-64 и rv32i)"
+cmp "$work/stage-2/toolchain-rv64" "$work/stage-3/toolchain-rv64"
+cmp "$work/stage-2/toolchain" "$work/stage-3/toolchain"
+cmp "$work/stage-2/toolchain.elf" "$work/stage-3/toolchain.elf"
+
+targets="rv32i, rv64, x86_64"
+compiler="$(saltic_compiler_path rv64 linux)"
+native_path="$(saltic_compiler_path x86_64 linux)"
+if cmp -s "$work/stage-3/toolchain-rv64" "$compiler" && [[ -f "$compiler.txt" ]]; then
     echo "bootstrap refresh: $(basename "$compiler") не изменился"
     # Паспорт родной версии мог остаться от другой сборки (сбой прошлой
     # самосборки): если она байт в байт stage-2 — паспорт переписывается.
-    native_path="$(saltic_compiler_path x86_64 linux)"
     if cmp -s "$work/stage-2/toolchain" "$native_path" \
         && ! grep -q "время самосборки" "$native_path.txt"; then
-        saltic_write_passport "$native_path" "x86_64, linux" "rv32i, x86_64" \
+        saltic_write_passport "$native_path" "x86_64, linux" "$targets" \
             "$previous_native" "$heap_bytes" "сходится на x86-64 (stage-2 = stage-3)" "$native_seconds" самосборки \
             "$work/stage-3/toolchain.time"
         echo "bootstrap refresh: паспорт $(basename "$native_path") обновлён"
     fi
 else
     # Прежняя версия того же компилятора больше не нужна: новая заменяет её.
-    for old in bootstrap/saltic-*-compiler-rv32i-linux.elf; do
-        if [[ -f "$old" && "$old" != "$compiler" ]]; then rm -f "$old" "${old%.elf}.txt"; fi
+    for old in bootstrap/saltic-*-compiler-rv64-linux; do
+        if [[ -f "$old" && "$old" != "$compiler" ]]; then rm -f "$old" "$old.txt"; fi
     done
-    cp "$work/stage-3/toolchain.elf" "$compiler"
+    cp "$work/stage-3/toolchain-rv64" "$compiler"
     chmod +x "$compiler"
-    saltic_write_passport "$compiler" "rv32i, linux (qemu-riscv32 -B 0x100000000)" "rv32i, x86_64" \
-        "$previous" "$heap_bytes" "сходится на x86-64 (stage-2 = stage-3)" "$self_build_seconds" \
-        самосборки "$work/stage-3/toolchain.elf.time"
+    saltic_write_passport "$compiler" "rv64, linux (qemu-riscv64 -B 0x100000000)" "$targets" \
+        "$previous" "$heap_bytes" "сходится на x86-64 (stage-2 = stage-3); на RV64 — just rv64" "$self_build_seconds" \
+        самосборки "$work/stage-3/toolchain-rv64.time"
     # stage-2 под x86_64 собран stage-1 (x86-64) и равен своему stage-3:
     # это родная версия нового компилятора.
-    native_path="$(saltic_compiler_path x86_64 linux)"
     for old in bootstrap/saltic-*-compiler-x86_64-linux; do
         if [[ -f "$old" && "$old" != "$native_path" ]]; then rm -f "$old" "$old.txt"; fi
     done
     cp "$work/stage-2/toolchain" "$native_path"
     chmod +x "$native_path"
-    saltic_write_passport "$native_path" "x86_64, linux" "rv32i, x86_64" \
+    saltic_write_passport "$native_path" "x86_64, linux" "$targets" \
         "$previous_native" "$heap_bytes" "сходится на x86-64 (stage-2 = stage-3)" "$native_seconds" самосборки \
         "$work/stage-3/toolchain.time"
     echo "bootstrap refresh: $(basename "$compiler") обновлён"
 fi
 sha256sum "$compiler"
+
+# rv32i — вторая сверка: выводится из нового компилятора, в git не лежит.
+narrow_path="$(saltic_compiler_path rv32i linux .elf)"
+if cmp -s "$work/stage-3/toolchain.elf" "$narrow_path" && [[ -f "${narrow_path%.elf}.txt" ]]; then
+    echo "bootstrap refresh: $(basename "$narrow_path") не изменился"
+else
+    for old in bootstrap/saltic-*-compiler-rv32i-linux.elf; do
+        if [[ -f "$old" && "$old" != "$narrow_path" ]]; then rm -f "$old" "${old%.elf}.txt"; fi
+    done
+    cp "$work/stage-3/toolchain.elf" "$narrow_path"
+    chmod +x "$narrow_path"
+    saltic_write_passport "$narrow_path" "rv32i, linux (qemu-riscv32 -B 0x100000000)" "$targets" \
+        "$native_path" "$heap_bytes" "вторая сверка: сходится на x86-64 (stage-2 = stage-3)" "$narrow_seconds" \
+        сборки "$work/stage-3/toolchain.elf.time"
+    echo "bootstrap refresh: $(basename "$narrow_path") обновлён (вторая сверка)"
+fi
 
 native="$(saltic_native_compiler)"
 echo "bootstrap refresh: $(basename "$native") готов"

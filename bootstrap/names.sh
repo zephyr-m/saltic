@@ -13,18 +13,20 @@ saltic_compiler_path() {
     echo "bootstrap/saltic-$(saltic_version)-compiler-$1-$2${3:-}"
 }
 
-# Загрузочный компилятор из git. После смены VERSION на релизе и до самосборки
-# он ещё носит прежнюю версию, поэтому при отсутствии текущей берётся единственный.
+# Загрузочный компилятор из git — канон RV64 (saltic-<версия>-compiler-rv64-linux,
+# запускается под qemu-riscv64; обычно вместо него работает его родная x86-версия).
+# После смены VERSION на релизе и до самосборки он ещё носит прежнюю версию,
+# поэтому при отсутствии текущей берётся единственный.
 saltic_bootstrap_compiler() {
     local current
-    current="$(saltic_compiler_path rv32i linux .elf)"
+    current="$(saltic_compiler_path rv64 linux)"
     if [[ -f "$current" ]]; then
         echo "$current"
         return
     fi
-    local found=(bootstrap/saltic-*-compiler-rv32i-linux.elf)
+    local found=(bootstrap/saltic-*-compiler-rv64-linux)
     if [[ ${#found[@]} -ne 1 || ! -f "${found[0]}" ]]; then
-        echo "bootstrap: нужен ровно один saltic-*-compiler-rv32i-linux.elf" >&2
+        echo "bootstrap: нужен ровно один saltic-*-compiler-rv64-linux" >&2
         return 1
     fi
     echo "${found[0]}"
@@ -119,7 +121,7 @@ saltic_native_compiler() {
     native="$(saltic_compiler_path x86_64 linux)"
     if ! saltic_native_fresh; then
         compiler="$(saltic_bootstrap_compiler)" || return 1
-        echo "bootstrap: перевожу $(basename "$compiler") в x86-64" >&2
+        echo "bootstrap: перевожу $(basename "$compiler") в x86-64 (под qemu-riscv64)" >&2
         for old in bootstrap/saltic-*-compiler-x86_64-linux; do
             if [[ -f "$old" && "$old" != "$native" ]]; then rm -f "$old" "$old.txt"; fi
         done
@@ -135,7 +137,7 @@ saltic_native_compiler() {
             grep -v "^warning" .cache/build/bootstrap-native.log | tail -5 >&2
             return 1
         }
-        saltic_write_passport "$native" "x86_64, linux" "rv32i, x86_64" \
+        saltic_write_passport "$native" "x86_64, linux" "rv32i, rv64, x86_64" \
             "$compiler" 4026531840 "переведён из $(basename "$compiler")" "$(saltic_seconds_since "$started")" сборки \
             .cache/build/bootstrap-native.time
     fi

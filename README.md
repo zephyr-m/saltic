@@ -109,10 +109,11 @@ pip устал
 nix --extra-experimental-features "nix-command flakes" develop
 ```
 
-- `just global-check` — самосборка с паспортами (rv32i и x86-64) и тесты
-  `all` на rv32i, с метриками и «было / стало»;
-- `just rv64` — компилятор RV64 собирает себя под `qemu-riscv64` (минуты;
-  перед релизом);
+- `just global-check` — самосборка с паспортами (неподвижная точка rv64,
+  x86-64 и rv32i родными компиляторами) и тесты `all` на rv32i, с метриками и
+  «было / стало»;
+- `just rv64` — доказательство: эталон RV64 собирает себя под `qemu-riscv64`
+  (около минуты; перед релизом);
 - `just hosts` — тесты `all` на x86-64 и RV64, тесты ОС `os`, платформы: qemu-virt, UEFI, closure
   (группы — [docs/process/TESTING.md](docs/process/TESTING.md));
 - `just qemu-graphics` — ОС с программами в окне QEMU.
@@ -160,7 +161,8 @@ qemu-riscv64 -B 0x100000000 ./hello
    и записать счёт в `VERSION`, `README.md` и `CHANGELOG.md`.
 2. `just global-check` — компиляторы на полке получат имя новой версии и
    паспорта; `just hosts` — платформы.
-3. Закоммитить `release: Saltic F:B:C`, вместе с обоими компиляторами.
+3. Закоммитить `release: Saltic F:B:C`, вместе с обоими компиляторами
+   (эталон RV64 и родной x86-64).
 4. Аннотированный тег: `git tag -a vF.B.C -m "Saltic F:B:C — название"`.
 5. `git push origin master --follow-tags`.
 
@@ -170,12 +172,13 @@ GitHub Actions сверит тег с `VERSION`, возьмёт описание
 ## Bootstrap
 
 На полке [bootstrap/](bootstrap/) — компилятор
-`saltic-<версия>-compiler-rv32i-linux.elf` (эталон, собирает сам себя) и его
-родная версия `saltic-<версия>-compiler-x86_64-linux`; у каждого паспорт
+`saltic-<версия>-compiler-rv64-linux` (эталон, канон RV64, собирает сам себя)
+и его родная версия `saltic-<версия>-compiler-x86_64-linux`; у каждого паспорт
 `.txt`: кто собрал, из каких исходников, размер, время и пик памяти.
-Компилятор для голого RISC-V (`…-for-qemu_virt.elf`) и канон RV64
-(`…-compiler-rv64-linux`, `just rv64`) собираются локально и в git не лежат.
-`SALTIC_NATIVE=0` возвращает запуск под QEMU.
+Компилятор для RV32I (`…-compiler-rv32i-linux.elf`, вторая сверка неподвижной
+точки) и для голого RISC-V (`…-for-qemu_virt.elf`) выводятся из них локально
+и в git не лежат. `SALTIC_NATIVE=0` возвращает запуск эталона под
+`qemu-riscv64`.
 
 ## Лицензия
 
