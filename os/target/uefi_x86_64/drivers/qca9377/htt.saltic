@@ -11,8 +11,10 @@
 -- version(chip) -> текст — VERSION_REQ, ждём VERSION_CONF в CE1
 -- rx_ring(chip) — заполнить кольцо приёма и отдать RX_RING_CFG
 -- setup(chip) -> текст — version, rx_ring
--- next_frame(chip) -> [адрес кадра, длина, RSSI] или none — очередной
---     готовый буфер; recycle(chip) — вернуть его в кольцо
+-- ring_state(chip) -> текст — x готов, o тронут, . пуст; указатели
+-- next_frame(chip) -> [адрес кадра, длина, RSSI] или none — любой готовый
+--     буфер (карта берёт их не строго по порядку), начиная с последнего
+--     прочитанного; recycle(chip) — вернуть его в хвост кольца
 
 use core.num
 use core.str
@@ -54,7 +56,7 @@ skill version(chip) {
     send(chip, 4)
     drum (WAITS) {
         rings.drain_letters(chip)
-        (str.contains(chip.htt_seen, " 0") == yes) {
+        (str.contains(chip.htt_seen, " 1:0") == yes) {
             card.say("   VERSION_CONF came")
             out "версия HTT подтверждена"
         }
@@ -99,16 +101,39 @@ skill setup(chip) {
 }
 
 skill next_frame(chip) {
-    @place = buffer(chip, chip.rx_read)
-    (firmware.read32(place, chip.base, ATTENTION) < MSDU_DONE) { out none }
-    @length = num.mod(firmware.read32(place, chip.base, MSDU_START), LENGTH_MASK)
-    @rssi = firmware.read8(place, chip.base, RSSI_COMB)
-    out [firmware.add(place, PAYLOAD), length, rssi]
+    drum (RX_SLOTS) {
+        @slot = num.mod(chip.rx_read + beat, RX_SLOTS)
+        @place = buffer(chip, slot)
+        (firmware.read32(place, chip.base, ATTENTION) >= MSDU_DONE) {
+            chip.rx_read = slot
+            @length = num.mod(firmware.read32(place, chip.base, MSDU_START), LENGTH_MASK)
+            @rssi = firmware.read8(place, chip.base, RSSI_COMB)
+            out [firmware.add(place, PAYLOAD), length, rssi]
+        }
+    }
+    out none
+}
+
+skill ring_state(chip) {
+    @done = ""
+    drum (RX_SLOTS) {
+        @mark = "."
+        (firmware.read32(buffer(chip, beat), chip.base, ATTENTION) >= MSDU_DONE) { mark = "x" }
+        (firmware.read32(buffer(chip, beat), chip.base, ATTENTION) > 0) {
+            (mark == ".") { mark = "o" }
+        }
+        done = "{done}{mark}"
+    }
+    @index = firmware.read32(rings.at(chip, "wifi_rx_ring"), chip.base, INDEX)
+    out "буферы [{done}], читаем {chip.rx_read}, заполнено до {chip.rx_fill}, индекс {index}"
 }
 
 skill recycle(chip) {
-    post(chip, chip.rx_fill)
+    @place = buffer(chip, chip.rx_read)
+    firmware.write_phys32(place, chip.base, ATTENTION, 0)
+    @ring = rings.at(chip, "wifi_rx_ring")
+    firmware.write_phys32(ring, chip.base, num.mod(chip.rx_fill, RX_SLOTS) * 4, place)
     chip.rx_fill = chip.rx_fill + 1
     chip.rx_read = chip.rx_read + 1
-    out firmware.write_phys32(rings.at(chip, "wifi_rx_ring"), chip.base, INDEX, num.mod(chip.rx_fill, RX_SLOTS))
+    out firmware.write_phys32(ring, chip.base, INDEX, num.mod(chip.rx_fill, RX_SLOTS))
 }
