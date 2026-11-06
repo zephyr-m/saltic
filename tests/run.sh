@@ -28,6 +28,9 @@ host="${SALTIC_TEST_HOST:-rv32i}"
 
 source tests/metrics.sh
 
+# Ожидаемый вывод tests/fixtures/big-numbers.saltic (x86_64 и rv64 — одинаково).
+BIG_NUMBERS="-268435455 268435455 33554432 -33554433 100000000 33554431 -256 255 4096 -4097 200000001 268435455 4294967296 1099511627784 1152921504606846975 "
+
 run_built() {
     if [[ "$host" == x86_64* ]]; then
         measure run "$@"
@@ -252,7 +255,12 @@ test_rv64() {
         "$work/rv64/input.txt" "$work/rv64/output.txt" >"$work/rv64/canonical.txt"
     diff -u soul/canonical/expected/output.txt "$work/rv64/canonical.txt"
     test "$(<"$work/rv64/output.txt")" = "pip:0"
-    echo "rv64: канон, edges и always под qemu-riscv64 — те же выводы, что у rv32i и x86_64"
+    SALTIC_TARGET=rv64 build big-numbers-rv64 \
+        tests/fixtures/big-numbers.saltic \
+        "$work/rv64/big-numbers" \
+        1048576
+    test "$(qemu-riscv64 -B 0x100000000 "$work/rv64/big-numbers" | tr '\n' ' ')" = "$BIG_NUMBERS"
+    echo "rv64: канон, edges, always и большие числа под qemu-riscv64 — те же выводы, что у rv32i и x86_64"
 }
 
 test_rva23() {
@@ -382,7 +390,7 @@ test_native() {
         tests/fixtures/big-numbers.saltic \
         "$work/native/big-numbers" \
         1048576
-    test "$("$work/native/big-numbers" | tr '\n' ' ')" = "-268435455 268435455 33554432 -33554433 100000000 33554431 -256 255 4096 -4097 200000001 268435455 "
+    test "$("$work/native/big-numbers" | tr '\n' ' ')" = "$BIG_NUMBERS"
     echo "x86-64 ($target): канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает, большие числа точны"
 }
 
