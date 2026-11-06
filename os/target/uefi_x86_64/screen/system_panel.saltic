@@ -18,7 +18,10 @@
 --     кадров (пусто — без графика); рисует в задний
 --     буфер (netlog.canvas) и кладёт на экран одним копированием
 -- link_speed(status) -> «100 Мбит/с» или «нет»
--- Внутри: gauge — подпись, полоса и «занято X из Y»; frames — график кадров;
+-- Сверху — Wi-Fi: иконка (серая, пока не подключён; бирюзовая — подключён)
+-- и ход подъёма или адрес с сетью — со страницы qca9377.handoff (stage).
+-- Внутри: wifi_icon — иконка WIFI_ICON (16 × 16, # — точка); gauge — подпись,
+--     полоса и «занято X из Y»; frames — график кадров;
 --     record — кадры за секунду в meter; add_bytes — КБ и остаток;
 --     signature — отпечаток подписей
 
@@ -28,6 +31,7 @@ use core.group
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.drivers.rtl8111
+use os.target.uefi_x86_64.drivers.qca9377.handoff
 use os.target.uefi_x86_64.storage.files
 use os.target.uefi_x86_64.network.netlog
 use os.target.uefi_x86_64.screen.graphics
@@ -60,6 +64,24 @@ MARGIN = 16
 ROW = 18
 BAR = 8
 FACE = lettering.FACE_SMALL
+WIFI_ICON = [
+    "................",
+    "....########....",
+    "..##........##..",
+    ".#............#.",
+    "#....######....#",
+    "...##......##...",
+    "..#..........#..",
+    ".....######.....",
+    "....#......#....",
+    "................",
+    ".......##.......",
+    "......####......",
+    ".......##.......",
+    "................",
+    "................",
+    "................"
+]
 RATES = 40
 GRAPH = 56
 FLOOR_RATE = 30
@@ -204,6 +226,17 @@ skill frames(screen, x, y, width, rates) {
     out none
 }
 
+skill wifi_icon(screen, x, y, ink) {
+    drum (16) {
+        @line = group.get(WIFI_ICON, beat)
+        @row = beat
+        drum (16) {
+            (str.get(line, beat) == "#") { graphics.fill(screen, x + beat, y + row, 1, 1, ink) }
+        }
+    }
+    out none
+}
+
 skill draw(base, card) {
     out show(base, card, yes, [])
 }
@@ -220,10 +253,13 @@ skill show(base, card, forced, rates) {
     @outgoing = sizes.speed_text(netlog.number_at(base, log, TX_SPEED))
     @received = sizes.kb_text(netlog.number_at(base, log, RX_KB))
     @sent = sizes.kb_text(netlog.number_at(base, log, TX_KB))
+    @wifi = handoff.stage(base)
+    @wifi_step = group.get(wifi, 0)
+    @wifi_text = group.get(wifi, 1)
     @shown = group.count(rates)
     @latest = 0
     (shown > 0) { latest = group.get(rates, shown - 1) }
-    @mark = signature("{memory_used}/{memory_total}/{disk_used}/{disk_total}/{link}/{incoming}/{outgoing}/{received}/{sent}/{shown}/{latest}")
+    @mark = signature("{memory_used}/{memory_total}/{disk_used}/{disk_total}/{link}/{incoming}/{outgoing}/{received}/{sent}/{shown}/{latest}/{wifi_step}/{wifi_text}")
     (forced == no) {
         (mark == netlog.number_at(base, log, SIGNATURE)) { out none }
     }
@@ -236,7 +272,14 @@ skill show(base, card, forced, rates) {
     graphics.fill(panel, 0, 0, side, whole.height, graphics.color(whole, 24, 24, 27))
     graphics.fill(panel, 0, 0, 1, whole.height, graphics.color(whole, 63, 63, 70))
     lettering.paint_text(panel, FACE, MARGIN, MARGIN, "система", graphics.color(whole, 113, 113, 122))
-    @y = gauge(panel, MARGIN, MARGIN + ROW * 2, width, "память", memory_used, memory_total)
+    @wifi_ink = grey
+    (wifi_step == handoff.CONNECTED) { wifi_ink = graphics.color(whole, 45, 212, 191) }
+    @wifi_line = wifi_text
+    (str.bytes(wifi_line) == 0) { wifi_line = "выключен" }
+    wifi_icon(panel, MARGIN, MARGIN + ROW * 2, wifi_ink)
+    lettering.paint_text(panel, FACE, MARGIN + 24, MARGIN + ROW * 2, "Wi-Fi", graphics.color(whole, 228, 228, 231))
+    lettering.paint_text(panel, FACE, MARGIN, MARGIN + ROW * 3, wifi_line, wifi_ink)
+    @y = gauge(panel, MARGIN, MARGIN + ROW * 5, width, "память", memory_used, memory_total)
     y = gauge(panel, MARGIN, y, width, "диск Saltic", disk_used, disk_total)
     lettering.paint_text(panel, FACE, MARGIN, y, "сеть", graphics.color(whole, 228, 228, 231))
     lettering.paint_text(panel, FACE, MARGIN, y + ROW, "линк {link}", grey)

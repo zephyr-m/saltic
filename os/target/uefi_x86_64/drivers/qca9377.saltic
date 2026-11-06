@@ -16,6 +16,10 @@
 -- bring_up(chip, data, name) -> текст — всё от сброса до адреса по DHCP в
 --     открытой сети name; сеть — в chip.point, адрес — chip.ip; дальше кадры —
 --     traffic.poll и traffic.send(chip, chip.point, кадр)
+-- STEPS — имена шагов подъёма; bring_step(chip, data, name, step) -> текст —
+--     один шаг (с 0): сброс, прошивка, связь с прошивкой, поиск сети,
+--     подключение, адрес; не вышло — ошибка (NetworkNotFound, NotAssociated,
+--     NoAddress). Шагами агент рисует ход на панели системы
 -- alive(chip) -> yes/no — прошивка отвечает на барьер WMI (карту не сбросили)
 -- join(chip, name) -> текст — поиск и подключение к открытой сети name (join),
 --     затем пробный DHCPDISCOVER (traffic)
@@ -43,6 +47,7 @@ use os.target.uefi_x86_64.drivers.qca9377.join
 use os.target.uefi_x86_64.drivers.qca9377.traffic
 
 VENDOR_QUALCOMM = 5772
+STEPS = ["сброс карты", "прошивка", "связь с прошивкой", "ищу сеть", "подключаюсь", "получаю адрес"]
 MODEL_QCA9377 = 66
 CORE_CTRL = 237568
 CPU_INTR = 8192
@@ -102,14 +107,33 @@ skill look(chip) {
 }
 
 skill bring_up(chip, data, name) {
-    start(chip)
-    load(chip, data)
-    talk(chip)
-    @told = ready(chip)
-    @network = join.run(chip, name)
-    (network == none) { out chip.journal }
-    @leased = traffic.lease(chip, network)
-    (group.count(chip.ip) > 0) { chip.point = network }
+    @told = ""
+    drum (group.count(STEPS)) { told = bring_step(chip, data, name, beat) }
+    out told
+}
+
+skill bring_step(chip, data, name, step) {
+    (step == 0) { out start(chip) }
+    (step == 1) { out load(chip, data) }
+    (step == 2) {
+        talk(chip)
+        out ready(chip)
+    }
+    (step == 3) {
+        @tally = scan.search(chip)
+        @network = join.named(tally.networks, name)
+        (network == none) { out error.NetworkNotFound }
+        chip.point = network
+        out "нашла «{name}»"
+    }
+    (step == 4) {
+        @network = chip.point
+        @joined = join.enter(chip, network)
+        (chip.station == 0) { out error.NotAssociated }
+        out joined
+    }
+    @leased = traffic.lease(chip, chip.point)
+    (group.count(chip.ip) == 0) { out error.NoAddress }
     out leased
 }
 

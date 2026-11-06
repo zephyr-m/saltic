@@ -12,7 +12,7 @@
 -- Agent { card, frames, commands, arp, expected, received, total, columns,
 --     rows, line, cursor, console, shown_second, rounds, failures, last_error,
 --     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, limit,
---     linked, opening, saver, active_at, wifi, wifi_text, via }
+--     linked, opening, saver, active_at, wifi, wifi_text, dream, via }
 -- my_ip(agent) -> наш IP на входе via / transmit(agent, frame) — кадр в via
 -- wifi_up(agent, name) -> текст — прошивка с диска в свои страницы (причал с
 --     принятой программой не трогается), qca9377.bring_up; greet по Wi-Fi;
@@ -21,9 +21,17 @@
 -- wifi_keep(agent) -> текст — посылку из причала на диск
 -- wifi_alive(agent) -> yes/no — прошивка отвечает на барьер WMI; после
 --     программы (она могла сбросить карту) мёртвый Wi-Fi поднимается заново
--- poll_wifi(agent) — до WIFI_FRAMES кадров из Wi-Fi в handle с via = wifi
+-- poll_wifi(agent) — до WIFI_FRAMES кадров из Wi-Fi в handle с via = wifi;
+--     точка выгнала (chip.lost) — подключиться заново
+-- wifi_stage(agent, step, text) — ход подъёма Wi-Fi на панель системы
+--     (handoff.set_stage, перерисовать панель)
+-- retry_wifi(agent) — Wi-Fi нет (точка была выключена) — новая попытка раз в
+--     WIFI_RETRY секунд
 -- day_second(base) -> секунда суток / wake(agent) -> yes, если снят хранитель;
 --     отмечает активность / doze(agent) — хранитель после SAVER_AFTER секунд простоя
+-- dream(agent, seen) — круг хранителя: Wi-Fi, клавиша и кадр пластилина —
+--     только если за круг не пришло ни одного кадра сети (seen — счётчик
+--     кадров в начале круга): снимок и заливка идут сотнями пакетов подряд
 -- log(agent, message) — в консоль, пока console = yes
 -- begin_upload / upload_state / launch / keep_program / open_by_word /
 --     memory_dump / prepare_disk / install_image / time_reply / show_code /
@@ -38,7 +46,8 @@
 -- link_russian(status) -> текст линка / has_link(card) -> yes/no
 -- refresh_shelf(agent) / open_program(agent) / press(agent, key) — полка и клавиши
 -- answer(agent, bytes) -> agent — UDP-команда или кусок shot; команда и ответ —
---     ещё и в netlog, панель внизу экрана
+--     ещё и в netlog, панель внизу экрана; не mRPC и не команда из реестра —
+--     мусор (так стучатся чужие устройства в сети), молча мимо
 -- store_chunk(agent, bytes) -> agent — кусок программы в bay, ответ "ok N"
 -- handle(agent, bytes) -> agent — ARP или UDP по портам
 -- greet(card) / watch_link(agent) / last_cry(card, message) — сеть и баннеры
@@ -92,7 +101,7 @@ use os.target.uefi_x86_64.network.mrpc
 use os.target.uefi_x86_64.network.mrpc.data
 use os.target.uefi_x86_64.platform.utf8
 
-VERSION = 23
+VERSION = 29
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -110,6 +119,7 @@ WIFI_FILE = "QCA9377.BIN"
 WIFI_EVERY = 8
 WIFI_FRAMES = 4
 WIFI_ROOM = 1048576
+WIFI_RETRY = 300
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -143,6 +153,8 @@ Agent = Box {
     active_at = 0,
     wifi = none,
     wifi_text = "выключен",
+    dream = none,
+    wifi_tried = 0,
     via = "cable"
 }
 
@@ -446,6 +458,8 @@ skill wake(agent) {
     agent.active_at = day_second(agent.card.base)
     (agent.saver == no) { out no }
     agent.saver = no
+    saver.stop(agent.card.base, agent.dream) rescue |err| { none }
+    agent.dream = none
     clear_screen(agent)
     out yes
 }
@@ -453,8 +467,18 @@ skill wake(agent) {
 skill doze(agent) {
     @idle = num.mod(day_second(agent.card.base) - agent.active_at + DAY_SECONDS, DAY_SECONDS)
     (idle < SAVER_AFTER) { out none }
+    @started = saver.start(agent.card.base) rescue |err| { out none }
+    agent.dream = started
     agent.saver = yes
-    out saver.draw(agent.card.base, VERSION)
+    out none
+}
+
+skill dream(agent, seen) {
+    poll_wifi(agent)
+    press(agent, uefi.poll_key(agent.card.base, 0))
+    (agent.saver == no) { out none }
+    (agent.frames > seen) { out none }
+    out saver.frame(agent.dream, agent.card.base) rescue |err| { none }
 }
 
 skill press(agent, key) {
@@ -622,6 +646,10 @@ skill answer(agent, bytes) {
         shot.send_chunk(agent.card, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(SHOT_PREFIX), str.bytes(packet.text))))
         out agent
     }
+    (mrpc.is_request(packet.payload) == no) {
+        @first = group.get(str.split(packet.text, " "), 0)
+        (commands.known(first) == no) { out agent }
+    }
     ((packet.text == "shot") == no) { wake(agent) }
     @who = net.ip_text(packet.from_ip)
     @command = packet.text
@@ -764,38 +792,64 @@ skill wifi_alive(agent) {
 
 skill wifi_start(agent, name, place) {
     @started = day_second(agent.card.base)
+    agent.wifi_tried = started
     agent.wifi = none
     handoff.forget(agent.card.base)
     agent.wifi_text = "поднимаю"
     @size = programs.load_file(agent.card.base, "{WIFI_FOLDER}\\{WIFI_FILE}", place, WIFI_ROOM) rescue |err| {
         agent.wifi_text = "нет прошивки на диске"
+        wifi_stage(agent, 0, "нет прошивки на диске")
         out "Wi-Fi: нет прошивки на диске ({err}); залей посылку и скажи wifi-keep"
     }
     @chip = qca9377.open()
     chip.quiet = yes
-    @told = qca9377.bring_up(chip, place, name) rescue |err| {
-        qca9377.quiet(chip)
-        agent.wifi_text = "ошибка: {err}"
-        out "Wi-Fi: ошибка {err}"
+    @total = group.count(qca9377.STEPS)
+    drum (total) {
+        @step = beat
+        @title = group.get(qca9377.STEPS, step)
+        @number = step + 1
+        wifi_stage(agent, number, "шаг {number}/{total}: {title}")
+        qca9377.bring_step(chip, place, name, step) rescue |err| {
+            qca9377.quiet(chip)
+            agent.wifi_text = "не подключился: {title} — {err}"
+            wifi_stage(agent, 0, "не вышло: {title} — {err}")
+            out "Wi-Fi «{name}»: не вышло на шаге «{title}»: {err}"
+        }
     }
     @took = day_second(agent.card.base) - started
-    (chip.point == none) {
-        qca9377.quiet(chip)
-        agent.wifi_text = "не подключился"
-        out "Wi-Fi «{name}» не поднялся за {took} с: {told}"
-    }
     agent.wifi = chip
     handoff.share(chip)
     @address = net.ip_text(chip.ip)
     agent.wifi_text = "{address} в «{name}»"
+    wifi_stage(agent, handoff.CONNECTED, "{address}  {name}")
     agent.via = "wifi"
     transmit(agent, net.udp_frame(chip.mac, chip.ip, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic {VERSION} слушает {address}:5555 по Wi-Fi"))
     agent.via = "cable"
     out "Wi-Fi: {address} в «{name}» за {took} с ({size} байт прошивки)"
 }
 
+skill wifi_stage(agent, step, text) {
+    handoff.set_stage(agent.card.base, step, text)
+    (agent.console == no) { system_panel.draw(agent.card.base, agent.card) rescue |err| { none } }
+    out none
+}
+
+skill retry_wifi(agent) {
+    ((agent.wifi == none) == no) { out none }
+    (agent.wifi_text == "нет прошивки на диске") { out none }
+    @waited = num.mod(day_second(agent.card.base) - agent.wifi_tried + DAY_SECONDS, DAY_SECONDS)
+    (waited < WIFI_RETRY) { out none }
+    out wifi_up(agent, WIFI_NETWORK) rescue |err| { none }
+}
+
 skill poll_wifi(agent) {
     (agent.wifi == none) { out none }
+    (agent.wifi.lost == yes) {
+        log(agent, "wifi: the access point dropped us, joining again")
+        wifi_stage(agent, 0, "точка пропала, ищу заново")
+        wifi_up(agent, WIFI_NETWORK) rescue |err| { none }
+        out none
+    }
     drum (WIFI_FRAMES) {
         @bytes = traffic.poll(agent.wifi)
         (bytes == none) { leave }
@@ -833,6 +887,7 @@ skill watch_link(agent) {
 }
 
 skill tick(agent) {
+    @seen = agent.frames
     drum (rtl8111.RX_COUNT) {
         (rtl8111.received(agent.card, beat) == yes) {
             @bytes = rtl8111.read_frame(agent.card, beat)
@@ -840,12 +895,14 @@ skill tick(agent) {
             handle(agent, bytes)
         }
     }
+    (agent.saver == yes) { dream(agent, seen) }
     agent.rounds = agent.rounds + 1
     (num.mod(agent.rounds, WIFI_EVERY) == 0) { poll_wifi(agent) }
     (num.mod(agent.rounds, KEY_EVERY) == 0) { press(agent, uefi.poll_key(agent.card.base, 0)) }
     (agent.rounds == CLOCK_EVERY) {
         agent.rounds = 0
         watch_link(agent)
+        retry_wifi(agent)
         (agent.console == no) {
             (agent.saver == no) {
                 (agent.lent == no) { feed.draw_clock(agent) }

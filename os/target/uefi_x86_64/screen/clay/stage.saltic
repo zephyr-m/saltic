@@ -1,0 +1,80 @@
+-- stage — съёмочная площадка «Пластилина»: экран, небо и задний буфер,
+-- камера, сцена. Кадр: небо из своего буфера, земля рядами от дальних к
+-- ближним, тени, предметы от дальних к ближним; готовый кадр копируется на
+-- экран прошивкой построчно. Камера смотрит на LOOK с орбиты радиуса RADIUS.
+-- Берут программа clay и хранитель экрана агента (agent/saver).
+--
+-- Stage { front, sky, back, camera, scene, faces }
+-- open_stage(base, front) -> Stage — буферы неба и кадра (страницы), сцена
+-- pages(stage) -> страниц одного буфера; close_stage(base, stage) — отдать буферы
+-- draw_sky(screen) — градиент неба
+-- render(stage, angle, lift, base) — кадр: камера на угле angle, высоте lift
+
+use core.group
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.screen.geometry
+use os.target.uefi_x86_64.screen.clay.mesh
+use os.target.uefi_x86_64.screen.clay.scene
+use os.uiengine.canvas
+
+RADIUS = 1150
+LOOK = [0, 40, 0]
+TOP = canvas.Rgb { red = 150, green = 196, blue = 238 }
+LOW = canvas.Rgb { red = 252, green = 232, blue = 214 }
+
+Stage = Box {
+    front = graphics.Screen {},
+    sky = graphics.Screen {},
+    back = graphics.Screen {},
+    camera = mesh.Camera {},
+    scene = scene.Scene {},
+    faces = 0
+}
+
+skill draw_sky(screen) {
+    @top = TOP
+    @low = LOW
+    drum (screen.height) {
+        @mix = beat * 100 / screen.height
+        @red = top.red + (low.red - top.red) * mix / 100
+        @green = top.green + (low.green - top.green) * mix / 100
+        @blue = top.blue + (low.blue - top.blue) * mix / 100
+        graphics.fill(screen, 0, beat, screen.width, 1, graphics.color(screen, red, green, blue))
+    }
+    out none
+}
+
+skill open_stage(base, front) {
+    @sky = graphics.buffer_like(base, front)
+    @back = graphics.buffer_like(base, front)
+    draw_sky(sky)
+    @world = scene.build(front)
+    out Stage { front = front, sky = sky, back = back, camera = mesh.Camera { width = front.width, height = front.height }, scene = world, faces = scene.quads(world) }
+}
+
+skill pages(stage) {
+    out graphics.buffer_pages(stage.front)
+}
+
+skill close_stage(base, stage) {
+    @sky = stage.sky
+    @back = stage.back
+    uefi.free_pages(base, sky.frame, pages(stage))
+    out uefi.free_pages(base, back.frame, pages(stage))
+}
+
+skill render(stage, angle, lift, base) {
+    @back = stage.back
+    drum (back.height) { graphics.copy_span(base, back, stage.sky, beat, 0, back.width) }
+    @camera = stage.camera
+    @from = [RADIUS * geometry.cosine(angle) / geometry.ONE, lift, RADIUS * geometry.sine(angle) / geometry.ONE]
+    mesh.look(camera, from, LOOK)
+    @world = stage.scene
+    mesh.ground(back, camera, world.ground, scene.CELLS)
+    drum (group.count(world.blots)) { mesh.draw(back, camera, group.get(world.blots, beat)) }
+    @bodies = mesh.order(camera, world.bodies)
+    drum (group.count(bodies)) { mesh.draw(back, camera, group.get(bodies, beat)) }
+    drum (back.height) { graphics.copy_span(base, stage.front, back, beat, 0, back.width) }
+    out none
+}

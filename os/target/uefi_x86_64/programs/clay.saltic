@@ -1,18 +1,13 @@
 -- clay — программа «Пластилин»: игрушечная полянка из скруглённых тел —
 -- холмы, деревья-леденцы, камни-капли, домик, паучок из шариков, мягкий
--- пластилиновый свет и тени-кляксы (programs/clay/{mesh,forms,scene}).
--- Камера облетает полянку. Кадр: небо из своего буфера, земля рядами от
--- дальних к ближним, тени, предметы от дальних к ближним; готовый кадр
--- копируется на экран прошивкой построчно. Стрелки ← → — облёт и его
--- скорость, ↑ ↓ — выше и ниже, пробел — пауза, Esc — назад; по сети —
--- quit, state, key, shot. Только x86_64-uefi.
+-- пластилиновый свет и тени-кляксы (screen/clay/{mesh,forms,scene}).
+-- Камера облетает полянку, кадр рисует screen/clay/stage. Стрелки ← → —
+-- облёт и его скорость, ↑ ↓ — выше и ниже, пробел — пауза, Esc — назад; по
+-- сети — quit, state, key, shot. Только x86_64-uefi.
 --
 -- Orbit { angle, speed, lift, paused, quit, frames, second, counted, rate }
--- Stage { front, sky, back, camera, scene, faces }
--- draw_sky(screen) — градиент неба
--- render(stage, orbit, base) — кадр
--- steer(orbit, key) / count_rate(orbit, base) / tick(stage, orbit, base, link)
--- broken(stage, orbit, base, link, problem) — ошибка кадра на экран и в state
+-- steer(orbit, key) / count_rate(orbit, base) / tick(set, orbit, base, link)
+-- broken(set, orbit, base, link, problem) — ошибка кадра на экран и в state
 -- program() — вход
 
 use core.group
@@ -21,19 +16,15 @@ use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.network.reply
 use os.target.uefi_x86_64.network.remote
-use os.target.uefi_x86_64.programs.web.geometry
-use os.target.uefi_x86_64.programs.clay.mesh
-use os.target.uefi_x86_64.programs.clay.forms
-use os.target.uefi_x86_64.programs.clay.scene
+use os.target.uefi_x86_64.screen.clay.forms
+use os.target.uefi_x86_64.screen.clay.stage
 use os.uiengine.canvas
 use os.uiengine.fonts
 
-RADIUS = 1150
 LIFT = 560
 LIFT_STEP = 40
 SPEED = 600
 SPEED_STEP = 300
-LOOK = [0, 40, 0]
 PAUSE = 1000
 SCAN_UP = 1
 SCAN_DOWN = 2
@@ -41,8 +32,6 @@ SCAN_RIGHT = 3
 SCAN_LEFT = 4
 SCAN_ESCAPE = 23
 SPACE = 32
-TOP = canvas.Rgb { red = 150, green = 196, blue = 238 }
-LOW = canvas.Rgb { red = 252, green = 232, blue = 214 }
 
 Orbit = Box {
     angle = 0,
@@ -54,43 +43,6 @@ Orbit = Box {
     second = -1,
     counted = 0,
     rate = 0
-}
-
-Stage = Box {
-    front = graphics.Screen {},
-    sky = graphics.Screen {},
-    back = graphics.Screen {},
-    camera = mesh.Camera {},
-    scene = scene.Scene {},
-    faces = 0
-}
-
-skill draw_sky(screen) {
-    @top = TOP
-    @low = LOW
-    drum (screen.height) {
-        @mix = beat * 100 / screen.height
-        @red = top.red + (low.red - top.red) * mix / 100
-        @green = top.green + (low.green - top.green) * mix / 100
-        @blue = top.blue + (low.blue - top.blue) * mix / 100
-        graphics.fill(screen, 0, beat, screen.width, 1, graphics.color(screen, red, green, blue))
-    }
-    out none
-}
-
-skill render(stage, orbit, base) {
-    @back = stage.back
-    drum (back.height) { graphics.copy_span(base, back, stage.sky, beat, 0, back.width) }
-    @camera = stage.camera
-    @from = [RADIUS * geometry.cosine(orbit.angle) / geometry.ONE, orbit.lift, RADIUS * geometry.sine(orbit.angle) / geometry.ONE]
-    mesh.look(camera, from, LOOK)
-    @world = stage.scene
-    mesh.ground(back, camera, world.ground, scene.CELLS)
-    drum (group.count(world.blots)) { mesh.draw(back, camera, group.get(world.blots, beat)) }
-    @bodies = mesh.order(camera, world.bodies)
-    drum (group.count(bodies)) { mesh.draw(back, camera, group.get(bodies, beat)) }
-    drum (back.height) { graphics.copy_span(base, stage.front, back, beat, 0, back.width) }
-    out none
 }
 
 skill steer(orbit, key) {
@@ -117,20 +69,20 @@ skill count_rate(orbit, base) {
     out none
 }
 
-skill tick(stage, orbit, base, link) {
+skill tick(set, orbit, base, link) {
     remote.serve(link)
     steer(orbit, uefi.poll_key(base, PAUSE))
     (orbit.paused == no) { orbit.angle = forms.wrap(orbit.angle + orbit.speed) }
-    render(stage, orbit, base)
+    stage.render(set, orbit.angle, orbit.lift, base)
     count_rate(orbit, base)
     @rate = orbit.rate
     @frames = orbit.frames
-    @faces = stage.faces
+    @faces = set.faces
     out remote.tell(link, "пластилин: кадров {frames}, в секунду {rate}, граней {faces}")
 }
 
-skill broken(stage, orbit, base, link, problem) {
-    @front = stage.front
+skill broken(set, orbit, base, link, problem) {
+    @front = set.front
     graphics.fill(front, 0, 0, front.width, 40, graphics.color(front, 20, 22, 28))
     fonts.draw_text(front, 16, 12, "Пластилин упал: {problem} · Esc — выход", canvas.Rgb { red = 250, green = 204, blue = 21 }, fonts.SMALL)
     remote.tell(link, "пластилин упал: {problem}")
@@ -150,21 +102,18 @@ program() {
     @front = graphics.open(base)
     uefi.forget_keys(base)
     @link = remote.open_remote()
-    @sky = graphics.buffer_like(base, front)
-    @back = graphics.buffer_like(base, front)
-    @pages = graphics.buffer_pages(front)
+    fonts.draw_text(front, 16, 12, "Пластилин: леплю полянку…", canvas.ZINC_900, fonts.REGULAR)
+    @set = stage.open_stage(base, front)
+    @sky = set.sky
+    @back = set.back
+    @pages = stage.pages(set)
     remote.own(link, sky.frame, pages)
     remote.own(link, back.frame, pages)
-    fonts.draw_text(front, 16, 12, "Пластилин: леплю полянку…", canvas.ZINC_900, fonts.REGULAR)
-    draw_sky(sky)
-    @world = scene.build(front)
-    @stage = Stage { front = front, sky = sky, back = back, camera = mesh.Camera { width = front.width, height = front.height }, scene = world, faces = scene.quads(world) }
     @orbit = Orbit {}
     always {
-        tick(stage, orbit, base, link) rescue |problem| { broken(stage, orbit, base, link, problem) }
+        tick(set, orbit, base, link) rescue |problem| { broken(set, orbit, base, link, problem) }
         (orbit.quit == yes) {
-            uefi.free_pages(base, sky.frame, pages)
-            uefi.free_pages(base, back.frame, pages)
+            stage.close_stage(base, set)
             @frames = orbit.frames
             reply.home("пластилин: кадров {frames}")
             out none

@@ -22,7 +22,10 @@
 --     в порт PORT (эхом), до ECHOES ответов
 -- probe(chip, network) -> текст — lease, find_router, listen
 -- poll(chip) -> кадр Ethernet или none — без ожидания: письма CE1, события
---     WMI отпустить, один кадр данных; для цикла агента
+--     WMI отпустить, один кадр данных; для цикла агента. Точка нас выгнала —
+--     chip.lost = yes: кадр Deauthentication или Disassociation от неё в
+--     приёме, событие прошивки PEER_STA_KICKOUT или ROAM (пропали маяки)
+-- expelled(chip, place) -> yes/no — кадр «уходи» от нашей точки
 
 use core.num
 use core.group
@@ -32,6 +35,7 @@ use os.target.uefi_x86_64.network.dhcp
 use os.target.uefi_x86_64.drivers.qca9377.card
 use os.target.uefi_x86_64.drivers.qca9377.rings
 use os.target.uefi_x86_64.drivers.qca9377.htt
+use os.target.uefi_x86_64.drivers.qca9377.wmi
 use os.target.uefi_x86_64.drivers.qca9377.join
 
 DATA_TO_POINT = [8, 1, 0, 0]
@@ -43,6 +47,10 @@ HEADER = 24
 BODY = 32
 DATA_MASK = 12
 DATA = 8
+DEAUTH = 192
+DISASSOC = 160
+KICKOUT = 24577
+ROAM = 45057
 XID = [83, 65, 76, 84]
 WAITS = 400
 PAUSE = 10000
@@ -97,6 +105,7 @@ skill receive(chip) {
         @found = none
         (group.get(got, 3) == no) { chip.frames_damaged = chip.frames_damaged + 1 }
         (group.get(got, 3) == yes) {
+            (expelled(chip, place) == yes) { chip.lost = yes }
             (num.mod(firmware.read8(place, chip.base, 0), 16) == DATA) {
                 (length > BODY) { found = ethernet(chip, place, length) }
             }
@@ -223,9 +232,25 @@ skill poll(chip) {
     rings.drain_letters(chip)
     drum (16) {
         (rings.held(chip) == 0) { leave }
+        @event = wmi.event_id(chip, rings.held_buffer(chip))
+        (event == KICKOUT) { chip.lost = yes }
+        (event == ROAM) { chip.lost = yes }
         rings.release(chip)
     }
     out receive(chip)
+}
+
+skill expelled(chip, place) {
+    @kind = firmware.read8(place, chip.base, 0)
+    @leave_now = no
+    (kind == DEAUTH) { leave_now = yes }
+    (kind == DISASSOC) { leave_now = yes }
+    (leave_now == no) { out no }
+    @network = chip.point
+    drum (6) {
+        ((firmware.read8(place, chip.base, 10 + beat) == group.get(network.address, beat)) == no) { out no }
+    }
+    out yes
 }
 
 skill probe(chip, network) {
