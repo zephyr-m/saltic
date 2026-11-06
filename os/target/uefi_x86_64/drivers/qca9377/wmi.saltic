@@ -8,9 +8,11 @@
 -- tlv(chip, at, tag, length) -> at + 4 — заголовок TLV в wifi_frame
 -- words(chip, at, values) -> at после значений — 32-битные числа подряд
 -- find_event(chip, id) -> номер буфера CE2 с событием id; NoEvent через 3 с
--- inbox(chip) -> текст — что лежит в 8 буферах CE2 и где индексы CE2/CE3
--- init(chip) -> текст — ждёт SERVICE_READY, потом WMI_INIT с настройками
---     ресурсов, ждёт READY, MAC карты
+-- inbox(chip) -> текст — разбор при молчании: FW_INDICATOR, что лежит в
+--     буферах CE2, индексы CE1/CE2/CE3 (у приёма — +72, у отправки — +68)
+-- init(chip) -> текст — ждёт SERVICE_READY, проверяет связь ECHO, отдаёт
+--     буферы писем CE1 обратно, WMI_INIT с настройками ресурсов (поля — как в
+--     ath10k_wmi_tlv_op_gen_init), ждёт READY, MAC карты
 
 use core.group
 use os.target.uefi_x86_64.platform.firmware
@@ -84,16 +86,6 @@ skill inbox(chip) {
     @write1 = firmware.read16(chip.bar, chip.base, rings.CE1 + 64)
     @letters = chip.receive_at - chip.letters_from
     text = "{text}; CE1 чтение {read1} запись {write1}, писем взято {letters}"
-    @read5 = firmware.read16(chip.bar, chip.base, rings.CE5 + 72)
-    @write5 = firmware.read16(chip.bar, chip.base, rings.CE5 + 64)
-    text = "{text}; CE5 чтение {read5} запись {write5}"
-    @fourth = boot.letter(chip, 3)
-    @bytes_hex = ""
-    drum (6) {
-        @word = firmware.hex(firmware.read32(fourth, chip.base, beat * 4), 8)
-        bytes_hex = "{bytes_hex} {word}"
-    }
-    text = "{text}; письмо 4:{bytes_hex}"
     @indicator = card.hex32(chip, card.FW_INDICATOR)
     out "FW_INDICATOR {indicator};{text}; CE2 чтение {read2} запись {write2}; CE3 чтение {read3} запись {write3}"
 }
@@ -114,24 +106,7 @@ skill init(chip) {
         @seen = inbox(chip)
         out "нет SERVICE_READY:{seen}"
     }
-    @passport_at = rings.event_buffer(chip, passport)
-    @first_tag = firmware.read16(passport_at, chip.base, 14)
-    @first_length = firmware.read16(passport_at, chip.base, 12)
-    @available = rings.event_buffer(chip, find_event(chip, 3))
-    @other_tag = firmware.read16(available, chip.base, 14)
-    card.say("   SERVICE_READY first TLV: tag {first_tag} (expect 32), length {first_length}; SERVICE_AVAILABLE tag {other_tag}")
-    @size = rings.event_slot(chip, passport)
-    @walk = ""
-    @at_tlv = 12
-    drum (24) {
-        (at_tlv + 4 > size) { leave }
-        @tlv_length = firmware.read16(passport_at, chip.base, at_tlv)
-        @tlv_tag = firmware.read16(passport_at, chip.base, at_tlv + 2)
-        walk = "{walk} {tlv_tag}/{tlv_length}"
-        at_tlv = at_tlv + 4 + tlv_length
-    }
-    card.say("   SERVICE_READY TLVs (tag/length):{walk}")
-    card.say("T1. ECHO {ECHO_VALUE}: does any WMI command reach the firmware?")
+    card.say("T1. ECHO {ECHO_VALUE}: do WMI commands reach the firmware?")
     @at_echo = tlv(chip, BODY, TAG_ECHO, 4)
     at_echo = words(chip, at_echo, [ECHO_VALUE])
     command(chip, ECHO, at_echo - BODY)
@@ -142,7 +117,7 @@ skill init(chip) {
         echo_text = "эхо {back}"
     }
     card.say("   {echo_text}")
-    card.say("T2. CE1 is full (4 letters read): give the 4 letter buffers back to the card")
+    card.say("T2. CE1: the 4 letters are read, give their buffers back to the card")
     drum (boot.LETTER_SLOTS) {
         @buffer = boot.letter(chip, beat)
         firmware.write_phys32(buffer, chip.base, 8, 0)
