@@ -1,0 +1,324 @@
+-- web — программа «Паутина»: паучок-скакун плетёт сеть кругопряда в реальном
+-- времени (радиусы, рама, причальные нити, спираль с провисанием), потом
+-- ждёт в центре. Стрелки — прицел, Enter — бросить муху: она липнет к
+-- ближайшей точке спирали, нить вспыхивает, паук бежит к ней кратчайшим путём
+-- по нитям и возвращается в центр. Esc — назад; по сети — quit, state, key, shot.
+-- Два слоя: layer — паутина (только дорисовывается), frame — layer плюс паук,
+-- муха и прицел; на экран копируется лишь изменившийся прямоугольник.
+-- Только x86_64-uefi.
+--
+-- Stage { front, layer, frame } — экран и два буфера
+-- Spinner { web, pieces, at, x, y, phase, aim_x, aim_y, fly, flies, node,
+--     flash, lit, quit, frames } — состояние; lit — точка спирали, чьи нити
+--     горят вспышкой (муху могут съесть раньше, чем вспышка погаснет)
+-- ink_color(screen, ink) -> пиксель нити / stroke_pieces(stage, pieces, ink) -> прямоугольник
+-- grow(rect, x0, y0, x1, y1) -> прямоугольник [x0, y0, x1, y1], объединение
+-- compose(stage, rect, spinner, base) — layer → frame, спрайты, frame → экран
+-- draw_hud(stage, spinner) -> прямоугольник строки подсказки
+-- steer / step / finish / tick(spinner, stage, base, link) — шаг программы
+-- broken(spinner, stage, base, link, problem) — ошибка шага: имя — в подсказку
+--     и в state, дальше только сеть и Esc
+-- program() — вход
+
+use core.num
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.screen.spider
+use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.remote
+use os.target.uefi_x86_64.programs.web.weave
+use os.uiengine.canvas
+use os.uiengine.shapes
+use os.uiengine.fonts
+
+STEP = 10
+PAUSE = 2000
+AIM_STEP = 16
+FLASH_FRAMES = 24
+HUD = 36
+SPIDER_WIDTH = 40
+SPIDER_HEIGHT = 26
+FLASH = 4
+SCAN_UP = 1
+SCAN_DOWN = 2
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+SCAN_ESCAPE = 23
+ENTER = 13
+BACKGROUND = canvas.Rgb { red = 20, green = 22, blue = 28 }
+TEXT = canvas.Rgb { red = 170, green = 176, blue = 190 }
+
+Phase = enum {
+    WEAVE,
+    WAIT,
+    HUNT,
+    RETURN
+}
+
+Stage = Box {
+    front = graphics.Screen {},
+    layer = graphics.Screen {},
+    frame = graphics.Screen {}
+}
+
+Spinner = Box {
+    web = weave.Web {},
+    pieces = [],
+    at = 0,
+    x = 0,
+    y = 0,
+    phase = Phase.WEAVE,
+    aim_x = 0,
+    aim_y = 0,
+    fly = -1,
+    flies = 0,
+    node = 0,
+    flash = 0,
+    lit = 0,
+    quit = no,
+    frames = 0
+}
+
+skill ink_color(ink) {
+    (ink == weave.FRAME) { out canvas.Rgb { red = 120, green = 126, blue = 140 } }
+    (ink == weave.SPOKE) { out canvas.Rgb { red = 175, green = 182, blue = 198 } }
+    (ink == FLASH) { out canvas.Rgb { red = 250, green = 204, blue = 21 } }
+    out canvas.Rgb { red = 226, green = 230, blue = 238 }
+}
+
+skill grow(rect, x0, y0, x1, y1) {
+    @left = group.get(rect, 0)
+    @top = group.get(rect, 1)
+    @right = group.get(rect, 2)
+    @bottom = group.get(rect, 3)
+    (x0 < left) { left = x0 }
+    (x1 < left) { left = x1 }
+    (y0 < top) { top = y0 }
+    (y1 < top) { top = y1 }
+    (x0 > right) { right = x0 }
+    (x1 > right) { right = x1 }
+    (y0 > bottom) { bottom = y0 }
+    (y1 > bottom) { bottom = y1 }
+    out [left, top, right, bottom]
+}
+
+skill stroke_pieces(stage, pieces, ink) {
+    @rect = [stage.front.width, stage.front.height, 0, 0]
+    @color = ink_color(ink)
+    drum (group.count(pieces)) {
+        @piece = group.get(pieces, beat)
+        shapes.stroke(stage.layer, piece.x0, piece.y0, piece.x1, piece.y1, 1, color, BACKGROUND)
+        rect = grow(rect, piece.x0 - 2, piece.y0 - 2, piece.x1 + 2, piece.y1 + 2)
+    }
+    out rect
+}
+
+skill sprite_left(stage, x) {
+    @left = x - SPIDER_WIDTH / 2
+    (left < 0) { left = 0 }
+    (left > stage.front.width - SPIDER_WIDTH) { left = stage.front.width - SPIDER_WIDTH }
+    out left
+}
+
+skill sprite_top(stage, y) {
+    @top = y - SPIDER_HEIGHT / 2
+    (top < 0) { top = 0 }
+    (top > stage.front.height - SPIDER_HEIGHT) { top = stage.front.height - SPIDER_HEIGHT }
+    out top
+}
+
+skill around(stage, spinner, rect) {
+    @left = sprite_left(stage, spinner.x)
+    @top = sprite_top(stage, spinner.y)
+    rect = grow(rect, left, top, left + SPIDER_WIDTH, top + SPIDER_HEIGHT)
+    rect = grow(rect, spinner.aim_x - 9, spinner.aim_y - 9, spinner.aim_x + 9, spinner.aim_y + 9)
+    (spinner.fly >= 0) {
+        @p = weave.point(spinner.web, spinner.fly)
+        rect = grow(rect, group.get(p, 0) - 6, group.get(p, 1) - 6, group.get(p, 0) + 6, group.get(p, 1) + 6)
+    }
+    out rect
+}
+
+skill draw_fly(stage, spinner) {
+    @p = weave.point(spinner.web, spinner.fly)
+    @shake = num.mod(spinner.frames, 3) - 1
+    @x = group.get(p, 0) + shake
+    @y = group.get(p, 1)
+    @wing = graphics.color(stage.frame, 200, 214, 235)
+    graphics.fill(stage.frame, x - 5, y - 4, 4, 3, wing)
+    graphics.fill(stage.frame, x + 2, y - 4, 4, 3, wing)
+    out graphics.fill(stage.frame, x - 2, y - 2, 5, 5, graphics.color(stage.frame, 132, 204, 22))
+}
+
+skill compose(stage, rect, spinner, base) {
+    @left = group.get(rect, 0)
+    @top = group.get(rect, 1)
+    @right = group.get(rect, 2)
+    @bottom = group.get(rect, 3)
+    (left < 0) { left = 0 }
+    (top < 0) { top = 0 }
+    (right > stage.front.width - 1) { right = stage.front.width - 1 }
+    (bottom > stage.front.height - 1) { bottom = stage.front.height - 1 }
+    (right < left) { out none }
+    (bottom < top) { out none }
+    drum (bottom - top + 1) { graphics.copy_span(base, stage.frame, stage.layer, top + beat, left, right - left + 1) }
+    (spinner.fly >= 0) { draw_fly(stage, spinner) }
+    @aim = graphics.color(stage.frame, 248, 113, 113)
+    ((spinner.phase == Phase.WEAVE) == no) {
+        graphics.fill(stage.frame, spinner.aim_x - 8, spinner.aim_y, 17, 1, aim)
+        graphics.fill(stage.frame, spinner.aim_x, spinner.aim_y - 8, 1, 17, aim)
+    }
+    spider.paint(stage.frame, sprite_left(stage, spinner.x), sprite_top(stage, spinner.y), 1)
+    drum (bottom - top + 1) { graphics.copy_span(base, stage.front, stage.frame, top + beat, left, right - left + 1) }
+    out none
+}
+
+skill draw_hud(stage, spinner) {
+    @layer = stage.layer
+    @top = layer.height - HUD
+    graphics.fill(layer, 0, top, layer.width, HUD, canvas.paint(layer, BACKGROUND))
+    @flies = spinner.flies
+    fonts.draw_text(layer, 16, top + 10, "Паутина · мух поймано: {flies} · ← → ↑ ↓ прицел, Enter — муха, Esc — выход", TEXT, fonts.SMALL)
+    out [0, top, layer.width - 1, layer.height - 1]
+}
+
+skill steer(spinner, stage, key) {
+    (key.scan == SCAN_ESCAPE) { spinner.quit = yes }
+    (key.scan == SCAN_LEFT) { spinner.aim_x = spinner.aim_x - AIM_STEP }
+    (key.scan == SCAN_RIGHT) { spinner.aim_x = spinner.aim_x + AIM_STEP }
+    (key.scan == SCAN_UP) { spinner.aim_y = spinner.aim_y - AIM_STEP }
+    (key.scan == SCAN_DOWN) { spinner.aim_y = spinner.aim_y + AIM_STEP }
+    (spinner.aim_x < 10) { spinner.aim_x = 10 }
+    (spinner.aim_y < 10) { spinner.aim_y = 10 }
+    (spinner.aim_x > stage.front.width - 10) { spinner.aim_x = stage.front.width - 10 }
+    (spinner.aim_y > stage.front.height - HUD - 10) { spinner.aim_y = stage.front.height - HUD - 10 }
+    (key.char == ENTER) {
+        (spinner.phase == Phase.WAIT) {
+            @target = weave.nearest(spinner.web, spinner.aim_x, spinner.aim_y)
+            spinner.fly = target
+            spinner.lit = target
+            spinner.flash = FLASH_FRAMES
+            spinner.pieces = weave.walk(spinner.web, weave.route(spinner.web, spinner.node, target), STEP)
+            spinner.at = 0
+            spinner.phase = Phase.HUNT
+            out flash_rect(stage, spinner, FLASH)
+        }
+    }
+    out [stage.front.width, stage.front.height, 0, 0]
+}
+
+skill flash_rect(stage, spinner, ink) {
+    @rect = [stage.front.width, stage.front.height, 0, 0]
+    @last = group.count(spinner.web.points) - 1
+    (spinner.lit > 0) {
+        @before = stroke_pieces(stage, weave.spiral_piece(spinner.web, spinner.lit - 1, ink, STEP), ink)
+        rect = grow(rect, group.get(before, 0), group.get(before, 1), group.get(before, 2), group.get(before, 3))
+    }
+    (spinner.lit < last) {
+        @after = stroke_pieces(stage, weave.spiral_piece(spinner.web, spinner.lit, ink, STEP), ink)
+        rect = grow(rect, group.get(after, 0), group.get(after, 1), group.get(after, 2), group.get(after, 3))
+    }
+    out rect
+}
+
+skill finish(spinner, stage) {
+    @hub = group.count(spinner.web.points)
+    (spinner.phase == Phase.HUNT) {
+        spinner.flies = spinner.flies + 1
+        spinner.node = spinner.fly
+        spinner.fly = -1
+        spinner.pieces = weave.walk(spinner.web, weave.route(spinner.web, spinner.node, hub), STEP)
+        spinner.at = 0
+        spinner.phase = Phase.RETURN
+        out draw_hud(stage, spinner)
+    }
+    spinner.node = hub
+    spinner.phase = Phase.WAIT
+    out [stage.front.width, stage.front.height, 0, 0]
+}
+
+skill step(spinner, stage) {
+    (spinner.at >= group.count(spinner.pieces)) { out finish(spinner, stage) }
+    @piece = group.get(spinner.pieces, spinner.at)
+    spinner.at = spinner.at + 1
+    spinner.x = piece.x1
+    spinner.y = piece.y1
+    (piece.ink > 0) { out stroke_pieces(stage, [piece], piece.ink) }
+    out [stage.front.width, stage.front.height, 0, 0]
+}
+
+skill tick(spinner, stage, base, link) {
+    @rect = around(stage, spinner, [stage.front.width, stage.front.height, 0, 0])
+    remote.serve(link)
+    @keyed = steer(spinner, stage, uefi.poll_key(base, PAUSE))
+    rect = grow(rect, group.get(keyed, 0), group.get(keyed, 1), group.get(keyed, 2), group.get(keyed, 3))
+    ((spinner.phase == Phase.WAIT) == no) {
+        @drawn = step(spinner, stage)
+        rect = grow(rect, group.get(drawn, 0), group.get(drawn, 1), group.get(drawn, 2), group.get(drawn, 3))
+    }
+    (spinner.flash > 0) {
+        spinner.flash = spinner.flash - 1
+        (spinner.flash == 0) {
+            @calm = flash_rect(stage, spinner, weave.SPIRAL)
+            flash_rect(stage, spinner, weave.SPIRAL)
+            rect = grow(rect, group.get(calm, 0), group.get(calm, 1), group.get(calm, 2), group.get(calm, 3))
+        }
+    }
+    rect = around(stage, spinner, rect)
+    compose(stage, rect, spinner, base)
+    spinner.frames = spinner.frames + 1
+    @at = spinner.at
+    @total = group.count(spinner.pieces)
+    @flies = spinner.flies
+    out remote.tell(link, "паутина: кусок {at} из {total}, мух {flies}")
+}
+
+skill broken(spinner, stage, base, link, problem) {
+    @layer = stage.layer
+    @top = layer.height - HUD
+    graphics.fill(layer, 0, top, layer.width, HUD, canvas.paint(layer, BACKGROUND))
+    fonts.draw_text(layer, 16, top + 10, "Паутина упала: {problem} · Esc — выход", ink_color(FLASH), fonts.SMALL)
+    compose(stage, [0, top, layer.width - 1, layer.height - 1], spinner, base)
+    remote.tell(link, "паутина упала: {problem}")
+    always {
+        remote.serve(link)
+        @key = uefi.poll_key(base, PAUSE)
+        (key.scan == SCAN_ESCAPE) {
+            spinner.quit = yes
+            out none
+        }
+    }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    @front = graphics.open(base)
+    uefi.forget_keys(base)
+    @link = remote.open_remote()
+    @layer = graphics.buffer_like(base, front)
+    @frame = graphics.buffer_like(base, front)
+    @pages = graphics.buffer_pages(front)
+    remote.own(link, layer.frame, pages)
+    remote.own(link, frame.frame, pages)
+    @stage = Stage { front = front, layer = layer, frame = frame }
+    graphics.fill(layer, 0, 0, layer.width, layer.height, canvas.paint(layer, BACKGROUND))
+    @moment = uefi.now(base)
+    @web = weave.design(front.width, front.height - HUD, moment.minute * 60 + moment.second + 1)
+    @spinner = Spinner { web = web, pieces = weave.plan(web, STEP), x = web.hub_x, y = web.hub_y, aim_x = web.hub_x, aim_y = web.hub_y / 2 }
+    draw_hud(stage, spinner)
+    compose(stage, [0, 0, front.width - 1, front.height - 1], spinner, base)
+    always {
+        tick(spinner, stage, base, link) rescue |problem| { broken(spinner, stage, base, link, problem) }
+        (spinner.quit == yes) {
+            uefi.free_pages(base, layer.frame, pages)
+            uefi.free_pages(base, frame.frame, pages)
+            @flies = spinner.flies
+            reply.home("паутина: мух поймано {flies}")
+            out none
+        }
+    }
+    out none
+}
