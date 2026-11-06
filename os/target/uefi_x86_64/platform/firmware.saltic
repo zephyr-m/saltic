@@ -1,29 +1,32 @@
 -- firmware — физическая память и вызовы прошивки для UEFI-программ:
 -- сниппеты, драйверы, графика. Только x86_64-uefi.
--- Адрес — Phys { hi, lo } по 16 бит, только ниже 4 ГБ (иначе *Above4G).
--- base = guest_base() — начало памяти программы, берётся один раз.
+-- Физический адрес — обычное число (61 бит, с 06.11.2026; было Phys { hi, lo }
+-- по 16 бит и только ниже 4 ГБ). Программа живёт в окне: base =
+-- guest_base() — начало её памяти, берётся один раз; mem.* получает смещение
+-- от base парой [hi, lo] (guest).
 --
 -- guest_base() -> base
--- number(value) -> Phys
--- add(p, offset) / sum(a, b) / align(p, boundary) -> Phys
+-- number(value) -> адрес (то же число; осталось от Phys)
+-- add(p, offset) / sum(a, b) / align(p, boundary) -> адрес
 -- hex(value, digits) / phys_text(p) -> текст
 -- guest(p, base) -> [hi, lo] для core.mem; ниже base — BelowGuestBase
--- read8 / read16(p, base, offset) -> число
--- read32 / pointer(p, base, offset) -> Phys; pointer читает 64 бита
--- write8 / write16(p, base, offset, value)
--- write64 / write_phys32(p, base, offset, Phys)
--- write_wide(p, base, offset, low, high) — 64 бита из двух Phys
--- system_table() / image_handle() -> Phys
--- find_rsdp(base) -> Phys; NoAcpi20
--- find_mcfg(base, rsdp) -> Phys; NoMcfg
+-- read8 / read16 / read32(p, base, offset) -> число
+-- pointer(p, base, offset) -> адрес, 64 бита
+-- write8 / write16 / write_phys32(p, base, offset, value)
+-- write64(p, base, offset, value) — 64 бита
+-- write_wide(p, base, offset, low, high) — 64 бита из двух 32-битных половин
+-- system_table() / image_handle() -> адрес
+-- find_rsdp(base) -> адрес; NoAcpi20
+-- find_mcfg(base, rsdp) -> адрес; NoMcfg
 -- ecam(base) -> Ecam { start, first, last } — окно PCI
--- function_config(space, bus, device, function) -> Phys конфига PCI
--- find_device(base, space, vendor, model) -> Phys конфига; DeviceNotFound
--- call(base, function, [Phys…]) -> Answer { value, failed }; до 10 аргументов
--- call_wide(base, function, arguments, highs) — то же, highs — старшие 32 бита
--- scratch(base, offset) -> Phys памяти для ответов прошивки (участок "scratch")
--- arena(base) -> Phys служебной арены, выровнена на 256
--- region(base, name) -> Phys участка арены по реестру arena_map; UnknownRegion
+-- function_config(space, bus, device, function) -> адрес конфига PCI
+-- find_device(base, space, vendor, model) -> адрес конфига; DeviceNotFound
+-- call(base, function, [адрес…]) -> Answer { value, failed }; до 10 аргументов
+-- call_wide(base, function, arguments, highs) — то же, highs — добавки к старшим
+--     32 битам (2^63 и выше в 61-битное число не влезают)
+-- scratch(base, offset) -> адрес памяти для ответов прошивки (участок "scratch")
+-- arena(base) -> адрес служебной арены, выровнен на 256
+-- region(base, name) -> адрес участка арены по реестру arena_map; UnknownRegion
 --
 -- Пример — uefi.now. Грабли: буферы для железа выравнивать через align;
 -- чтение MMIO по неизвестному адресу может повесить машину. Место в арене
@@ -37,6 +40,7 @@ use core.group
 use os.target.uefi_x86_64.platform.arena_map
 
 PAGE = 65536
+WORD = 4294967296
 ACPI20_GUID_LOW = 59505
 ACPI20_GUID_HIGH = 34920
 ACPI20_GUID_DATA2 = 58609
@@ -46,18 +50,13 @@ NO_DEVICE = 65535
 CALL_RESULT = 96
 CALL_ARGUMENTS = 10
 
-Phys = Box {
-    hi = 0,
-    lo = 0
-}
-
 Answer = Box {
-    value = Phys {},
+    value = 0,
     failed = no
 }
 
 Ecam = Box {
-    start = Phys {},
+    start = 0,
     first = 0,
     last = 0
 }
@@ -73,29 +72,26 @@ skill hex(value, digits) {
 }
 
 skill phys_text(p) {
-    out str.concat(hex(p.hi, 4), hex(p.lo, 4))
+    (p < WORD) { out hex(p, 8) }
+    out hex(p, 12)
 }
 
 skill add(p, offset) {
-    @total = p.lo + num.mod(offset, PAGE)
-    out Phys { hi = p.hi + offset / PAGE + total / PAGE, lo = num.mod(total, PAGE) }
+    out p + offset
+}
+
+skill pieces(first) {
+    out ((cpu.firmware(first + 3) * PAGE + cpu.firmware(first + 2)) * PAGE + cpu.firmware(first + 1)) * PAGE + cpu.firmware(first)
 }
 
 skill guest_base() {
-    (cpu.firmware(2) > 0) { out error.GuestBaseAbove4G }
-    (cpu.firmware(3) > 0) { out error.GuestBaseAbove4G }
-    out Phys { hi = cpu.firmware(1), lo = cpu.firmware(0) }
+    out pieces(0)
 }
 
 skill guest(p, base) {
-    @lo = p.lo - base.lo
-    @hi = p.hi - base.hi
-    (lo < 0) {
-        lo = lo + PAGE
-        hi = hi - 1
-    }
-    (hi < 0) { out error.BelowGuestBase }
-    out [hi, lo]
+    @offset = p - base
+    (offset < 0) { out error.BelowGuestBase }
+    out [offset / PAGE, num.mod(offset, PAGE)]
 }
 
 skill read8(p, base, offset) {
@@ -107,7 +103,7 @@ skill read16(p, base, offset) {
 }
 
 skill read32(p, base, offset) {
-    out Phys { hi = read16(p, base, offset + 2), lo = read16(p, base, offset) }
+    out read16(p, base, offset + 2) * PAGE + read16(p, base, offset)
 }
 
 skill write16(p, base, offset, value) {
@@ -119,34 +115,29 @@ skill write8(p, base, offset, value) {
 }
 
 skill write_phys32(p, base, offset, value) {
-    out mem.store_address32(guest(add(p, offset), base), 0, [value.hi, value.lo])
+    out mem.store_address32(guest(add(p, offset), base), 0, [value / PAGE, num.mod(value, PAGE)])
 }
 
 skill sum(a, b) {
-    @lo = a.lo + b.lo
-    out Phys { hi = a.hi + b.hi + lo / PAGE, lo = num.mod(lo, PAGE) }
+    out a + b
 }
 
 skill align(p, boundary) {
-    @rest = num.mod(p.lo, boundary)
+    @rest = num.mod(p, boundary)
     (rest == 0) { out p }
-    out add(p, boundary - rest)
+    out p + boundary - rest
 }
 
 skill arena(base) {
-    out align(sum(base, Phys { hi = mem.arena(1), lo = mem.arena(0) }), 256)
+    out align(base + mem.arena(1) * PAGE + mem.arena(0), 256)
 }
 
 skill pointer(p, base, offset) {
-    (read16(p, base, offset + 4) > 0) { out error.PointerAbove4G }
-    (read16(p, base, offset + 6) > 0) { out error.PointerAbove4G }
-    out read32(p, base, offset)
+    out read32(p, base, offset + 4) * WORD + read32(p, base, offset)
 }
 
 skill system_table() {
-    (cpu.firmware(6) > 0) { out error.SystemTableAbove4G }
-    (cpu.firmware(7) > 0) { out error.SystemTableAbove4G }
-    out Phys { hi = cpu.firmware(5), lo = cpu.firmware(4) }
+    out pieces(4)
 }
 
 skill find_rsdp(base) {
@@ -206,24 +197,20 @@ skill find_device(base, space, vendor, model) {
 }
 
 skill image_handle() {
-    (cpu.firmware(10) > 0) { out error.ImageHandleAbove4G }
-    (cpu.firmware(11) > 0) { out error.ImageHandleAbove4G }
-    out Phys { hi = cpu.firmware(9), lo = cpu.firmware(8) }
+    out pieces(8)
 }
 
 skill number(value) {
-    out Phys { hi = value / PAGE, lo = num.mod(value, PAGE) }
+    out value
 }
 
 skill write64(p, base, offset, value) {
-    out write_wide(p, base, offset, value, Phys {})
+    out write_wide(p, base, offset, num.mod(value, WORD), value / WORD)
 }
 
 skill write_wide(p, base, offset, low, high) {
-    write16(p, base, offset, low.lo)
-    write16(p, base, offset + 2, low.hi)
-    write16(p, base, offset + 4, high.lo)
-    out write16(p, base, offset + 6, high.hi)
+    write_phys32(p, base, offset, low)
+    out write_phys32(p, base, offset + 4, high)
 }
 
 skill region(base, name) {
@@ -244,11 +231,11 @@ skill call_wide(base, function, arguments, highs) {
     write64(block, base, 0, function)
     write64(block, base, 8, number(group.count(arguments)))
     drum (CALL_ARGUMENTS) {
-        @value = Phys {}
-        @high = Phys {}
+        @value = 0
+        @high = 0
         (beat < group.count(arguments)) { value = group.get(arguments, beat) }
         (beat < group.count(highs)) { high = group.get(highs, beat) }
-        write_wide(block, base, 16 + beat * 8, value, high)
+        write_wide(block, base, 16 + beat * 8, num.mod(value, WORD), value / WORD + high)
     }
     @at = guest(block, base)
     cpu.call(group.get(at, 0), group.get(at, 1))

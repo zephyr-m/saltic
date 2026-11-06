@@ -1,26 +1,24 @@
 -- disk — разметка несъёмного диска: GPT с одним разделом EFI (512 МБ от
 -- сектора 2048) и пустая FAT32 с меткой SALTIC. Стирает диск!
--- Сектор 512 байт; LBA и 32/64-битные поля — firmware.Phys { hi, lo },
--- little-endian. Работа через Block IO прошивки, буферы — участки арены
+-- Сектор 512 байт; LBA и 32/64-битные поля — обычные числа, little-endian. Работа через Block IO прошивки, буферы — участки арены
 -- "disk_zero" (128 нулевых секторов) и "disk_work" (сектор + таблица GPT).
 -- Порядок: find_target → write_table → write_fat → reconnect.
 --
 -- Target { handle, device, media, last, megabytes } — выбранный диск
 -- zeros(count) / le16 / le32 / le64(bytes, value) / ascii(bytes, line) /
 --     pad_to(bytes, size) -> группа байтов
--- minus(value, amount) -> Phys минус число
 -- protective_mbr(last) / gpt_header(own, other, entries_at, last, entries_crc) /
 --     esp_entry() / fat_boot_sector() / fat_info_sector() / fat_first_sector()
 --     -> байты сектора или записи
 -- fat_layout() -> [[имя, сектор]] / data_start() -> сектор данных FAT
 -- find_target(base, handles, guid) -> Target: единственный целый несъёмный
 --     диск больше 10 ГБ; NoInternalDisk, SeveralInternalDisks
--- files_protocol(base, handle, guid) -> Phys протокола; NoProtocol
--- place(base, at, bytes) / place_zeros(base, at, count) -> at — байты или нули по Phys
--- work(base) -> Phys участка "disk_work"
+-- files_protocol(base, handle, guid) -> адрес протокола; NoProtocol
+-- place(base, at, bytes) / place_zeros(base, at, count) -> at — байты или нули по адресу
+-- work(base) -> адрес участка "disk_work"
 -- blocks(base, target, kind, lba, count, buffer); BlockIoFailed
 -- write_bytes_at(base, target, lba, bytes) / zero_range(base, target, first, count)
--- crc(base, at, size) -> Phys CRC32 прошивки
+-- crc(base, at, size) -> CRC32 прошивки
 -- write_header(base, target, own, other, entries_at, entries_crc) — заголовок GPT
 -- write_table(base, target) — MBR, обе таблицы и заголовки GPT
 -- write_fat(base, target) — загрузочные сектора, info и начало обеих FAT
@@ -69,11 +67,11 @@ skill le16(bytes, value) {
 }
 
 skill le32(bytes, value) {
-    out le16(le16(bytes, value.lo), value.hi)
+    out le16(le16(bytes, num.mod(value, firmware.PAGE)), value / firmware.PAGE)
 }
 
 skill le64(bytes, value) {
-    out le32(le32(bytes, value), firmware.Phys {})
+    out le32(le32(bytes, num.mod(value, firmware.WORD)), value / firmware.WORD)
 }
 
 skill ascii(bytes, line) {
@@ -84,18 +82,6 @@ skill ascii(bytes, line) {
 skill pad_to(bytes, size) {
     (group.count(bytes) < size) { out group.concat(bytes, zeros(size - group.count(bytes))) }
     out bytes
-}
-
-skill minus(value, amount) {
-    @lo = value.lo - amount
-    @hi = value.hi
-    drum (4) {
-        (lo < 0) {
-            lo = lo + firmware.PAGE
-            hi = hi - 1
-        }
-    }
-    out firmware.Phys { hi = hi, lo = lo }
 }
 
 skill protective_mbr(last) {
@@ -112,7 +98,7 @@ skill gpt_header(own, other, entries_at, last, entries_crc) {
     bytes = group.concat(bytes, [0, 0, 1, 0, 92, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     bytes = le64(le64(bytes, own), other)
     bytes = le64(bytes, firmware.number(FIRST_USABLE))
-    bytes = le64(bytes, minus(last, 33))
+    bytes = le64(bytes, last - 33)
     bytes = group.concat(bytes, DISK_GUID)
     bytes = le64(bytes, entries_at)
     bytes = le32(le32(bytes, firmware.number(ENTRY_COUNT)), firmware.number(ENTRY_BYTES))
@@ -124,7 +110,7 @@ skill esp_entry() {
     @bytes = group.concat(ESP_TYPE, ESP_GUID)
     bytes = le64(bytes, firmware.number(ESP_FIRST))
     bytes = le64(bytes, firmware.number(ESP_FIRST + ESP_SECTORS - 1))
-    bytes = le64(bytes, firmware.Phys {})
+    bytes = le64(bytes, 0)
     drum (str.bytes(ESP_NAME)) { bytes = le16(bytes, str.byte(ESP_NAME, beat)) }
     out pad_to(bytes, ENTRY_BYTES)
 }
@@ -179,10 +165,10 @@ BOOT_DISCONNECT = 272
 DISK_MINIMUM_MB = 10240
 
 Target = Box {
-    handle = firmware.Phys {},
-    device = firmware.Phys {},
+    handle = 0,
+    device = 0,
     media = 0,
-    last = firmware.Phys {},
+    last = 0,
     megabytes = 0
 }
 
@@ -190,19 +176,19 @@ skill find_target(base, handles, guid) {
     @found = []
     drum (handles) {
         @owner = beat
-        @device = files_protocol(base, owner, guid) rescue |err| { firmware.Phys {} }
-        (device.hi + device.lo > 0) {
+        @device = files_protocol(base, owner, guid) rescue |err| { 0 }
+        (device > 0) {
             @media = firmware.pointer(device, base, BLOCK_MEDIA)
             @whole = firmware.read8(media, base, 6) == 0
             @fixed = firmware.read8(media, base, 4) == 0
             @present = firmware.read8(media, base, 5) > 0
             @last = firmware.read32(media, base, MEDIA_LAST_BLOCK)
             @upper = firmware.read32(media, base, MEDIA_LAST_BLOCK + 4)
-            @megabytes = last.hi * 32
+            @megabytes = last / 2048
             (whole == yes) {
                 (fixed == yes) {
                     (present == yes) {
-                        (upper.hi + upper.lo == 0) {
+                        (upper == 0) {
                             (megabytes > DISK_MINIMUM_MB) {
                                 found = group.add(found, Target { handle = owner, device = device, media = firmware.read16(media, base, 0), last = last, megabytes = megabytes })
                             }
@@ -275,8 +261,7 @@ skill zero_range(base, target, first, count) {
 skill write_header(base, target, own, other, entries_at, entries_crc) {
     @at = place(base, work(base), gpt_header(own, other, entries_at, target.last, entries_crc))
     @sum = crc(base, at, 92)
-    firmware.write16(at, base, 16, sum.lo)
-    firmware.write16(at, base, 18, sum.hi)
+    firmware.write_phys32(at, base, 16, sum)
     out blocks(base, target, BLOCK_WRITE, own, 1, at)
 }
 
@@ -287,9 +272,9 @@ skill write_table(base, target) {
     @entries = place(base, table, esp_entry())
     @entries_crc = crc(base, entries, ENTRY_COUNT * ENTRY_BYTES)
     blocks(base, target, BLOCK_WRITE, firmware.number(2), ENTRY_SECTORS, entries)
-    blocks(base, target, BLOCK_WRITE, minus(target.last, 32), ENTRY_SECTORS, entries)
+    blocks(base, target, BLOCK_WRITE, target.last - 32, ENTRY_SECTORS, entries)
     write_header(base, target, firmware.number(1), target.last, firmware.number(2), entries_crc)
-    out write_header(base, target, target.last, firmware.number(1), minus(target.last, 32), entries_crc)
+    out write_header(base, target, target.last, firmware.number(1), target.last - 32, entries_crc)
 }
 
 skill write_fat(base, target) {

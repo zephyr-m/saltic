@@ -1,22 +1,22 @@
 -- uefi — службы прошивки UEFI поверх firmware: консоль, клавиши, время,
 -- страницы памяти, запуск образов, перезагрузка. Только x86_64-uefi.
--- base = firmware.guest_base(); адреса — firmware.Phys; при неудаче вызова
+-- base = firmware.guest_base(); адреса — числа; при неудаче вызова
 -- навыки отдают пустой Box (Clock {}, Key {}, Console {}), не ошибку.
 --
 -- Clock { year, month, day, hour, minute, second } — время прошивки (UTC)
 -- Launched { outcome = Answer, output = [байты] } — итог запуска образа
 -- Key { scan, char, ready } — клавиша; ready = no значит «не было»
 -- Console { columns, rows } — размер текстового режима
--- con_out(base) / boot_services(base) -> Phys таблиц прошивки
+-- con_out(base) / boot_services(base) -> адреса таблиц прошивки
 -- query_mode(base, output, mode) -> Console
 -- wide_console(base) -> Console — выбирает самый большой текстовый режим
 -- start_image(base, image, size) -> Launched; текст выхода ребёнка — в output
 -- exit_output(base, services, size_at, data_at) -> [байты] после первого нуля
 -- now(base) -> Clock
 -- restart(base) — холодная перезагрузка
--- pages_below_4g(base, pages) -> Phys; MemoryExhausted
+-- pages_below_4g(base, pages) -> адрес; MemoryExhausted
 -- pages_at_address(base, place, pages) -> yes/no
--- pages_in_window(base, pages) -> Phys в окне выше base; MemoryExhausted
+-- pages_in_window(base, pages) -> адрес в окне выше base; MemoryExhausted
 -- free_pages(base, place, pages) -> Answer
 -- forget_keys(base) — сброс буфера клавиш
 -- poll_key(base, pause) -> Key; pause — микросекунды ожидания после промаха;
@@ -124,8 +124,8 @@ skill start_image(base, image, size) {
     @child = firmware.pointer(handle_at, base, 0)
     @size_at = firmware.scratch(base, EXIT_SIZE_AT)
     @data_at = firmware.scratch(base, EXIT_DATA_AT)
-    firmware.write64(size_at, base, 0, firmware.Phys {})
-    firmware.write64(data_at, base, 0, firmware.Phys {})
+    firmware.write64(size_at, base, 0, 0)
+    firmware.write64(data_at, base, 0, 0)
     @outcome = firmware.call(base, firmware.pointer(services, base, BOOT_START_IMAGE), [child, size_at, data_at])
     out Launched { outcome = outcome, output = exit_output(base, services, size_at, data_at) }
 }
@@ -173,7 +173,7 @@ skill restart(base) {
 skill pages_below_4g(base, pages) {
     @services = boot_services(base)
     @at = firmware.scratch(base, PAGE_AT)
-    firmware.write64(at, base, 0, firmware.Phys { hi = 65535, lo = 65535 })
+    firmware.write64(at, base, 0, 4294967295)
     @got = firmware.call(base, firmware.pointer(services, base, BOOT_ALLOCATE_PAGES), [firmware.number(ALLOCATE_BELOW), firmware.number(LOADER_DATA), firmware.number(pages), at])
     (got.failed == yes) { out error.MemoryExhausted }
     @pages_at = firmware.pointer(at, base, 0)
@@ -196,13 +196,13 @@ skill pages_at_address(base, place, pages) {
 }
 
 skill pages_in_window(base, pages) {
-    @anywhere = pages_below_4g(base, pages) rescue |err| { firmware.Phys {} }
-    (anywhere.hi > 0) { out anywhere }
+    @anywhere = pages_below_4g(base, pages) rescue |err| { 0 }
+    (anywhere > 0) { out anywhere }
     @span = (pages * 4096 + 65535) / 65536
-    @high = (base.hi / WINDOW_STEP + 1) * WINDOW_STEP
+    @high = (base / firmware.PAGE / WINDOW_STEP + 1) * WINDOW_STEP
     drum ((TOP_HALF - high) / WINDOW_STEP) {
         (high + span > TOP_HALF) { out error.MemoryExhausted }
-        @place = firmware.Phys { hi = high, lo = 0 }
+        @place = high * firmware.PAGE
         (pages_at_address(base, place, pages) == yes) { out place }
         high = high + WINDOW_STEP
     }

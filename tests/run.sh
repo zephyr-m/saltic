@@ -469,12 +469,12 @@ test_panels() {
 }
 
 test_mrpc() {
+    # Модули ОС UEFI — 61-битный мир (firmware), под 29 бит не собираются.
     mkdir -p "$work/mrpc"
-    build mrpc \
+    SALTIC_TARGET=x86_64 build mrpc \
         tests/mrpc.saltic \
-        "$work/mrpc/program.elf"
-    run_built \
-        "$work/mrpc/program.elf"
+        "$work/mrpc/program"
+    measure run "$work/mrpc/program"
     echo "mrpc: запросы и ответы mRPC/1.0 агента подтверждены"
 }
 
