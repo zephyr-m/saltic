@@ -4,10 +4,13 @@ import sys
 import time
 import zlib
 
+from acer_address import route
+
 path = sys.argv[1] if len(sys.argv) > 1 else "shot.png"
-AGENT = ("10.0.0.2", 5555)
+LOCAL, ADDRESS = route()
+AGENT = (ADDRESS, 5555)
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(("10.0.0.1", 0))
+sock.bind((LOCAL, 0))
 sock.settimeout(30)
 started = time.time()
 sock.sendto(b"shot", AGENT)

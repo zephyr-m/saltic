@@ -1,14 +1,13 @@
 """Где агент Acer: кабель или Wi-Fi.
 
 route() -> (наш адрес, адрес агента). Сначала кабель: 10.0.0.1 → 10.0.0.2,
-если у интерфейса с 10.0.0.1 есть линк (carrier) — без лишних команд агенту.
+если у интерфейса с 10.0.0.1 есть линк (carrier) и агент отвечает там на "time".
 Иначе Wi-Fi (интерфейсы wl*): сперва последний известный адрес агента
 (MEMORY), затем "time" прямо на каждый адрес подсети /24 — первый ответивший
 и есть агент. Широковещание не годится: ответ на него приходит с адреса, на
 который мы не писали, и брандмауэр компьютера его режет. Первый пакет после
 тишины в Wi-Fi часто теряется, поэтому попыток TRIES.
-SALTIC_ACER="наш,агент" — задать путь руками.
-Снимок экрана (shot) и чат ходят только по кабелю.
+SALTIC_ACER="наш,агент" — задать путь руками. Чат ходит только по кабелю.
 """
 
 import os
@@ -89,7 +88,10 @@ def route(say=True):
         local, agent = given.split(",")
         return local, agent
     if cable_up():
-        return CABLE
+        if ask_time(CABLE[0], [CABLE[1]]):
+            return CABLE
+        if say:
+            print("acer: кабель есть, но агент по нему молчит — ищу по Wi-Fi", file=sys.stderr)
     last = remembered()
     for name, local in addresses():
         if name.startswith("wl") == False:
@@ -104,7 +106,7 @@ def route(say=True):
         if agent:
             remember(agent)
             if say:
-                print(f"acer: кабеля нет, агент по Wi-Fi: {agent} (с {local})", file=sys.stderr)
+                print(f"acer: агент по Wi-Fi: {agent} (с {local})", file=sys.stderr)
             return local, agent
     if say:
         print("acer: агент не отвечает ни по кабелю, ни по Wi-Fi — беру кабель", file=sys.stderr)

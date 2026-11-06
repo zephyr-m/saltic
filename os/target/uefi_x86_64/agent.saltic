@@ -14,8 +14,13 @@
 --     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, limit,
 --     linked, opening, saver, active_at, wifi, wifi_text, via }
 -- my_ip(agent) -> наш IP на входе via / transmit(agent, frame) — кадр в via
--- wifi_up(agent, name) -> текст — прошивка с диска в причал, qca9377.bring_up;
---     greet по Wi-Fi / wifi_keep(agent) -> текст — посылку из причала на диск
+-- wifi_up(agent, name) -> текст — прошивка с диска в свои страницы (причал с
+--     принятой программой не трогается), qca9377.bring_up; greet по Wi-Fi;
+--     затем кабельная карта настраивается заново: за ~10 с подъёма её кольцо
+--     приёма (4 места) переполняется, и приём глохнет насовсем
+-- wifi_keep(agent) -> текст — посылку из причала на диск
+-- wifi_alive(agent) -> yes/no — прошивка отвечает на барьер WMI; после
+--     программы (она могла сбросить карту) мёртвый Wi-Fi поднимается заново
 -- poll_wifi(agent) — до WIFI_FRAMES кадров из Wi-Fi в handle с via = wifi
 -- day_second(base) -> секунда суток / wake(agent) -> yes, если снят хранитель;
 --     отмечает активность / doze(agent) — хранитель после SAVER_AFTER секунд простоя
@@ -85,7 +90,7 @@ use os.target.uefi_x86_64.network.mrpc
 use os.target.uefi_x86_64.network.mrpc.data
 use os.target.uefi_x86_64.platform.utf8
 
-VERSION = 17
+VERSION = 19
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -222,6 +227,12 @@ skill launch(agent) {
     rtl8111.wait_link(agent.card) rescue |err| { none }
     agent.linked = has_link(agent.card)
     log(agent, "run: card configured again, listening")
+    ((agent.wifi == none) == no) {
+        (wifi_alive(agent) == no) {
+            log(agent, "run: Wi-Fi was reset by the program, bringing it up again")
+            wifi_up(agent, WIFI_NETWORK) rescue |err| { none }
+        }
+    }
     agent.active_at = day_second(agent.card.base)
     (outcome.failed == no) {
         (code == reply.HOME) { clear_screen(agent) }
@@ -599,7 +610,11 @@ skill restart_later(agent) {
 skill answer(agent, bytes) {
     @packet = net.udp(bytes)
     (str.starts_with(packet.text, SHOT_PREFIX) == yes) {
-        (agent.via == "wifi") { out agent }
+        (agent.via == "wifi") {
+            @piece = shot.chunk_frame(agent.wifi.mac, agent.wifi.ip, agent.card.base, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(SHOT_PREFIX), str.bytes(packet.text))))
+            ((piece == none) == no) { transmit(agent, piece) }
+            out agent
+        }
         shot.send_chunk(agent.card, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(SHOT_PREFIX), str.bytes(packet.text))))
         out agent
     }
@@ -726,17 +741,33 @@ skill wifi_keep(agent) {
 }
 
 skill wifi_up(agent, name) {
+    @base = agent.card.base
+    @pages = WIFI_ROOM / PAGE_BYTES
+    @place = uefi.pages_in_window(base, pages) rescue |err| {
+        agent.wifi_text = "нет памяти под прошивку"
+        out "Wi-Fi: нет памяти под прошивку ({err})"
+    }
+    @told = wifi_start(agent, name, place) rescue |err| { "Wi-Fi: ошибка {err}" }
+    uefi.free_pages(base, place, pages)
+    rtl8111.configure(agent.card)
+    out told
+}
+
+skill wifi_alive(agent) {
+    (agent.wifi == none) { out no }
+    out qca9377.alive(agent.wifi)
+}
+
+skill wifi_start(agent, name, place) {
     @started = day_second(agent.card.base)
     agent.wifi = none
     agent.wifi_text = "поднимаю"
-    agent.expected = 0
-    take_bay(agent, WIFI_ROOM)
-    @size = programs.load_file(agent.card.base, "{WIFI_FOLDER}\\{WIFI_FILE}", agent.bay, WIFI_ROOM) rescue |err| {
+    @size = programs.load_file(agent.card.base, "{WIFI_FOLDER}\\{WIFI_FILE}", place, WIFI_ROOM) rescue |err| {
         agent.wifi_text = "нет прошивки на диске"
         out "Wi-Fi: нет прошивки на диске ({err}); залей посылку и скажи wifi-keep"
     }
     @chip = qca9377.open()
-    @told = qca9377.bring_up(chip, agent.bay, name) rescue |err| {
+    @told = qca9377.bring_up(chip, place, name) rescue |err| {
         qca9377.quiet(chip)
         agent.wifi_text = "ошибка: {err}"
         out "Wi-Fi: ошибка {err}"
