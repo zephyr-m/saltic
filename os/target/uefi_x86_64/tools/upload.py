@@ -20,11 +20,19 @@ LOCAL, AGENT = route()
 sock.bind((LOCAL, 0))
 
 
-def ask(text, timeout=5):
+def ask(text, timeout=5, tries=3):
+    # Агент сразу после выхода из программы несколько секунд проверяет Wi-Fi
+    # и не слышит — первую команду повторяем.
     sock.settimeout(timeout)
-    sock.sendto(text.encode(), (AGENT, COMMAND_PORT))
-    reply, _ = sock.recvfrom(65535)
-    return reply.decode(errors="replace")
+    for attempt in range(tries):
+        sock.sendto(text.encode(), (AGENT, COMMAND_PORT))
+        try:
+            reply, _ = sock.recvfrom(65535)
+            return reply.decode(errors="replace")
+        except socket.timeout:
+            if attempt == tries - 1:
+                raise
+    return ""
 
 
 print(f"upload: {path}, {len(data)} байт", flush=True)

@@ -23,8 +23,13 @@
 -- present(frames) -> текст «строк N, пикселей M» — показать дельту; с
 --     видеокартой — «видеокарта»: весь кадр одной командой блиттера, без
 --     сравнения пикселей
--- push(base, to, from) — задний буфер from на экран to целиком: блиттером,
---     если from размечен для видеокарты, иначе по строкам (copy_span)
+-- push(base, to, from) — задний буфер from на экран to целиком
+-- copy_rect(base, to, from, x, y, width, height) — прямоугольник из from в
+--     to (те же координаты и шаг строки): блиттером, если from размечен для
+--     видеокарты, а to — тоже размеченный буфер или экран GOP; иначе по
+--     строкам (copy_span). Видеокарту дожидается — дальше рисует процессор
+-- fill с видеокартой: заливка от BIG пикселей в размеченном буфере — блиттером
+--     (мелкие — процессором: команда и ожидание дороже)
 -- close_frames(frames) — вернуть буферы прошивке (перед выходом)
 -- Буферы берутся в окне программы (uefi.pages_in_window): ниже базы их не видно.
 
@@ -46,6 +51,7 @@ INFO_STRIDE = 32
 FORMAT_RGB = 0
 FORMAT_BGR = 1
 PIXEL_BYTES = 4
+BIG = 4096
 PAGE_BYTES = 4096
 BOOT_COPY_MEM = 352
 SIDE_SHARE = 4
@@ -113,6 +119,13 @@ skill color(screen, red, green, blue) {
 }
 
 skill fill(screen, x, y, width, height, value) {
+    (group.count(screen.accel) > 0) {
+        (width * height >= BIG) {
+            @gpu = group.get(screen.accel, 0)
+            intel_gpu.fill(gpu, screen.frame, screen.stride * PIXEL_BYTES, x, y, width, height, value)
+            out intel_gpu.wait(gpu)
+        }
+    }
     drum (height) {
         @row = ((y + beat) * screen.stride + x) * PIXEL_BYTES
         drum (width) { mem.store32(screen.memory, row + beat * PIXEL_BYTES, value) }
@@ -149,12 +162,24 @@ skill buffer_like(base, front) {
 }
 
 skill push(base, to, from) {
+    out copy_rect(base, to, from, 0, 0, from.width, from.height)
+}
+
+skill copy_rect(base, to, from, x, y, width, height) {
     (group.count(from.accel) == 0) {
-        drum (from.height) { copy_span(base, to, from, beat, 0, from.width) }
+        drum (height) { copy_span(base, to, from, y + beat, x, width) }
         out none
     }
     @gpu = group.get(from.accel, 0)
-    intel_gpu.copy(gpu, from.frame, intel_gpu.screen_at(gpu, to.frame), to.stride * PIXEL_BYTES, 0, 0, from.width, from.height)
+    @target = to.frame
+    (group.count(to.accel) == 0) {
+        (to.frame < gpu.aperture) {
+            drum (height) { copy_span(base, to, from, y + beat, x, width) }
+            out none
+        }
+        target = intel_gpu.screen_at(gpu, to.frame)
+    }
+    intel_gpu.copy(gpu, from.frame, target, to.stride * PIXEL_BYTES, x, y, width, height)
     out intel_gpu.wait(gpu)
 }
 
