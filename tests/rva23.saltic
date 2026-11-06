@@ -1,18 +1,27 @@
 -- rva23 — сверка кодировщика RVA23 с GNU-ассемблером: для каждой команды
 -- таблицы печатает строки «текст ассемблера<TAB>байты hex» — с базовыми
 -- операндами и с псевдослучайными допустимыми; workbench/rva23/verify.py
--- собирает тексты ассемблером и сравнивает байты.
+-- собирает тексты ассемблером и сравнивает байты. Затем «форма = таблица»:
+-- 14 команд, которые исполнитель rv64 кодирует по форме (rv64.machine.forms),
+-- на случайных операндах дают те же байты, что таблица; расхождение
+-- печатается и завершает программу FormsDiffer. Команды, общие с RV32I
+-- (addi, lui, lbu…), сверяет эталон soul/seed/tests/machine/golden.
 --
 -- next_seed(seed) -> следующее псевдослучайное число
 -- sample(kind, seed) -> допустимое значение вида
 -- hex(bytes) -> текст байтов, старший первый
--- program() -> none
+-- by_form(name, values) -> [b0, b1, b2, b3] по форме; UnknownInstruction
+-- operands(name, seed) -> случайные операнды команды по её форме
+-- program() -> none; FormsDiffer
 
 use io
 use core.str
 use core.num
 use core.group
 use selfhost.compiler.backend.rv64.machine.codec
+use selfhost.compiler.backend.rv64.machine.forms
+
+FORM_NAMES = ["ld", "lwu", "sd", "addiw", "slli", "srli", "srai", "mul", "mulh", "mulhu", "div", "divu", "rem", "remu"]
 
 skill next_seed(seed) {
     out num.mod(seed * 1103 + 12345, 65521)
@@ -46,6 +55,41 @@ skill hex(bytes) {
     out text
 }
 
+skill word_bytes(encoded) {
+    out [encoded.b0, encoded.b1, encoded.b2, encoded.b3]
+}
+
+skill by_form(name, values) {
+    @a = group.get(values, 0)
+    @b = group.get(values, 1)
+    @c = 0
+    (group.count(values) > 2) { c = group.get(values, 2) }
+    (name == "ld") { out word_bytes(forms.ld(a, c, b)) }
+    (name == "lwu") { out word_bytes(forms.lwu(a, c, b)) }
+    (name == "sd") { out word_bytes(forms.sd(a, c, b)) }
+    (name == "addiw") { out word_bytes(forms.addiw(a, b, c)) }
+    (name == "slli") { out word_bytes(forms.slli(a, b, c)) }
+    (name == "srli") { out word_bytes(forms.srli(a, b, c)) }
+    (name == "srai") { out word_bytes(forms.srai(a, b, c)) }
+    (name == "mul") { out word_bytes(forms.mul(a, b, c)) }
+    (name == "mulh") { out word_bytes(forms.mulh(a, b, c)) }
+    (name == "mulhu") { out word_bytes(forms.mulhu(a, b, c)) }
+    (name == "div") { out word_bytes(forms.div(a, b, c)) }
+    (name == "divu") { out word_bytes(forms.divu(a, b, c)) }
+    (name == "rem") { out word_bytes(forms.rem(a, b, c)) }
+    (name == "remu") { out word_bytes(forms.remu(a, b, c)) }
+    out error.UnknownInstruction
+}
+
+skill operands(name, seed) {
+    @values = []
+    drum (codec.form_at(codec.find(name))) {
+        seed = next_seed(seed)
+        values = group.add(values, sample(group.get(beat, 0), seed))
+    }
+    out values
+}
+
 program() {
     @seed = 7
     drum (codec.count()) {
@@ -69,4 +113,21 @@ program() {
             io.show("{text}\t{random_bytes}")
         }
     }
+    @checked = 0
+    drum (FORM_NAMES) {
+        @name = beat
+        drum (50) {
+            seed = next_seed(seed)
+            @values = operands(name, seed)
+            @table = codec.encode(name, values)
+            @formed = by_form(name, values)
+            ((formed == table.bytes) == no) {
+                io.show("форма != таблица: ", codec.render(name, values), " форма ", hex(formed), " таблица ", hex(table.bytes))
+                out error.FormsDiffer
+            }
+            checked = checked + 1
+        }
+    }
+    io.show("форма = таблица: команд ", group.count(FORM_NAMES), ", проверок ", checked)
+    out none
 }

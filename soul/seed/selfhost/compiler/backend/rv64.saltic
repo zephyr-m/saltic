@@ -1,28 +1,30 @@
 -- rv64 — исполнитель договора машины для RV64 (канон RVA23). Всё, что на
 -- RV64 кодируется так же, как на RV32I — арифметика, сравнения, переходы,
--- вызовы, auipc + addi, lui + addi, ecall, — отдаёт исполнителю RV32I на той
--- же раскладке программы (rv32i.machine.layout: правки переходов и адресов те
--- же). Сам делает 64-битное: слово 8 байт (ld / sd, push / pop, data_word),
--- 32-битные поля (lwu / sw / data32), сдвиги до 63 — через machine.codec
--- (таблица RVA23). Широкое смещение (не влезает в 12 бит) — через t6, как у
--- RV32I. 32-битная константа — lui + addiw (не addi: иначе значение чуть ниже
--- 2^31 после lui расширится знаком). Раскладка памяти — abi.shape на 8 байт (WORDS).
+-- вызовы, auipc + addi, lui + addi, ecall, — отдаёт исполнителю RV32I (поле
+-- narrow_executor, один на сборку) на той же раскладке (rv32i.machine.layout).
+-- Сам делает 64-битное: слово 8 байт (ld / sd, push / pop, data_word),
+-- 32-битные поля (lwu / sw / data32), сдвиги до 63 — по форме (machine.forms);
+-- общие с RV32I (addi, lui, lbu…) — через rv32i.assembler. Широкое смещение
+-- (не влезает в 12 бит) — через t6, как у RV32I. 32-битная константа — lui +
+-- addiw (не addi: иначе значение чуть ниже 2^31 после lui расширится знаком).
+-- Раскладка памяти — abi.shape на 8 байт (WORDS).
 --
--- Executor { far_calls } — методы договора backend.saltic; внутренние
---     narrow() -> rv32i.Executor с теми же far_calls,
---     emit(compiler, name, operands) — команда RVA23 в код,
---     memory(compiler, name, data, base, offset) — загрузка / сохранение
+-- Executor { far_calls, narrow_executor } — методы договора backend.saltic;
+--     внутренние: narrow() -> narrow_executor (rv32i, один на сборку; far_calls
+--     берёт программа), emit(compiler, encoded) — слово команды в код,
+--     wide_offset(compiler, base, offset) — t6 = base + offset
 -- Сверх договора RV32I: multiply / multiply_high / multiply_high_unsigned / divide / remainder /
 --     divide_unsigned / remainder_unsigned(to, left, right) — M; load_wide(to,
---     wide) — константа из rodata (auipc + addi + ld)
--- WORDS — abi.shape.of(8); WORD_BYTES — 8
+--     wide) — константа из rodata (auipc + addi + ld); WORDS — abi.shape.of(8)
 
 use core.group
 use selfhost.compiler.backend
 use selfhost.compiler.backend.rv32i
 use selfhost.compiler.backend.rv32i.machine.layout
 use selfhost.compiler.backend.rv32i.machine.registers
-use selfhost.compiler.backend.rv64.machine.codec
+use selfhost.compiler.backend.rv64.machine.forms
+use selfhost.compiler.backend.rv32i.assembler
+use selfhost.compiler.backend.rv32i.machine.instruction
 use selfhost.abi.shape
 use selfhost.machine.word
 use selfhost.machine.wide
@@ -33,41 +35,31 @@ WORD_BYTES = 8
 WIDE_OFFSET_REGISTER = registers.T6
 
 Executor = Box {
-    far_calls = no
+    far_calls = no,
+    narrow_executor = rv32i.Executor {}
 
     skill narrow() {
-        out rv32i.Executor { far_calls = far_calls }
+        out narrow_executor
     }
 
     skill register(role) {
-        @base = narrow()
-        out base.register(role)
+        out group.get(rv32i.REGISTER_OF_ROLE, role)
     }
 
-    skill emit(compiler, name, operands) {
-        @encoded = codec.encode(name, operands)
-        @bytes = encoded.bytes
-        compiler.machine = layout.emit_word(compiler.machine, word.from_bytes(group.get(bytes, 0), group.get(bytes, 1), group.get(bytes, 2), group.get(bytes, 3)))
+    skill emit(compiler, encoded) {
+        compiler.machine = layout.emit_word(compiler.machine, encoded)
         out compiler
     }
 
-    skill memory(compiler, name, data, base, offset) {
-        (offset < -2048) {
-            compiler.machine = layout.emit_load_immediate(compiler.machine, WIDE_OFFSET_REGISTER, offset)
-            compiler = emit(compiler, "add", [WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, base])
-            out emit(compiler, name, [data, 0, WIDE_OFFSET_REGISTER])
-        }
-        (offset > 2047) {
-            compiler.machine = layout.emit_load_immediate(compiler.machine, WIDE_OFFSET_REGISTER, offset)
-            compiler = emit(compiler, "add", [WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, base])
-            out emit(compiler, name, [data, 0, WIDE_OFFSET_REGISTER])
-        }
-        out emit(compiler, name, [data, offset, base])
+    skill wide_offset(compiler, base, offset) {
+        compiler.machine = layout.emit_load_immediate(compiler.machine, WIDE_OFFSET_REGISTER, offset)
+        out assembler.emit_op(compiler, instruction.Kind.ADD, WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, base, 0)
     }
 
     skill new_program(compiler, entry) {
-        @base = narrow()
-        compiler = base.new_program(compiler, entry)
+        @narrowed = narrow()
+        compiler = narrowed.new_program(compiler, entry)
+        compiler.machine.far_calls = far_calls
         compiler.words = WORDS
         out compiler
     }
@@ -122,15 +114,15 @@ Executor = Box {
     }
 
     skill load_immediate(compiler, to, value) {
-        (value > -2049) {
-            (value < 2048) { out emit(compiler, "addi", [register(to), registers.ZERO, value]) }
+        (assembler.fits_immediate(value) == yes) {
+            out assembler.emit_op(compiler, instruction.Kind.ADDI, register(to), registers.ZERO, registers.ZERO, value)
         }
         out load_word(compiler, to, word.from_signed(value))
     }
 
     skill load_word(compiler, to, value) {
-        compiler = emit(compiler, "lui", [register(to), layout.address_upper(value)])
-        out emit(compiler, "addiw", [register(to), register(to), layout.address_low(value)])
+        compiler = assembler.emit_op(compiler, instruction.Kind.LUI, register(to), registers.ZERO, registers.ZERO, layout.address_upper(value))
+        out emit(compiler, forms.addiw(register(to), register(to), layout.address_low(value)))
     }
 
     skill load_address(compiler, to, name, addend) {
@@ -194,15 +186,15 @@ Executor = Box {
     }
 
     skill shift_left(compiler, to, from, count) {
-        out emit(compiler, "slli", [register(to), register(from), count])
+        out emit(compiler, forms.slli(register(to), register(from), count))
     }
 
     skill shift_right_signed(compiler, to, from, count) {
-        out emit(compiler, "srai", [register(to), register(from), count])
+        out emit(compiler, forms.srai(register(to), register(from), count))
     }
 
     skill shift_right_unsigned(compiler, to, from, count) {
-        out emit(compiler, "srli", [register(to), register(from), count])
+        out emit(compiler, forms.srli(register(to), register(from), count))
     }
 
     skill shift_left_by(compiler, to, from, count) {
@@ -251,53 +243,69 @@ Executor = Box {
     }
 
     skill load(compiler, to, base, offset) {
-        out memory(compiler, "ld", register(to), register(base), offset)
+        (assembler.fits_immediate(offset) == no) {
+            compiler = wide_offset(compiler, register(base), offset)
+            out emit(compiler, forms.ld(register(to), WIDE_OFFSET_REGISTER, 0))
+        }
+        out emit(compiler, forms.ld(register(to), register(base), offset))
     }
 
     skill load32(compiler, to, base, offset) {
-        out memory(compiler, "lwu", register(to), register(base), offset)
+        (assembler.fits_immediate(offset) == no) {
+            compiler = wide_offset(compiler, register(base), offset)
+            out emit(compiler, forms.lwu(register(to), WIDE_OFFSET_REGISTER, 0))
+        }
+        out emit(compiler, forms.lwu(register(to), register(base), offset))
     }
 
     skill store32(compiler, from, base, offset) {
-        out memory(compiler, "sw", register(from), register(base), offset)
+        out assembler.emit_op(compiler, instruction.Kind.SW, registers.ZERO, register(base), register(from), offset)
     }
 
     skill load_byte(compiler, to, base, offset) {
-        out memory(compiler, "lbu", register(to), register(base), offset)
+        out assembler.emit_op(compiler, instruction.Kind.LBU, register(to), register(base), registers.ZERO, offset)
     }
 
     skill load_half(compiler, to, base, offset) {
-        out memory(compiler, "lhu", register(to), register(base), offset)
+        out assembler.emit_op(compiler, instruction.Kind.LHU, register(to), register(base), registers.ZERO, offset)
     }
 
     skill store(compiler, from, base, offset) {
-        out memory(compiler, "sd", register(from), register(base), offset)
+        (assembler.fits_immediate(offset) == no) {
+            compiler = wide_offset(compiler, register(base), offset)
+            out emit(compiler, forms.sd(register(from), WIDE_OFFSET_REGISTER, 0))
+        }
+        out emit(compiler, forms.sd(register(from), register(base), offset))
     }
 
     skill store_byte(compiler, from, base, offset) {
-        out memory(compiler, "sb", register(from), register(base), offset)
+        out assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, register(base), register(from), offset)
     }
 
     skill store_half(compiler, from, base, offset) {
-        out memory(compiler, "sh", register(from), register(base), offset)
+        out assembler.emit_op(compiler, instruction.Kind.SH, registers.ZERO, register(base), register(from), offset)
     }
 
     skill store_zero(compiler, base, offset) {
-        out memory(compiler, "sd", registers.ZERO, register(base), offset)
+        (assembler.fits_immediate(offset) == no) {
+            compiler = wide_offset(compiler, register(base), offset)
+            out emit(compiler, forms.sd(registers.ZERO, WIDE_OFFSET_REGISTER, 0))
+        }
+        out emit(compiler, forms.sd(registers.ZERO, register(base), offset))
     }
 
     skill store_byte_zero(compiler, base, offset) {
-        out memory(compiler, "sb", registers.ZERO, register(base), offset)
+        out assembler.emit_op(compiler, instruction.Kind.SB, registers.ZERO, register(base), registers.ZERO, offset)
     }
 
     skill push(compiler, from) {
-        compiler = emit(compiler, "addi", [registers.SP, registers.SP, 0 - WORD_BYTES])
-        out emit(compiler, "sd", [register(from), 0, registers.SP])
+        compiler = assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 0 - WORD_BYTES)
+        out emit(compiler, forms.sd(register(from), registers.SP, 0))
     }
 
     skill pop(compiler, to) {
-        compiler = emit(compiler, "ld", [register(to), 0, registers.SP])
-        out emit(compiler, "addi", [registers.SP, registers.SP, WORD_BYTES])
+        compiler = emit(compiler, forms.ld(register(to), registers.SP, 0))
+        out assembler.emit_op(compiler, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, WORD_BYTES)
     }
 
     skill branch_equal(compiler, left, right, name) {
@@ -411,31 +419,31 @@ Executor = Box {
     }
 
     skill multiply(compiler, to, left, right) {
-        out emit(compiler, "mul", [register(to), register(left), register(right)])
+        out emit(compiler, forms.mul(register(to), register(left), register(right)))
     }
 
     skill multiply_high(compiler, to, left, right) {
-        out emit(compiler, "mulh", [register(to), register(left), register(right)])
+        out emit(compiler, forms.mulh(register(to), register(left), register(right)))
     }
 
     skill multiply_high_unsigned(compiler, to, left, right) {
-        out emit(compiler, "mulhu", [register(to), register(left), register(right)])
+        out emit(compiler, forms.mulhu(register(to), register(left), register(right)))
     }
 
     skill divide(compiler, to, left, right) {
-        out emit(compiler, "div", [register(to), register(left), register(right)])
+        out emit(compiler, forms.div(register(to), register(left), register(right)))
     }
 
     skill remainder(compiler, to, left, right) {
-        out emit(compiler, "rem", [register(to), register(left), register(right)])
+        out emit(compiler, forms.rem(register(to), register(left), register(right)))
     }
 
     skill divide_unsigned(compiler, to, left, right) {
-        out emit(compiler, "divu", [register(to), register(left), register(right)])
+        out emit(compiler, forms.divu(register(to), register(left), register(right)))
     }
 
     skill remainder_unsigned(compiler, to, left, right) {
-        out emit(compiler, "remu", [register(to), register(left), register(right)])
+        out emit(compiler, forms.remu(register(to), register(left), register(right)))
     }
 
     skill load_wide(compiler, to, value) {
