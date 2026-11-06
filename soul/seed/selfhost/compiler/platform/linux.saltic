@@ -1,10 +1,9 @@
 -- linux — платформа Linux на вызовах ядра (executor.syscall с номерами
 -- core.system): write, exit, key (сырой режим tty через ioctl termios, read),
--- file_read / file_write (openat, read / write, close; чтение до 1 МиБ);
--- now, wait, firmware, call — NotSupported. Одна на исполнители: rv32i
--- (ecall) и родной x86-64 (подпрограммы x86_syscall_<n>, номера переводит
--- x86_64_native/platform). Команды — методами compiler.executor
--- (договор backend), регистры — его роли. Ошибка файла — метка FILE_ERROR (File).
+-- file_read / file_write (openat, read / write, close; file_read: размер —
+-- lseek в конец, на RV32I _llseek, — выделяет ровно его и читает в цикле);
+-- now, wait, firmware, call — NotSupported. Исполнители — rv32i (ecall) и родной
+-- x86-64 (x86_syscall_<n>); команды — методами executor. Ошибка файла — FILE_ERROR.
 --
 -- Linux { name } — платформа: append(compiler) -> compiler, все метки договора
 -- emit_write / emit_exit(compiler) — rt_platform_write / rt_platform_exit
@@ -12,7 +11,8 @@
 --     кадр на стеке — termios, буфер и ячейки-слова (key_slot / key_frame от words);
 --     emit_terminal_mode / emit_name_branches / emit_name_results / emit_key_bytes — части;
 --     key_label / text_label(name) -> метки; append_key_data(compiler) — тексты имён
--- emit_file_read / emit_file_write / emit_file_error(compiler) — файлы
+-- emit_file_read / emit_file_write / emit_file_error / emit_seek(compiler, …) —
+--     файлы; emit_seek -> VALUE = новое смещение; кадр чтения — слоты READ_*
 
 use core.group
 use core.system
@@ -22,6 +22,15 @@ use selfhost.compiler.platform
 use selfhost.compiler.backend.rv32i.runtime.terminal
 
 FILE_ERROR = "rt_platform_file_error"
+READ_LOOP = ".L_file_read_loop"
+READ_DONE = ".L_file_read_done"
+READ_OFFSET = 1
+READ_SIZE = 3
+READ_TOTAL = 4
+READ_OBJECT = 5
+READ_FD = 6
+SEEK_SET = 0
+SEEK_END = 2
 
 STDIN = 0
 TERMINAL_GET = 21505
@@ -94,30 +103,66 @@ skill emit_file_read(compiler) {
     compiler = executor.load_immediate(compiler, backend.ARG3, 0)
     compiler = executor.syscall(compiler, system.SYSCALL_OPENAT)
     compiler = executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * 6)
-    compiler = executor.load_immediate(compiler, backend.VALUE, 1048576 + words.string_data + 1)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * READ_FD)
+    compiler = emit_seek(compiler, SEEK_END)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
+    compiler = emit_seek(compiler, SEEK_SET)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.string_data + 1)
     compiler = executor.call(compiler, "rt_alloc")
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
     compiler = executor.store32(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * 5)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * 6)
-    compiler = executor.load(compiler, backend.ERROR, backend.STACK, words.bytes * 5)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * READ_OBJECT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
+    compiler = executor.label(compiler, READ_LOOP)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, words.bytes * READ_SIZE)
+    compiler = executor.branch_greater_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, READ_DONE)
+    compiler = executor.load(compiler, backend.ERROR, backend.STACK, words.bytes * READ_OBJECT)
     compiler = executor.add_immediate(compiler, backend.ERROR, backend.ERROR, words.payload + words.bytes)
-    compiler = executor.load_immediate(compiler, backend.ARG2, 1048576)
+    compiler = executor.add(compiler, backend.ERROR, backend.ERROR, backend.SCRATCH0)
+    compiler = executor.sub(compiler, backend.ARG2, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * READ_FD)
     compiler = executor.syscall(compiler, system.SYSCALL_READ)
     compiler = executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * 5)
-    compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH0, words.payload)
-    compiler = executor.add(compiler, backend.SCRATCH1, backend.SCRATCH0, backend.VALUE)
+    compiler = executor.branch_zero(compiler, backend.VALUE, READ_DONE)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
+    compiler = executor.add(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.VALUE)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
+    compiler = executor.jump(compiler, READ_LOOP)
+    compiler = executor.label(compiler, READ_DONE)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * READ_OBJECT)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.STACK, words.bytes * READ_TOTAL)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.SCRATCH0, words.payload)
+    compiler = executor.add(compiler, backend.SCRATCH1, backend.SCRATCH0, backend.SCRATCH2)
     compiler = executor.store_byte_zero(compiler, backend.SCRATCH1, words.payload + words.bytes)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * 6)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * READ_FD)
     compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * 5)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * READ_OBJECT)
     compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
     compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 7)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 8)
     compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
     out executor.ret(compiler)
+}
+
+skill emit_seek(compiler, whence) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * READ_FD)
+    compiler = executor.load_immediate(compiler, backend.ERROR, 0)
+    (words.bytes == 8) {
+        compiler = executor.load_immediate(compiler, backend.ARG2, whence)
+        compiler = executor.syscall(compiler, system.SYSCALL_LSEEK)
+        out executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
+    }
+    compiler = executor.load_immediate(compiler, backend.ARG2, 0)
+    compiler = executor.add_immediate(compiler, backend.ARG3, backend.STACK, words.bytes * READ_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.ARG4, whence)
+    compiler = executor.syscall(compiler, system.SYSCALL_LSEEK)
+    compiler = executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
+    out executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * READ_OFFSET)
 }
 
 skill emit_file_write(compiler) {
