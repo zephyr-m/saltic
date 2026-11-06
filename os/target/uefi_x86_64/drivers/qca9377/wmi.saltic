@@ -14,12 +14,15 @@
 --     rings.release); события до него отпускаются; NoEvent через 3 с
 -- inbox(chip) -> текст — разбор при молчании: FW_INDICATOR, индексы CE1/CE2/CE3
 -- mac_text(mac) -> «aa:bb:…»
+-- has_service(chip, bit) -> yes/no — бит карты служб из SERVICE_READY
+--     (chip.services, 32 слова)
 -- barrier(chip) — ECHO и ждать ответа: всё отправленное раньше обработано
 --     (ath10k_wmi_barrier); NoEvent
 -- init(chip) -> текст — ждёт SERVICE_READY, проверяет связь ECHO, отдаёт
 --     буферы писем CE1 обратно, WMI_INIT с настройками ресурсов (поля — как в
 --     ath10k_wmi_tlv_op_gen_init), ждёт READY, MAC карты — в chip.mac
 
+use core.num
 use core.group
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.drivers.qca9377.card
@@ -41,6 +44,7 @@ TAG_ARRAY_STRUCT = 18
 ABI = [16777216, 53, 1598112593, 19533, 0, 0]
 RESOURCES = [4, 33, 4, 4, 2, 66, 16, 7, 7, 100, 100, 100, 40, 1, 4, 4, 4, 8, 0, 0, 0, 1024, 32, 0, 0, 0, 0, 2, 1056, 2, 1, 32, 2, 5, 22, 6, 0, 1, 1, 0, 0, 0, 0, 512]
 READY_MAC = 40
+SERVICE_BITS = 188
 READY_STATUS = 48
 WAITS = 300
 PAUSE = 10000
@@ -113,6 +117,10 @@ skill mac_text(mac) {
     out text
 }
 
+skill has_service(chip, bit) {
+    out num.mod(group.get(chip.services, bit / 32) / num.power2(num.mod(bit, 32)), 2) == 1
+}
+
 skill barrier(chip) {
     @at = tlv(chip, BODY, TAG_ECHO, 4)
     at = words(chip, at, [ECHO_VALUE])
@@ -123,10 +131,12 @@ skill barrier(chip) {
 
 skill init(chip) {
     card.say("T0. waiting for SERVICE_READY before WMI_INIT (as ath10k does) ...")
-    wait_for(chip, SERVICE_READY) rescue |err| {
+    @passport = wait_for(chip, SERVICE_READY) rescue |err| {
         @seen = inbox(chip)
         out "нет SERVICE_READY: {seen}"
     }
+    chip.services = []
+    drum (32) { chip.services = group.add(chip.services, firmware.read32(passport, chip.base, SERVICE_BITS + beat * 4)) }
     rings.release(chip)
     card.say("T1. ECHO {ECHO_VALUE}: do WMI commands reach the firmware?")
     @at_echo = tlv(chip, BODY, TAG_ECHO, 4)

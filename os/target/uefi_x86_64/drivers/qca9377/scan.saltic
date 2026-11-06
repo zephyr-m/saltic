@@ -8,7 +8,8 @@
 -- с 60-го: тип в байте 0 (0x80 маяк, 0x50 ответ на пробу), BSSID с 16-го,
 -- поля с 36-го (ID, длина, данные): 0 — имя сети, 3 — номер канала.
 --
--- Network { bssid, name, channel, snr } — найденная сеть
+-- Network { bssid, address, name, channel, snr } — найденная сеть; address —
+--     BSSID байтами
 -- reset_filter(chip) — фиктивный интерфейс создать и удалить, затем барьер:
 --     у QCA9377 (hw_filter_reset_required) так прошивка настраивает фильтр приёма
 -- region(chip) — PDEV_SET_REGDOMAIN: домен из EEPROM карты (WOR9_WORLD), как
@@ -22,7 +23,8 @@
 -- Tally { networks, frames, scans, others, done } — итог поиска: сети, кадры
 --     MGMT_RX, события SCAN (вид/причина), номера прочих событий, дошёл ли до конца
 -- collect(chip) -> Tally — события до COMPLETED (не дольше LIMIT)
--- run(chip) -> текст — всё по порядку, список сетей
+-- search(chip) -> Tally — всё по порядку до конца поиска
+-- run(chip) -> текст — search и список сетей
 
 use core.num
 use core.str
@@ -81,6 +83,7 @@ Tally = Box {
 
 Network = Box {
     bssid = "",
+    address = [],
     name = "",
     channel = 0,
     snr = 0
@@ -161,7 +164,9 @@ skill parse_frame(chip, frame, length, snr, channel) {
     (kind == BEACON) { known = yes }
     (kind == PROBE_RESPONSE) { known = yes }
     (known == no) { out none }
-    @found = Network { bssid = bssid_text(chip, frame), snr = snr, channel = channel }
+    @address = []
+    drum (6) { address = group.add(address, firmware.read8(frame, chip.base, 16 + beat)) }
+    @found = Network { bssid = bssid_text(chip, frame), address = address, snr = snr, channel = channel }
     @at = FIELDS
     drum (64) {
         (at + 2 > length) { leave }
@@ -248,17 +253,21 @@ skill collect(chip) {
     out tally
 }
 
-skill run(chip) {
+skill search(chip) {
     reset_filter(chip)
-    htt.setup(chip)
+    @link = htt.setup(chip)
+    card.say("   {link}")
     region(chip)
     channels(chip)
     interface(chip)
     start(chip)
-    @tally = collect(chip)
+    out collect(chip)
+}
+
+skill run(chip) {
+    @tally = search(chip)
     @networks = tally.networks
     @count = group.count(networks)
-    @rings_state = wmi.inbox(chip)
     @text = "сетей: {count} (кадров {tally.received}, поиск завершён: {tally.done})"
     drum (count) {
         @found = group.get(networks, beat)
