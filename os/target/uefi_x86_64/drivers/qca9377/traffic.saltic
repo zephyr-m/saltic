@@ -10,8 +10,16 @@
 -- send(chip, network, ethernet) — кадр Ethernet (группа байтов) в эфир
 -- receive(chip) -> кадр Ethernet или none — первый готовый кадр данных из
 --     приёма HTT; кадры управления по пути отпускаются
--- probe(chip, network) -> текст — DHCPDISCOVER и ответы за WAITS: сколько
---     кадров данных пришло, что предложил сервер
+-- answer_arp(chip, network, bytes) -> yes/no — ответить на ARP-запрос о
+--     нашем адресе (chip.ip)
+-- wait_dhcp(chip, network, kinds) -> dhcp.Offer или none — ответ сервера
+--     одного из видов kinds (не дольше WAITS), ARP по пути отвечаем
+-- lease(chip, network) -> текст — DISCOVER → OFFER → REQUEST → ACK; адрес и
+--     шлюз — в chip.ip и chip.router
+-- find_router(chip, network) -> текст — ARP-запрос шлюза, MAC в chip.router_mac
+-- listen(chip, network, rounds) -> текст — слушать: отвечать на ARP и на UDP
+--     в порт PORT (эхом), до ECHOES ответов
+-- probe(chip, network) -> текст — lease, find_router, listen
 
 use core.num
 use core.group
@@ -35,6 +43,9 @@ DATA = 8
 XID = [83, 65, 76, 84]
 WAITS = 400
 PAUSE = 10000
+PORT = 5555
+ECHOES = 3
+LISTEN = 6000
 
 skill send(chip, network, ethernet) {
     @at = join.bytes(chip, 0, DATA_TO_POINT)
@@ -90,39 +101,122 @@ skill receive(chip) {
     out none
 }
 
-skill probe(chip, network) {
-    card.say("K1. DHCPDISCOVER: broadcast UDP 68 -> 67 through the access point")
-    chip.htt_seen = ""
-    send(chip, network, dhcp.frame(chip.mac, XID))
-    @frames = 0
-    @kinds = ""
+skill answer_arp(chip, network, bytes) {
+    (group.count(chip.ip) == 0) { out no }
+    (net.is_arp_request_for(bytes, chip.ip) == no) { out no }
+    send(chip, network, net.arp_reply(chip.mac, chip.ip, bytes))
+    chip.arp_answered = chip.arp_answered + 1
+    out yes
+}
+
+skill settle(chip) {
+    drum (16) {
+        (rings.held(chip) == 0) { leave }
+        rings.release(chip)
+    }
+    out card.stall(chip, PAUSE)
+}
+
+skill wait_dhcp(chip, network, kinds) {
     drum (WAITS) {
         rings.drain_letters(chip)
         drum (16) {
             @bytes = receive(chip)
             (bytes == none) { leave }
-            frames = frames + 1
-            @type = firmware.hex(net.word(bytes, 12), 4)
-            (frames <= 4) { kinds = "{kinds} {type}" }
+            chip.frames_in = chip.frames_in + 1
+            answer_arp(chip, network, bytes)
             (net.is_udp_to(bytes, dhcp.CLIENT_PORT) == yes) {
                 @packet = net.udp(bytes)
                 @offer = dhcp.offer(packet.payload)
                 ((offer == none) == no) {
-                    @address = net.ip_text(offer.address)
-                    @server = net.ip_text(offer.server)
-                    @seen = chip.htt_seen
-                    card.say("   DHCP reply kind {offer.kind}: address {address} from {server}")
-                    out "данные: кадров {frames} (типы{kinds}); DHCP вид {offer.kind}: адрес {address} от {server} (письма HTT:{seen})"
+                    (group.contains(kinds, offer.kind) == yes) { out offer }
                 }
             }
         }
-        drum (16) {
-            (rings.held(chip) == 0) { leave }
-            rings.release(chip)
-        }
-        card.stall(chip, PAUSE)
+        settle(chip)
     }
-    @seen = chip.htt_seen
-    card.say("   no DHCP reply; data frames {frames}")
-    out "данные: кадров {frames} (типы{kinds}), ответа DHCP нет (письма HTT:{seen})"
+    out none
+}
+
+skill lease(chip, network) {
+    card.say("K1. DHCPDISCOVER: broadcast UDP 68 -> 67 through the access point")
+    send(chip, network, dhcp.frame(chip.mac, XID))
+    @offer = wait_dhcp(chip, network, [dhcp.OFFER])
+    (offer == none) { out "DHCP: на DISCOVER ответа нет (кадров данных {chip.frames_in})" }
+    @offered = net.ip_text(offer.address)
+    @server = net.ip_text(offer.server)
+    card.say("K2. DHCPREQUEST: taking {offered} from {server}")
+    send(chip, network, dhcp.request_frame(chip.mac, XID, offer))
+    @ack = wait_dhcp(chip, network, [dhcp.ACK, dhcp.NAK])
+    (ack == none) { out "DHCP: предложен {offered} от {server}, на REQUEST ответа нет" }
+    (ack.kind == dhcp.NAK) { out "DHCP: предложен {offered}, сервер отказал (NAK)" }
+    chip.ip = ack.address
+    chip.router = ack.router
+    @address = net.ip_text(ack.address)
+    @router = net.ip_text(ack.router)
+    @mask = net.ip_text(ack.mask)
+    card.say("   DHCPACK: address {address}, mask {mask}, gateway {router}")
+    out "DHCP: адрес {address}, маска {mask}, шлюз {router}"
+}
+
+skill find_router(chip, network) {
+    (group.count(chip.router) == 0) { out "ARP: шлюза нет" }
+    @router = net.ip_text(chip.router)
+    card.say("K3. ARP: who has {router}?")
+    send(chip, network, net.arp_request(chip.mac, chip.ip, chip.router))
+    drum (WAITS) {
+        rings.drain_letters(chip)
+        drum (16) {
+            @bytes = receive(chip)
+            (bytes == none) { leave }
+            chip.frames_in = chip.frames_in + 1
+            answer_arp(chip, network, bytes)
+            @found = net.arp_answer_from(bytes, chip.router)
+            ((found == none) == no) {
+                chip.router_mac = found
+                @shown = net.mac_text(found)
+                card.say("   {router} is at {shown}")
+                out "ARP: шлюз {router} — {shown}"
+            }
+        }
+        settle(chip)
+    }
+    out "ARP: шлюз {router} не ответил"
+}
+
+skill echo(chip, network, bytes) {
+    @packet = net.udp(bytes)
+    @from = net.ip_text(packet.from_ip)
+    card.say("   UDP from {from}:{packet.from_port}: {packet.text}")
+    chip.heard_udp = "{chip.heard_udp} [{from}: {packet.text}]"
+    @reply = "Saltic по Wi-Fi слышит: {packet.text}"
+    send(chip, network, net.udp_frame(chip.mac, chip.ip, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply))
+    chip.echoes = chip.echoes + 1
+    out chip.echoes
+}
+
+skill listen(chip, network, rounds) {
+    @address = net.ip_text(chip.ip)
+    card.say("K4. listening on {address}:{PORT}: ARP and UDP echo")
+    drum (rounds) {
+        rings.drain_letters(chip)
+        drum (16) {
+            @bytes = receive(chip)
+            (bytes == none) { leave }
+            chip.frames_in = chip.frames_in + 1
+            answer_arp(chip, network, bytes)
+            (net.is_udp_to(bytes, PORT) == yes) { echo(chip, network, bytes) }
+        }
+        (chip.echoes >= ECHOES) { leave }
+        settle(chip)
+    }
+    out "слушали: кадров данных {chip.frames_in}, ответов ARP {chip.arp_answered}, UDP:{chip.heard_udp}"
+}
+
+skill probe(chip, network) {
+    @leased = lease(chip, network)
+    (group.count(chip.ip) == 0) { out leased }
+    @found = find_router(chip, network)
+    @heard = listen(chip, network, LISTEN)
+    out "{leased}\n{found}\n{heard}"
 }

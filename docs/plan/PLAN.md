@@ -158,7 +158,10 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   06.11.2026: PEER_ASSOC, VDEV_UP, authorize; DHCPDISCOVER ушёл, телефон
   предложил адрес 10.192.81.195. → `drivers/qca9377/traffic.saltic`,
   `network/dhcp.saltic`
-- [ ] Wi-Fi, шаг 5: DHCP — адрес от точки доступа, ARP и наш UDP поверх Wi-Fi.
+- [x] Wi-Fi, шаг 5: DHCP — адрес от точки доступа, ARP и наш UDP поверх Wi-Fi.
+  06.11.2026: адрес 10.192.81.195 по DHCP, ARP в обе стороны, компьютер в
+  сети телефона получил эхо UDP с порта 5555. Перед входом — Deauthentication:
+  иначе телефон через раз молчит на ассоциацию. → `drivers/qca9377/traffic.saltic`
 - [ ] Wi-Fi, шаг 6: агент выбирает кабель или Wi-Fi; заливки программ по воздуху.
 - [ ] Wi-Fi, потом: WPA2 — SHA-1, HMAC, PBKDF2, AES, четырёхшаговое рукопожатие.
 

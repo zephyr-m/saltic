@@ -3,10 +3,13 @@
 -- (номер, длина, байты), конец — 255. Флаг BROADCAST просит сервер отвечать
 -- на широковещательный адрес: своего IP у нас ещё нет.
 --
--- Offer { server, address, kind } — разобранный ответ: IP сервера (опция 54),
--- предложенный адрес (yiaddr), вид сообщения (опция 53: 2 — OFFER, 5 — ACK)
+-- Offer { server, address, router, mask, kind } — разобранный ответ: IP
+-- сервера (опция 54), предложенный адрес (yiaddr), шлюз (3), маска (1), вид
+-- сообщения (опция 53: 2 — OFFER, 5 — ACK, 6 — NAK)
 -- discover(mac, xid) -> тело DHCPDISCOVER
--- frame(mac, xid) -> кадр Ethernet: широковещательный UDP 0.0.0.0:68 → :67
+-- request(mac, xid, offer) -> тело DHCPREQUEST: беру offer.address у offer.server
+-- frame(mac, xid) -> кадр Ethernet с DISCOVER: широковещательный UDP 0.0.0.0:68 → :67
+-- request_frame(mac, xid, offer) -> так же с REQUEST
 -- offer(payload) -> Offer или none — тело ответа сервера
 
 use core.num
@@ -21,7 +24,14 @@ BROADCAST = 128
 COOKIE = [99, 130, 83, 99]
 MESSAGE_TYPE = 53
 DISCOVER = 1
+REQUEST = 3
+OFFER = 2
+ACK = 5
+NAK = 6
 SERVER_ID = 54
+REQUESTED = 50
+ROUTER = 3
+MASK = 1
 REQUEST_LIST = [55, 3, 1, 3, 6]
 END = 255
 OPTIONS = 240
@@ -31,6 +41,8 @@ EVERYONE = [255, 255, 255, 255]
 Offer = Box {
     server = [],
     address = [],
+    router = [],
+    mask = [],
     kind = 0
 }
 
@@ -40,6 +52,16 @@ skill zeros(bytes, count) {
 }
 
 skill discover(mac, xid) {
+    out group.add(group.concat(header(mac, xid), [MESSAGE_TYPE, 1, DISCOVER]), END)
+}
+
+skill request(mac, xid, offer) {
+    @bytes = group.concat(header(mac, xid), [MESSAGE_TYPE, 1, REQUEST, REQUESTED, 4])
+    bytes = group.concat(group.concat(bytes, offer.address), [SERVER_ID, 4])
+    out group.add(group.concat(bytes, offer.server), END)
+}
+
+skill header(mac, xid) {
     @bytes = [BOOT_REQUEST, ETHERNET, 6, 0]
     bytes = group.concat(bytes, xid)
     bytes = group.concat(bytes, [0, 0, BROADCAST, 0])
@@ -47,13 +69,15 @@ skill discover(mac, xid) {
     bytes = zeros(group.concat(bytes, mac), 10)
     bytes = zeros(bytes, 192)
     bytes = group.concat(bytes, COOKIE)
-    bytes = group.concat(bytes, [MESSAGE_TYPE, 1, DISCOVER])
-    bytes = group.concat(bytes, REQUEST_LIST)
-    out group.add(bytes, END)
+    out group.concat(bytes, REQUEST_LIST)
 }
 
 skill frame(mac, xid) {
     out net.udp_frame_bytes(mac, ANY, net.BROADCAST_MAC, EVERYONE, CLIENT_PORT, SERVER_PORT, discover(mac, xid))
+}
+
+skill request_frame(mac, xid, offer) {
+    out net.udp_frame_bytes(mac, ANY, net.BROADCAST_MAC, EVERYONE, CLIENT_PORT, SERVER_PORT, request(mac, xid, offer))
 }
 
 skill offer(payload) {
@@ -67,6 +91,8 @@ skill offer(payload) {
         @size = group.get(payload, at + 1)
         (code == MESSAGE_TYPE) { found.kind = group.get(payload, at + 2) }
         (code == SERVER_ID) { found.server = net.slice_bytes(payload, at + 2, 4) }
+        (code == ROUTER) { found.router = net.slice_bytes(payload, at + 2, 4) }
+        (code == MASK) { found.mask = net.slice_bytes(payload, at + 2, 4) }
         at = at + 2 + size
     }
     out found
