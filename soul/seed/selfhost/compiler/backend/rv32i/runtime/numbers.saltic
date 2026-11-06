@@ -5,7 +5,9 @@
 -- mul/div — сдвигами и сложением, переполнение — rt_number_overflow.
 --
 -- emit_add / emit_sub(compiler) — rt_add / rt_sub без проверки
--- emit_mul / emit_div(compiler) — rt_mul / rt_div; overflow, division_by_zero
+-- emit_mul / emit_div(compiler) — rt_mul / rt_div; overflow, division_by_zero;
+--     на 8-байтном слове — emit_mul_wide / emit_div_wide на mul, mulh, div
+--     (переполнение — по 61 биту числа); текст числа — divu / remu
 -- emit_number_overflow / emit_division_by_zero(compiler) — метки ошибок
 -- emit_equal(compiler) — rt_equal: слова, строки побайтно -> yes/no
 -- emit_value_equal(compiler) — rt_value_equal: то, что зовёт `==`; группы
@@ -49,7 +51,35 @@ skill emit_sub(compiler) {
     out executor.ret(compiler)
 }
 
+skill emit_mul_wide(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_mul")
+    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.multiply(compiler, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    compiler = executor.multiply_high(compiler, backend.SCRATCH1, backend.VALUE, backend.ERROR)
+    compiler = executor.shift_right_signed(compiler, backend.SCRATCH2, backend.SCRATCH0, compiler.words.bits - 1)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, "rt_number_overflow")
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
+}
+
+skill emit_div_wide(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_div")
+    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.shift_right_signed(compiler, backend.ERROR, backend.ERROR, abi.TAG_SHIFT)
+    compiler = executor.branch_zero(compiler, backend.ERROR, "rt_division_by_zero")
+    compiler = executor.divide(compiler, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
+    compiler = executor.shift_right_signed(compiler, backend.SCRATCH1, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH0, "rt_number_overflow")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
+}
+
 skill emit_mul(compiler) {
+    (compiler.words.bytes == 8) { out emit_mul_wide(compiler) }
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_mul")
     compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
@@ -89,6 +119,7 @@ skill emit_mul(compiler) {
 }
 
 skill emit_div(compiler) {
+    (compiler.words.bytes == 8) { out emit_div_wide(compiler) }
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_div")
     compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
@@ -299,13 +330,21 @@ skill emit_number_text(compiler) {
     compiler = executor.label(compiler, ".L_number_digits")
     compiler = executor.load_immediate(compiler, backend.SCRATCH4, 10)
     compiler = executor.label(compiler, ".L_number_digit_loop")
-    compiler = executor.load_immediate(compiler, backend.SCRATCH5, 0)
-    compiler = executor.move(compiler, backend.ARG2, backend.SCRATCH0)
-    compiler = executor.label(compiler, ".L_number_div10")
-    compiler = executor.branch_less_unsigned(compiler, backend.ARG2, backend.SCRATCH4, ".L_number_remainder")
-    compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, -10)
-    compiler = executor.add_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, 1)
-    compiler = executor.jump(compiler, ".L_number_div10")
+    pick {
+        (words.bytes == 8) {
+            compiler = executor.divide_unsigned(compiler, backend.SCRATCH5, backend.SCRATCH0, backend.SCRATCH4)
+            compiler = executor.remainder_unsigned(compiler, backend.ARG2, backend.SCRATCH0, backend.SCRATCH4)
+        }
+        {
+            compiler = executor.load_immediate(compiler, backend.SCRATCH5, 0)
+            compiler = executor.move(compiler, backend.ARG2, backend.SCRATCH0)
+            compiler = executor.label(compiler, ".L_number_div10")
+            compiler = executor.branch_less_unsigned(compiler, backend.ARG2, backend.SCRATCH4, ".L_number_remainder")
+            compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, -10)
+            compiler = executor.add_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, 1)
+            compiler = executor.jump(compiler, ".L_number_div10")
+        }
+    }
     compiler = executor.label(compiler, ".L_number_remainder")
     compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, 48)
     compiler = executor.add(compiler, backend.SCRATCH4, backend.SCRATCH2, backend.SCRATCH3)

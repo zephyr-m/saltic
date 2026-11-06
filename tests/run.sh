@@ -237,7 +237,16 @@ test_rv64() {
     measure run qemu-riscv64 -B 0x100000000 "$work/rv64/always" >"$work/rv64/always.txt"
     diff -u tests/expected/edges.txt "$work/rv64/edges.txt"
     diff -u tests/expected/always.txt "$work/rv64/always.txt"
-    echo "rv64: edges и always под qemu-riscv64 — те же выводы, что у rv32i и x86_64"
+    SALTIC_TARGET=rv64 build canonical-rv64 \
+        soul/canonical/main.saltic \
+        "$work/rv64/canonical" \
+        67108864
+    cp tests/fixtures/input.txt "$work/rv64/input.txt"
+    measure run qemu-riscv64 -B 0x100000000 "$work/rv64/canonical" \
+        "$work/rv64/input.txt" "$work/rv64/output.txt" >"$work/rv64/canonical.txt"
+    diff -u soul/canonical/expected/output.txt "$work/rv64/canonical.txt"
+    test "$(<"$work/rv64/output.txt")" = "pip:0"
+    echo "rv64: канон, edges и always под qemu-riscv64 — те же выводы, что у rv32i и x86_64"
 }
 
 test_rva23() {

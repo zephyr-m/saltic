@@ -12,7 +12,11 @@
 --
 -- emit_fixed_overflow / emit_fixed_overflow_restore(compiler) — ошибка
 --     (restore — с откатом кадра 16 байт)
--- emit_fixed_new(compiler) — rt_fixed_new: проверка диапазона u8/u16
+-- emit_fixed_new(compiler) — rt_fixed_new: проверка диапазона u8/u16; на 8-байтном
+--     слове (emit_fixed_new_wide) — по ширине вида: u8/u16/u32/bits32 без знака,
+--     i32 со знаком, usize/address — всё слово; emit_fixed_wrap — rt_fixed_wrap:
+--     not и сдвиг влево 32-битных видов обрезаются до 32 бит, как на RV32;
+--     emit_fixed_mul_wide / emit_fixed_div_wide — mul / mulhu / div / divu
 -- emit_fixed_equal / emit_fixed_less / emit_fixed_greater(compiler)
 -- emit_fixed_add / emit_fixed_sub / emit_fixed_mul / emit_fixed_div(compiler)
 -- emit_fixed_and / emit_fixed_or / emit_fixed_xor / emit_fixed_not(compiler)
@@ -82,7 +86,96 @@ skill emit_fixed_greater(compiler) {
     out compiler
 }
 
+skill emit_fixed_new_wide(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_new")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_U8)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u8")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_U16)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u16")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_U32)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u32")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_BITS32)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u32")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_I32)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_i32")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_fixed_check_u8")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.VALUE, 8)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, "rt_fixed_overflow")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_fixed_check_u16")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.VALUE, 16)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, "rt_fixed_overflow")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_fixed_check_u32")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.VALUE, 32)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, "rt_fixed_overflow")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_fixed_check_i32")
+    compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.VALUE, 32)
+    compiler = executor.shift_right_signed(compiler, backend.SCRATCH0, backend.SCRATCH0, 32)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.VALUE, "rt_fixed_overflow")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
+}
+
+skill emit_fixed_wrap(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_wrap")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_I32)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_wrap_signed")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_U32)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_wrap_unsigned")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_BITS32)
+    compiler = executor.branch_not_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, "rt_fixed_new")
+    compiler = executor.label(compiler, ".L_fixed_wrap_unsigned")
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, 32)
+    compiler = executor.shift_right_unsigned(compiler, backend.VALUE, backend.VALUE, 32)
+    compiler = executor.jump(compiler, "rt_fixed_new")
+    compiler = executor.label(compiler, ".L_fixed_wrap_signed")
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, 32)
+    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, 32)
+    out executor.jump(compiler, "rt_fixed_new")
+}
+
+skill emit_fixed_mul_wide(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_mul")
+    compiler = executor.multiply(compiler, backend.SCRATCH2, backend.VALUE, backend.ERROR)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_USIZE)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_mul_wide_high")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_ADDRESS)
+    compiler = executor.branch_not_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_mul_wide_done")
+    compiler = executor.label(compiler, ".L_fixed_mul_wide_high")
+    compiler = executor.multiply_high_unsigned(compiler, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, "rt_fixed_overflow")
+    compiler = executor.label(compiler, ".L_fixed_mul_wide_done")
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH2)
+    out executor.jump(compiler, "rt_fixed_new")
+}
+
+skill emit_fixed_div_wide(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fixed_div")
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_fixed_div_nonzero")
+    compiler = executor.jump(compiler, "rt_division_by_zero")
+    compiler = executor.label(compiler, ".L_fixed_div_nonzero")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_I32)
+    compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_div_wide_signed")
+    compiler = executor.divide_unsigned(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
+    compiler = executor.jump(compiler, "rt_fixed_new")
+    compiler = executor.label(compiler, ".L_fixed_div_wide_signed")
+    compiler = executor.divide(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
+    out executor.jump(compiler, "rt_fixed_new")
+}
+
 skill emit_fixed_new(compiler) {
+    (compiler.words.bytes == 8) { out emit_fixed_new_wide(compiler) }
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_fixed_new")
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_U8)
@@ -198,23 +291,32 @@ skill emit_fixed_show(compiler) {
     compiler = executor.label(compiler, ".L_fixed_text_digits")
     compiler = executor.load_immediate(compiler, backend.SCRATCH3, 0)
     compiler = executor.label(compiler, ".L_fixed_text_digit")
-    compiler = executor.load_immediate(compiler, backend.SCRATCH4, 0)
-    compiler = executor.load_immediate(compiler, backend.SCRATCH5, 0)
-    compiler = executor.load_immediate(compiler, backend.ARG2, 32)
-    compiler = executor.move(compiler, backend.ARG3, backend.SCRATCH0)
-    compiler = executor.label(compiler, ".L_fixed_text_div10")
-    compiler = executor.shift_right_unsigned(compiler, backend.ARG4, backend.ARG3, 31)
-    compiler = executor.shift_left(compiler, backend.ARG3, backend.ARG3, 1)
-    compiler = executor.shift_left(compiler, backend.SCRATCH5, backend.SCRATCH5, 1)
-    compiler = executor.or(compiler, backend.SCRATCH5, backend.SCRATCH5, backend.ARG4)
-    compiler = executor.shift_left(compiler, backend.SCRATCH4, backend.SCRATCH4, 1)
-    compiler = executor.load_immediate(compiler, backend.ARG4, 10)
-    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH5, backend.ARG4, ".L_fixed_text_div10_next")
-    compiler = executor.add_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, -10)
-    compiler = executor.or_immediate(compiler, backend.SCRATCH4, backend.SCRATCH4, 1)
-    compiler = executor.label(compiler, ".L_fixed_text_div10_next")
-    compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, -1)
-    compiler = executor.branch_nonzero(compiler, backend.ARG2, ".L_fixed_text_div10")
+    pick {
+        (words.bytes == 8) {
+            compiler = executor.load_immediate(compiler, backend.ARG4, 10)
+            compiler = executor.divide_unsigned(compiler, backend.SCRATCH4, backend.SCRATCH0, backend.ARG4)
+            compiler = executor.remainder_unsigned(compiler, backend.SCRATCH5, backend.SCRATCH0, backend.ARG4)
+        }
+        {
+            compiler = executor.load_immediate(compiler, backend.SCRATCH4, 0)
+            compiler = executor.load_immediate(compiler, backend.SCRATCH5, 0)
+            compiler = executor.load_immediate(compiler, backend.ARG2, 32)
+            compiler = executor.move(compiler, backend.ARG3, backend.SCRATCH0)
+            compiler = executor.label(compiler, ".L_fixed_text_div10")
+            compiler = executor.shift_right_unsigned(compiler, backend.ARG4, backend.ARG3, 31)
+            compiler = executor.shift_left(compiler, backend.ARG3, backend.ARG3, 1)
+            compiler = executor.shift_left(compiler, backend.SCRATCH5, backend.SCRATCH5, 1)
+            compiler = executor.or(compiler, backend.SCRATCH5, backend.SCRATCH5, backend.ARG4)
+            compiler = executor.shift_left(compiler, backend.SCRATCH4, backend.SCRATCH4, 1)
+            compiler = executor.load_immediate(compiler, backend.ARG4, 10)
+            compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH5, backend.ARG4, ".L_fixed_text_div10_next")
+            compiler = executor.add_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, -10)
+            compiler = executor.or_immediate(compiler, backend.SCRATCH4, backend.SCRATCH4, 1)
+            compiler = executor.label(compiler, ".L_fixed_text_div10_next")
+            compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, -1)
+            compiler = executor.branch_nonzero(compiler, backend.ARG2, ".L_fixed_text_div10")
+        }
+    }
     compiler = executor.add_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, 48)
     compiler = executor.add(compiler, backend.ARG4, backend.STACK, backend.SCRATCH3)
     compiler = executor.store_byte(compiler, backend.SCRATCH5, backend.ARG4, 0)
@@ -297,6 +399,7 @@ skill emit_fixed_sub(compiler) {
 }
 
 skill emit_fixed_mul(compiler) {
+    (compiler.words.bytes == 8) { out emit_fixed_mul_wide(compiler) }
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_fixed_mul")
     compiler = executor.move(compiler, backend.SCRATCH2, backend.VALUE)
@@ -352,6 +455,7 @@ skill emit_fixed_mul(compiler) {
 }
 
 skill emit_fixed_div(compiler) {
+    (compiler.words.bytes == 8) { out emit_fixed_div_wide(compiler) }
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_fixed_div")
     compiler = executor.move(compiler, backend.SCRATCH2, backend.VALUE)
@@ -422,11 +526,16 @@ skill emit_fixed_xor(compiler) {
     out compiler
 }
 
+skill wrap_label(compiler) {
+    (compiler.words.bytes == 8) { out "rt_fixed_wrap" }
+    out "rt_fixed_new"
+}
+
 skill emit_fixed_not(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_fixed_not")
     compiler = executor.xor_immediate(compiler, backend.VALUE, backend.VALUE, -1)
-    compiler = executor.jump(compiler, "rt_fixed_new")
+    compiler = executor.jump(compiler, wrap_label(compiler))
     out compiler
 }
 
@@ -434,7 +543,7 @@ skill emit_fixed_shift_left(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, "rt_fixed_shift_left")
     compiler = executor.shift_left_by(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
-    compiler = executor.jump(compiler, "rt_fixed_new")
+    compiler = executor.jump(compiler, wrap_label(compiler))
     out compiler
 }
 
@@ -466,7 +575,7 @@ skill emit_fixed_to_number(compiler) {
     compiler = executor.label(compiler, "rt_fixed_to_number")
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.FIXED_I32)
     compiler = executor.branch_equal(compiler, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_to_number_signed")
-    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH1, backend.VALUE, 31 - abi.TAG_SHIFT)
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH1, backend.VALUE, compiler.words.bits - 1 - abi.TAG_SHIFT)
     compiler = executor.load_immediate(compiler, backend.SCRATCH2, 0)
     compiler = executor.branch_not_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, ".L_fixed_to_number_overflow")
     compiler = executor.jump(compiler, ".L_fixed_to_number_ready")
