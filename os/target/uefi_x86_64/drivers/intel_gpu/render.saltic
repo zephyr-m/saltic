@@ -10,7 +10,8 @@
 --
 -- Surface { at, pitch, width, height } — поверхность: адрес GGTT, шаг строки
 --     в байтах, размеры в пикселях (32 бита на пиксель, BGRA)
--- Painter { gpu, batch, strip, vertices, memory, count } — видеокарта, буферы
+-- Painter { gpu, batch, strip, vertices, memory, count, broken } — broken:
+--     движок завис (сброшен) — рисовать процессором; видеокарта, буферы
 --     порций (прямоугольник, треугольники), буфер вершин (memory — он же для
 --     core.mem: вершины пишутся прямо в память, без вызова на слово) и
 --     сколько в нём вершин
@@ -20,7 +21,9 @@
 -- begin(painter) — пустой список треугольников
 -- add_quad(painter, corners, pixel) — четырёхугольник (углы [x, y, …]
 --     экрана) двумя треугольниками цвета pixel (0xRRGGBB); вне FAR — мимо
--- triangles(painter, target) -> yes — нарисовать накопленные треугольники
+--     (у растеризатора есть предел координат: за ним движок зависал)
+-- triangles(painter, target) -> yes — нарисовать накопленные треугольники;
+--     не дождались — сброс движка (intel_gpu.reset_render) и broken = yes
 -- Внутри: put / load(…) — слово в буфер, шаблон в буфер с адресами;
 --     ONE — 1.0 в битах float; VERTEX_LIMIT — вершин в буфере
 
@@ -40,7 +43,7 @@ VERTEX_BYTES = 8
 ONE = 1065353216
 HALF_WORD = 65536
 OPAQUE = 4278190080
-FAR = 16000
+FAR = 4000
 KIND_BATCH = 1
 KIND_TARGET = 2
 KIND_TEXTURE = 3
@@ -59,7 +62,8 @@ Painter = Box {
     strip = 0,
     vertices = 0,
     memory = [],
-    count = 0
+    count = 0,
+    broken = no
 }
 
 skill painter(gpu, base) {
@@ -98,9 +102,13 @@ skill surface(painter, place, at, words, area) {
 }
 
 skill run(painter, place) {
+    (painter.broken == yes) { out no }
     @gpu = painter.gpu
     intel_gpu.submit_render(gpu, group.concat(group.concat(rect.BEFORE, [rect.START, place, 0]), rect.AFTER))
-    out intel_gpu.wait_render(gpu)
+    (intel_gpu.wait_render(gpu) == yes) { out yes }
+    painter.broken = yes
+    intel_gpu.reset_render(gpu)
+    out no
 }
 
 skill draw(painter, target, texture, x, y, width, height) {

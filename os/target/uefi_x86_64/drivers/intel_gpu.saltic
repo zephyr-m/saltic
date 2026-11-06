@@ -34,6 +34,11 @@
 --     (те же x, y и шаг строки в обеих поверхностях: задний буфер и экран)
 -- submit(gpu, words) — порция команд блиттеру (сброс TLB впереди)
 -- submit_render(gpu, words) — порция команд в кольцо рендера как есть
+-- wait_vblank(gpu) -> yes, когда начался обратный ход луча (vblank) дисплея A:
+--     счётчик кадров PIPE_FRMCOUNT сменился (не дольше VBLANK_WAITS опросов)
+-- reset_render(gpu) -> yes, если сброс прошёл: зависший движок рендера —
+--     «готов к сбросу» (RESET_CTL), сброс домена рендера (GDRST), кольцо
+--     заново на том же месте (как i915 gen8_reset_engines)
 -- wait(gpu) / wait_render(gpu) -> yes, если движок дочитал кольцо (не дольше
 --     WAITS); в HEAD выше HEAD_OFFSET — счётчик оборотов, ниже — смещение
 -- Внутри: wake(…) — пробуждение (forcewake); start_ring / push / drained —
@@ -82,6 +87,13 @@ FLUSH_TLB = 319045634
 USE_GTT = 4
 NOOP = 0
 RENDER_KEPT = 4
+RESET_CONTROL = 208
+REQUEST_RESET = 65537
+READY_TO_RESET = 2
+GDRST = 37916
+FRAME_COUNT = 458816
+VBLANK_WAITS = 2000000
+RESET_RENDER = 2
 MAGIC_KEPT = 8
 MAGIC = 1196446258
 GUID = [83, 65, 76, 84, 73, 67, 45, 71, 80, 85, 0, 0, 0, 0, 0, 1]
@@ -209,6 +221,41 @@ skill push(gpu, engine, ring, words) {
 skill submit(gpu, words) {
     @mark = (REGION + RING_PAGES) * PAGE
     out push(gpu, BLITTER, gpu.ring, group.concat([FLUSH_TLB, mark + USE_GTT, 0, 0], words))
+}
+
+skill wait_vblank(gpu) {
+    @start = firmware.read32(gpu.mmio, gpu.base, FRAME_COUNT)
+    drum (VBLANK_WAITS) {
+        ((firmware.read32(gpu.mmio, gpu.base, FRAME_COUNT) == start) == no) { out yes }
+    }
+    out no
+}
+
+skill reset_render(gpu) {
+    @mmio = gpu.mmio
+    @base = gpu.base
+    firmware.write_phys32(mmio, base, RENDER + RESET_CONTROL, REQUEST_RESET)
+    drum (1000) {
+        (num.mod(firmware.read32(mmio, base, RENDER + RESET_CONTROL) / READY_TO_RESET, 2) == 1) { leave }
+        uefi.poll_key(base, 10)
+    }
+    firmware.write_phys32(mmio, base, GDRST, RESET_RENDER)
+    @cleared = no
+    drum (1000) {
+        (cleared == no) {
+            cleared = num.mod(firmware.read32(mmio, base, GDRST) / RESET_RENDER, 2) == 0
+            uefi.poll_key(base, 10)
+        }
+    }
+    (cleared == no) { out no }
+    wake(mmio, base, WAKE_RENDER, ACK_RENDER)
+    firmware.write_phys32(mmio, base, RENDER + GFX_MODE, NO_EXECLISTS)
+    firmware.write_phys32(mmio, base, RENDER + CONTROL, 0)
+    firmware.write_phys32(mmio, base, RENDER + HEAD, 0)
+    firmware.write_phys32(mmio, base, RENDER + TAIL, 0)
+    firmware.write_phys32(mmio, base, RENDER + START, (REGION + RENDER_SLOTS) * PAGE)
+    firmware.write_phys32(mmio, base, RENDER + CONTROL, RING_ON)
+    out yes
 }
 
 skill submit_render(gpu, words) {
