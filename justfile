@@ -23,10 +23,12 @@ qemu file="os/target/qemu_virt/smoke.saltic":
     bash bootstrap/build.sh "$1" .cache/build/qemu_virt/program.elf
 
 qemu-graphics:
-    nix --extra-experimental-features "nix-command flakes" develop --command bash -c 'bash os/target/qemu_virt/build-graphics.sh && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -device virtio-tablet-device -audiodev pipewire,id=saltic_audio -device virtio-sound-device,audiodev=saltic_audio -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
+    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-build-graphics bash bootstrap/build.sh os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics >/dev/null
+    nix --extra-experimental-features "nix-command flakes" develop --command bash -c '.cache/build/workbench/build-graphics "" && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -device virtio-tablet-device -audiodev pipewire,id=saltic_audio -device virtio-sound-device,audiodev=saltic_audio -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
 
 os port="46321":
-    bash os/target/qemu_virt/build-graphics.sh
+    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-build-graphics bash bootstrap/build.sh os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics >/dev/null
+    nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/build-graphics ""
 
 os-send command port="46321":
     #!/usr/bin/env bash
@@ -40,7 +42,8 @@ os-send command port="46321":
     printf '%s\n' "$response"
 
 qemu-graphics-check:
-    bash os/target/qemu_virt/build-graphics.sh --check
+    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-build-graphics bash bootstrap/build.sh os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics >/dev/null
+    nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/build-graphics --check
 
 bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic":
     SALTIC_TARGET=x86_64 bash bootstrap/build.sh bootstrap/refresh.saltic .cache/build/workbench/refresh >/dev/null

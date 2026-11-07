@@ -18,7 +18,9 @@ saltic_stamp_program() {
     local program="$root/.cache/build/workbench/stamp"
     local failed="$program.failed"
     local compiler newest source
-    compiler="$(cd "$root" && source bootstrap/names.sh && saltic_bootstrap_compiler 2>/dev/null)" || return 1
+    local shelf=("$root"/bootstrap/saltic-*-compiler-rv64-linux)
+    [[ ${#shelf[@]} -eq 1 && -f "${shelf[0]}" ]] || return 1
+    compiler="bootstrap/${shelf[0]##*/}"
     newest="$program"
     [[ -f "$failed" ]] && newest="$failed"
     if [[ -x "$program" || -f "$failed" ]]; then

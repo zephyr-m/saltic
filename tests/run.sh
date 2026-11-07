@@ -494,8 +494,10 @@ test_abi() {
 }
 
 test_qemu_virt() {
-    SALTIC_QEMU_GRAPHICS_DIR="$work/qemu-virt" \
-        bash os/target/qemu_virt/build-graphics.sh --check
+    mkdir -p "$work/qemu-virt"
+    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR="$work/build/build-graphics" \
+        bash bootstrap/build.sh os/target/qemu_virt/build-graphics.saltic "$work/qemu-virt/build-graphics" >/dev/null
+    SALTIC_QEMU_GRAPHICS_DIR="$work/qemu-virt" "$work/qemu-virt/build-graphics" --check
 }
 
 test_uefi() {

@@ -2,15 +2,15 @@
 -- родным x86-64 и под rv64 и rv32i; fixed point у всех трёх — stage-2 = stage-3
 -- для rv64 (эталон в git), x86-64 (родной собирает сам себя) и rv32i (вторая
 -- сверка, в git не лежит). Самосборка на самом RV64 — bootstrap/refresh-rv64.saltic.
--- Новый компилятор заменяет прежнюю версию на полке, паспорта — функции
--- bootstrap/names.sh. Окружение как у прежнего refresh.sh: SALTIC_BOOTSTRAP_COMPILER,
+-- Новый компилятор заменяет прежнюю версию на полке, имена и паспорта —
+-- bootstrap.names. Окружение как у прежнего refresh.sh: SALTIC_BOOTSTRAP_COMPILER,
 -- SALTIC_BOOTSTRAP_REFRESH_DIR, SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES; нет
 -- qemu-riscv32 — перезапуск себя (BINARY) в проектном Nix shell. Строки без
 -- времени, если SALTIC_STAMPED (их ищет global-check). Вместо bootstrap/refresh.sh
 -- (в .archive/); вызывают just bootstrap-refresh, global-check и CI релиза.
 --
 -- program(source) — source: исходник компилятора или "" (SOURCE)
--- Внутри: Refresh — настройки прогона; say, names(call), stage(run, compiler,
+-- Внутри: Refresh — настройки прогона; say, stage(run, compiler,
 --     target, output), same_or_fail, passport(path, …), replace(run, kind, path),
 --     cpu_text(file) -> "15.6" (user + sys из вывода time)
 
@@ -22,6 +22,7 @@ use core.time
 use core.group
 use core.process
 use workbench.kit
+use bootstrap.names
 
 SOURCE = "soul/seed/selfhost/toolchain.saltic"
 WORK = ".cache/build/bootstrap-refresh"
@@ -55,12 +56,6 @@ skill say(run, text) {
     out kit.line(run.zone, "bootstrap refresh: {text}")
 }
 
-skill names(call) {
-    @done = process.capture(["bash", "-c", "source bootstrap/names.sh && {call}"], "", [])
-    ((done.code == 0) == no) { out error.NamesFailed }
-    out str.slice(done.output, 0, str.bytes(done.output) - 1)
-}
-
 skill stage(run, compiler, target, output) {
     @measure = ""
     (str.bytes(run.timer) > 0) { measure = "\"$5\" -o \"$2.time\" -f \"%M %U %S\"" }
@@ -77,11 +72,8 @@ skill same_or_fail(left, right) {
     out error.FixedPointBroken
 }
 
-skill passport(path, runs_on, parent, run, how, seconds, word, times) {
-    @script = "source bootstrap/names.sh && saltic_write_passport \"$0\" \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" \"$8\""
-    @written = kit.shell(script, [path, runs_on, TARGETS, parent, run.heap, how, seconds, word, times], "")
-    ((written == 0) == no) { out error.PassportFailed }
-    out none
+skill passport(path, runs_on, parent, run, how, seconds, times) {
+    out names.write_passport(names.Passport { binary = path, runs_on = runs_on, emits = TARGETS, parent = parent, heap = run.heap, how = how, seconds = seconds, word = "самосборки", times = times })
 }
 
 skill replace(kind, path) {
@@ -164,12 +156,12 @@ program(source) {
     @work = run.work
     process.run(["mkdir", "-p", "{work}/stage-1", "{work}/stage-2", "{work}/stage-3", "{work}/previous"], "", [])
     kit.shell("rm -f \"$0\"/previous/* \"$0\"/stage-*/toolchain*", [work], "")
-    @bootstrap = names("saltic_bootstrap_compiler")
+    @bootstrap = names.bootstrap_compiler()
     @bootstrap_name = kit.base_name(bootstrap)
     @previous = "{work}/previous/{bootstrap_name}"
     process.run(["cp", bootstrap, previous], "", [])
     say(run, "исходный compiler {bootstrap}")
-    @shelf_native = names("saltic_native_compiler")
+    @shelf_native = names.native_compiler()
     @native_name = kit.base_name(shelf_native)
     @previous_native = "{work}/previous/{native_name}"
     process.run(["cp", shelf_native, previous_native], "", [])
@@ -208,8 +200,8 @@ program(source) {
     same_or_fail("{work}/stage-2/toolchain-rv64", "{work}/stage-3/toolchain-rv64")
     same_or_fail("{work}/stage-2/toolchain", "{work}/stage-3/toolchain")
     same_or_fail("{work}/stage-2/toolchain.elf", "{work}/stage-3/toolchain.elf")
-    @compiler = names("saltic_compiler_path rv64 linux")
-    @native_path = names("saltic_compiler_path x86_64 linux")
+    @compiler = names.compiler_path("rv64", "linux", "")
+    @native_path = names.compiler_path("x86_64", "linux", "")
     @kept = no
     (kit.same_file("{work}/stage-3/toolchain-rv64", compiler) == yes) { kept = kit.exists("{compiler}.txt") }
     (kept == yes) {
@@ -218,7 +210,7 @@ program(source) {
         (kit.same_file(stage2, native_path) == yes) {
             @text = file.read("{native_path}.txt") rescue |err| { "" }
             (str.contains(text, "время самосборки") == no) {
-                passport(native_path, "x86_64, linux", previous_native, run, "сходится на x86-64 (stage-2 = stage-3)", native_seconds, "самосборки", "{work}/stage-3/toolchain.time")
+                passport(native_path, "x86_64, linux", previous_native, run, "сходится на x86-64 (stage-2 = stage-3)", native_seconds, "{work}/stage-3/toolchain.time")
                 @native_file = kit.base_name(native_path)
                 say(run, "паспорт {native_file} обновлён")
             }
@@ -227,16 +219,16 @@ program(source) {
     (kept == no) {
         replace("rv64-linux", compiler)
         copy_in("{work}/stage-3/toolchain-rv64", compiler)
-        passport(compiler, "rv64, linux (qemu-riscv64 -B 0x100000000)", previous, run, "сходится на x86-64 (stage-2 = stage-3); на RV64 — just rv64", self_seconds, "самосборки", "{work}/stage-3/toolchain-rv64.time")
+        passport(compiler, "rv64, linux (qemu-riscv64 -B 0x100000000)", previous, run, "сходится на x86-64 (stage-2 = stage-3); на RV64 — just rv64", self_seconds, "{work}/stage-3/toolchain-rv64.time")
         replace("x86_64-linux", native_path)
         copy_in(stage2, native_path)
-        passport(native_path, "x86_64, linux", previous_native, run, "сходится на x86-64 (stage-2 = stage-3)", native_seconds, "самосборки", "{work}/stage-3/toolchain.time")
+        passport(native_path, "x86_64, linux", previous_native, run, "сходится на x86-64 (stage-2 = stage-3)", native_seconds, "{work}/stage-3/toolchain.time")
         @updated = kit.base_name(compiler)
         say(run, "{updated} обновлён")
     }
     @sum = process.capture(["sha256sum", compiler], "", [])
     io.show(str.slice(sum.output, 0, str.bytes(sum.output) - 1))
-    @narrow_path = names("saltic_compiler_path rv32i linux .elf")
+    @narrow_path = names.compiler_path("rv32i", "linux", ".elf")
     @narrow_passport = str.slice(narrow_path, 0, str.bytes(narrow_path) - 4)
     @narrow_kept = no
     (kit.same_file("{work}/stage-3/toolchain.elf", narrow_path) == yes) { narrow_kept = kit.exists("{narrow_passport}.txt") }
@@ -245,12 +237,12 @@ program(source) {
     (narrow_kept == no) {
         replace("rv32i-linux.elf", narrow_path)
         copy_in("{work}/stage-3/toolchain.elf", narrow_path)
-        passport(narrow_path, "rv32i, linux (qemu-riscv32 -B 0x100000000)", native_path, run, "вторая сверка: сходится на x86-64 (stage-2 = stage-3)", narrow_seconds, "сборки", "{work}/stage-3/toolchain.elf.time")
+        names.write_passport(names.Passport { binary = narrow_path, runs_on = "rv32i, linux (qemu-riscv32 -B 0x100000000)", emits = TARGETS, parent = native_path, heap = run.heap, how = "вторая сверка: сходится на x86-64 (stage-2 = stage-3)", seconds = narrow_seconds, times = "{work}/stage-3/toolchain.elf.time" })
         say(run, "{narrow_name} обновлён (вторая сверка)")
     }
-    @ready = kit.base_name(names("saltic_native_compiler"))
+    @ready = kit.base_name(names.native_compiler())
     say(run, "{ready} готов")
-    @virt = kit.base_name(names("saltic_qemu_virt_compiler"))
+    @virt = kit.base_name(names.qemu_virt_compiler())
     say(run, "{virt} готов")
     out none
 }

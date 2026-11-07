@@ -5,7 +5,17 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-source bootstrap/names.sh
+
+# Первый камень: компилятор с полки по маске, без проверки свежести — её и
+# перевод родного x86-64 из эталона ведёт refresh (bootstrap/names.saltic).
+# shelf <конец имени> — единственный bootstrap/saltic-*-compiler-<конец имени>.
+shelf() {
+    local found=(bootstrap/saltic-*-compiler-"$1")
+    if [[ ${#found[@]} -ne 1 || ! -f "${found[0]}" ]]; then
+        return 1
+    fi
+    echo "${found[0]}"
+}
 
 if ! command -v qemu-riscv32 >/dev/null 2>&1; then
     if [[ "${SALTIC_BUILD_IN_DEV_SHELL:-}" == "1" ]]; then
@@ -44,7 +54,8 @@ fi
 source_path="$1"
 output_path="$2"
 work="${SALTIC_BUILD_DIR:-.cache/build/bootstrap}"
-compiler="${SALTIC_BOOTSTRAP_COMPILER:-$(saltic_bootstrap_compiler)}"
+reference="$(shelf rv64-linux)" || { echo "bootstrap: нужен ровно один saltic-*-compiler-rv64-linux" >&2; exit 1; }
+compiler="${SALTIC_BOOTSTRAP_COMPILER:-$reference}"
 heap_bytes="${SALTIC_HEAP_BYTES:-536870912}"
 target="${SALTIC_TARGET:-rv32i}"
 compiler_output="$work/compiler-output"
@@ -61,14 +72,14 @@ fi
 mkdir -p "$work" "$(dirname "$output_path")"
 rm -f "$compiler_output"
 
-# Загрузочный компилятор с полки (канон RV64) работает своей родной x86-версией:
-# те же байты, в разы быстрее. При SALTIC_NATIVE=0 или с другим компилятором
+# Загрузочный компилятор с полки (канон RV64) работает своей родной x86-версией
+# с той же полки: те же байты, в разы быстрее; её нет — сам, под qemu-riscv64. При SALTIC_NATIVE=0 или с другим компилятором
 # (SALTIC_BOOTSTRAP_COMPILER, stage-1 и т. п.) раннер — по заголовку файла:
 # RISC-V 64 (ELF64, машина 243) — под qemu-riscv64, x86-64 (ELF64) — прямо,
 # RISC-V 32 (ELF32) — под qemu-riscv32.
 runner=(qemu-riscv32 -B 0x100000000 "$compiler")
-if [[ "${SALTIC_NATIVE:-1}" != "0" && "$compiler" == "$(saltic_bootstrap_compiler)" ]]; then
-    runner=("$(saltic_native_compiler)")
+if [[ "${SALTIC_NATIVE:-1}" != "0" && "$compiler" == "$reference" ]] && native="$(shelf x86_64-linux)"; then
+    runner=("$native")
 elif [[ "$(od -An -tx1 -j18 -N1 "$compiler" | tr -d '[:space:]')" == "f3" \
     && "$(od -An -tx1 -j4 -N1 "$compiler" | tr -d '[:space:]')" == "02" ]]; then
     runner=(qemu-riscv64 -B 0x100000000 "$compiler")

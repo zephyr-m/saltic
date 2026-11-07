@@ -1,0 +1,312 @@
+-- names — имена компиляторов в bootstrap/ и их паспорта (вместо names.sh, в
+-- .archive/). Формат имени: saltic-<версия>-compiler-<процессор>-<платформа>
+-- [.расширение], процессор — тот, на котором компилятор запускается; хэши —
+-- только в паспорте. Версия — счёт Football Versioning: в VERSION «142:37:77»,
+-- в именах «142-37-77». Первый камень — bootstrap/build.sh — берёт компилятор
+-- с полки по маске сам; свежесть родного x86-64 и его перевод из эталона RV64
+-- решает native_compiler (его зовут refresh и проверки).
+--
+-- version() -> "211-59-209"; compiler_path(processor, platform, ending) -> путь
+-- bootstrap_compiler() -> эталон RV64 из git; после смены VERSION — единственный
+--     saltic-*-compiler-rv64-linux; BootstrapMissing
+-- source_hash(extra) -> 16 знаков sha256 исходников языка (soul/seed без тестов)
+--     и папок extra (группа)
+-- Passport { binary, runs_on, emits, parent, heap, how, seconds, word, times } —
+--     что писать: seconds "" — без строки времени, word — «сборки» или
+--     «самосборки», times — файл замера GNU time «%M %U %S» или ""
+-- write_passport(card) — паспорт <binary без .elf>.txt
+-- native_compiler() -> родной x86-64; не свежий — переводится из эталона
+-- qemu_virt_compiler() -> toolchain rv32i для голого железа qemu-virt
+-- Внутри: sha(path), file_name(path), saltic_files(folder), source_volume,
+--     fresh(own, compiler), remove_others, timed(times, command, log, env)
+
+use io
+use io.file
+use core.str
+use core.time
+use core.group
+use core.bytes
+use core.process
+use workbench.kit
+
+TRANSLATE_HEAP = "4026531840"
+QEMU_VIRT_HEAP = "536870912"
+SCRATCH = ".cache/build/names"
+
+Passport = Box {
+    binary = "",
+    runs_on = "",
+    emits = "",
+    parent = "",
+    heap = "",
+    how = "",
+    seconds = "",
+    word = "сборки",
+    times = ""
+}
+
+skill version() {
+    @text = file.read("VERSION")
+    @line = group.get(str.lines(text), 0)
+    out str.join(str.split(line, ":"), "-")
+}
+
+skill compiler_path(processor, platform, ending) {
+    @shown = version()
+    out "bootstrap/saltic-{shown}-compiler-{processor}-{platform}{ending}"
+}
+
+skill bootstrap_compiler() {
+    @current = compiler_path("rv64", "linux", "")
+    (kit.exists(current) == yes) { out current }
+    @found = []
+    drum (file.list("bootstrap")) {
+        (str.starts_with(beat, "saltic-") == yes) {
+            (str.ends_with(beat, "-compiler-rv64-linux") == yes) { found = group.add(found, "bootstrap/{beat}") }
+        }
+    }
+    (group.count(found) == 1) { out group.get(found, 0) }
+    io.show("bootstrap: нужен ровно один saltic-*-compiler-rv64-linux")
+    out error.BootstrapMissing
+}
+
+skill first_word(text) {
+    @lines = str.lines(text)
+    (group.count(lines) == 0) { out "" }
+    out group.get(str.split(group.get(lines, 0), " "), 0)
+}
+
+skill file_name(path) {
+    @parts = str.split(path, "/")
+    out group.get(parts, group.count(parts) - 1)
+}
+
+skill sha(path) {
+    @done = process.capture(["sha256sum", path], "", [])
+    out str.slice(first_word(done.output), 0, 16)
+}
+
+skill saltic_files(folder) {
+    @result = []
+    drum (file.list(folder)) {
+        @path = "{folder}/{beat}"
+        @inner = file.list(path) rescue |err| { [] }
+        (str.ends_with(beat, ".saltic") == yes) {
+            (group.count(inner) == 0) { result = group.add(result, path) }
+        }
+        (group.count(inner) > 0) { result = group.concat(result, saltic_files(path)) }
+    }
+    out result
+}
+
+skill source_hash(extra) {
+    @files = []
+    drum (group.concat(["soul/seed"], extra)) {
+        drum (saltic_files(beat)) {
+            (str.starts_with(beat, "soul/seed/tests/") == no) { files = group.add(files, beat) }
+        }
+    }
+    @sums = process.capture(group.concat(["sha256sum"], kit.sorted(files)), "", [])
+    process.run(["mkdir", "-p", SCRATCH], "", [])
+    @listing = "{SCRATCH}/source-sums.txt"
+    file.write(listing, sums.output)
+    out sha(listing)
+}
+
+skill line_count(path) {
+    @buffer = file.read_bytes(path)
+    @count = 0
+    drum (bytes.count(buffer)) {
+        (bytes.get(buffer, beat) == 10) { count = count + 1 }
+    }
+    out count
+}
+
+skill source_volume() {
+    @files = group.concat(saltic_files("soul/seed/core"), saltic_files("soul/seed/selfhost"))
+    @lines = 0
+    drum (files) { lines = lines + line_count(beat) }
+    @count = group.count(files)
+    out "файлов {count}, строк {lines} (soul/seed/core, selfhost)"
+}
+
+skill hundredths(text) {
+    @parts = str.split(text, ".")
+    @value = 0
+    drum (str.bytes(group.get(parts, 0))) { value = value * 10 + str.byte(group.get(parts, 0), beat) - 48 }
+    value = value * 100
+    (group.count(parts) > 1) {
+        @fraction = group.get(parts, 1)
+        @scale = 10
+        drum (str.bytes(fraction)) {
+            (beat < 2) {
+                value = value + (str.byte(fraction, beat) - 48) * scale
+                scale = scale / 10
+            }
+        }
+    }
+    out value
+}
+
+skill measured_lines(times) {
+    (str.bytes(times) == 0) { out "" }
+    @text = file.read(times) rescue |err| { out "" }
+    @lines = str.lines(text)
+    (group.count(lines) == 0) { out "" }
+    @numbers = str.split(group.get(lines, 0), " ")
+    ((group.count(numbers) == 3) == no) { out "" }
+    @megabytes = hundredths(group.get(numbers, 0)) / 100 / 1024
+    @tenths = (hundredths(group.get(numbers, 1)) + hundredths(group.get(numbers, 2)) + 5) / 10
+    @whole = tenths / 10
+    @part = tenths % 10
+    out "пик памяти:       {megabytes} МБ\nпроцессор:        {whole}.{part} с (user + sys)\n"
+}
+
+skill cpu_model() {
+    @read = process.capture(["cat", "/proc/cpuinfo"], "", [])
+    drum (str.lines(read.output)) {
+        (str.starts_with(beat, "model name") == yes) {
+            @parts = str.split(beat, ":")
+            @model = str.join(group.slice(parts, 1, group.count(parts)), ":")
+            drum (str.bytes(model)) {
+                ((str.get(model, beat) == " ") == no) { out str.slice(model, beat, str.bytes(model)) }
+            }
+            out ""
+        }
+    }
+    out ""
+}
+
+skill passport_path(binary) {
+    (str.ends_with(binary, ".elf") == yes) { out str.slice(binary, 0, str.bytes(binary) - 4) }
+    out binary
+}
+
+skill write_passport(card) {
+    @binary = card.binary
+    @runs_on = card.runs_on
+    @emits = card.emits
+    @parent = card.parent
+    @heap = card.heap
+    @how = card.how
+    @seconds = card.seconds
+    @word = card.word
+    @times = card.times
+    @shown = version()
+    @hash = source_hash(passport_extra(emits))
+    @parent_name = file_name(parent)
+    @parent_sum = sha(parent)
+    @own_sum = sha(binary)
+    @size = kit.size(binary)
+    @volume = source_volume()
+    @today = process.capture(["date", "+%Y-%m-%d"], "", [])
+    @date = first_word(today.output)
+    @text = "программа:        компилятор Saltic\nверсия:           {shown}\nзапускается на:   {runs_on}\nвыдаёт код для:   {emits}\nисходники:        {hash}\n"
+    text = str.concat(text, "собран чем:       {parent_name} (sha256 {parent_sum})\nсамосборка:       {how}\nкуча:             {heap} байт\nsha256 файла:     {own_sum}\nразмер:           {size} байт\n")
+    text = str.concat(text, "объём исходников: {volume}\nдата:             {date}\n")
+    text = str.concat(text, measured_lines(times))
+    (str.bytes(seconds) > 0) {
+        @model = cpu_model()
+        text = str.concat(text, "время {word}: {seconds} с, {model}\n")
+    }
+    @path = passport_path(binary)
+    out file.write("{path}.txt", text)
+}
+
+skill passport_extra(emits) {
+    (str.contains(emits, "qemu-virt") == yes) { out ["os/target/qemu_virt"] }
+    out []
+}
+
+skill fresh(own, compiler) {
+    (kit.exists(own) == no) { out no }
+    @text = file.read("{own}.txt") rescue |err| { out no }
+    @parent = sha(compiler)
+    (str.contains(text, "sha256 {parent})") == yes) { out yes }
+    (str.contains(text, "сходится на x86-64") == no) { out no }
+    @hash = source_hash([])
+    drum (str.lines(text)) {
+        (str.starts_with(beat, "исходники:") == yes) { out str.ends_with(beat, " {hash}") }
+    }
+    out no
+}
+
+skill remove_others(ending, keep) {
+    drum (file.list("bootstrap")) {
+        @old = "bootstrap/{beat}"
+        (str.starts_with(beat, "saltic-") == yes) {
+            (str.ends_with(beat, ending) == yes) {
+                ((old == keep) == no) {
+                    @old_passport = passport_path(old)
+                    process.run(["rm", "-f", old, "{old_passport}.txt"], "", [])
+                }
+            }
+        }
+    }
+    out none
+}
+
+skill timed(times, command, log, env) {
+    process.run(["rm", "-f", times], "", [])
+    @measure = process.locate("time") rescue |err| { "" }
+    @full = command
+    (str.bytes(measure) > 0) { full = group.concat([measure, "-o", times, "-f", "%M %U %S"], command) }
+    @script = "\"$@\" > \"$0\" 2>&1"
+    @done = process.capture(group.concat(["bash", "-c", script, log], full), "", env)
+    out done.code
+}
+
+skill native_compiler() {
+    @own = compiler_path("x86_64", "linux", "")
+    @compiler = bootstrap_compiler()
+    (fresh(own, compiler) == yes) { out own }
+    @name = file_name(compiler)
+    io.show("bootstrap: перевожу {name} в x86-64 (под qemu-riscv64)")
+    remove_others("-compiler-x86_64-linux", own)
+    process.run(["mkdir", "-p", ".cache/build"], "", [])
+    @started = time.now()
+    @heap = TRANSLATE_HEAP
+    @env = ["SALTIC_BOOTSTRAP_COMPILER={compiler}", "SALTIC_BUILD_DIR=.cache/build/bootstrap-native", "SALTIC_HEAP_BYTES={heap}", "SALTIC_TARGET=x86_64", "SALTIC_NATIVE=0"]
+    @log = ".cache/build/bootstrap-native.log"
+    @code = timed(".cache/build/bootstrap-native.time", ["bash", "bootstrap/build.sh", "soul/seed/selfhost/toolchain.saltic", own], log, env)
+    ((code == 0) == no) {
+        drum (kit.tail(log, 5)) { io.show(beat) }
+        out error.TranslateFailed
+    }
+    @spent = kit.seconds_since(started)
+    write_passport(Passport { binary = own, runs_on = "x86_64, linux", emits = "rv32i, rv64, x86_64", parent = compiler, heap = TRANSLATE_HEAP, how = "переведён из {name}", seconds = spent, times = ".cache/build/bootstrap-native.time" })
+    out own
+}
+
+skill qemu_virt_compiler() {
+    @own = native_compiler()
+    @toolchain = compiler_path("rv32i", "linux-for-qemu_virt", ".elf")
+    @passport = str.concat(passport_path(toolchain), ".txt")
+    @text = file.read(passport) rescue |err| { "" }
+    (kit.exists(toolchain) == yes) {
+        @parent = sha(own)
+        (str.contains(text, "sha256 {parent})") == yes) {
+            @hash = source_hash(["os/target/qemu_virt"])
+            drum (str.lines(text)) {
+                (str.starts_with(beat, "исходники:") == yes) {
+                    (str.ends_with(beat, " {hash}") == yes) { out toolchain }
+                }
+            }
+        }
+    }
+    @name = file_name(toolchain)
+    io.show("bootstrap: собираю {name}")
+    remove_others("-compiler-rv32i-linux-for-qemu_virt.elf", toolchain)
+    process.run(["mkdir", "-p", ".cache/build"], "", [])
+    @started = time.now()
+    @log = ".cache/build/bootstrap-qemu_virt.log"
+    @code = timed(".cache/build/bootstrap-qemu_virt.time", [own, "os/target/qemu_virt/toolchain.saltic", toolchain, QEMU_VIRT_HEAP, "rv32i"], log, [])
+    ((code == 0) == no) {
+        drum (kit.tail(log, 5)) { io.show(beat) }
+        out error.ToolchainFailed
+    }
+    process.run(["chmod", "+x", toolchain], "", [])
+    @spent = kit.seconds_since(started)
+    write_passport(Passport { binary = toolchain, runs_on = "rv32i, linux (qemu-riscv32 -B 0x100000000)", emits = "rv32i, qemu-virt (голое железо)", parent = own, heap = QEMU_VIRT_HEAP, how = "собран родным компилятором", seconds = spent, times = ".cache/build/bootstrap-qemu_virt.time" })
+    out toolchain
+}

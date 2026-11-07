@@ -1,0 +1,60 @@
+-- build-graphics — ОС для qemu-virt с графикой: toolchain qemu-virt с полки
+-- (bootstrap.names; устарел — собирается заново), им — os/main.saltic в голый
+-- ELF. Папка — SALTIC_QEMU_GRAPHICS_DIR (по умолчанию .cache/build/qemu-graphics),
+-- куча — SALTIC_QEMU_HEAP_BYTES (67108864). Toolchain запускается под
+-- qemu-riscv32, поэтому программу зовут из проектного Nix shell: tests/run.sh
+-- (qemu-virt) и just qemu-graphics. Вместо build-graphics.sh (в .archive/).
+--
+-- program(mode) — mode "--check": ещё и проверить, что вышел ELF; иначе ""
+-- Внутри: say(text), setting(name, fallback)
+
+use io
+use io.file
+use core.str
+use core.bytes
+use core.group
+use core.process
+use bootstrap.names
+
+WORK = ".cache/build/qemu-graphics"
+HEAP = "67108864"
+ELF = [127, 69, 76, 70]
+
+skill say(text) {
+    out io.show("графика: {text}")
+}
+
+skill setting(name, fallback) {
+    drum (process.environment()) {
+        (str.starts_with(beat, "{name}=") == yes) {
+            @value = str.slice(beat, str.bytes(name) + 1, str.bytes(beat))
+            (str.bytes(value) > 0) { out value }
+        }
+    }
+    out fallback
+}
+
+program(mode) {
+    @work = setting("SALTIC_QEMU_GRAPHICS_DIR", WORK)
+    @heap = setting("SALTIC_QEMU_HEAP_BYTES", HEAP)
+    process.run(["mkdir", "-p", work], "", [])
+    say("беру qemu-virt toolchain из bootstrap/")
+    @toolchain = names.qemu_virt_compiler()
+    @elf = "{work}/program.elf"
+    say("собираю bare-metal ELF {elf}")
+    @code = process.run(["qemu-riscv32", "-B", "0x100000000", toolchain, "os/main.saltic", elf, heap], "", [])
+    ((code == 0) == no) { out error.BuildFailed }
+    say("сборка готова")
+    (mode == "--check") {
+        @image = file.read_bytes(elf) rescue |err| { out error.NoElf }
+        (bytes.count(image) < 4) { out error.NoElf }
+        drum (group.count(ELF)) {
+            ((bytes.get(image, beat) == group.get(ELF, beat)) == no) {
+                say("компилятор не создал ELF")
+                out error.NoElf
+            }
+        }
+        say("прямой ELF подтверждён")
+    }
+    out none
+}
