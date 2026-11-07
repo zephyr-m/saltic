@@ -1,0 +1,215 @@
+-- crash — страховочная сетка рантайма: путь непойманной ошибки и журнал
+-- yamatakudasai.log. Навык, через который прошла ошибка, кладёт своё имя в
+-- TRAIL (до TRAIL_SIZE, внутренний — первым); rescue путь очищает. В конце
+-- программы rt_start_failure зовёт rt_crash_report: «путь: a ← b ← program» на
+-- экран (путь из одного навыка — сама программа — не печатается), затем — если
+-- платформа открыла журнал на дозапись (Linux; у прочих
+-- log_open — NotSupported) — туда же «ЧЧ:ММ:СС UTC  ошибка: Имя» и путь.
+-- Вывод rt_show / rt_newline идёт в OUT_FD (0 — экран, fd 1).
+--
+-- out_fd(compiler, label) — VALUE = fd вывода (метка label — своя у каждого места)
+-- emit_trail_push(compiler) — rt_trail_push(VALUE имя-строка), ERROR не трогает
+-- emit_trail_clear(compiler) — rt_trail_clear
+-- emit_trail_print / emit_report / emit_clock(compiler) — rt_trail_print,
+--     rt_crash_report(VALUE ошибка), rt_crash_clock — «ЧЧ:ММ:СС UTC  »
+-- append_data(compiler) — подписи; append_bss(compiler) — TRAIL, счётчик, OUT_FD
+
+use selfhost.abi
+use selfhost.compiler.backend
+use selfhost.machine.wide
+use selfhost.compiler.platform
+use selfhost.compiler.backend.rv32i.runtime.tails
+use selfhost.compiler.backend.rv32i.runtime.terminal
+
+TRAIL = "saltic_trail"
+TRAIL_COUNT = "saltic_trail_count"
+TRAIL_SIZE = 16
+OUT_FD = "saltic_out_fd"
+STDOUT = 1
+MILLISECONDS = 1000
+HOUR = 3600
+MINUTE = 60
+
+skill out_fd(compiler, label) {
+    @executor = compiler.executor
+    compiler = executor.load_address(compiler, backend.VALUE, OUT_FD, 0)
+    compiler = executor.load(compiler, backend.VALUE, backend.VALUE, 0)
+    compiler = executor.branch_nonzero(compiler, backend.VALUE, label)
+    compiler = executor.load_immediate(compiler, backend.VALUE, STDOUT)
+    out executor.label(compiler, label)
+}
+
+skill emit_trail_push(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_trail_push")
+    compiler = executor.load_address(compiler, backend.SCRATCH0, TRAIL_COUNT, 0)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, TRAIL_SIZE)
+    compiler = executor.branch_greater_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, ".L_trail_full")
+    compiler = executor.shift_left(compiler, backend.SCRATCH2, backend.SCRATCH1, words.shift)
+    compiler = executor.load_address(compiler, backend.SCRATCH3, TRAIL, 0)
+    compiler = executor.add(compiler, backend.SCRATCH3, backend.SCRATCH3, backend.SCRATCH2)
+    compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH3, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, 1)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+    compiler = executor.label(compiler, ".L_trail_full")
+    out executor.ret(compiler)
+}
+
+skill emit_trail_clear(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_trail_clear")
+    compiler = executor.load_address(compiler, backend.SCRATCH0, TRAIL_COUNT, 0)
+    compiler = executor.store_zero(compiler, backend.SCRATCH0, 0)
+    out executor.ret(compiler)
+}
+
+skill show_text(compiler, label) {
+    @executor = compiler.executor
+    compiler = executor.load_address(compiler, backend.VALUE, label, 0)
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    out executor.call(compiler, "rt_show")
+}
+
+skill emit_trail_print(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_trail_print")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - words.bytes * 4)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, TRAIL_COUNT, 0)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 2)
+    compiler = executor.branch_less(compiler, backend.SCRATCH1, backend.SCRATCH2, ".L_trail_print_done")
+    compiler = show_text(compiler, "rt_path_text")
+    compiler = executor.store_zero(compiler, backend.STACK, 0)
+    compiler = executor.label(compiler, ".L_trail_print_next")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 0)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, TRAIL_COUNT, 0)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH1, 0)
+    compiler = executor.branch_greater_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_trail_print_end")
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_trail_print_name")
+    compiler = show_text(compiler, "rt_arrow_text")
+    compiler = executor.label(compiler, ".L_trail_print_name")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 0)
+    compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.SCRATCH0, words.shift)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, TRAIL, 0)
+    compiler = executor.add(compiler, backend.SCRATCH1, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH1, 0)
+    compiler = executor.call(compiler, "rt_show")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, 0)
+    compiler = executor.jump(compiler, ".L_trail_print_next")
+    compiler = executor.label(compiler, ".L_trail_print_end")
+    compiler = executor.call(compiler, "rt_newline")
+    compiler = executor.label(compiler, ".L_trail_print_done")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    out tails.ok(compiler)
+}
+
+skill tagged(compiler, register, number) {
+    @executor = compiler.executor
+    out executor.load_immediate(compiler, register, number * abi.TAG_SCALE)
+}
+
+skill two_digits(compiler, slot, label) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * slot)
+    compiler = tagged(compiler, backend.SCRATCH1, 10)
+    compiler = executor.branch_greater_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, label)
+    compiler = show_text(compiler, "rt_zero_text")
+    compiler = executor.label(compiler, label)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * slot)
+    out executor.call(compiler, "rt_show")
+}
+
+skill emit_clock(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_crash_clock")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - words.bytes * 4)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.call(compiler, platform.NOW)
+    compiler = tagged(compiler, backend.ERROR, MILLISECONDS)
+    compiler = executor.call(compiler, "rt_div")
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 0)
+    compiler = tagged(compiler, backend.ERROR, HOUR)
+    compiler = executor.call(compiler, "rt_div")
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes)
+    compiler = two_digits(compiler, 1, ".L_clock_hours")
+    compiler = show_text(compiler, "rt_colon_text")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
+    compiler = tagged(compiler, backend.ERROR, MINUTE)
+    compiler = executor.call(compiler, "rt_div")
+    compiler = tagged(compiler, backend.ERROR, MINUTE)
+    compiler = executor.call(compiler, "rt_mod")
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes)
+    compiler = two_digits(compiler, 1, ".L_clock_minutes")
+    compiler = show_text(compiler, "rt_colon_text")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
+    compiler = tagged(compiler, backend.ERROR, MINUTE)
+    compiler = executor.call(compiler, "rt_mod")
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes)
+    compiler = two_digits(compiler, 1, ".L_clock_seconds")
+    compiler = show_text(compiler, "rt_utc_text")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    out tails.ok(compiler)
+}
+
+skill emit_report(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_crash_report")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - words.bytes * 4)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 0)
+    compiler = executor.call(compiler, "rt_trail_print")
+    compiler = executor.call(compiler, platform.LOG_OPEN)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_crash_done")
+    compiler = executor.load_address(compiler, backend.SCRATCH0, OUT_FD, 0)
+    compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH0, 0)
+    compiler = executor.call(compiler, "rt_crash_clock")
+    compiler = show_text(compiler, "rt_failure_text")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
+    compiler = executor.call(compiler, "rt_show")
+    compiler = executor.call(compiler, "rt_newline")
+    compiler = executor.call(compiler, "rt_trail_print")
+    compiler = executor.load_address(compiler, backend.SCRATCH0, OUT_FD, 0)
+    compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH0, 0)
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.call(compiler, platform.PROCESS_CLOSE)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, OUT_FD, 0)
+    compiler = executor.store_zero(compiler, backend.SCRATCH0, 0)
+    compiler = executor.label(compiler, ".L_crash_done")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    out tails.ok(compiler)
+}
+
+skill append_data(compiler) {
+    compiler = terminal.append_text(compiler, "rt_path_text", "  путь: ")
+    compiler = terminal.append_text(compiler, "rt_arrow_text", " ← ")
+    compiler = terminal.append_text(compiler, "rt_zero_text", "0")
+    compiler = terminal.append_text(compiler, "rt_colon_text", ":")
+    out terminal.append_text(compiler, "rt_utc_text", " UTC  ")
+}
+
+skill append_bss(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.align(compiler, backend.BSS, words.bytes)
+    compiler = executor.data_label(compiler, backend.BSS, TRAIL)
+    compiler = executor.reserve(compiler, wide.from_number(words.bytes * TRAIL_SIZE))
+    compiler = executor.data_label(compiler, backend.BSS, TRAIL_COUNT)
+    compiler = executor.reserve(compiler, wide.from_number(words.bytes))
+    compiler = executor.data_label(compiler, backend.BSS, OUT_FD)
+    out executor.reserve(compiler, wide.from_number(words.bytes))
+}
