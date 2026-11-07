@@ -13,9 +13,12 @@
 -- in_range(type, text, wide) -> answer
 -- range_text(type, wide) -> "0..255" и подобное, "" для чужого типа;
 --     word_maximum(wide) -> текст предела usize / address
+-- TYPES — одна строка на тип: [имя, kind, ширина, знак, предел отрицательных или "",
+--     предел или "word" — word_maximum(wide)]; навыки выше читают её
 
 use core.str
 use core.num
+use core.group
 
 UNKNOWN = 0
 U8 = 1
@@ -27,36 +30,43 @@ ADDRESS = 6
 USIZE = 7
 WIDE_LITERAL_MAXIMUM = "1152921504606846975"
 
+TYPES = [
+    ["u8", U8, 8, no, "", "255"],
+    ["u16", U16, 16, no, "", "65535"],
+    ["u32", U32, 32, no, "", "4294967295"],
+    ["i32", I32, 32, yes, "2147483648", "2147483647"],
+    ["bits32", BITS32, 32, no, "", "4294967295"],
+    ["address", ADDRESS, 32, no, "", "word"],
+    ["usize", USIZE, 32, no, "", "word"]
+]
+NAME = 0
+KIND = 1
+WIDTH = 2
+SIGNED = 3
+NEGATIVE_LIMIT = 4
+LIMIT = 5
+
+skill row(type) {
+    drum (TYPES) {
+        (group.get(beat, NAME) == type) { out beat }
+    }
+    out []
+}
+
 skill is_type(type) {
-    (type == "u8") { out yes }
-    (type == "u16") { out yes }
-    (type == "u32") { out yes }
-    (type == "i32") { out yes }
-    (type == "bits32") { out yes }
-    (type == "address") { out yes }
-    (type == "usize") { out yes }
-    out no
+    out group.count(row(type)) > 0
 }
 
 skill kind(type) {
-    (type == "u8") { out U8 }
-    (type == "u16") { out U16 }
-    (type == "u32") { out U32 }
-    (type == "i32") { out I32 }
-    (type == "bits32") { out BITS32 }
-    (type == "address") { out ADDRESS }
-    (type == "usize") { out USIZE }
-    out UNKNOWN
+    @found = row(type)
+    (group.count(found) == 0) { out UNKNOWN }
+    out group.get(found, KIND)
 }
 
 skill type(kind) {
-    (kind == U8) { out "u8" }
-    (kind == U16) { out "u16" }
-    (kind == U32) { out "u32" }
-    (kind == I32) { out "i32" }
-    (kind == BITS32) { out "bits32" }
-    (kind == ADDRESS) { out "address" }
-    (kind == USIZE) { out "usize" }
+    drum (TYPES) {
+        (group.get(beat, KIND) == kind) { out group.get(beat, NAME) }
+    }
     out "unknown"
 }
 
@@ -67,14 +77,15 @@ skill valid_kind(kind) {
 }
 
 skill width_bits(type) {
-    (type == "u8") { out 8 }
-    (type == "u16") { out 16 }
-    (is_type(type) == yes) { out 32 }
-    out 0
+    @found = row(type)
+    (group.count(found) == 0) { out 0 }
+    out group.get(found, WIDTH)
 }
 
 skill is_signed(type) {
-    out type == "i32"
+    @found = row(type)
+    (group.count(found) == 0) { out no }
+    out group.get(found, SIGNED)
 }
 
 skill valid_integer_text(text) {
@@ -105,35 +116,33 @@ skill unsigned_greater(value, maximum) {
     out no
 }
 
+skill limit(found, wide) {
+    @text = group.get(found, LIMIT)
+    (text == "word") { out word_maximum(wide) }
+    out text
+}
+
 skill in_range(type, text, wide) {
-    (is_type(type) == no) { out no }
+    @found = row(type)
+    (group.count(found) == 0) { out no }
     (valid_integer_text(text) == no) { out no }
-    @negative = str.starts_with(text, "-")
-    @magnitude = text
-    (negative == yes) { magnitude = str.slice(text, 1, str.bytes(text)) }
-    (type == "u8") { (negative == yes) { out no } out unsigned_greater(magnitude, "255") == no }
-    (type == "u16") { (negative == yes) { out no } out unsigned_greater(magnitude, "65535") == no }
-    (type == "u32") { (negative == yes) { out no } out unsigned_greater(magnitude, "4294967295") == no }
-    (type == "bits32") { (negative == yes) { out no } out unsigned_greater(magnitude, "4294967295") == no }
-    (type == "address") { (negative == yes) { out no } out unsigned_greater(magnitude, word_maximum(wide)) == no }
-    (type == "usize") { (negative == yes) { out no } out unsigned_greater(magnitude, word_maximum(wide)) == no }
-    (type == "i32") {
-        (negative == yes) { out unsigned_greater(magnitude, "2147483648") == no }
-        out unsigned_greater(magnitude, "2147483647") == no
+    (str.starts_with(text, "-") == yes) {
+        @negative_limit = group.get(found, NEGATIVE_LIMIT)
+        (str.bytes(negative_limit) == 0) { out no }
+        out unsigned_greater(str.slice(text, 1, str.bytes(text)), negative_limit) == no
     }
-    out no
+    out unsigned_greater(text, limit(found, wide)) == no
 }
 
 skill range_text(type, wide) {
-    (type == "u8") { out "0..255" }
-    (type == "u16") { out "0..65535" }
-    (type == "i32") { out "-2147483648..2147483647" }
-    (type == "u32") { out "0..4294967295" }
-    (type == "bits32") { out "0..4294967295" }
-    @maximum = word_maximum(wide)
-    (type == "address") { out "0..{maximum}" }
-    (type == "usize") { out "0..{maximum}" }
-    out ""
+    @found = row(type)
+    (group.count(found) == 0) { out "" }
+    @maximum = limit(found, wide)
+    (group.get(found, SIGNED) == yes) {
+        @minimum = group.get(found, NEGATIVE_LIMIT)
+        out "-{minimum}..{maximum}"
+    }
+    out "0..{maximum}"
 }
 
 skill word_maximum(wide) {
