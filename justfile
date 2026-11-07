@@ -63,6 +63,10 @@ release-draft base="":
     SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/release-draft.saltic .cache/build/workbench/release-draft >/dev/null
     .cache/build/workbench/release-draft "$1"
 
+same-source:
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/same-source.saltic .cache/build/workbench/same-source-check >/dev/null
+    .cache/build/workbench/same-source-check
+
 same *sources:
     bash workbench/same.sh "$@"
 
