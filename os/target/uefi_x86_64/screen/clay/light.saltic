@@ -1,0 +1,349 @@
+-- light — запекание света «Пластилина» трассировкой путей (path tracing —
+-- свет считается лучами: как он прыгает по сцене). Для каждой грани один раз,
+-- при постройке, в каждой вершине тела: SAMPLES лучей по полусфере над ней,
+-- чаще туда, куда смотрит нормаль; видеокарта потом плавно смешивает цвета
+-- вершин по грани. Луч уходит в небо и приносит его цвет — или упирается в предмет
+-- или траву и приносит их цвет под солнцем (второй отскок: отсюда цветные
+-- отсветы, зелень снизу на домике). Плюс солнце напрямую: к нему лучи с
+-- дрожью, поэтому тени мягкие. Предметы для лучей — эллипсоиды тел solid,
+-- трава — плоскость на высоте под гранью. Дальние грани тонут в дымке цвета
+-- горизонта. Всё в целых числах.
+--
+-- Shape { x, y, z, rx, ry, rz, reach, red, green, blue, owner } — эллипсоид
+--     для лучей; reach — наибольшая полуось, owner — номер тела в сцене
+-- Light { shapes, sun, suns, sun_color, top, low, ground, land, around } —
+--     всё для лучей; suns — дрожащие направления на солнце, around —
+--     направления полусферы в осях грани
+-- Progress { done, total } — сколько вершин запечено
+-- bake(screen, world) — запечь цвета всех вершин сцены (Body.colors), грани —
+--     цвет первого угла (для рисования процессором); на screen — полоска хода
+-- hit(shape, ox, oy, oz, dx, dy, dz) -> расстояние до эллипсоида, -1 — мимо
+
+use core.group
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.screen.geometry
+use os.target.uefi_x86_64.screen.clay.mesh
+use os.target.uefi_x86_64.screen.clay.dice
+use os.target.uefi_x86_64.screen.clay.land
+use os.target.uefi_x86_64.screen.clay.season
+
+UNIT = 1024
+SPHERE = 65536
+RINGS = 6
+SPOKES = 8
+SAMPLES = 48
+SPREAD = 90
+LIFT = 3
+NEAR = 2
+SUN_GAIN = 115
+SKY_GAIN = 80
+BOUNCE_SKY = 55
+WHITE = 430
+HAZE_FROM = 240
+HAZE_SPAN = 340
+HAZE_MOST = 50
+STEP = 64
+
+Shape = Box {
+    x = 0,
+    y = 0,
+    z = 0,
+    rx = 1,
+    ry = 1,
+    rz = 1,
+    reach = 1,
+    red = 0,
+    green = 0,
+    blue = 0,
+    owner = -1
+}
+
+Light = Box {
+    shapes = [],
+    sun = [0, UNIT, 0],
+    suns = [],
+    sun_color = [255, 255, 255],
+    top = [0, 0, 0],
+    low = [0, 0, 0],
+    ground = [0, 0, 0],
+    land = land.Land {},
+    around = []
+}
+
+Progress = Box {
+    done = 0,
+    total = 1
+}
+
+skill limit(value) {
+    (value > 255) { out 255 }
+    (value < 0) { out 0 }
+    out value
+}
+
+skill shapes_of(world) {
+    @shapes = []
+    drum (group.count(world.bodies)) {
+        @body = group.get(world.bodies, beat)
+        (body.solid == yes) {
+            @first = group.get(body.quads, 0)
+            @rx = group.get(body.size, 0)
+            @ry = group.get(body.size, 1)
+            @rz = group.get(body.size, 2)
+            @reach = rx
+            (ry > reach) { reach = ry }
+            (rz > reach) { reach = rz }
+            shapes = group.add(shapes, Shape { x = group.get(body.center, 0), y = group.get(body.center, 1), z = group.get(body.center, 2), rx = rx, ry = ry, rz = rz, reach = reach, red = first.red, green = first.green, blue = first.blue, owner = beat })
+        }
+    }
+    out shapes
+}
+
+skill hemisphere() {
+    @made = []
+    drum (RINGS) {
+        @r = geometry.root(UNIT * UNIT * (2 * beat + 1) / (2 * RINGS))
+        @up = geometry.root(UNIT * UNIT - r * r)
+        drum (SPOKES) {
+            @phi = geometry.TURN * (2 * beat + 1) / (2 * SPOKES)
+            made = group.add(made, [r * geometry.cosine(phi) / geometry.ONE, r * geometry.sine(phi) / geometry.ONE, up])
+        }
+    }
+    out made
+}
+
+skill frame(n) {
+    @helper = [0, UNIT, 0]
+    @ny = group.get(n, 1)
+    (ny > 900) { helper = [UNIT, 0, 0] }
+    (ny < -900) { helper = [UNIT, 0, 0] }
+    @t = mesh.cross(helper, n)
+    out [t, mesh.cross(n, t)]
+}
+
+skill turn(local, t, b, n) {
+    @lx = group.get(local, 0)
+    @ly = group.get(local, 1)
+    @lz = group.get(local, 2)
+    @made = []
+    drum (3) { made = group.add(made, (lx * group.get(t, beat) + ly * group.get(b, beat) + lz * group.get(n, beat)) / UNIT) }
+    out made
+}
+
+skill prepare(world) {
+    @light = Light { sun = world.sun, sun_color = world.sun_color, top = world.top, low = world.low, ground = world.season.grass, land = world.land }
+    light.shapes = shapes_of(world)
+    light.around = hemisphere()
+    @axes = frame(world.sun)
+    @t = group.get(axes, 0)
+    @b = group.get(axes, 1)
+    @suns = []
+    drum (SAMPLES) {
+        @local = group.get(light.around, beat)
+        @lx = group.get(local, 0) * SPREAD / UNIT
+        @ly = group.get(local, 1) * SPREAD / UNIT
+        suns = group.add(suns, mesh.unit(group.get(world.sun, 0) + (lx * group.get(t, 0) + ly * group.get(b, 0)) / UNIT, group.get(world.sun, 1) + (lx * group.get(t, 1) + ly * group.get(b, 1)) / UNIT, group.get(world.sun, 2) + (lx * group.get(t, 2) + ly * group.get(b, 2)) / UNIT))
+    }
+    light.suns = suns
+    out light
+}
+
+skill hit(shape, ox, oy, oz, dx, dy, dz) {
+    @vx = shape.x - ox
+    @vy = shape.y - oy
+    @vz = shape.z - oz
+    @along = (vx * dx + vy * dy + vz * dz) / UNIT
+    (along < 0 - shape.reach) { out -1 }
+    (vx * vx + vy * vy + vz * vz - along * along > shape.reach * shape.reach) { out -1 }
+    @px = (ox + dx * along / UNIT - shape.x) * SPHERE / shape.rx
+    @py = (oy + dy * along / UNIT - shape.y) * SPHERE / shape.ry
+    @pz = (oz + dz * along / UNIT - shape.z) * SPHERE / shape.rz
+    @qx = dx * 64 / shape.rx
+    @qy = dy * 64 / shape.ry
+    @qz = dz * 64 / shape.rz
+    @a = qx * qx + qy * qy + qz * qz
+    @b = px * qx + py * qy + pz * qz
+    @c = (px * px + py * py + pz * pz - SPHERE * SPHERE) / 1048576
+    @half = b / 1024
+    @spread = half * half - a * c
+    (spread < 0) { out -1 }
+    @root = geometry.root(spread) * 1024
+    @t = along + (0 - b - root) / a
+    (t > NEAR) { out t }
+    t = along + (root - b) / a
+    (t > NEAR) { out t }
+    out -1
+}
+
+skill blocked(light, ox, oy, oz, d, owner) {
+    @dx = group.get(d, 0)
+    @dy = group.get(d, 1)
+    @dz = group.get(d, 2)
+    drum (group.count(light.shapes)) {
+        @shape = group.get(light.shapes, beat)
+        ((shape.owner == owner) == no) {
+            (hit(shape, ox, oy, oz, dx, dy, dz) > 0) { out yes }
+        }
+    }
+    out no
+}
+
+skill nearest(light, ox, oy, oz, dx, dy, dz, owner) {
+    @best = -1
+    @which = -1
+    drum (group.count(light.shapes)) {
+        @shape = group.get(light.shapes, beat)
+        ((shape.owner == owner) == no) {
+            @t = hit(shape, ox, oy, oz, dx, dy, dz)
+            (t > 0) {
+                (which >= 0) {
+                    (t < best) {
+                        best = t
+                        which = beat
+                    }
+                }
+                (which < 0) {
+                    best = t
+                    which = beat
+                }
+            }
+        }
+    }
+    out [best, which]
+}
+
+skill sky(light, dy) {
+    @up = dy
+    (up < 0) { up = 0 }
+    @color = season.mix(light.low, light.top, up * 100 / UNIT)
+    out [group.get(color, 0) * SKY_GAIN / 100, group.get(color, 1) * SKY_GAIN / 100, group.get(color, 2) * SKY_GAIN / 100]
+}
+
+skill lit(light, x, y, z, n, albedo, owner) {
+    @facing = mesh.dot(n, light.sun)
+    @sun = 0
+    (facing > 0) {
+        (blocked(light, x + group.get(n, 0) * LIFT / UNIT, y + group.get(n, 1) * LIFT / UNIT, z + group.get(n, 2) * LIFT / UNIT, light.sun, owner) == no) { sun = facing }
+    }
+    @made = []
+    drum (3) {
+        @ambient = (group.get(light.top, beat) + group.get(light.low, beat)) / 2 * BOUNCE_SKY / 100
+        made = group.add(made, group.get(albedo, beat) * (group.get(light.sun_color, beat) * SUN_GAIN / 100 * sun / UNIT + ambient) / 255)
+    }
+    out made
+}
+
+skill trace(light, ox, oy, oz, d, owner, floor) {
+    @dx = group.get(d, 0)
+    @dy = group.get(d, 1)
+    @dz = group.get(d, 2)
+    @found = nearest(light, ox, oy, oz, dx, dy, dz, owner)
+    @t = group.get(found, 0)
+    @which = group.get(found, 1)
+    (dy < 0) {
+        @ground = (oy - floor) * UNIT / (0 - dy)
+        @closer = which < 0
+        (which >= 0) { closer = ground < t }
+        (closer == yes) { out lit(light, ox + dx * ground / UNIT, floor, oz + dz * ground / UNIT, [0, UNIT, 0], light.ground, -1) }
+    }
+    (which < 0) { out sky(light, dy) }
+    @shape = group.get(light.shapes, which)
+    @hx = ox + dx * t / UNIT
+    @hy = oy + dy * t / UNIT
+    @hz = oz + dz * t / UNIT
+    @n = mesh.unit((hx - shape.x) * SPHERE / (shape.rx * shape.rx), (hy - shape.y) * SPHERE / (shape.ry * shape.ry), (hz - shape.z) * SPHERE / (shape.rz * shape.rz))
+    out lit(light, hx, hy, hz, n, [shape.red, shape.green, shape.blue], shape.owner)
+}
+
+skill bake_point(screen, light, point, n, albedo, owner, luck) {
+    @px = group.get(point, 0)
+    @pz = group.get(point, 2)
+    @ox = px + group.get(n, 0) * LIFT / UNIT
+    @oy = group.get(point, 1) + group.get(n, 1) * LIFT / UNIT
+    @oz = pz + group.get(n, 2) * LIFT / UNIT
+    @floor = land.height(light.land, ox, oz)
+    (floor > oy) { floor = oy }
+    @axes = frame(n)
+    @angle = dice.roll(luck, 1024) * geometry.TURN / 1024
+    @cos = geometry.cosine(angle)
+    @sin = geometry.sine(angle)
+    @t0 = group.get(axes, 0)
+    @b0 = group.get(axes, 1)
+    @t = []
+    @b = []
+    drum (3) {
+        t = group.add(t, (group.get(t0, beat) * cos + group.get(b0, beat) * sin) / geometry.ONE)
+        b = group.add(b, (group.get(b0, beat) * cos - group.get(t0, beat) * sin) / geometry.ONE)
+    }
+    @sums = [0, 0, 0]
+    @seen = 0
+    @facing = mesh.dot(n, light.sun)
+    drum (SAMPLES) {
+        @came = trace(light, ox, oy, oz, turn(group.get(light.around, beat), t, b, n), owner, floor)
+        sums = [group.get(sums, 0) + group.get(came, 0), group.get(sums, 1) + group.get(came, 1), group.get(sums, 2) + group.get(came, 2)]
+        (facing > 0) {
+            (blocked(light, ox, oy, oz, group.get(light.suns, beat), owner) == no) { seen = seen + 1 }
+        }
+    }
+    @sun = 0
+    (facing > 0) { sun = facing * seen / SAMPLES }
+    @dist = geometry.root(px * px + pz * pz)
+    @haze = (dist - HAZE_FROM) * HAZE_MOST / HAZE_SPAN
+    (haze < 0) { haze = 0 }
+    (haze > HAZE_MOST) { haze = HAZE_MOST }
+    @made = []
+    drum (3) {
+        @gather = group.get(light.sun_color, beat) * SUN_GAIN / 100 * sun / UNIT + group.get(sums, beat) / SAMPLES
+        @own = group.get(albedo, beat) * gather / WHITE
+        made = group.add(made, limit(own + (group.get(light.low, beat) - own) * haze / 100))
+    }
+    out graphics.color(screen, group.get(made, 0), group.get(made, 1), group.get(made, 2))
+}
+
+skill bar(screen, progress) {
+    @width = screen.width / 3
+    @left = (screen.width - width) / 2
+    @top = screen.height * 3 / 4
+    graphics.fill(screen, left, top, width * progress.done / progress.total, 6, graphics.color(screen, 250, 204, 21))
+    out none
+}
+
+skill bake_body(screen, light, body, owner, luck, progress) {
+    @colors = []
+    drum (group.count(body.points)) {
+        colors = group.add(colors, bake_point(screen, light, group.get(body.points, beat), group.get(body.normals, beat), group.get(body.tints, beat), owner, luck))
+        progress.done = progress.done + 1
+        (progress.done % STEP == 0) { bar(screen, progress) }
+    }
+    body.colors = colors
+    drum (group.count(body.quads)) {
+        @quad = group.get(body.quads, beat)
+        quad.color = group.get(colors, quad.a)
+    }
+    out none
+}
+
+skill points(world) {
+    @count = group.count(world.ground.points)
+    drum (group.count(world.flats)) {
+        @flat = group.get(world.flats, beat)
+        count = count + group.count(flat.points)
+    }
+    drum (group.count(world.bodies)) {
+        @body = group.get(world.bodies, beat)
+        count = count + group.count(body.points)
+    }
+    out count
+}
+
+skill bake(screen, world) {
+    @light = prepare(world)
+    @luck = dice.Dice { state = world.seed + 7 }
+    @progress = Progress { total = points(world) }
+    @width = screen.width / 3
+    graphics.fill(screen, (screen.width - width) / 2, screen.height * 3 / 4, width, 6, graphics.color(screen, 63, 63, 70))
+    bake_body(screen, light, world.ground, -1, luck, progress)
+    drum (group.count(world.flats)) { bake_body(screen, light, group.get(world.flats, beat), -1, luck, progress) }
+    drum (group.count(world.bodies)) { bake_body(screen, light, group.get(world.bodies, beat), beat, luck, progress) }
+    out none
+}

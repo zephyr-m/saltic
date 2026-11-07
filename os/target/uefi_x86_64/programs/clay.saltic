@@ -1,12 +1,14 @@
 -- clay — программа «Пластилин»: игрушечная полянка из скруглённых тел —
--- холмы, деревья-леденцы, камни-капли, домик, паучок из шариков, мягкий
--- пластилиновый свет и тени-кляксы (screen/clay/{mesh,forms,scene}).
+-- холмы, пруд, деревья, камни, домики, цветы, снеговик или тыквы по
+-- времени года; каждый запуск полянка новая, свет запечён лучами — мягкие
+-- тени и цветные отсветы (screen/clay/{mesh,forms,scene,light}).
 -- Камера облетает полянку, кадр рисует screen/clay/stage. Стрелки ← → —
--- облёт и его скорость, ↑ ↓ — выше и ниже, пробел — пауза, V — vsync вкл/выкл
+-- облёт и его скорость, ↑ ↓ — выше и ниже, пробел — пауза, R — новая
+-- полянка (сама — каждые RENEW секунд), V — vsync вкл/выкл
 -- (60 кадров без разрывов или сколько выжмет видеокарта), Esc — назад; по
 -- сети — quit, state, key, shot. Только x86_64-uefi.
 --
--- Orbit { angle, speed, lift, paused, quit, frames, second, counted, rate, vsync }
+-- Orbit { angle, speed, lift, paused, quit, frames, second, counted, rate, vsync, remake, made }
 -- steer(orbit, key) / count_rate(orbit, base) / tick(set, orbit, base, link)
 -- broken(set, orbit, base, link, problem) — ошибка кадра на экран и в state
 -- program() — вход
@@ -22,7 +24,7 @@ use os.target.uefi_x86_64.screen.clay.stage
 use os.uiengine.canvas
 use os.uiengine.fonts
 
-LIFT = 560
+LIFT = 380
 LIFT_STEP = 40
 SPEED = 600
 SPEED_STEP = 300
@@ -35,6 +37,10 @@ SCAN_ESCAPE = 23
 SPACE = 32
 LETTER_V = 118
 LETTER_V_UPPER = 86
+LETTER_R = 114
+LETTER_R_UPPER = 82
+RENEW = 60
+DAY = 86400
 
 Orbit = Box {
     angle = 0,
@@ -46,7 +52,9 @@ Orbit = Box {
     second = -1,
     counted = 0,
     rate = 0,
-    vsync = yes
+    vsync = yes,
+    remake = no,
+    made = 0
 }
 
 skill steer(orbit, key) {
@@ -60,6 +68,8 @@ skill steer(orbit, key) {
     (key.char == SPACE) { orbit.paused = orbit.paused == no }
     (key.char == LETTER_V) { orbit.vsync = orbit.vsync == no }
     (key.char == LETTER_V_UPPER) { orbit.vsync = orbit.vsync == no }
+    (key.char == LETTER_R) { orbit.remake = yes }
+    (key.char == LETTER_R_UPPER) { orbit.remake = yes }
     out none
 }
 
@@ -78,6 +88,13 @@ skill count_rate(orbit, base) {
 skill tick(set, orbit, base, link) {
     remote.serve(link)
     steer(orbit, uefi.poll_key(base, PAUSE))
+    @now = stage.moment(base)
+    ((now - orbit.made + DAY) % DAY >= RENEW) { orbit.remake = yes }
+    (orbit.remake == yes) {
+        orbit.remake = no
+        stage.remake(set, base)
+        orbit.made = stage.moment(base)
+    }
     (orbit.paused == no) { orbit.angle = forms.wrap(orbit.angle + orbit.speed) }
     @back = set.back
     back.vsync = orbit.vsync
@@ -88,7 +105,15 @@ skill tick(set, orbit, base, link) {
     @faces = set.faces
     @sync = "vsync"
     (orbit.vsync == no) { sync = "без vsync" }
-    out remote.tell(link, "пластилин: кадров {frames}, в секунду {rate}, граней {faces}, {sync}")
+    @world = set.scene
+    @season_name = world.season.name
+    @baked = set.baked
+    @drawer = "процессор"
+    (group.count(set.painter) > 0) {
+        @painter = group.get(set.painter, 0)
+        (painter.broken == no) { drawer = "видеокарта" }
+    }
+    out remote.tell(link, "пластилин: {season_name}, зерно {world.seed}, кадров {frames}, в секунду {rate}, граней {faces}, запечено за {baked} с, рисует {drawer}, {sync}")
 }
 
 skill broken(set, orbit, base, link, problem) {
@@ -112,14 +137,14 @@ program() {
     @front = graphics.open(base)
     uefi.forget_keys(base)
     @link = remote.open_remote()
-    fonts.draw_text(front, 16, 12, "Пластилин: леплю полянку…", canvas.ZINC_900, fonts.REGULAR)
+    fonts.draw_text(front, 16, 12, "Пластилин: леплю полянку и запекаю свет…", canvas.ZINC_900, fonts.REGULAR)
     @set = stage.open_stage(base, front)
     @sky = set.sky
     @back = set.back
     @pages = stage.pages(set)
     remote.own(link, sky.frame, pages)
     remote.own(link, back.frame, pages)
-    @orbit = Orbit {}
+    @orbit = Orbit { made = stage.moment(base) }
     always {
         tick(set, orbit, base, link) rescue |problem| { broken(set, orbit, base, link, problem) }
         (orbit.quit == yes) {

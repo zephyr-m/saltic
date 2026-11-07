@@ -32,8 +32,11 @@
 --     веером треугольников
 -- add_shape(painter, points, pixel, alpha, width, height) — то же для выпуклого
 --     многоугольника любого числа углов с альфой alpha (0…255)
+-- add_smooth(painter, corners, pixels, width, height) — четырёхугольник со
+--     своим цветом в каждом углу: видеокарта плавно смешивает их по грани
 -- clip(points, edge, limit, keep_below) -> многоугольник, обрезанный по
---     прямой x = limit (edge 0) или y = limit (edge 1) — Сазерленд — Ходжман
+--     прямой x = limit (edge 0) или y = limit (edge 1) — Сазерленд — Ходжман;
+--     остальные числа точки (цвет, глубина) на срезе делятся в той же доле
 -- triangles(painter, target) -> yes — нарисовать накопленные треугольники;
 --     не дождались — сброс движка (intel_gpu.reset_render) и broken = yes
 -- blended(painter, target) -> yes — то же, но смешать с целью по альфе
@@ -53,8 +56,8 @@ use os.target.uefi_x86_64.drivers.intel_gpu.generated.blend
 use os.target.uefi_x86_64.drivers.intel_gpu.generated.overlay
 
 BATCH_PAGES = 2
-VERTEX_PAGES = 64
-VERTEX_LIMIT = 32760
+VERTEX_PAGES = 256
+VERTEX_LIMIT = 131070
 VERTEX_BYTES = 8
 ONE = 1065353216
 HALF_WORD = 65536
@@ -173,8 +176,13 @@ skill crossing(a, b, edge, limit) {
     @ao = group.get(a, other)
     @bo = group.get(b, other)
     @cut = ao + (bo - ao) * (limit - av) / (bv - av)
-    (edge == 0) { out [limit, cut] }
-    out [cut, limit]
+    @made = [cut, limit]
+    (edge == 0) { made = [limit, cut] }
+    drum (group.count(a) - 2) {
+        @from = group.get(a, beat + 2)
+        made = group.add(made, from + (group.get(b, beat + 2) - from) * (limit - av) / (bv - av))
+    }
+    out made
 }
 
 skill clip(points, edge, limit, keep_below) {
@@ -212,6 +220,33 @@ skill add_shape(painter, points, pixel, alpha, width, height) {
         vertex(painter, first, rgba)
         vertex(painter, group.get(shape, beat + 1), rgba)
         vertex(painter, group.get(shape, beat + 2), rgba)
+    }
+    out none
+}
+
+skill add_smooth(painter, corners, pixels, width, height) {
+    @points = []
+    drum (4) {
+        @corner = group.get(corners, beat)
+        @pixel = group.get(pixels, beat)
+        points = group.add(points, [group.get(corner, 0), group.get(corner, 1), pixel / 65536 % 256, pixel / 256 % 256, pixel % 256])
+    }
+    @shape = clip(points, 0, 0 - MARGIN, no)
+    shape = clip(shape, 0, width + MARGIN, yes)
+    shape = clip(shape, 1, 0 - MARGIN, no)
+    shape = clip(shape, 1, height + MARGIN, yes)
+    @count = group.count(shape)
+    (count < 3) { out none }
+    (painter.count + (count - 2) * 3 > VERTEX_LIMIT) { out none }
+    @rgba = []
+    drum (count) {
+        @point = group.get(shape, beat)
+        rgba = group.add(rgba, group.get(point, 2) + group.get(point, 3) * 256 + group.get(point, 4) * 65536 + 4278190080)
+    }
+    drum (count - 2) {
+        vertex(painter, group.get(shape, 0), group.get(rgba, 0))
+        vertex(painter, group.get(shape, beat + 1), group.get(rgba, beat + 1))
+        vertex(painter, group.get(shape, beat + 2), group.get(rgba, beat + 2))
     }
     out none
 }

@@ -1,15 +1,20 @@
 -- stage — съёмочная площадка «Пластилина»: экран, небо и задний буфер,
--- камера, сцена. Кадр: небо из своего буфера, земля рядами от дальних к
--- ближним, тени, предметы от дальних к ближним; готовый кадр копируется на
--- экран прошивкой построчно. Камера смотрит на LOOK с орбиты радиуса RADIUS.
--- Берут программа clay и хранитель экрана агента (agent/saver).
+-- камера, сцена. Сцена каждый раз новая: зерно — из часов (clay/scene), свет
+-- запекается лучами (clay/light), пока на экране бежит полоска. Небо —
+-- градиент цветов сезона и облака. Кадр: небо из своего буфера, земля рядами
+-- от дальних к ближним, вода, предметы от дальних к ближним; готовый кадр
+-- копируется на экран прошивкой построчно. Камера смотрит на LOOK с орбиты
+-- радиуса RADIUS. Берут программа clay и хранитель экрана агента (agent/saver).
 --
--- Stage { front, sky, back, camera, scene, faces, painter } — painter —
+-- Stage { front, sky, back, camera, scene, faces, painter, baked } — painter —
 --     [intel_gpu/render.Painter], если задний буфер размечен для видеокарты:
---     грани рисует её 3D-движок, иначе процессор
+--     грани рисует её 3D-движок, иначе процессор; baked — секунд на постройку
+--     и запекание
 -- open_stage(base, front) -> Stage — буферы неба и кадра (страницы), сцена
+-- remake(stage, base) — новая полянка с новым зерном
+-- moment(base) -> секунда суток по часам прошивки
 -- pages(stage) -> страниц одного буфера; close_stage(base, stage) — отдать буферы
--- draw_sky(screen) — градиент неба
+-- draw_sky(screen, world) — градиент неба и облака
 -- render(stage, angle, lift, base) — кадр: камера на угле angle, высоте lift
 
 use core.group
@@ -18,13 +23,14 @@ use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.screen.geometry
 use os.target.uefi_x86_64.screen.clay.mesh
 use os.target.uefi_x86_64.screen.clay.scene
+use os.target.uefi_x86_64.screen.clay.light
+use os.target.uefi_x86_64.screen.clay.dice
+use os.target.uefi_x86_64.screen.clay.season
 use os.target.uefi_x86_64.drivers.intel_gpu.render
-use os.uiengine.canvas
 
-RADIUS = 1150
+RADIUS = 760
 LOOK = [0, 40, 0]
-TOP = canvas.Rgb { red = 150, green = 196, blue = 238 }
-LOW = canvas.Rgb { red = 252, green = 232, blue = 214 }
+WHITE = [255, 255, 255]
 
 Stage = Box {
     front = graphics.Screen {},
@@ -33,33 +39,94 @@ Stage = Box {
     camera = mesh.Camera {},
     scene = scene.Scene {},
     faces = 0,
-    painter = []
+    painter = [],
+    baked = 0
 }
 
-skill draw_sky(screen) {
-    @top = TOP
-    @low = LOW
-    drum (screen.height) {
-        @mix = beat * 100 / screen.height
-        @red = top.red + (low.red - top.red) * mix / 100
-        @green = top.green + (low.green - top.green) * mix / 100
-        @blue = top.blue + (low.blue - top.blue) * mix / 100
-        graphics.fill(screen, 0, beat, screen.width, 1, graphics.color(screen, red, green, blue))
+skill paint(screen, color) {
+    out graphics.color(screen, group.get(color, 0), group.get(color, 1), group.get(color, 2))
+}
+
+skill circle(screen, cx, cy, r, bottom, color) {
+    drum (2 * r + 1) {
+        @dy = beat - r
+        @y = cy + dy
+        (y >= 0) {
+            (y < bottom) {
+                @half = geometry.root(r * r - dy * dy)
+                @left = cx - half
+                @right = cx + half
+                (left < 0) { left = 0 }
+                (right > screen.width - 1) { right = screen.width - 1 }
+                (right >= left) { graphics.fill(screen, left, y, right - left + 1, 1, color) }
+            }
+        }
     }
+    out none
+}
+
+skill cloud(screen, cx, cy, size, shade, bright) {
+    @bottom = cy + size / 3
+    (bottom > screen.height) { bottom = screen.height }
+    drum (5) {
+        @side = beat - 2
+        (side < 0) { side = 0 - side }
+        circle(screen, cx + (beat - 2) * size / 2, cy, size * (4 - side) / 4, bottom, shade)
+    }
+    drum (5) {
+        @side = beat - 2
+        (side < 0) { side = 0 - side }
+        circle(screen, cx + (beat - 2) * size / 2, cy - size / 8, size * (4 - side) / 6, bottom - size / 6, bright)
+    }
+    out none
+}
+
+skill draw_sky(screen, world) {
+    drum (screen.height) { graphics.fill(screen, 0, beat, screen.width, 1, paint(screen, season.mix(world.top, world.low, beat * 100 / screen.height))) }
+    @luck = dice.Dice { state = world.seed + 3 }
+    @white = WHITE
+    (world.evening == yes) { white = season.mix(world.low, WHITE, 45) }
+    drum (dice.between(luck, 2, 6)) {
+        @cx = dice.roll(luck, screen.width)
+        @cy = screen.height * dice.between(luck, 8, 34) / 100
+        @size = screen.width * dice.between(luck, 4, 8) / 100
+        @behind = season.mix(world.top, world.low, cy * 100 / screen.height)
+        cloud(screen, cx, cy, size, paint(screen, season.mix(behind, white, 55)), paint(screen, season.mix(behind, white, 85)))
+    }
+    out none
+}
+
+skill moment(base) {
+    @clock = uefi.now(base)
+    out clock.hour * 3600 + clock.minute * 60 + clock.second
+}
+
+skill make(stage, base, seed) {
+    @began = moment(base)
+    @world = scene.build(stage.front, seed)
+    light.bake(stage.front, world) rescue |err| { none }
+    draw_sky(stage.sky, world)
+    stage.scene = world
+    stage.faces = scene.quads(world)
+    stage.baked = moment(base) - began
     out none
 }
 
 skill open_stage(base, front) {
     @sky = graphics.buffer_like(base, front)
     @back = graphics.buffer_like(base, front)
-    draw_sky(sky)
-    @world = scene.build(front)
     @painter = []
     (group.count(back.accel) > 0) {
         @made = render.painter(group.get(back.accel, 0), base) rescue |err| { none }
         (made) |made| { painter = [made] }
     }
-    out Stage { front = front, sky = sky, back = back, camera = mesh.Camera { width = front.width, height = front.height }, scene = world, faces = scene.quads(world), painter = painter }
+    @stage = Stage { front = front, sky = sky, back = back, camera = mesh.Camera { width = front.width, height = front.height }, painter = painter }
+    make(stage, base, dice.seed(uefi.now(base)))
+    out stage
+}
+
+skill remake(stage, base) {
+    out make(stage, base, (stage.scene.seed * 7 + dice.seed(uefi.now(base)) + 1) % 1000000007)
 }
 
 skill pages(stage) {
@@ -90,14 +157,14 @@ skill render(stage, angle, lift, base) {
         @painter = group.get(stage.painter, 0)
         render.begin(painter)
         mesh.collect_ground(painter, camera, world.ground, scene.CELLS)
-        drum (group.count(world.blots)) { mesh.collect(painter, camera, group.get(world.blots, beat)) }
+        drum (group.count(world.flats)) { mesh.collect(painter, camera, group.get(world.flats, beat)) }
         drum (group.count(bodies)) { mesh.collect(painter, camera, group.get(bodies, beat)) }
         @drawn = render.triangles(painter, render.Surface { at = back.frame, pitch = back.stride * graphics.PIXEL_BYTES, width = back.width, height = back.height })
         (drawn == yes) { out graphics.push(base, stage.front, back) }
         graphics.copy_rect(base, back, stage.sky, 0, 0, back.width, back.height)
     }
     mesh.ground(back, camera, world.ground, scene.CELLS)
-    drum (group.count(world.blots)) { mesh.draw(back, camera, group.get(world.blots, beat)) }
+    drum (group.count(world.flats)) { mesh.draw(back, camera, group.get(world.flats, beat)) }
     drum (group.count(bodies)) { mesh.draw(back, camera, group.get(bodies, beat)) }
     out graphics.push(base, stage.front, back)
 }
