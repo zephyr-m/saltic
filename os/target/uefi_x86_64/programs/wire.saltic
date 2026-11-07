@@ -21,6 +21,8 @@
 -- арены "wire_cache" из arena_map; не влезает — CacheTooSmall.
 -- Справа сверху — табличка: выбор, камера, высота и поворот выбранной фигуры,
 -- кадры в секунду; её место помечено «навсегда», фигуры её не задевают.
+-- Табличка рисуется в свой холст (страницы прошивки) и ложится на экран
+-- готовой (graphics.put) — без мигания пустого прямоугольника.
 --
 -- program() — сцена до Esc или quit; фигуры — в wire/solids
 
@@ -289,24 +291,37 @@ skill panel_lines(shapes, scene) {
     out found
 }
 
-skill draw_panel(screen, stamps, shapes, scene, background, ink, chosen_ink) {
-    @lines = panel_lines(shapes, scene)
+skill panel_height() {
+    out PANEL_LINES * PANEL_LINE + PANEL_MARGIN
+}
+
+skill panel_pages() {
+    out (PANEL_WIDTH * panel_height() * graphics.PIXEL_BYTES + 4095) / 4096
+}
+
+skill draw_panel(stage) {
+    @screen = stage.screen
+    @panel = stage.panel
+    @stamps = stage.stamps
+    @scene = stage.scene
+    @background = stage.background
+    @lines = panel_lines(stage.shapes, scene)
     @joined = str.join(lines, "|")
     (joined == scene.panel) { out none }
     scene.panel = joined
     @left = screen.width - PANEL_WIDTH
-    @height = PANEL_LINES * PANEL_LINE + PANEL_MARGIN
-    graphics.fill(screen, left, 0, PANEL_WIDTH, height, background)
+    @height = panel_height()
+    graphics.fill(panel, 0, 0, PANEL_WIDTH, height, background)
     drum (height) {
         @row = beat * screen.stride
         drum (PANEL_WIDTH) { mem.store32(stamps.memory, (row + left + beat) * graphics.PIXEL_BYTES, ROOM_MARK) }
     }
     drum (group.count(lines)) {
-        @color = ink
-        (beat == 0) { color = chosen_ink }
-        lettering.paint_text(screen, lettering.FACE_SMALL, left + PANEL_MARGIN, PANEL_MARGIN + beat * PANEL_LINE, group.get(lines, beat), color)
+        @color = stage.ink
+        (beat == 0) { color = stage.chosen_ink }
+        lettering.paint_text(panel, lettering.FACE_SMALL, PANEL_MARGIN, PANEL_MARGIN + beat * PANEL_LINE, group.get(lines, beat), color)
     }
-    out none
+    out graphics.put(stage.base, panel, screen, left)
 }
 
 skill act(shapes, scene, action) {
@@ -398,6 +413,7 @@ Stage = Box {
     background = 0,
     ink = 0,
     cache = Cache {},
+    panel = graphics.Screen {},
     link = none
 }
 
@@ -406,7 +422,7 @@ skill tick(stage) {
     @scene = stage.scene
     @shapes = stage.shapes
     scene_frame(screen, stage.stamps, shapes, scene, stage.shades, stage.chosen_ink, stage.background, stage.cache)
-    draw_panel(screen, stage.stamps, shapes, scene, stage.background, stage.ink, stage.chosen_ink)
+    draw_panel(stage)
     save_view(stage.base, scene)
     @link = stage.link
     (count_rate(stage.base, scene) == yes) {
@@ -429,11 +445,17 @@ program() {
     @scene = Scene { chosen = group.count(shapes) - 2 }
     load_view(base, scene)
     @link = remote.open_remote() rescue |err| { none }
-    (link) |link| { remote.own(link, stamps.frame, graphics.buffer_pages(screen)) }
-    @stage = Stage { base = base, screen = screen, stamps = stamps, shapes = shapes, scene = scene, shades = make_shades(screen), chosen_ink = graphics.color(screen, group.get(MUSTARD, 0), group.get(MUSTARD, 1), group.get(MUSTARD, 2)), background = graphics.color(screen, 12, 16, 28), ink = graphics.color(screen, 150, 170, 190), cache = make_cache(base, shapes), link = link }
+    @panel_at = uefi.pages_in_window(base, panel_pages())
+    @panel = graphics.canvas(base, panel_at, PANEL_WIDTH, panel_height(), screen)
+    (link) |link| {
+        remote.own(link, stamps.frame, graphics.buffer_pages(screen))
+        remote.own(link, panel_at, panel_pages())
+    }
+    @stage = Stage { base = base, screen = screen, stamps = stamps, panel = panel, shapes = shapes, scene = scene, shades = make_shades(screen), chosen_ink = graphics.color(screen, group.get(MUSTARD, 0), group.get(MUSTARD, 1), group.get(MUSTARD, 2)), background = graphics.color(screen, 12, 16, 28), ink = graphics.color(screen, 150, 170, 190), cache = make_cache(base, shapes), link = link }
     always {
         (tick(stage) == yes) {
             uefi.free_pages(base, stamps.frame, graphics.buffer_pages(screen))
+            uefi.free_pages(base, panel_at, panel_pages())
             reply.home(state_text(shapes, scene))
             out none
         }
