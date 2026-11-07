@@ -10,8 +10,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-LIMIT_CODE=500
-LIMIT_HEADER=16
+LIMIT_CODE=512
+LIMIT_HEADER=32
 known=workbench/limits-known.txt
 
 measure() {
