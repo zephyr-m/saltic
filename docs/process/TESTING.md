@@ -51,6 +51,8 @@
   (`workbench/rva23/verify.py`); таблицу пишет `workbench/rva23/generate.py`;
   затем «форма = таблица» — команды, которые исполнитель rv64 кодирует по
   форме (`rv64/machine/forms`), сверяются с таблицей на случайных операндах;
+- `process` — `core.process` (run, capture, lines, папка ребёнка, PATH, окружение)
+  и `io.file.list` под rv32i, x86_64 и rv64;
 - `always` — регион на оборот: 200 000 оборотов с Box в куче 1 МБ, внешние
   переменные, поля Box, `out`, ошибки и вложенный `always`; под rv32i и x86_64;
 - `seed-contract` — контракт ядра (`soul/seed/tests/contract.saltic`);

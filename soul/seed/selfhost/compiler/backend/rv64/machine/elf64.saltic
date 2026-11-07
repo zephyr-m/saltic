@@ -1,12 +1,13 @@
 -- elf64 — ELF64 RISC-V для Linux из layout.Program (той же раскладки, что у
 -- RV32I). Тело (код, rodata, data) — rv32i.machine.image.payload с файлового
--- смещения 4096; адреса программы ниже 4 ГБ, старшие 32 бита адресов — ноль.
+-- смещения 4096; адреса программы ниже 4 ГБ (старшие 32 бита адресов — ноль),
+-- размеры памяти (data + bss с кучей) — 64-битные: куча может быть больше 4 ГБ.
 -- Сегменты: низкая память 0…low_memory_size (RW, с заголовком файла — её ждут
 -- core.mem и канон), код + rodata (RX), data + bss (RW). Таблиц секций и
 -- символов пока нет (e_shoff = 0).
 --
 -- Segment { offset, address, file_bytes, memory_bytes, flags }
--- append_u32(target, value) / append_u64(target, low) — старшая половина ноль
+-- append_u32(target, value) / append_u64(target, wide) — 64-битное поле
 -- append_file_header(target, entry, count) / append_segment(target, Segment)
 -- executable(machine) -> buffer ELF; UnresolvedPatch, LoadAddressNotAligned
 -- write(path, machine) — записать файл; WriteFailed
@@ -16,6 +17,7 @@ use selfhost.compiler.backend.rv32i.machine.layout
 use selfhost.compiler.backend.rv32i.machine.image
 use selfhost.compiler.backend.rv32i.machine.buffer
 use selfhost.machine.word
+use selfhost.machine.wide
 
 HEADER_BYTES = 64
 PROGRAM_HEADER_BYTES = 56
@@ -30,7 +32,7 @@ Segment = Box {
     offset = 0,
     address = word.Word {},
     file_bytes = 0,
-    memory_bytes = word.Word {},
+    memory_bytes = wide.Wide {},
     flags = 0
 }
 
@@ -38,9 +40,9 @@ skill append_u32(target, value) {
     out buffer.append_word(target, word.from_number(value))
 }
 
-skill append_u64(target, low) {
-    target = buffer.append_word(target, low)
-    out append_u32(target, 0)
+skill append_u64(target, value) {
+    target = buffer.append_word(target, value.low)
+    out buffer.append_word(target, value.high)
 }
 
 skill append_file_header(target, entry, count) {
@@ -49,9 +51,9 @@ skill append_file_header(target, entry, count) {
     target = buffer.append_u16(target, TYPE_EXECUTABLE)
     target = buffer.append_u16(target, MACHINE_RISCV)
     target = append_u32(target, 1)
-    target = append_u64(target, entry)
-    target = append_u64(target, word.from_number(HEADER_BYTES))
-    target = append_u64(target, word.Word {})
+    target = append_u64(target, wide.from_word(entry))
+    target = append_u64(target, wide.from_number(HEADER_BYTES))
+    target = append_u64(target, wide.Wide {})
     target = append_u32(target, 0)
     target = buffer.append_u16(target, HEADER_BYTES)
     target = buffer.append_u16(target, PROGRAM_HEADER_BYTES)
@@ -64,12 +66,12 @@ skill append_file_header(target, entry, count) {
 skill append_segment(target, segment) {
     target = append_u32(target, SEGMENT_LOAD)
     target = append_u32(target, segment.flags)
-    target = append_u64(target, word.from_number(segment.offset))
-    target = append_u64(target, segment.address)
-    target = append_u64(target, segment.address)
-    target = append_u64(target, word.from_number(segment.file_bytes))
+    target = append_u64(target, wide.from_number(segment.offset))
+    target = append_u64(target, wide.from_word(segment.address))
+    target = append_u64(target, wide.from_word(segment.address))
+    target = append_u64(target, wide.from_number(segment.file_bytes))
     target = append_u64(target, segment.memory_bytes)
-    out append_u64(target, word.from_number(PAGE_BYTES))
+    out append_u64(target, wide.from_number(PAGE_BYTES))
 }
 
 skill executable(machine) {
@@ -88,7 +90,7 @@ skill executable(machine) {
     (machine.low_memory_size > 0) {
         result = append_segment(result, Segment {
             file_bytes = HEADER_BYTES + count * PROGRAM_HEADER_BYTES,
-            memory_bytes = word.from_number(machine.low_memory_size),
+            memory_bytes = wide.from_number(machine.low_memory_size),
             flags = READ_WRITE
         })
     }
@@ -96,14 +98,14 @@ skill executable(machine) {
         offset = PAGE_BYTES,
         address = machine.load_address,
         file_bytes = current.data_offset,
-        memory_bytes = word.from_number(current.data_offset),
+        memory_bytes = wide.from_number(current.data_offset),
         flags = READ_EXECUTE
     })
     result = append_segment(result, Segment {
         offset = PAGE_BYTES + current.data_offset,
         address = layout.address_add(machine.load_address, current.data_offset),
         file_bytes = data_file_bytes,
-        memory_bytes = word.add_number(machine.bss_size, data_file_bytes),
+        memory_bytes = wide.add_number(machine.bss_size, data_file_bytes),
         flags = READ_WRITE
     })
     result = image.pad_to(result, PAGE_BYTES)

@@ -100,6 +100,10 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
 - [ ] Вызов метода у поля-Box внутри метода его Box (`base.register(…)`, где
   `base` — поле): чекер молчит, компилятор падает «не найден навык для вызова».
   Обход — через локальную переменную (`@b = base`). → разведка 2а, 07.11.2026
+- [ ] Запись в своё поле из метода Box (`total = total + amount` внутри `skill` в
+  Box): чекер молчит, программа падает Segmentation fault. Обход — состояние во
+  вложенном Box и запись через локальный псевдоним (`@s = stream; s.x = …`), как
+  в `core.dict` и `core.process.Lines`. → разведка 4а, 07.11.2026
 
 ## 6. Память и размер
 
@@ -124,15 +128,17 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   под rv64, ≈ +7 с), rv32i — производный «вторая сверка» вне git; `just rv64`
   (`refresh-rv64.sh`) — доказательство: эталон собирает себя под qemu-riscv64
   и сходится с git, куча та же, что у `refresh.sh`; `same.sh` — три цели.
-- [ ] 1. Адреса на 64 бита: литерал `usize`/`address` больше 2^32, программа выше 4 ГБ.
+- [x] 1. Адреса на 64 бита: литерал `usize`/`address` больше 2^32, программа выше 4 ГБ.
   07.11.2026: литерал — сделано: на 64-битной цели `usize`/`address` — всё слово,
   литерал до 2^60 - 1 (предел литерала языка; `abi/fixed.in_range(type, text, wide)`,
   чекер по `WIDE_MARK`, кодоген грузит `wide.from_decimal`), на 32-битной — как было
-  (`fixed-errors`, `big-numbers` под x86_64 и rv64). Программа выше 4 ГБ —
-  **решение**: x86-64 кладёт строки программы после кучи и грузит адреса
-  меток ABS32, PE32+ — 32-битный SizeOfImage; куча > 4 ГБ требует перестройки
-  образа x86-64 (строки до bss или 64-битные адреса меток); у rv64 — размеры
-  раскладки (`bss_size`, `heap_size`, `memory_size` — `word`) в `wide`, ELF64 u64.
+  (`fixed-errors`, `big-numbers` под x86_64 и rv64). Программа выше 4 ГБ — по
+  Q-028 (07.11.2026): куча последняя в bss и растёт сколько нужно, адреса меток
+  32-битные; размеры раскладки (`heap_bytes`, `bss_size`, `memory_size`) — `wide`,
+  в ELF64 (x86-64 Linux без окна и rv64) — u64; на 4-байтном слове (rv32i) куча
+  от 4 ГБ — `ValueOutsideRange`. Без окна на x86-64 Linux строк после кучи нет
+  (стек и аргументы — ядра); окно UEFI 32-битное по построению — там куча < 4 ГБ.
+  Канон с кучей 4,5 ГБ работает на x86_64 и rv64 (`native`, `rv64`), 8 ГБ собирается.
 - [x] 4г. Кодирование команд обычной арифметикой вместо `power2`/`mod`/`bits32`.
   07.11.2026: `rv32i/machine/codec` — поля делением и вычитанием с константами,
   пределы числами (`*_LIMIT`, `*_MODULUS`), `bits` и `num.power2` ушли; x86-64
@@ -141,8 +147,17 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   Родная сборка toolchain: rv32i 3,6 → 3,3 с, x86_64 2,1 → 2,0 с, rv64 3,7 → 3,4 с.
   `mod`/`power2` остались вне кодирования команд: `machine/word`, `wide`,
   `layout` (адреса), `decoder`, таблица RVA23 (эталон теста).
-- [ ] 4а. bash → Saltic: `process.run` / `capture` / `lines`, окружение,
+- [x] 4а. bash → Saltic: `process.run` / `capture` / `lines`, окружение,
   список файлов; Q-010. → PLAN-1 «Инструменты», RECON «Bash»
+  07.11.2026: `core.process` — `run(command, folder)`, `capture` → `Capture { code,
+  output }`, `lines` → `Lines.next()` / `code()`, `environment()` (группа
+  «ИМЯ=значение»), `locate` по PATH, `ProgramNotFound`; `io.file.list(path)`;
+  системная ошибка `Process`. Действия платформы Linux — ребёнок
+  `compiler/platform/linux/process` (clone, execve, wait4, pipe2, dup3, chdir,
+  faccessat, getdents64), общие для rv32i, x86-64, rv64; `_start` отдаёт стек
+  входа в `rt_environment_capture`; `append_unsupported` закрывает отсутствующие
+  действия у qemu-virt и UEFI без правок ОС. Тест `process` на трёх целях, канон.
+  Не сделано: окружение ребёнку (форма не решена), перевод `stamp.sh`/`hosts.sh`.
 - [x] 3. ОС: `Phys { hi, lo }` → число — 06.11.2026 (агент 15).
 - [x] Шапки и документы после RV64: seed/README, word, wide, num, platform,
   linux, x86-64, toolchain, README бэкендов, TESTING, hosts, FOOTBALL —

@@ -1,5 +1,126 @@
--- process — коды выхода программы, общие для рантайма и инструментов.
--- EXIT_MISSING_ARGUMENTS = 64, EXIT_OUT_OF_MEMORY = 65. Навыков нет.
+-- process — запуск программ (Linux): run / capture / lines, окружение.
+-- Команда — группа слов [программа, аргументы…]; имя без «/»
+-- ищется по PATH окружения, как в терминале (ProgramNotFound); folder — папка
+-- ребёнка, "" — своя (своя папка не меняется). stdout ребёнка: run — общий,
+-- capture и lines — труба; stderr у всех общий. Окружение ребёнка — своё.
+-- Коды выхода самой программы (64, 65) — в core.system.
+--
+-- run(command, folder) -> код выхода (128 + сигнал, если убит); ProgramNotFound, Process
+-- capture(command, folder) -> Capture { code, output }; ProgramNotFound, Process
+-- lines(command, folder) -> Lines: next() -> строка без «\n», в конце LinesEnded;
+--     code() -> код выхода (дочитывает остаток); ProgramNotFound, Process
+-- environment() -> группа строк "ИМЯ=значение"
+-- locate(name) -> путь программы по PATH; ProgramNotFound
+-- spawn(path, command, folder, piped) -> pid; pipe_end() / wait(pid) /
+--     read_output(fd) / close_output(fd) / executable(path) — родные части
 
-EXIT_MISSING_ARGUMENTS = 64
-EXIT_OUT_OF_MEMORY = 65
+use core.str
+use core.group
+
+Capture = Box {
+    code = 0,
+    output = ""
+}
+
+Stream = Box {
+    pid = 0,
+    pipe = 0,
+    rest = "",
+    done = no,
+    code = 0
+}
+
+Lines = Box {
+    stream = Stream {}
+
+    skill next() {
+        @s = stream
+        (s.done == yes) { out error.LinesEnded }
+        always {
+            @cut = newline_at(s.rest)
+            (cut >= 0) {
+                @line = str.slice(s.rest, 0, cut)
+                s.rest = str.slice(s.rest, cut + 1, str.bytes(s.rest))
+                out line
+            }
+            @chunk = read_output(s.pipe)
+            (str.bytes(chunk) == 0) {
+                close_output(s.pipe)
+                s.code = wait(s.pid)
+                s.done = yes
+                (str.bytes(s.rest) == 0) { out error.LinesEnded }
+                @tail = s.rest
+                s.rest = ""
+                out tail
+            }
+            s.rest = str.concat(s.rest, chunk)
+        }
+    }
+
+    skill code() {
+        @s = stream
+        always {
+            (s.done == yes) { out s.code }
+            @line = next() rescue |err| { "" }
+        }
+    }
+}
+
+skill spawn(path, command, folder, piped) native
+skill pipe_end() native
+skill wait(pid) native
+skill read_output(fd) native
+skill close_output(fd) native
+skill executable(path) native
+skill environment() native
+
+skill newline_at(text) {
+    drum (str.bytes(text)) {
+        (str.byte(text, beat) == 10) { out beat }
+    }
+    out -1
+}
+
+skill locate(name) {
+    (str.contains(name, "/") == yes) {
+        (executable(name) == yes) { out name }
+        out error.ProgramNotFound
+    }
+    drum (environment()) {
+        (str.starts_with(beat, "PATH=") == yes) {
+            @folders = str.split(str.slice(beat, 5, str.bytes(beat)), ":")
+            drum (folders) {
+                @candidate = "{beat}/{name}"
+                (executable(candidate) == yes) { out candidate }
+            }
+        }
+    }
+    out error.ProgramNotFound
+}
+
+skill run(command, folder) {
+    @path = locate(group.get(command, 0))
+    @pid = spawn(path, command, folder, no)
+    out wait(pid)
+}
+
+skill capture(command, folder) {
+    @path = locate(group.get(command, 0))
+    @pid = spawn(path, command, folder, yes)
+    @pipe = pipe_end()
+    @captured = Capture {}
+    always {
+        @chunk = read_output(pipe)
+        (str.bytes(chunk) == 0) { leave }
+        captured.output = str.concat(captured.output, chunk)
+    }
+    close_output(pipe)
+    captured.code = wait(pid)
+    out captured
+}
+
+skill lines(command, folder) {
+    @path = locate(group.get(command, 0))
+    @pid = spawn(path, command, folder, yes)
+    out Lines { stream = Stream { pid = pid, pipe = pipe_end() } }
+}

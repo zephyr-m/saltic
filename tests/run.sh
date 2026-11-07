@@ -29,6 +29,8 @@ host="${SALTIC_TEST_HOST:-rv32i}"
 source tests/metrics.sh
 
 # Ожидаемый вывод tests/fixtures/big-numbers.saltic (x86_64 и rv64 — одинаково).
+# Куча больше 4 ГБ (4,5 ГиБ): на 64-битных целях — работает, на rv32i — ValueOutsideRange.
+HUGE_HEAP_BYTES=4831838208
 BIG_NUMBERS="-268435455 268435455 33554432 -33554433 100000000 33554431 -256 255 4096 -4097 200000001 268435455 4294967296 1099511627784 1152921504606846975 "
 
 run_built() {
@@ -260,7 +262,14 @@ test_rv64() {
         "$work/rv64/big-numbers" \
         1048576
     test "$(qemu-riscv64 -B 0x100000000 "$work/rv64/big-numbers" | tr '\n' ' ')" = "$BIG_NUMBERS"
-    echo "rv64: канон, edges, always и большие числа под qemu-riscv64 — те же выводы, что у rv32i и x86_64"
+    SALTIC_TARGET=rv64 build huge-heap-rv64 \
+        soul/canonical/main.saltic \
+        "$work/rv64/huge-heap" \
+        "$HUGE_HEAP_BYTES"
+    measure run qemu-riscv64 -B 0x100000000 "$work/rv64/huge-heap" \
+        "$work/rv64/input.txt" "$work/rv64/huge-output.txt" >"$work/rv64/huge-stdout.txt"
+    diff -u soul/canonical/expected/output.txt "$work/rv64/huge-stdout.txt"
+    echo "rv64: канон (и с кучей 4,5 ГБ), edges, always и большие числа под qemu-riscv64 — те же выводы, что у rv32i и x86_64"
 }
 
 test_rva23() {
@@ -305,6 +314,20 @@ test_dict() {
     diff -u tests/expected/dict.txt "$work/dict/rv32i.txt"
     diff -u tests/expected/dict.txt "$work/dict/x86_64.txt"
     echo "словарь: запись на месте, UnknownKey, вложенный навык, рост таблицы — одинаково под rv32i и x86_64"
+}
+
+test_process() {
+    mkdir -p "$work/process"
+    local target host_run
+    for target in rv32i x86_64 rv64; do
+        SALTIC_TARGET=$target build process-$target tests/process.saltic "$work/process/$target"
+        host_run=()
+        [[ "$target" == rv32i ]] && host_run=(qemu-riscv32 -B 0x100000000)
+        [[ "$target" == rv64 ]] && host_run=(qemu-riscv64 -B 0x100000000)
+        "${host_run[@]}" "$work/process/$target" >"$work/process/$target.txt"
+        diff -u tests/expected/process.txt "$work/process/$target.txt"
+    done
+    echo "process: run, capture, lines, папка, PATH, окружение, список файлов — одинаково под rv32i, x86_64 и rv64"
 }
 
 test_platform() {
@@ -391,7 +414,18 @@ test_native() {
         "$work/native/big-numbers" \
         1048576
     test "$("$work/native/big-numbers" | tr '\n' ' ')" = "$BIG_NUMBERS"
-    echo "x86-64 ($target): канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает, большие числа точны"
+    SALTIC_TARGET=$target build native-huge-heap \
+        soul/canonical/main.saltic \
+        "$work/native/huge-heap" \
+        "$HUGE_HEAP_BYTES"
+    "$work/native/huge-heap" "$work/native/input.txt" "$work/native/huge-output.txt" >"$work/native/huge-stdout.txt"
+    diff -u soul/canonical/expected/output.txt "$work/native/huge-stdout.txt"
+    if SALTIC_TARGET=rv32i build narrow-huge-heap soul/canonical/main.saltic "$work/native/narrow-huge" "$HUGE_HEAP_BYTES" >"$work/native/narrow-huge.txt" 2>&1; then
+        echo "x86-64: куча $HUGE_HEAP_BYTES на 4-байтном слове должна быть отвергнута" >&2
+        return 1
+    fi
+    grep -q "ValueOutsideRange" "$work/native/narrow-huge.txt"
+    echo "x86-64 ($target): канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает, большие числа точны, куча 4,5 ГБ работает, на rv32i отвергается"
 }
 
 test_seed_contract() {
@@ -543,6 +577,7 @@ run_case() {
         abi) test_abi ;;
         memory) test_memory ;;
         platform) test_platform ;;
+        process) test_process ;;
         native) test_native ;;
         qemu-virt) test_qemu_virt ;;
         uefi) test_uefi ;;
@@ -586,6 +621,7 @@ elif [[ "$1" == "all" ]]; then
         abi \
         memory \
         platform \
+        process \
         native
 elif [[ "$1" == "os" ]]; then
     set -- jtml tasks panels mrpc

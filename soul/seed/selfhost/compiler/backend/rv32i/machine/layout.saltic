@@ -9,9 +9,9 @@
 -- Section = enum { CODE, RODATA, DATA, BSS }; PatchKind = enum { BRANCH, JUMP, … }
 -- Label { name, section, offset, present, next, bucket_next } / LabelBucket
 -- Patch { kind, instruction_kind, section, offset, base, label, addend, rd, rs1, rs2 }
--- Layout { code_offset, rodata_offset, data_offset, bss_offset, file_size, memory_size }
--- Program { load_address, low_memory_size, entry, code, rodata, data, bss_size,
---     heap_size, labels_*, patches_*, resolved, far_calls, encoding_errors }
+-- Layout { code_offset, rodata_offset, data_offset, bss_offset, file_size, memory_size (wide) }
+-- Program { load_address, low_memory_size, entry, code, rodata, data, bss_size (wide),
+--     heap_size (wide: куча последняя в bss, может быть больше 4 ГБ), labels_*, … }
 -- host(entry) / qemu_virt(entry) -> Program (адрес 65536 с низкой памятью / 0x80000000)
 -- word_address(b0, b1, b2, b3) / address_from_number(n) / address_add(word, n) -> Word;
 --     InvalidAddress, AddressOverflow
@@ -32,7 +32,7 @@
 -- append_label_address(program, section, label, addend) — слово-адрес в секцию
 -- define_label(program, section, name); DuplicateLabel; find_label(program, name) -> Label
 -- label_hash / label_bucket / index_label — внутренности поиска меток
--- reserve_bss(program, word) / align_section(program, section, boundary)
+-- reserve_bss(program, wide) / align_section(program, section, boundary)
 -- append_section_byte / append_section_word / append_section_text(program, section, …)
 -- set_section_word(program, section, offset, word)
 -- layout(program) -> Layout; section_offset(layout, section)
@@ -49,6 +49,7 @@ use selfhost.compiler.backend.rv32i.machine.codec
 use core.num
 use selfhost.compiler.backend.rv32i.machine.registers
 use selfhost.machine.word
+use selfhost.machine.wide
 use selfhost.compiler.backend.rv32i.machine.buffer
 use selfhost.errors
 
@@ -106,7 +107,7 @@ Layout = Box {
     data_offset = 0,
     bss_offset = 0,
     file_size = 0,
-    memory_size = word.Word {}
+    memory_size = wide.Wide {}
 }
 
 Program = Box {
@@ -116,8 +117,8 @@ Program = Box {
     code = buffer.Buffer {},
     rodata = buffer.Buffer {},
     data = buffer.Buffer {},
-    bss_size = word.Word {},
-    heap_size = word.Word {},
+    bss_size = wide.Wide {},
+    heap_size = wide.Wide {},
     labels_first = none,
     labels_last = none,
     label_buckets = [],
@@ -219,7 +220,7 @@ skill section_length(value, section) {
     (section == Section.CODE) { out value.code.length }
     (section == Section.RODATA) { out value.rodata.length }
     (section == Section.DATA) { out value.data.length }
-    out value.bss_size
+    out wide.to_word(value.bss_size)
 }
 
 skill assign_section(value, section, target) {
@@ -316,7 +317,7 @@ skill define_label(value, section, name) {
 }
 
 skill reserve_bss(value, count) {
-    value.bss_size = word.add(value.bss_size, count)
+    value.bss_size = wide.add(value.bss_size, count)
     value.resolved = no
     out value
 }
@@ -342,7 +343,7 @@ skill append_section_text(value, section, text, terminated) {
 
 skill align_section(value, section, boundary) {
     (section == Section.BSS) {
-        value.bss_size = word.align(value.bss_size, boundary)
+        value.bss_size = wide.align(value.bss_size, boundary)
         value.resolved = no
         out value
     }
@@ -498,7 +499,7 @@ skill layout(value) {
         data_offset = data_offset,
         bss_offset = bss_offset,
         file_size = bss_offset,
-        memory_size = word.add_number(value.bss_size, bss_offset)
+        memory_size = wide.add_number(value.bss_size, bss_offset)
     }
 }
 
@@ -513,8 +514,7 @@ skill label_offset(value, current_layout, name) {
     @label = find_label(value, name)
     (label.present == no) { out error.UnknownLabel }
     (label.section == Section.BSS) {
-        @offset = word.add_number(label.offset, current_layout.bss_offset)
-        out word.to_number(offset)
+        out word.to_number(word.add_number(label.offset, current_layout.bss_offset))
     }
     out section_offset(current_layout, label.section) + label.offset
 }
