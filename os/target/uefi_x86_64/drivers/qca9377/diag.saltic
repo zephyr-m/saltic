@@ -13,7 +13,6 @@
 --     в CE1. С обычной таблицей прошивка молча застревает на WMI_INIT
 -- segment(chip, data, row, index, sent) -> байт — кусок прошивки [адрес, смещение, длина]
 
-use core.num
 use core.group
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.drivers.qca9377.card
@@ -38,19 +37,19 @@ SERVICES = [[260, 2, 3], [260, 1, 2], [258, 2, 3], [258, 1, 2], [257, 2, 3], [25
 
 skill engine_address(chip, address) {
     @control = firmware.read16(chip.bar, chip.base, CORE_CTRL)
-    @high = num.mod(control, 2048) * 32 + num.mod(address / firmware.PAGE, 16)
+    @high = control % 2048 * 32 + address / firmware.PAGE % 16
     (address / firmware.PAGE > 15) { high = high + 16 }
-    out high * firmware.PAGE + num.mod(address, firmware.PAGE)
+    out high * firmware.PAGE + address % firmware.PAGE
 }
 
 skill copy(chip, from, to, length) {
-    @slot = num.mod(chip.diag_receive, rings.DIAG_ENTRIES)
+    @slot = chip.diag_receive % rings.DIAG_ENTRIES
     rings.descriptor(rings.at(chip, "wifi_diag_destination"), chip.base, slot, to, 0, 0)
     chip.diag_receive = chip.diag_receive + 1
-    card.put(chip, rings.CE7 + 64, num.mod(chip.diag_receive, rings.DIAG_ENTRIES))
-    rings.descriptor(rings.at(chip, "wifi_diag_source"), chip.base, num.mod(chip.diag_send, rings.DIAG_ENTRIES), from, length, 0)
+    card.put(chip, rings.CE7 + 64, chip.diag_receive % rings.DIAG_ENTRIES)
+    rings.descriptor(rings.at(chip, "wifi_diag_source"), chip.base, chip.diag_send % rings.DIAG_ENTRIES, from, length, 0)
     chip.diag_send = chip.diag_send + 1
-    card.put(chip, rings.CE7 + 60, num.mod(chip.diag_send, rings.DIAG_ENTRIES))
+    card.put(chip, rings.CE7 + 60, chip.diag_send % rings.DIAG_ENTRIES)
     drum (1000) {
         @got = firmware.read16(rings.at(chip, "wifi_diag_destination"), chip.base, slot * 8 + 4)
         (got > 0) { out got }
@@ -93,11 +92,11 @@ skill configure(chip) {
     write_rows(chip, read(chip, state), PIPES)
     write_rows(chip, read(chip, firmware.add(state, 4)), SERVICES)
     @flags = read(chip, firmware.add(state, 32))
-    write(chip, firmware.add(state, 32), flags - num.mod(flags, firmware.PAGE) + card.without_bit(num.mod(flags, firmware.PAGE), 1))
+    write(chip, firmware.add(state, 32), flags - flags % firmware.PAGE + card.without_bit(flags % firmware.PAGE, 1))
     @early = read(chip, host_item(HI_EARLY_ALLOC))
-    write(chip, host_item(HI_EARLY_ALLOC), EALLOC_MAGIC * firmware.PAGE + num.mod(early, firmware.PAGE) - num.mod(early, 16) + IRAM_BANKS)
+    write(chip, host_item(HI_EARLY_ALLOC), EALLOC_MAGIC * firmware.PAGE + early % firmware.PAGE - early % 16 + IRAM_BANKS)
     @flag2 = read(chip, host_item(HI_FLAG2))
-    write(chip, host_item(HI_FLAG2), flag2 - num.mod(flag2, firmware.PAGE) + card.with_bit(num.mod(flag2, firmware.PAGE), EARLY_CFG_DONE))
+    write(chip, host_item(HI_FLAG2), flag2 - flag2 % firmware.PAGE + card.with_bit(flag2 % firmware.PAGE, EARLY_CFG_DONE))
     @after = firmware.phys_text(read(chip, host_item(HI_FLAG2)))
     out "flag2 {after}"
 }
@@ -111,7 +110,7 @@ skill stream(chip, from, address, length, sent) {
         copy(chip, firmware.add(from, done), engine_address(chip, target), size)
         done = done + size
         @total = sent + done
-        (num.mod(beat, 32) == 31) { card.say(chip, "   firmware: {total} of {FIRMWARE_BYTES} bytes") }
+        (beat % 32 == 31) { card.say(chip, "   firmware: {total} of {FIRMWARE_BYTES} bytes") }
     }
     out done
 }
@@ -123,9 +122,9 @@ skill segment(chip, data, row, index, sent) {
     @where = firmware.hex(address, 8)
     card.say(chip, "J{index}. segment {index}/6 -> card address {where}, {length} bytes")
     (address < DIRECT_LIMIT) { out stream(chip, from, address, length, sent) }
-    @window = num.mod(address / WINDOW, 16)
+    @window = address / WINDOW % 16
     card.put(chip, FW_RAM_CONFIG, window)
-    @inside = num.mod(address, WINDOW)
+    @inside = address % WINDOW
     @first = length
     (inside + length > WINDOW) { first = WINDOW - inside }
     @done = stream(chip, from, address, first, sent)

@@ -33,7 +33,6 @@
 --     карте, кольцо событий бесконечно (EVENT_SLOTS буферов по кругу)
 -- event_buffer(chip, index) -> адрес буфера события index в участке wifi_events
 
-use core.num
 use core.str
 use core.group
 use os.target.uefi_x86_64.platform.firmware
@@ -105,7 +104,7 @@ skill ring_in(chip, engine, ring, entries) {
     firmware.write_phys32(chip.bar, chip.base, engine + 8, ring)
     card.put(chip, engine + 12, entries)
     @control = firmware.read32(chip.bar, chip.base, engine + 16)
-    firmware.write_phys32(chip.bar, chip.base, engine + 16, card.without_bit(control / firmware.PAGE, 2) * firmware.PAGE + num.mod(control, firmware.PAGE))
+    firmware.write_phys32(chip.bar, chip.base, engine + 16, card.without_bit(control / firmware.PAGE, 2) * firmware.PAGE + control % firmware.PAGE)
     card.put(chip, engine + 80, entries)
     out firmware.read16(chip.bar, chip.base, engine + 64)
 }
@@ -133,9 +132,9 @@ skill event_rings(chip) {
 }
 
 skill send(chip, buffer, length, flags) {
-    descriptor(at(chip, "wifi_source_ring"), chip.base, num.mod(chip.send_at, ENTRIES), buffer, length, flags)
+    descriptor(at(chip, "wifi_source_ring"), chip.base, chip.send_at % ENTRIES, buffer, length, flags)
     chip.send_at = chip.send_at + 1
-    @target = num.mod(chip.send_at, ENTRIES)
+    @target = chip.send_at % ENTRIES
     card.put(chip, CE0 + 60, target)
     drum (20000) {
         (firmware.read16(chip.bar, chip.base, CE0 + 68) == target) { out buffer }
@@ -145,9 +144,9 @@ skill send(chip, buffer, length, flags) {
 }
 
 skill command(chip, buffer, length, endpoint) {
-    descriptor(at(chip, "wifi_command_ring"), chip.base, num.mod(chip.command_at, ENTRIES), buffer, length, endpoint * META)
+    descriptor(at(chip, "wifi_command_ring"), chip.base, chip.command_at % ENTRIES, buffer, length, endpoint * META)
     chip.command_at = chip.command_at + 1
-    @target = num.mod(chip.command_at, ENTRIES)
+    @target = chip.command_at % ENTRIES
     card.put(chip, CE3 + 60, target)
     drum (20000) {
         (firmware.read16(chip.bar, chip.base, CE3 + 68) == target) { out buffer }
@@ -162,9 +161,9 @@ skill htt_rings(chip) {
 }
 
 skill htt_send(chip, buffer, length, endpoint) {
-    descriptor(at(chip, "wifi_htt_ring"), chip.base, num.mod(chip.htt_at, ENTRIES), buffer, length, endpoint * META)
+    descriptor(at(chip, "wifi_htt_ring"), chip.base, chip.htt_at % ENTRIES, buffer, length, endpoint * META)
     chip.htt_at = chip.htt_at + 1
-    @target = num.mod(chip.htt_at, ENTRIES)
+    @target = chip.htt_at % ENTRIES
     card.put(chip, CE4 + 60, target)
     drum (20000) {
         (firmware.read16(chip.bar, chip.base, CE4 + 68) == target) { out buffer }
@@ -174,13 +173,13 @@ skill htt_send(chip, buffer, length, endpoint) {
 }
 
 skill expect(chip, buffer) {
-    descriptor(at(chip, "wifi_destination_ring"), chip.base, num.mod(chip.receive_at, ENTRIES), buffer, 0, 0)
+    descriptor(at(chip, "wifi_destination_ring"), chip.base, chip.receive_at % ENTRIES, buffer, 0, 0)
     chip.receive_at = chip.receive_at + 1
-    out card.put(chip, CE1 + 64, num.mod(chip.receive_at, ENTRIES))
+    out card.put(chip, CE1 + 64, chip.receive_at % ENTRIES)
 }
 
 skill arrived(chip, slot) {
-    out firmware.read16(at(chip, "wifi_destination_ring"), chip.base, num.mod(slot, ENTRIES) * 8 + 4)
+    out firmware.read16(at(chip, "wifi_destination_ring"), chip.base, slot % ENTRIES * 8 + 4)
 }
 
 skill event_slot(chip, index) {
@@ -196,12 +195,12 @@ skill letters_reset(chip, first) {
     chip.letter_read = first
     drum (LETTERS) {
         @index = chip.letter_read + beat
-        @buffer = firmware.add(at(chip, "wifi_letters"), num.mod(index, LETTERS) * BUFFER_BYTES)
-        descriptor(ring, chip.base, num.mod(index, ENTRIES), buffer, 0, 0)
+        @buffer = firmware.add(at(chip, "wifi_letters"), index % LETTERS * BUFFER_BYTES)
+        descriptor(ring, chip.base, index % ENTRIES, buffer, 0, 0)
     }
     chip.receive_at = chip.letter_read + LETTERS
     chip.letters_live = yes
-    out card.put(chip, CE1 + 64, num.mod(chip.receive_at, ENTRIES))
+    out card.put(chip, CE1 + 64, chip.receive_at % ENTRIES)
 }
 
 skill drain_letters(chip) {
@@ -210,7 +209,7 @@ skill drain_letters(chip) {
     @drained = 0
     drum (ENTRIES) {
         (arrived(chip, chip.letter_read) == 0) { leave }
-        @buffer = firmware.add(at(chip, "wifi_letters"), num.mod(chip.letter_read, LETTERS) * BUFFER_BYTES)
+        @buffer = firmware.add(at(chip, "wifi_letters"), chip.letter_read % LETTERS * BUFFER_BYTES)
         @owner = firmware.read8(buffer, chip.base, 0)
         @kind = firmware.read8(buffer, chip.base, 8)
         @mark = ""
@@ -226,30 +225,30 @@ skill drain_letters(chip) {
                 chip.htt_version = " {major}.{minor}"
             }
         }
-        descriptor(ring, chip.base, num.mod(chip.letter_read, ENTRIES), 0, 0, 0)
-        descriptor(ring, chip.base, num.mod(chip.receive_at, ENTRIES), buffer, 0, 0)
+        descriptor(ring, chip.base, chip.letter_read % ENTRIES, 0, 0, 0)
+        descriptor(ring, chip.base, chip.receive_at % ENTRIES, buffer, 0, 0)
         chip.letter_read = chip.letter_read + 1
         chip.receive_at = chip.receive_at + 1
         drained = drained + 1
     }
-    (drained > 0) { card.put(chip, CE1 + 64, num.mod(chip.receive_at, ENTRIES)) }
+    (drained > 0) { card.put(chip, CE1 + 64, chip.receive_at % ENTRIES) }
     chip.letters_seen = chip.letters_seen + drained
     out drained
 }
 
 skill held(chip) {
-    out firmware.read16(at(chip, "wifi_event_ring"), chip.base, num.mod(chip.event_read, ENTRIES) * 8 + 4)
+    out firmware.read16(at(chip, "wifi_event_ring"), chip.base, chip.event_read % ENTRIES * 8 + 4)
 }
 
 skill held_buffer(chip) {
-    out event_buffer(chip, num.mod(chip.event_read, EVENT_SLOTS))
+    out event_buffer(chip, chip.event_read % EVENT_SLOTS)
 }
 
 skill release(chip) {
     @ring = at(chip, "wifi_event_ring")
-    firmware.write16(ring, chip.base, num.mod(chip.event_read, ENTRIES) * 8 + 4, 0)
-    descriptor(ring, chip.base, num.mod(chip.event_write, ENTRIES), held_buffer(chip), 0, 0)
+    firmware.write16(ring, chip.base, chip.event_read % ENTRIES * 8 + 4, 0)
+    descriptor(ring, chip.base, chip.event_write % ENTRIES, held_buffer(chip), 0, 0)
     chip.event_read = chip.event_read + 1
     chip.event_write = chip.event_write + 1
-    out card.put(chip, CE2 + 64, num.mod(chip.event_write, ENTRIES))
+    out card.put(chip, CE2 + 64, chip.event_write % ENTRIES)
 }
