@@ -16,14 +16,16 @@
 --     что писать: seconds "" — без строки времени, word — «сборки» или
 --     «самосборки», times — файл замера GNU time «%M %U %S» или ""
 -- write_passport(card) — паспорт <binary без .elf>.txt
--- native_compiler() -> родной x86-64; не свежий — переводится из эталона
+-- native_compiler() -> родной x86-64; свежий — собран из тех же исходников, что эталон
+--     RV64 (строка «исходники» паспортов; правка исходников его не старит), иначе
+--     переводится из эталона под qemu-riscv64 (нет QEMU — через Nix shell)
 -- qemu_virt_compiler() -> toolchain rv32i для голого железа qemu-virt
 -- link(path) — LINK указывает на path (имя файла на полке)
 -- build(source, output, heap, target) — собрать родным компилятором с полки;
 --     BuildFailed; finish(output, target) — проверить подпись (ELF, у UEFI — MZ)
 --     и поставить право на запуск; NotProgram
 -- Внутри: sha(path), file_name(path), saltic_files(folder), source_volume,
---     fresh(own, compiler), remove_others, timed(times, command, log, env)
+--     sources_line(passport), fresh(own, compiler), remove_others, timed(…)
 
 use io
 use io.file
@@ -224,17 +226,23 @@ skill passport_extra(emits) {
     out []
 }
 
+skill sources_line(passport) {
+    @text = file.read(passport) rescue |err| { out "" }
+    drum (str.lines(text)) {
+        (str.starts_with(beat, "исходники:") == yes) { out beat }
+    }
+    out ""
+}
+
 skill fresh(own, compiler) {
     (kit.exists(own) == no) { out no }
     @text = file.read("{own}.txt") rescue |err| { out no }
     @parent = sha(compiler)
     (str.contains(text, "sha256 {parent})") == yes) { out yes }
     (str.contains(text, "сходится на x86-64") == no) { out no }
-    @hash = source_hash([])
-    drum (str.lines(text)) {
-        (str.starts_with(beat, "исходники:") == yes) { out str.ends_with(beat, " {hash}") }
-    }
-    out no
+    @line = sources_line("{own}.txt")
+    (str.bytes(line) == 0) { out no }
+    out line == sources_line(str.concat(passport_path(compiler), ".txt"))
 }
 
 skill remove_others(ending, keep) {
@@ -273,7 +281,10 @@ skill native_compiler() {
     @started = time.now()
     @heap = TRANSLATE_HEAP
     @log = ".cache/build/bootstrap-native.log"
-    @code = timed(".cache/build/bootstrap-native.time", ["qemu-riscv64", "-B", "0x100000000", compiler, "soul/seed/selfhost/toolchain.saltic", own, heap, "x86_64"], log, [])
+    @command = ["qemu-riscv64", "-B", "0x100000000", compiler, "soul/seed/selfhost/toolchain.saltic", own, heap, "x86_64"]
+    @qemu = process.locate("qemu-riscv64") rescue |err| { "" }
+    (str.bytes(qemu) == 0) { command = group.concat(["nix", "--extra-experimental-features", "nix-command flakes", "develop", "--command"], command) }
+    @code = timed(".cache/build/bootstrap-native.time", command, log, [])
     ((code == 0) == no) {
         drum (kit.tail(log, 5)) { io.show(beat) }
         out error.TranslateFailed
