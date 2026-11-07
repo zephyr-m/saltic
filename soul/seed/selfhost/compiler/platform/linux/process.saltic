@@ -1,5 +1,5 @@
 -- process — действия платформы Linux для core.process и io.file.list:
--- rt_platform_process_start / pipe / wait / read / close / executable,
+-- rt_platform_process_start / open / pipe / input / write / wait / read / close / executable,
 -- rt_platform_environment, rt_platform_file_list. Вызовы ядра (core.system):
 -- clone(SIGCHLD), pipe2, dup3, execve, waitid (wait4 на RV32 нет), faccessat,
 -- getdents64. envp со входа — в слове saltic_environment (state.start).
@@ -7,13 +7,17 @@
 -- VALUE, ERROR = CALL_NO_ERROR или ERROR_PROCESS / ERROR_FILE.
 --
 -- emit_start(compiler) — start(path, argv, folder, piped, env) -> pid; env — группа
---     "ИМЯ=значение", всё окружение ребёнка; Process; ребёнок: chdir, stdout в
---     трубу при piped, execve; не вышло — выход 127
+--     "ИМЯ=значение", всё окружение ребёнка; open(…, input) — то же, при input —
+--     труба и на ввод (пишущий конец — в saltic_process_input); Process; ребёнок:
+--     chdir, stdout в трубу при piped, ввод из трубы при input, execve; не вышло —
+--     выход 127
+-- emit_input / emit_write_input(compiler) — пишущий конец трубы ввода; write(fd,
+--     text) — всё до последнего байта, Process при ошибке
 -- emit_pipe / emit_wait(compiler) — читающий конец трубы; wait(pid) -> код
 --     (128 + сигнал); siginfo на стеке: si_code +8, si_status за объединением
 -- emit_read / emit_close / emit_executable(compiler) — read(fd) -> до CHUNK байт,
 --     "" в конце; close(fd); executable(path) -> yes/no
--- emit_environment / emit_file_list(compiler) — группы строк (без . и ..); append — все восемь
+-- emit_environment / emit_file_list(compiler) — группы строк (без . и ..); append — все десять
 
 use selfhost.abi
 use selfhost.machine.wide
@@ -24,6 +28,7 @@ use selfhost.compiler.constants
 use selfhost.compiler.backend.rv32i.runtime.tails
 
 PIPE_LABEL = "saltic_process_pipe"
+INPUT_LABEL = "saltic_process_input"
 ENVIRONMENT_LABEL = "saltic_environment"
 CHUNK = 4096
 SIGCHLD = 17
@@ -40,7 +45,7 @@ WEXITED = 4
 CLD_EXITED = 1
 SIGINFO_CODE = 8
 WAIT_FRAME = 36
-SPAWN_FRAME = 12
+SPAWN_FRAME = 15
 SPAWN_PATH = 0
 SPAWN_ARGV = 1
 SPAWN_FOLDER = 2
@@ -51,6 +56,10 @@ SPAWN_FDS = 6
 SPAWN_INDEX = 8
 SPAWN_ENV = 9
 SPAWN_ENV_BLOCK = 10
+SPAWN_INPUT = 11
+SPAWN_INPUT_FDS = 12
+STDIN = 0
+CLOSE_ON_EXEC = 524288
 
 skill cstring(compiler, to, from) {
     @executor = compiler.executor
@@ -175,6 +184,18 @@ skill emit_child(compiler) {
     compiler = executor.load32(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_FDS + 4)
     compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
     compiler = executor.label(compiler, ".L_spawn_child_exec")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * SPAWN_INPUT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.YES)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_spawn_child_run")
+    compiler = executor.load32(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_INPUT_FDS)
+    compiler = executor.load_immediate(compiler, backend.ERROR, STDIN)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 0)
+    compiler = executor.syscall(compiler, system.SYSCALL_DUP3)
+    compiler = executor.load32(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_INPUT_FDS)
+    compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
+    compiler = executor.load32(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_INPUT_FDS + 4)
+    compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
+    compiler = executor.label(compiler, ".L_spawn_child_run")
     compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_PATH)
     compiler = cstring(compiler, backend.VALUE, backend.VALUE)
     compiler = executor.load(compiler, backend.ERROR, backend.STACK, words.bytes * SPAWN_BLOCK)
@@ -191,7 +212,10 @@ skill emit_start(compiler) {
     @executor = compiler.executor
     @words = compiler.words
     compiler = executor.label(compiler, platform.PROCESS_START)
+    compiler = executor.load_immediate(compiler, backend.ARG5, abi.NO)
+    compiler = executor.label(compiler, platform.PROCESS_OPEN)
     compiler = enter(compiler, SPAWN_FRAME)
+    compiler = executor.store(compiler, backend.ARG5, backend.STACK, words.bytes * SPAWN_INPUT)
     compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_PATH)
     compiler = executor.store(compiler, backend.ERROR, backend.STACK, words.bytes * SPAWN_ARGV)
     compiler = executor.store(compiler, backend.ARG2, backend.STACK, words.bytes * SPAWN_FOLDER)
@@ -207,6 +231,14 @@ skill emit_start(compiler) {
     compiler = executor.syscall(compiler, system.SYSCALL_PIPE2)
     compiler = executor.branch_negative(compiler, backend.VALUE, ".L_spawn_failed")
     compiler = executor.label(compiler, ".L_spawn_fork")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * SPAWN_INPUT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.YES)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_spawn_clone")
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_INPUT_FDS)
+    compiler = executor.load_immediate(compiler, backend.ERROR, CLOSE_ON_EXEC)
+    compiler = executor.syscall(compiler, system.SYSCALL_PIPE2)
+    compiler = executor.branch_negative(compiler, backend.VALUE, ".L_spawn_failed")
+    compiler = executor.label(compiler, ".L_spawn_clone")
     compiler = executor.load_immediate(compiler, backend.VALUE, SIGCHLD)
     compiler = executor.load_immediate(compiler, backend.ERROR, 0)
     compiler = executor.load_immediate(compiler, backend.ARG2, 0)
@@ -226,6 +258,15 @@ skill emit_start(compiler) {
     compiler = executor.load_address(compiler, backend.SCRATCH1, PIPE_LABEL, 0)
     compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
     compiler = executor.label(compiler, ".L_spawn_parent_done")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * SPAWN_INPUT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.YES)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_spawn_parent_input_done")
+    compiler = executor.load32(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_INPUT_FDS)
+    compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
+    compiler = executor.load32(compiler, backend.SCRATCH0, backend.STACK, words.bytes * SPAWN_INPUT_FDS + 4)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, INPUT_LABEL, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
+    compiler = executor.label(compiler, ".L_spawn_parent_input_done")
     compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_COUNT)
     compiler = tag_number(compiler)
     compiler = finish(compiler, SPAWN_FRAME, abi.CALL_NO_ERROR)
@@ -240,6 +281,47 @@ skill emit_pipe(compiler) {
     compiler = executor.load(compiler, backend.VALUE, backend.VALUE, 0)
     compiler = tag_number(compiler)
     out tails.ok(compiler)
+}
+
+skill emit_input(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.PROCESS_INPUT)
+    compiler = executor.load_address(compiler, backend.VALUE, INPUT_LABEL, 0)
+    compiler = executor.load(compiler, backend.VALUE, backend.VALUE, 0)
+    compiler = tag_number(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_write_input(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, platform.PROCESS_WRITE)
+    compiler = enter(compiler, 4)
+    compiler = number(compiler, backend.VALUE, backend.VALUE)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, 0)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ERROR, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, words.payload)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.STACK, words.bytes * 2)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, words.payload + words.string_data)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.label(compiler, ".L_write_input_next")
+    compiler = executor.load(compiler, backend.ARG2, backend.STACK, words.bytes * 2)
+    compiler = executor.branch_not_positive(compiler, backend.ARG2, ".L_write_input_done")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
+    compiler = executor.load(compiler, backend.ERROR, backend.STACK, words.bytes)
+    compiler = executor.syscall(compiler, system.SYSCALL_WRITE)
+    compiler = executor.branch_not_positive(compiler, backend.VALUE, ".L_write_input_failed")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.add(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.VALUE)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * 2)
+    compiler = executor.sub(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.VALUE)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes * 2)
+    compiler = executor.jump(compiler, ".L_write_input_next")
+    compiler = executor.label(compiler, ".L_write_input_done")
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = finish(compiler, 4, abi.CALL_NO_ERROR)
+    out failure(compiler, ".L_write_input_failed", 4, abi.ERROR_PROCESS)
 }
 
 skill emit_wait(compiler) {
@@ -417,6 +499,8 @@ skill append(compiler) {
     @words = compiler.words
     compiler = emit_start(compiler)
     compiler = emit_pipe(compiler)
+    compiler = emit_input(compiler)
+    compiler = emit_write_input(compiler)
     compiler = emit_wait(compiler)
     compiler = emit_read(compiler)
     compiler = emit_close(compiler)
@@ -425,5 +509,7 @@ skill append(compiler) {
     compiler = emit_file_list(compiler)
     compiler = executor.align(compiler, backend.BSS, words.bytes)
     compiler = executor.data_label(compiler, backend.BSS, PIPE_LABEL)
+    compiler = executor.reserve(compiler, wide.from_number(words.bytes))
+    compiler = executor.data_label(compiler, backend.BSS, INPUT_LABEL)
     out executor.reserve(compiler, wide.from_number(words.bytes))
 }

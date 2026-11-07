@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-source "$(dirname "$0")/stamp.sh"
-saltic_stamp_output "$0" "$@"
+# Первый камень: собрать программу на Saltic компилятором с полки. Время у строк
+# не ставит — его ставят программы на Saltic, в журналы которых идёт вывод.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

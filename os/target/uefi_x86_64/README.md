@@ -64,7 +64,7 @@ Saltic на ноутбуке без Linux: программа собираетс
 | `tools/chat.py` | другая сторона чата: `listen журнал` (порт 5557, стучится к Acer, чтобы пропускал файрвол), `say текст` |
 | `tools/wifi_pack.py` | посылка для Wi-Fi: плата, OTP и прошивка ath10k из системы одним файлом для `SNIPPET_DATA` |
 | `tools/upload.py` | залить программу агенту и, с `--run`, запустить: `python3 tools/upload.py visitor.efi --run`; куски по 1024 байта с подтверждением, сверка суммы |
-| `build.sh` | собирает `EFI/BOOT/BOOTX64.EFI` и папку образа флешки |
+| `build.saltic` | собирает `EFI/BOOT/BOOTX64.EFI` и папку образа флешки (вместо build.sh) |
 | `run.sh` | запускает собранное в QEMU x86-64 с прошивкой OVMF; `--check` — без окна, жмёт клавишу и ждёт «Bye!» (так его зовёт `tests/run.saltic`, случай `uefi`) |
 
 Цель компилятора — `x86_64-uefi`. Образ — одна секция PE32+: таблица
@@ -74,7 +74,7 @@ Saltic на ноутбуке без Linux: программа собираетс
 
 ## Флешка
 
-1. Собрать: `bash os/target/uefi_x86_64/build.sh` — папка образа
+1. Собрать: `SALTIC_TARGET=x86_64 bash bootstrap/build.sh os/target/uefi_x86_64/build.saltic .cache/build/workbench/uefi-build && .cache/build/workbench/uefi-build ""` — папка образа
    `.cache/build/uefi_x86_64/image`.
 2. Проверить в QEMU: `bash os/target/uefi_x86_64/run.sh`.
 3. Флешку отформатировать в FAT32 (`sudo mkfs.vfat -F 32 /dev/sdX1`,
