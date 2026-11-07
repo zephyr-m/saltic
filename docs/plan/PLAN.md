@@ -170,7 +170,9 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   faccessat, getdents64), общие для rv32i, x86-64, rv64; `_start` отдаёт стек
   входа в `rt_environment_capture`; `append_unsupported` закрывает отсутствующие
   действия у qemu-virt и UEFI без правок ОС. Тест `process` на трёх целях, канон.
-  Не сделано: окружение ребёнку (форма не решена). `hosts.sh` →
+  Окружение ребёнку — 07.11.2026, решение автора (вариант 1): `run` / `capture` /
+  `lines(command, folder, env)`, env — «ИМЯ=значение» поверх своего
+  (`environment_with`), родная `process.start` вместо `spawn`. `hosts.sh` →
   `workbench/hosts.saltic` — 07.11.2026, первый bash на Saltic. Часы на Linux
   (`core.time.now` — clock_gettime на трёх целях, `io.clock` — пояс из
   /etc/localtime) и `workbench/stamp.saltic` вместо цикла `stamp.sh` — 07.11.2026.

@@ -1,19 +1,21 @@
 -- process — запуск программ (Linux): run / capture / lines, окружение.
 -- Команда — группа слов [программа, аргументы…]; имя без «/»
 -- ищется по PATH окружения, как в терминале (ProgramNotFound); folder — папка
--- ребёнка, "" — своя (своя папка не меняется). stdout ребёнка: run — общий,
--- capture и lines — труба; stderr у всех общий. Окружение ребёнка — своё.
+-- ребёнка, "" — своя (своя папка не меняется); env — группа "ИМЯ=значение"
+-- поверх окружения родителя ([] — как у родителя). stdout ребёнка: run —
+-- общий, capture и lines — труба; stderr у всех общий.
 -- Коды выхода самой программы (64, 65) — в core.system.
 --
--- run(command, folder) -> код выхода (128 + сигнал, если убит); ProgramNotFound, Process
--- capture(command, folder) -> Capture { code, output }; ProgramNotFound, Process
--- lines(command, folder) -> Lines: next() -> строка без «\n», в конце LinesEnded;
+-- run(command, folder, env) -> код выхода (128 + сигнал, если убит); ProgramNotFound, Process
+-- capture(command, folder, env) -> Capture { code, output }; ProgramNotFound, Process
+-- lines(command, folder, env) -> Lines: next() -> строка без «\n», в конце LinesEnded;
 --     code() -> код выхода (дочитывает остаток); ProgramNotFound, Process
--- environment() -> группа строк "ИМЯ=значение"
+-- environment() -> группа строк "ИМЯ=значение"; environment_with(env) -> окружение
+--     родителя, где переменные из env заменены или добавлены
 -- locate(name) -> путь программы по PATH; ProgramNotFound
--- spawn(path, command, folder, piped) -> pid; start(…, env) — то же, env — всё
---     окружение ребёнка "ИМЯ=значение"; pipe_end() / wait(pid) /
---     read_output(fd) / close_output(fd) / executable(path) — родные части
+-- start(path, command, folder, piped, env) -> pid, env — всё окружение ребёнка
+--     (обычно environment_with); pipe_end() / wait(pid) / read_output(fd) /
+--     close_output(fd) / executable(path) — родные части
 
 use core.str
 use core.group
@@ -67,7 +69,6 @@ Lines = Box {
     }
 }
 
-skill spawn(path, command, folder, piped) native
 skill start(path, command, folder, piped, env) native
 skill pipe_end() native
 skill wait(pid) native
@@ -100,15 +101,35 @@ skill locate(name) {
     out error.ProgramNotFound
 }
 
-skill run(command, folder) {
+skill name_of(entry) {
+    drum (str.bytes(entry)) {
+        (str.byte(entry, beat) == 61) { out str.slice(entry, 0, beat + 1) }
+    }
+    out entry
+}
+
+skill environment_with(env) {
+    @result = []
+    drum (environment()) {
+        @entry = beat
+        @kept = yes
+        drum (env) {
+            (str.starts_with(entry, name_of(beat)) == yes) { kept = no }
+        }
+        (kept == yes) { result = group.add(result, entry) }
+    }
+    out group.concat(result, env)
+}
+
+skill run(command, folder, env) {
     @path = locate(group.get(command, 0))
-    @pid = spawn(path, command, folder, no)
+    @pid = start(path, command, folder, no, environment_with(env))
     out wait(pid)
 }
 
-skill capture(command, folder) {
+skill capture(command, folder, env) {
     @path = locate(group.get(command, 0))
-    @pid = spawn(path, command, folder, yes)
+    @pid = start(path, command, folder, yes, environment_with(env))
     @pipe = pipe_end()
     @captured = Capture {}
     always {
@@ -121,8 +142,8 @@ skill capture(command, folder) {
     out captured
 }
 
-skill lines(command, folder) {
+skill lines(command, folder, env) {
     @path = locate(group.get(command, 0))
-    @pid = spawn(path, command, folder, yes)
+    @pid = start(path, command, folder, yes, environment_with(env))
     out Lines { stream = Stream { pid = pid, pipe = pipe_end() } }
 }

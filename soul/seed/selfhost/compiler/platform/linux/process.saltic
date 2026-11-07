@@ -1,15 +1,14 @@
 -- process — действия платформы Linux для core.process и io.file.list:
--- rt_platform_process_spawn / start / pipe / wait / read / close / executable,
+-- rt_platform_process_start / pipe / wait / read / close / executable,
 -- rt_platform_environment, rt_platform_file_list. Вызовы ядра (core.system):
 -- clone(SIGCHLD), pipe2, dup3, execve, waitid (wait4 на RV32 нет), faccessat,
 -- getdents64. envp со входа — в слове saltic_environment (state.start).
 -- Соглашение как у rt_*: аргументы в VALUE, ERROR, ARG2, ARG3, результат в
 -- VALUE, ERROR = CALL_NO_ERROR или ERROR_PROCESS / ERROR_FILE.
 --
--- emit_spawn(compiler) — spawn(path, argv, folder, piped) -> pid и start(path, argv,
---     folder, piped, env) — то же, env — группа "ИМЯ=значение", всё окружение
---     ребёнка (у spawn — своё, saltic_environment); Process; ребёнок: chdir,
---     stdout в трубу при piped, execve; не вышло — выход 127
+-- emit_start(compiler) — start(path, argv, folder, piped, env) -> pid; env — группа
+--     "ИМЯ=значение", всё окружение ребёнка; Process; ребёнок: chdir, stdout в
+--     трубу при piped, execve; не вышло — выход 127
 -- emit_pipe / emit_wait(compiler) — читающий конец трубы; wait(pid) -> код
 --     (128 + сигнал); siginfo на стеке: si_code +8, si_status за объединением
 -- emit_read / emit_close / emit_executable(compiler) — read(fd) -> до CHUNK байт,
@@ -180,26 +179,17 @@ skill emit_child(compiler) {
     compiler = cstring(compiler, backend.VALUE, backend.VALUE)
     compiler = executor.load(compiler, backend.ERROR, backend.STACK, words.bytes * SPAWN_BLOCK)
     compiler = executor.add_immediate(compiler, backend.ERROR, backend.ERROR, words.payload + words.string_data)
-    compiler = executor.load(compiler, backend.ARG2, backend.STACK, words.bytes * SPAWN_ENV)
-    compiler = executor.branch_zero(compiler, backend.ARG2, ".L_spawn_child_inherit")
     compiler = executor.load(compiler, backend.ARG2, backend.STACK, words.bytes * SPAWN_ENV_BLOCK)
     compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, words.payload + words.string_data)
-    compiler = executor.jump(compiler, ".L_spawn_child_execve")
-    compiler = executor.label(compiler, ".L_spawn_child_inherit")
-    compiler = executor.load_address(compiler, backend.ARG2, ENVIRONMENT_LABEL, 0)
-    compiler = executor.load(compiler, backend.ARG2, backend.ARG2, 0)
-    compiler = executor.label(compiler, ".L_spawn_child_execve")
     compiler = executor.syscall(compiler, system.SYSCALL_EXECVE)
     compiler = executor.label(compiler, ".L_spawn_child_fail")
     compiler = executor.load_immediate(compiler, backend.VALUE, EXEC_FAILED)
     out executor.syscall(compiler, system.SYSCALL_EXIT_GROUP)
 }
 
-skill emit_spawn(compiler) {
+skill emit_start(compiler) {
     @executor = compiler.executor
     @words = compiler.words
-    compiler = executor.label(compiler, platform.PROCESS_SPAWN)
-    compiler = executor.load_immediate(compiler, backend.ARG4, 0)
     compiler = executor.label(compiler, platform.PROCESS_START)
     compiler = enter(compiler, SPAWN_FRAME)
     compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * SPAWN_PATH)
@@ -208,10 +198,7 @@ skill emit_spawn(compiler) {
     compiler = executor.store(compiler, backend.ARG3, backend.STACK, words.bytes * SPAWN_PIPED)
     compiler = executor.store(compiler, backend.ARG4, backend.STACK, words.bytes * SPAWN_ENV)
     compiler = emit_argv_block(compiler, SPAWN_ARGV, SPAWN_BLOCK, ".L_spawn_argv")
-    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * SPAWN_ENV)
-    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_spawn_env_skip")
     compiler = emit_argv_block(compiler, SPAWN_ENV, SPAWN_ENV_BLOCK, ".L_spawn_env")
-    compiler = executor.label(compiler, ".L_spawn_env_skip")
     compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * SPAWN_PIPED)
     compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.YES)
     compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_spawn_fork")
@@ -428,7 +415,7 @@ skill emit_file_list(compiler) {
 skill append(compiler) {
     @executor = compiler.executor
     @words = compiler.words
-    compiler = emit_spawn(compiler)
+    compiler = emit_start(compiler)
     compiler = emit_pipe(compiler)
     compiler = emit_wait(compiler)
     compiler = emit_read(compiler)

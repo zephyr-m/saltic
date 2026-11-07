@@ -14,7 +14,7 @@
 -- Вместо workbench/global-check.sh и hosts.saltic (в .archive/).
 --
 -- Step { name, marker, seen, start } — случай ветки; start — десятые секунды
--- Branch { name, proc, what, script, log, done, code, tenths, cases, steps } — ветка
+-- Branch { name, proc, what, script, env, log, done, code, tenths, cases, steps } — ветка; env — поверх своего
 -- program() — вся проверка
 -- Внутри: prep_wait — шаг подготовки со спиннером, scan — случаи из журнала,
 --     branch_rows — строки ветки, wait_all — живой блок, summary — итог,
@@ -56,6 +56,7 @@ Branch = Box {
     proc = "",
     what = "",
     script = "",
+    env = [],
     log = "",
     done = no,
     code = 0,
@@ -97,10 +98,10 @@ skill show_logo(run) {
 skill launch(branches) {
     drum (branches) {
         @branch = beat
-        process.run(["rm", "-f", branch.log, "{branch.log}.code"], "")
+        process.run(["rm", "-f", branch.log, "{branch.log}.code"], "", [])
         @wrapped = "{branch.script} > \"$0\" 2>&1; echo $? > \"$0.code\""
         @bash = process.locate("bash")
-        process.spawn(bash, ["bash", "-c", wrapped, branch.log], "", no)
+        process.start(bash, ["bash", "-c", wrapped, branch.log], "", no, process.environment_with(branch.env))
     }
     out branches
 }
@@ -161,7 +162,7 @@ skill prep_wait(run, label, branches) {
             (beat.done == no) { left = left + 1 }
         }
         (left == 0) { leave }
-        process.run(["sleep", "1"], "")
+        process.run(["sleep", "1"], "", [])
         ticks = ticks + 1
         run.look.tick = run.look.tick + 1
         @spent = kit.tenths_since(started)
@@ -204,8 +205,8 @@ skill preparation(run) {
     drum (TOOLS) {
         @name = group.get(beat, 0)
         @source = group.get(beat, 1)
-        @script = "SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR={WORK}/build-{name} bash bootstrap/build.sh {source} {WORK}/{name}"
-        builds = group.add(builds, Branch { name = name, script = script, log = "{WORK}/build-{name}.log" })
+        @env = ["SALTIC_TARGET=x86_64", "SALTIC_BUILD_DIR={WORK}/build-{name}"]
+        builds = group.add(builds, Branch { name = name, script = "bash bootstrap/build.sh {source} {WORK}/{name}", env = env, log = "{WORK}/build-{name}.log" })
     }
     @built = prep_wait(run, "сборка проверок", builds)
     (run.failed > 0) {
@@ -236,7 +237,7 @@ skill preparation(run) {
     }
     finish_prep(run, "ok", "лимиты канона", counts, 0)
 
-    @refresh = Branch { name = "refresh", script = "SALTIC_STAMPED=1 {WORK}/refresh \"\"", log = "{WORK}/refresh.log" }
+    @refresh = Branch { name = "refresh", script = "{WORK}/refresh \"\"", env = ["SALTIC_STAMPED=1"], log = "{WORK}/refresh.log" }
     @spent = prep_wait(run, "самосборка", [refresh])
     ((refresh.code == 0) == no) {
         finish_prep(run, "fail", "самосборка", "", spent)
@@ -446,7 +447,7 @@ skill wait_all(run, branches) {
         }
         (run.look.plain == no) { live_block(run, branches, now) }
         (group.count(left) == 0) { leave }
-        process.run(["sleep", "1"], "")
+        process.run(["sleep", "1"], "", [])
         ticks = ticks + 1
         run.look.tick = run.look.tick + 1
         (run.look.plain == yes) {
@@ -477,11 +478,12 @@ skill check_branches() {
         @tests = group.get(beat, 1)
         @proc = host
         (host == "x86_64") { proc = "x86-64" }
-        @script = "env SALTIC_TEST_HOST={host} SALTIC_STAMPED=1 {NIX} bash tests/run.sh {tests}"
-        result = group.add(result, Branch { name = "{proc} {tests}", proc = proc, what = group.get(beat, 2), script = script, log = "{WORK}/check-{host}-{tests}.log", cases = yes })
+        @script = "{NIX} bash tests/run.sh {tests}"
+        @env = ["SALTIC_TEST_HOST={host}", "SALTIC_STAMPED=1"]
+        result = group.add(result, Branch { name = "{proc} {tests}", proc = proc, what = group.get(beat, 2), script = script, env = env, log = "{WORK}/check-{host}-{tests}.log", cases = yes })
     }
-    result = group.add(result, Branch { name = "rv64 самосборка", proc = "rv64", what = "самосборка", script = "SALTIC_STAMPED=1 {WORK}/refresh-rv64 \"\"", log = "{WORK}/check-rv64-self.log", steps = steps_of(RV64_STEPS) })
-    result = group.add(result, Branch { name = "x86-64 кодировщик", proc = "x86-64", what = "кодировщик", script = "SALTIC_STAMPED=1 {WORK}/x86-encoder-golden \"\"", log = "{WORK}/check-x86-golden.log", steps = steps_of(GOLDEN_STEPS) })
+    result = group.add(result, Branch { name = "rv64 самосборка", proc = "rv64", what = "самосборка", script = "{WORK}/refresh-rv64 \"\"", env = ["SALTIC_STAMPED=1"], log = "{WORK}/check-rv64-self.log", steps = steps_of(RV64_STEPS) })
+    result = group.add(result, Branch { name = "x86-64 кодировщик", proc = "x86-64", what = "кодировщик", script = "{WORK}/x86-encoder-golden \"\"", env = ["SALTIC_STAMPED=1"], log = "{WORK}/check-x86-golden.log", steps = steps_of(GOLDEN_STEPS) })
     out result
 }
 
@@ -516,17 +518,17 @@ skill summary(run, done) {
 
 skill save_receipt(run) {
     (run.look.plain == yes) { out none }
-    @stamp = process.capture(["date", "+%Y-%m-%d_%H-%M-%S"], "")
+    @stamp = process.capture(["date", "+%Y-%m-%d_%H-%M-%S"], "", [])
     @moment = group.get(str.lines(stamp.output), 0)
-    @head = process.capture(["git", "rev-parse", "--short", "HEAD"], "")
+    @head = process.capture(["git", "rev-parse", "--short", "HEAD"], "", [])
     @commit = group.get(str.lines(head.output), 0)
-    @changes = process.capture(["git", "status", "--porcelain", "--untracked-files=no"], "")
+    @changes = process.capture(["git", "status", "--porcelain", "--untracked-files=no"], "", [])
     (str.bytes(changes.output) > 0) { commit = "{commit} + правки" }
     @verdict = "зелёный"
     (run.failed > 0) { verdict = "красный" }
     @footer = cards.paint(run.look, cards.GRAY, "  {moment} · {commit} · {verdict}")
     @path = "{RECEIPTS}/{moment}_{verdict}.png"
-    process.run(["mkdir", "-p", RECEIPTS], "")
+    process.run(["mkdir", "-p", RECEIPTS], "", [])
     @started = time.now()
     receipt.save(group.add(group.add(run.kept, ""), footer), path)
     @spent = cards.seconds_text(kit.tenths_since(started))
@@ -540,7 +542,7 @@ program() {
     run.started = time.now()
     run.look.plain = cards.plain_mode()
     (run.look.plain == no) { run.screen = cards.screen_rows() }
-    process.run(["mkdir", "-p", WORK], "")
+    process.run(["mkdir", "-p", WORK], "", [])
     show_logo(run)
     @prepared = preparation(run) rescue |err| {
         save_receipt(run)
