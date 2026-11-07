@@ -10,12 +10,14 @@
 -- capture(command, folder, env) -> Capture { code, output }; ProgramNotFound, Process
 -- lines(command, folder, env) -> Lines: next() -> строка без «\n», в конце LinesEnded;
 --     code() -> код выхода (дочитывает остаток); ProgramNotFound, Process
+-- talk(command, folder, env) -> Lines, у которого ещё и ввод ребёнка: send(text) —
+--     написать ему, close_input() — конец ввода (code() закрывает и сам)
 -- environment() -> группа строк "ИМЯ=значение"; environment_with(env) -> окружение
---     родителя, где переменные из env заменены или добавлены
+--     родителя, где переменные из env заменены или добавлены (обычно для open)
 -- locate(name) -> путь программы по PATH; ProgramNotFound
--- start(path, command, folder, piped, env) -> pid, env — всё окружение ребёнка
---     (обычно environment_with); open(…, input) — то же, при input — труба на ввод
---     ребёнка: input_end() -> её конец, write_input(fd, text); pipe_end() /
+-- open(path, command, folder, piped, env, input) -> pid; env — всё окружение
+--     ребёнка (обычно environment_with), piped — stdout в трубу, input — ввод из
+--     трубы; pipe_end() / input_end() -> концы труб, write_input(fd, text),
 --     wait(pid) / read_output(fd) / close_output(fd) / executable(path) — родные части
 
 use core.str
@@ -31,7 +33,8 @@ Stream = Box {
     pipe = 0,
     rest = "",
     done = no,
-    code = 0
+    code = 0,
+    input = -1
 }
 
 Lines = Box {
@@ -61,8 +64,24 @@ Lines = Box {
         }
     }
 
+    skill send(text) {
+        @s = stream
+        (s.input < 0) { out error.NoInput }
+        out write_input(s.input, text)
+    }
+
+    skill close_input() {
+        @s = stream
+        (s.input >= 0) {
+            close_output(s.input)
+            s.input = -1
+        }
+        out none
+    }
+
     skill code() {
         @s = stream
+        close_input()
         always {
             (s.done == yes) { out s.code }
             @line = next() rescue |err| { "" }
@@ -70,7 +89,6 @@ Lines = Box {
     }
 }
 
-skill start(path, command, folder, piped, env) native
 skill open(path, command, folder, piped, env, input) native
 skill input_end() native
 skill write_input(fd, text) native
@@ -127,13 +145,13 @@ skill environment_with(env) {
 
 skill run(command, folder, env) {
     @path = locate(group.get(command, 0))
-    @pid = start(path, command, folder, no, environment_with(env))
+    @pid = open(path, command, folder, no, environment_with(env), no)
     out wait(pid)
 }
 
 skill capture(command, folder, env) {
     @path = locate(group.get(command, 0))
-    @pid = start(path, command, folder, yes, environment_with(env))
+    @pid = open(path, command, folder, yes, environment_with(env), no)
     @pipe = pipe_end()
     @captured = Capture {}
     always {
@@ -148,6 +166,12 @@ skill capture(command, folder, env) {
 
 skill lines(command, folder, env) {
     @path = locate(group.get(command, 0))
-    @pid = start(path, command, folder, yes, environment_with(env))
+    @pid = open(path, command, folder, yes, environment_with(env), no)
     out Lines { stream = Stream { pid = pid, pipe = pipe_end() } }
+}
+
+skill talk(command, folder, env) {
+    @path = locate(group.get(command, 0))
+    @pid = open(path, command, folder, yes, environment_with(env), yes)
+    out Lines { stream = Stream { pid = pid, pipe = pipe_end(), input = input_end() } }
 }

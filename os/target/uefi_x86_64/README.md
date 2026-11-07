@@ -65,7 +65,7 @@ Saltic на ноутбуке без Linux: программа собираетс
 | `tools/wifi_pack.py` | посылка для Wi-Fi: плата, OTP и прошивка ath10k из системы одним файлом для `SNIPPET_DATA` |
 | `tools/upload.py` | залить программу агенту и, с `--run`, запустить: `python3 tools/upload.py visitor.efi --run`; куски по 1024 байта с подтверждением, сверка суммы |
 | `build.saltic` | собирает `EFI/BOOT/BOOTX64.EFI` и папку образа флешки (вместо build.sh) |
-| `run.sh` | запускает собранное в QEMU x86-64 с прошивкой OVMF; `--check` — без окна, жмёт клавишу и ждёт «Bye!» (так его зовёт `tests/run.saltic`, случай `uefi`) |
+| `run.saltic` | запускает собранное в QEMU x86-64 с прошивкой OVMF (вместо run.sh); `--check` — без окна, жмёт клавишу и ждёт «Bye!» (так его зовёт `tests/run.saltic`, случай `uefi`) |
 
 Цель компилятора — `x86_64-uefi`. Образ — одна секция PE32+: таблица
 переходов, регистры, переведённый код, точка входа и память гостя.
@@ -76,7 +76,7 @@ Saltic на ноутбуке без Linux: программа собираетс
 
 1. Собрать: `SALTIC_TARGET=x86_64 bash bootstrap/build.sh os/target/uefi_x86_64/build.saltic .cache/build/workbench/uefi-build && .cache/build/workbench/uefi-build ""` — папка образа
    `.cache/build/uefi_x86_64/image`.
-2. Проверить в QEMU: `bash os/target/uefi_x86_64/run.sh`.
+2. Проверить в QEMU: `SALTIC_TARGET=x86_64 bash bootstrap/build.sh os/target/uefi_x86_64/run.saltic .cache/build/workbench/uefi-run && .cache/build/workbench/uefi-run ""`.
 3. Флешку отформатировать в FAT32 (`sudo mkfs.vfat -F 32 /dev/sdX1`,
    где `sdX1` — раздел флешки, проверить по `lsblk`), смонтировать и
    скопировать туда папку `EFI` из образа:

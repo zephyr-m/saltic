@@ -1,0 +1,81 @@
+-- run — UEFI-образ из build.saltic в QEMU x86-64 с прошивкой OVMF. Без
+-- аргумента — окно QEMU; "--check" — без окна: на «Press any key.» жмёт k,
+-- ждёт «Pressed: k. Bye!» не дольше LIMIT секунд (timeout из coreutils, stderr
+-- QEMU — в ту же трубу) и останавливает QEMU. Нет qemu-system-x86_64 — перезапуск себя (BINARY) в
+-- проектном Nix shell. Папка — SALTIC_UEFI_DIR (.cache/build/uefi_x86_64).
+-- LD_LIBRARY_PATH детям — пустой (как env -u у прежнего run.sh). Вместо run.sh
+-- (в .archive/); зовёт tests/run.saltic (случай uefi).
+--
+-- program(mode) — mode "--check" или ""
+-- Внутри: setting(name, fallback), firmware() -> путь OVMF.fd, check(machine)
+
+use io
+use core.str
+use core.group
+use core.process
+
+WORK = ".cache/build/uefi_x86_64"
+BINARY = ".cache/build/workbench/uefi-run"
+NIX = ["nix", "--extra-experimental-features", "nix-command flakes"]
+CLEAN = ["LD_LIBRARY_PATH="]
+LIMIT = "60"
+
+skill setting(name, fallback) {
+    drum (process.environment()) {
+        (str.starts_with(beat, "{name}=") == yes) {
+            @value = str.slice(beat, str.bytes(name) + 1, str.bytes(beat))
+            (str.bytes(value) > 0) { out value }
+        }
+    }
+    out fallback
+}
+
+skill firmware() {
+    @built = process.capture(group.concat(NIX, ["build", "--no-link", "--print-out-paths", "nixpkgs#OVMF.fd"]), "", [])
+    @lines = str.lines(built.output)
+    (group.count(lines) == 0) { out error.NoFirmware }
+    @path = group.get(lines, group.count(lines) - 1)
+    out "{path}/FV/OVMF.fd"
+}
+
+skill check(machine) {
+    @command = group.concat(["sh", "-c", "exec timeout \"$0\" \"$@\" 2>&1", LIMIT], group.concat(machine, ["-nographic", "-no-reboot"]))
+    @qemu = process.talk(command, "", CLEAN)
+    @seen = no
+    always {
+        @line = qemu.next() rescue |err| { leave }
+        (str.contains(line, "Press any key.") == yes) { qemu.send("k") }
+        (str.contains(line, "Pressed: k. Bye!") == yes) {
+            seen = yes
+            leave
+        }
+    }
+    @s = qemu.stream
+    process.run(["kill", "{s.pid}"], "", [])
+    qemu.code()
+    (seen == no) {
+        io.show("uefi: образ не дошёл до «Pressed: k. Bye!» в QEMU+OVMF")
+        out error.UefiFailed
+    }
+    out io.show("uefi: образ грузится прошивкой, пишет на экран и читает клавишу")
+}
+
+program(mode) {
+    @qemu = process.locate("qemu-system-x86_64") rescue |err| { "" }
+    (str.bytes(qemu) == 0) {
+        @again = process.run(group.concat(NIX, ["develop", "--command", BINARY, mode]), "", CLEAN)
+        (again == 0) { out none }
+        out error.UefiFailed
+    }
+    @image = str.concat(setting("SALTIC_UEFI_DIR", WORK), "/image")
+    @bootable = process.run(["test", "-f", "{image}/EFI/BOOT/BOOTX64.EFI"], "", [])
+    ((bootable == 0) == no) {
+        io.show("uefi: сначала собери образ (os/target/uefi_x86_64/build.saltic)")
+        out error.NoImage
+    }
+    @bios = firmware()
+    @machine = ["qemu-system-x86_64", "-machine", "q35", "-m", "512M", "-bios", bios, "-drive", "format=raw,file=fat:rw:{image}", "-net", "none"]
+    (mode == "--check") { out check(machine) }
+    process.run(machine, "", CLEAN)
+    out none
+}
