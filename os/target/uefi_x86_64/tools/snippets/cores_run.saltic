@@ -1,0 +1,65 @@
+-- cores_run — кусок для tools/snippet.py: работает ли второе ядро вместе с
+-- главным. На ядро CORE уходит 12 байт машинного кода: в цикле lock inc
+-- счётчика [rcx], пока [rcx + 8] == 0. Запуск без ожидания (StartupThisAP с
+-- событием); главное ядро дважды читает счётчик с паузой — растёт, значит
+-- ядра идут одновременно, — потом ставит флаг «стоп» и ждёт событие.
+--
+-- snippet() -> текст: два замера счётчика и чем кончилось; NoMpServices
+
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+
+MP_GUID = [5, 166, 221, 63, 110, 167, 70, 79, 173, 41, 18, 244, 83, 27, 61, 8]
+CODE = [240, 72, 255, 1, 72, 131, 121, 8, 0, 116, 245, 195]
+BOOT_LOCATE_PROTOCOL = 320
+BOOT_CREATE_EVENT = 80
+BOOT_CHECK_EVENT = 120
+BOOT_STALL = 248
+STARTUP_THIS = 24
+CORE = 2
+
+skill pause(base, micro) {
+    out firmware.call(base, firmware.pointer(uefi.boot_services(base), base, BOOT_STALL), [firmware.number(micro)])
+}
+
+skill snippet() {
+    @base = firmware.guest_base()
+    @services = uefi.boot_services(base)
+    @guid_at = firmware.scratch(base, 32)
+    drum (16) { firmware.write8(guid_at, base, beat, group.get(MP_GUID, beat)) }
+    @found_at = firmware.scratch(base, 64)
+    @located = firmware.call(base, firmware.pointer(services, base, BOOT_LOCATE_PROTOCOL), [guid_at, firmware.number(0), found_at])
+    (located.failed == yes) { out error.NoMpServices }
+    @mp = firmware.pointer(found_at, base, 0)
+    @code = firmware.scratch(base, 512)
+    drum (group.count(CODE)) { firmware.write8(code, base, beat, group.get(CODE, beat)) }
+    @shared = firmware.scratch(base, 768)
+    firmware.write64(shared, base, 0, 0)
+    firmware.write64(shared, base, 8, 0)
+    @event_at = firmware.scratch(base, 128)
+    @made = firmware.call(base, firmware.pointer(services, base, BOOT_CREATE_EVENT), [firmware.number(0), firmware.number(8), firmware.number(0), firmware.number(0), event_at])
+    (made.failed == yes) { out "CreateEvent не вышел" }
+    @event = firmware.pointer(event_at, base, 0)
+    @started = firmware.call(base, firmware.pointer(mp, base, STARTUP_THIS), [mp, code, firmware.number(CORE), event, firmware.number(0), shared, firmware.number(0)])
+    (started.failed == yes) {
+        @why = started.value
+        out "StartupThisAP отказал, код {why}"
+    }
+    pause(base, 2000)
+    @first = firmware.read32(shared, base, 0)
+    pause(base, 100000)
+    @second = firmware.read32(shared, base, 0)
+    firmware.write64(shared, base, 8, 1)
+    @done = "не дождалась"
+    drum (100) {
+        @check = firmware.call(base, firmware.pointer(services, base, BOOT_CHECK_EVENT), [event])
+        (check.failed == no) {
+            done = "второе ядро вернулось"
+            leave
+        }
+        pause(base, 1000)
+    }
+    @last = firmware.read32(shared, base, 0)
+    out "счётчик через 2 мс: {first}, через 102 мс: {second}, в конце: {last}; {done}"
+}

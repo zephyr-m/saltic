@@ -1,0 +1,45 @@
+-- cores — кусок для tools/snippet.py: служба многоядерности прошивки
+-- (EFI_MP_SERVICES_PROTOCOL): сколько процессоров, сколько включено, кто
+-- главный (WhoAmI) и где каждый сидит — пакет, ядро, поток.
+--
+-- snippet() -> текст: число процессоров и строка на каждый; NoMpServices
+
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+
+MP_GUID = [5, 166, 221, 63, 110, 167, 70, 79, 173, 41, 18, 244, 83, 27, 61, 8]
+BOOT_LOCATE_PROTOCOL = 320
+COUNT = 0
+INFO = 8
+WHO = 48
+
+skill snippet() {
+    @base = firmware.guest_base()
+    @guid_at = firmware.scratch(base, 32)
+    drum (16) { firmware.write8(guid_at, base, beat, group.get(MP_GUID, beat)) }
+    @found_at = firmware.scratch(base, 64)
+    @located = firmware.call(base, firmware.pointer(uefi.boot_services(base), base, BOOT_LOCATE_PROTOCOL), [guid_at, firmware.number(0), found_at])
+    (located.failed == yes) { out error.NoMpServices }
+    @mp = firmware.pointer(found_at, base, 0)
+    @numbers = firmware.scratch(base, 128)
+    @asked = firmware.call(base, firmware.pointer(mp, base, COUNT), [mp, numbers, firmware.add(numbers, 8)])
+    (asked.failed == yes) { out "GetNumberOfProcessors не ответила" }
+    @total = firmware.read32(numbers, base, 0)
+    @enabled = firmware.read32(numbers, base, 8)
+    firmware.call(base, firmware.pointer(mp, base, WHO), [mp, firmware.add(numbers, 16)])
+    @me = firmware.read32(numbers, base, 16)
+    @text = "процессоров {total}, включено {enabled}, главный {me}"
+    @info = firmware.scratch(base, 256)
+    drum (total) {
+        @got = firmware.call(base, firmware.pointer(mp, base, INFO), [mp, firmware.number(beat), info])
+        @apic = firmware.read32(info, base, 0)
+        @flags = firmware.read32(info, base, 8)
+        @package = firmware.read32(info, base, 12)
+        @core = firmware.read32(info, base, 16)
+        @thread = firmware.read32(info, base, 20)
+        @n = beat
+        text = "{text}\n#{n}: apic {apic}, флаги {flags}, пакет {package}, ядро {core}, поток {thread}"
+    }
+    out text
+}
