@@ -1,0 +1,421 @@
+-- run — граф Nodus считает. Значение (Val) — число, текст или список. Числа
+-- — целые в тысячных долях (MILLI): 3.5 — это 3500; «да» — 1, «нет» — 0.
+-- Счёт по запросу: узел считается, только когда его результат нужен, —
+-- от выходов назад по связям (demand), каждый узел один раз за пересчёт.
+-- «если» ленивое: сначала условие, потом только выбранная ветка, — поэтому
+-- программа может вызывать саму себя (рекурсия), пока глубина меньше DEPTH.
+-- Узел, который через связи зависит сам от себя, остаётся без значения.
+-- Что считать — по заголовку:
+--   число, текст — своё значение; время — секунды с запуска
+--   сложить, вычесть, умножить, делить, синус (градусы) — числа
+--   равно, меньше, или (1/0), если (условие, а, б; условие не 0 — а),
+--   склеить (тексты), список (пустой), добавить (список, элемент), взять
+--   (список, номер с 0), длина (символов или элементов)
+--   свернуть — входы: текст, затем состояния; программа узла (called)
+--     получает состояния и символ и отдаёт новые состояния — по символу
+--   показать, график, выход — отдают пришедшее
+-- Вставленная программа (вид CALL) считается внутри: её узлы «вход» по
+-- порядку получают пришедшее, её узлы «выход» по порядку — выходы узла.
+-- Программы на время одного пересчёта лежат в Shelf (с диска — один раз).
+-- Нет входа, не тот вид значения, неизвестный узел — значения нет.
+-- Результат — в node.result (текст), на диск не пишется; график копит
+-- node.history (последние HISTORY чисел).
+--
+-- Val { kind, number, text, items } — значение; NUMBER, TEXT, LIST
+-- Run { base, shelf, nodes, now, slots, depth, values, states } — один
+--     пересчёт одного графа: slots — что получили узлы «вход», states —
+--     WAITING, BUSY, DONE, FAILED по узлам
+-- MILLI, HISTORY, DEPTH — единица, длина истории, глубина вставок
+-- evaluate(base, nodes_graph, now, live) — посчитать граф; now — секунды ×
+--     MILLI; live = yes — добавить точку графикам
+-- number_of(text) -> число из «3», «-2», «0.5»; NotNumber
+-- shown(value) -> текст Val: 3.5, 'слово', [a, b] (кавычек «» нет в шрифте)
+-- ticking(nodes_graph) -> yes, если в графе есть «время»
+
+use core.str
+use core.num
+use core.group
+use os.target.uefi_x86_64.screen.geometry
+use os.target.uefi_x86_64.programs.nodus.graph
+use os.target.uefi_x86_64.programs.nodus.disk
+use os.target.uefi_x86_64.programs.nodus.look
+
+NUMBER = 0
+TEXT = 1
+LIST = 2
+MILLI = 1000
+HISTORY = 60
+DEPTH = 64
+WAITING = 0
+BUSY = 1
+DONE = 2
+FAILED = 3
+
+Val = Box {
+    kind = NUMBER,
+    number = 0,
+    text = "",
+    items = []
+}
+
+Shelf = Box {
+    files = [],
+    graphs = []
+}
+
+Run = Box {
+    base = [],
+    shelf = Shelf {},
+    nodes = graph.Graph {},
+    now = 0,
+    slots = [],
+    depth = 0,
+    values = [],
+    states = []
+}
+
+skill numeric(value) {
+    out Val { number = value }
+}
+
+skill textual(text) {
+    out Val { kind = TEXT, text = text }
+}
+
+skill number_of(text) {
+    @parts = str.split(text, ".")
+    (group.count(parts) == 0) { out error.NotNumber }
+    @head = group.get(parts, 0)
+    @negative = str.starts_with(head, "-")
+    @made = graph.whole(head) * MILLI
+    (group.count(parts) > 1) {
+        @tail = group.get(parts, 1)
+        @scale = MILLI / 10
+        drum (str.bytes(tail)) {
+            @letter = str.get(tail, beat)
+            (str.is_digit(letter) == no) { out error.NotNumber }
+            (scale > 0) {
+                @digit = (str.byte(letter, 0) - 48) * scale
+                (negative == yes) { digit = 0 - digit }
+                made = made + digit
+            }
+            scale = scale / 10
+        }
+    }
+    out made
+}
+
+skill number_text(value) {
+    @sign = ""
+    @rest = value
+    (rest < 0) {
+        sign = "-"
+        rest = 0 - rest
+    }
+    @whole = num.text(rest / MILLI)
+    @part = rest % MILLI
+    (part == 0) { out "{sign}{whole}" }
+    @digits = num.text(part)
+    drum (3 - str.bytes(digits)) { digits = "0{digits}" }
+    drum (3) {
+        (str.byte(digits, str.bytes(digits) - 1) == 48) { digits = str.slice(digits, 0, str.bytes(digits) - 1) }
+    }
+    out "{sign}{whole}.{digits}"
+}
+
+skill shown(value) {
+    (value.kind == NUMBER) { out number_text(value.number) }
+    (value.kind == TEXT) { out "'{value.text}'" }
+    @parts = []
+    drum (value.items) { parts = group.add(parts, shown(beat)) }
+    @inside = str.join(parts, ", ")
+    out "[{inside}]"
+}
+
+skill plain(value) {
+    (value.kind == TEXT) { out value.text }
+    out shown(value)
+}
+
+skill same(a, b) {
+    ((a.kind == b.kind) == no) { out no }
+    (a.kind == NUMBER) { out a.number == b.number }
+    (a.kind == TEXT) { out a.text == b.text }
+    out shown(a) == shown(b)
+}
+
+skill ticking(nodes_graph) {
+    drum (nodes_graph.nodes) {
+        (beat.title == "время") { out yes }
+    }
+    out no
+}
+
+skill source(nodes_graph, index, entry) {
+    drum (nodes_graph.links) {
+        @link = beat
+        (link.to == index) {
+            (link.entry == entry) { out link }
+        }
+    }
+    out none
+}
+
+skill shelved(base, shelf, file) {
+    drum (group.count(shelf.files)) {
+        (group.get(shelf.files, beat) == file) { out group.get(shelf.graphs, beat) }
+    }
+    @spot = look.View {}
+    @loaded = disk.load(base, file, spot) rescue |err| { none }
+    @inside = graph.Graph {}
+    (loaded) |loaded| { inside = loaded }
+    shelf.files = group.add(shelf.files, file)
+    shelf.graphs = group.add(shelf.graphs, inside)
+    out inside
+}
+
+skill numbers(args, count) {
+    (group.count(args) < count) { out no }
+    drum (count) {
+        @arg = group.get(args, beat)
+        ((arg.kind == NUMBER) == no) { out no }
+    }
+    out yes
+}
+
+skill arithmetic(title, args) {
+    (numbers(args, 1) == no) { out none }
+    @a = group.get(args, 0)
+    (title == "синус") {
+        @degrees = a.number % (360 * MILLI)
+        (degrees < 0) { degrees = degrees + 360 * MILLI }
+        out [numeric(geometry.sine(degrees * (geometry.TURN / 360) / MILLI) * MILLI / geometry.ONE)]
+    }
+    (numbers(args, 2) == no) { out none }
+    @b = group.get(args, 1)
+    (title == "сложить") { out [numeric(a.number + b.number)] }
+    (title == "вычесть") { out [numeric(a.number - b.number)] }
+    (title == "умножить") { out [numeric(a.number * b.number / MILLI)] }
+    (title == "делить") {
+        (b.number == 0) { out none }
+        out [numeric(a.number * MILLI / b.number)]
+    }
+    out none
+}
+
+skill words(title, args) {
+    (title == "список") { out [Val { kind = LIST }] }
+    (group.count(args) == 0) { out none }
+    @a = group.get(args, 0)
+    (title == "длина") {
+        (a.kind == TEXT) { out [numeric(str.count(a.text) * MILLI)] }
+        (a.kind == LIST) { out [numeric(group.count(a.items) * MILLI)] }
+        out none
+    }
+    (group.count(args) < 2) { out none }
+    @b = group.get(args, 1)
+    (title == "равно") {
+        (same(a, b) == yes) { out [numeric(MILLI)] }
+        out [numeric(0)]
+    }
+    (title == "склеить") {
+        @left = plain(a)
+        @right = plain(b)
+        out [textual("{left}{right}")]
+    }
+    (title == "добавить") {
+        ((a.kind == LIST) == no) { out none }
+        out [Val { kind = LIST, items = group.add(a.items, b) }]
+    }
+    (title == "взять") {
+        ((a.kind == LIST) == no) { out none }
+        ((b.kind == NUMBER) == no) { out none }
+        @at = b.number / MILLI
+        (at < 0) { out none }
+        (at >= group.count(a.items)) { out none }
+        out [group.get(a.items, at)]
+    }
+    (numbers(args, 2) == yes) {
+        (title == "меньше") {
+            (a.number < b.number) { out [numeric(MILLI)] }
+            out [numeric(0)]
+        }
+        (title == "или") {
+            (a.number == 0) {
+                (b.number == 0) { out [numeric(0)] }
+            }
+            out [numeric(MILLI)]
+        }
+    }
+    out none
+}
+
+skill fold(run, node, args) {
+    (group.count(args) < 2) { out none }
+    @source_text = group.get(args, 0)
+    ((source_text.kind == TEXT) == no) { out none }
+    @inside = shelved(run.base, run.shelf, node.called)
+    @states = group.slice(args, 1, group.count(args))
+    drum (str.bytes(source_text.text)) {
+        @letter = textual(str.slice(source_text.text, beat, beat + 1))
+        @next = outputs_of(run, inside, group.add(states, letter))
+        (next) |next| {
+            (group.count(next) == group.count(states)) { states = next }
+        }
+    }
+    out states
+}
+
+skill start(base, shelf, nodes_graph, now, bound, depth) {
+    @run = Run { base = base, shelf = shelf, nodes = nodes_graph, now = now, depth = depth }
+    @values = []
+    @states = []
+    @slots = []
+    @inputs_seen = 0
+    drum (nodes_graph.nodes) {
+        @node = beat
+        values = group.add(values, [])
+        states = group.add(states, WAITING)
+        @slot = []
+        (node.kind == graph.IN) {
+            (inputs_seen < group.count(bound)) { slot = [group.get(bound, inputs_seen)] }
+            inputs_seen = inputs_seen + 1
+        }
+        slots = group.add(slots, slot)
+    }
+    run.values = values
+    run.states = states
+    run.slots = slots
+    out run
+}
+
+skill outputs_of(run, inside, bound) {
+    (run.depth >= DEPTH) { out none }
+    @inner = start(run.base, run.shelf, inside, run.now, bound, run.depth + 1)
+    @outputs = []
+    drum (group.count(inside.nodes)) {
+        @node = group.get(inside.nodes, beat)
+        (node.kind == graph.OUT) {
+            @made = demand(inner, beat)
+            @got = no
+            (made) |made| {
+                got = yes
+                outputs = group.add(outputs, group.get(made, 0))
+            }
+            (got == no) { out none }
+        }
+    }
+    out outputs
+}
+
+skill put(items, index, value) {
+    out group.concat(group.add(group.slice(items, 0, index), value), group.slice(items, index + 1, group.count(items)))
+}
+
+skill input(run, index, entry) {
+    @found = source(run.nodes, index, entry)
+    (found) |link| {
+        (link.from >= group.count(run.states)) { out none }
+        @outputs = demand(run, link.from)
+        (outputs) |outputs| {
+            (link.exit < group.count(outputs)) { out group.get(outputs, link.exit) }
+        }
+    }
+    out none
+}
+
+skill compute(run, node, args, slot) {
+    @title = node.title
+    (node.kind == graph.IN) {
+        (group.count(slot) > 0) { out slot }
+        out none
+    }
+    (node.kind == graph.CALL) { out outputs_of(run, shelved(run.base, run.shelf, node.called), args) }
+    (title == "число") {
+        @value = number_of(node.value) rescue |err| { out none }
+        out [numeric(value)]
+    }
+    (title == "текст") { out [textual(node.value)] }
+    (title == "время") { out [numeric(run.now)] }
+    (title == "свернуть") { out fold(run, node, args) }
+    @counted = arithmetic(title, args)
+    (counted) |counted| { out counted }
+    @worded = words(title, args)
+    (worded) |worded| { out worded }
+    (group.count(args) > 0) {
+        (title == "показать") { out [group.get(args, 0)] }
+        (title == "график") { out [group.get(args, 0)] }
+        (node.kind == graph.OUT) { out [group.get(args, 0)] }
+    }
+    out none
+}
+
+skill work(run, index) {
+    @node = group.get(run.nodes.nodes, index)
+    (node.title == "если") {
+        @condition = input(run, index, 0)
+        (condition) |condition| {
+            @entry = 1
+            (condition.kind == NUMBER) {
+                (condition.number == 0) { entry = 2 }
+            }
+            @chosen = input(run, index, entry)
+            (chosen) |chosen| { out [chosen] }
+        }
+        out none
+    }
+    @args = []
+    drum (group.count(node.inputs)) {
+        @arg = input(run, index, beat)
+        @got = no
+        (arg) |arg| {
+            got = yes
+            args = group.add(args, arg)
+        }
+        (got == no) { out none }
+    }
+    out compute(run, node, args, group.get(run.slots, index))
+}
+
+skill demand(run, index) {
+    @state = group.get(run.states, index)
+    (state == DONE) { out group.get(run.values, index) }
+    ((state == WAITING) == no) { out none }
+    run.states = put(run.states, index, BUSY)
+    @made = work(run, index)
+    @final = FAILED
+    @kept = []
+    (made) |made| {
+        final = DONE
+        kept = made
+    }
+    run.states = put(run.states, index, final)
+    run.values = put(run.values, index, kept)
+    (final == FAILED) { out none }
+    out kept
+}
+
+skill evaluate(base, nodes_graph, now, live) {
+    @run = start(base, Shelf {}, nodes_graph, now, [], 0)
+    drum (group.count(nodes_graph.nodes)) {
+        @node = group.get(nodes_graph.nodes, beat)
+        node.result = ""
+        @made = demand(run, beat)
+        (made) |outputs| {
+            (group.count(outputs) > 0) {
+                @first = group.get(outputs, 0)
+                node.result = shown(first)
+                (node.title == "график") {
+                    (live == yes) {
+                        (first.kind == NUMBER) {
+                            @history = group.add(node.history, first.number)
+                            (group.count(history) > HISTORY) { history = group.slice(history, group.count(history) - HISTORY, group.count(history)) }
+                            node.history = history
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out none
+}

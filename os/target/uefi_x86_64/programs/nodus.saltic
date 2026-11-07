@@ -1,0 +1,284 @@
+-- nodus — Nodus: холст живого графа. Узлы — карточки со входами и выходами,
+-- связи — плавные кривые (programs/nodus/{graph,look}). Пока только вид:
+-- пример из рисунка, значения нарисованы. Первые WIDE_AFTER секунд — в
+-- середине экрана между панелями, потом холст на весь экран (remote больше
+-- не рисует панели), граф остаётся на том же месте. Кадр рисуется в задний
+-- буфер и ложится на экран целиком, только когда что-то поменялось.
+-- По mRPC — свои команды (programs/nodus/commands: nodes, node, link, set,
+-- remove, unlink, clear, view): граф собирают по сети.
+-- Программы-ноды: слева список (programs/nodus/catalog), у каждой свой граф
+-- в своём файле (programs/nodus/disk); открытая поднимается при запуске
+-- (нет файла у первой — пример), пишется через SAVE_AFTER секунд после
+-- последней правки, при выходе по Esc и перед открытием другой. [ и ] —
+-- предыдущая и следующая программа; команда open кладёт номер в wanted.
+-- Граф считает (programs/nodus/run): после правки, при открытии и, если в
+-- нём есть «время», сам каждые TICK_EVERY проходов (время — по проходам
+-- цикла, PAUSE на проход).
+-- Клавиши: Tab — выбрать следующий узел или холст; стрелки — двигать холст
+-- или выбранный узел; Esc — выход. По сети — state, quit, key, shot.
+--
+-- Desk { base, middle, whole, back, narrow, nodes, view, palette, wide,
+--     started, dirty, unsaved, changed, catalog, wanted, link } — narrow — тот же задний
+--     буфер шириной middle; unsaved — есть правки не на диске, changed —
+--     секунда последней правки
+-- touched(desk) — граф поменялся: перерисовать и сохранить позже
+-- save_now(desk) — на диск; сдвиг холста — как между панелями
+-- file(desk) -> файл открытой программы; switch(desk) — открыть wanted
+-- recount(desk, live) — посчитать граф; live — добавить точку графикам
+-- moment(base) -> секунда суток
+-- status(desk) -> строка внизу
+-- steer(desk, key) — клавиша; out yes — выход
+-- widen(desk) — на весь экран
+-- show(desk) — нарисовать и выложить кадр
+-- answer(desk, link, packet) — ответить на команду mRPC программы
+-- program() — вход
+
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.remote
+use os.target.uefi_x86_64.programs.nodus.graph
+use os.target.uefi_x86_64.programs.nodus.look
+use os.target.uefi_x86_64.programs.nodus.commands
+use os.target.uefi_x86_64.programs.nodus.disk
+use os.target.uefi_x86_64.programs.nodus.catalog
+use os.target.uefi_x86_64.programs.nodus.run
+use os.target.uefi_x86_64.network.mrpc
+
+PAUSE = 10000
+WIDE_AFTER = 10
+SAVE_AFTER = 2
+CLOCK_EVERY = 20
+TICK_EVERY = 10
+DAY = 86400
+PAN = 24
+NUDGE = 12
+SCAN_UP = 1
+SCAN_DOWN = 2
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+SCAN_ESCAPE = 23
+TAB = 9
+BACK = 91
+NEXT = 93
+
+Desk = Box {
+    base = [],
+    middle = graphics.Screen {},
+    whole = graphics.Screen {},
+    back = graphics.Screen {},
+    narrow = graphics.Screen {},
+    nodes = graph.Graph {},
+    view = look.View {},
+    palette = look.Palette {},
+    wide = no,
+    started = 0,
+    dirty = yes,
+    unsaved = no,
+    changed = 0,
+    catalog = catalog.Catalog {},
+    wanted = -1,
+    rounds = 0,
+    link = none
+}
+
+skill moment(base) {
+    @clock = uefi.now(base)
+    out clock.hour * 3600 + clock.minute * 60 + clock.second
+}
+
+skill status(desk) {
+    @nodes = group.count(desk.nodes.nodes)
+    @links = group.count(desk.nodes.links)
+    @view = desk.view
+    @chosen = "холст"
+    @hint = "стрелки — двигать холст"
+    (view.chosen >= 0) {
+        @node = group.get(desk.nodes.nodes, view.chosen)
+        chosen = node.title
+        hint = "стрелки — двигать узел"
+    }
+    @entry = catalog.entry_at(desk.catalog, desk.catalog.open)
+    out "{entry.name}  |  узлов {nodes}  |  связей {links}  |  выбрано: {chosen}  |  {hint}  |  Tab — выбор  |  Esc — выход"
+}
+
+skill save_now(desk) {
+    @view = desk.view
+    @x = view.x
+    (desk.wide == yes) { x = x - graphics.side_width(desk.whole.width) }
+    out disk.save(desk.base, file(desk), desk.nodes, look.View { x = x, y = view.y })
+}
+
+skill file(desk) {
+    @entry = catalog.entry_at(desk.catalog, desk.catalog.open)
+    out entry.file
+}
+
+skill opened(base, registry, view) {
+    @entry = catalog.entry_at(registry, registry.open)
+    @loaded = disk.load(base, entry.file, view) rescue |err| { none }
+    (loaded) |loaded| { out loaded }
+    (entry.file == catalog.FIRST) { out graph.example() }
+    out graph.Graph {}
+}
+
+skill switch(desk) {
+    @registry = desk.catalog
+    @wanted = desk.wanted
+    desk.wanted = -1
+    (desk.unsaved == yes) {
+        save_now(desk)
+        desk.unsaved = no
+    }
+    registry.open = wanted
+    catalog.save(desk.base, registry)
+    @view = look.View {}
+    desk.nodes = opened(desk.base, registry, view)
+    (desk.wide == yes) { view.x = view.x + graphics.side_width(desk.whole.width) }
+    desk.view = view
+    recount(desk, no)
+    desk.dirty = yes
+    out none
+}
+
+skill recount(desk, live) {
+    out run.evaluate(desk.base, desk.nodes, desk.rounds * PAUSE / 1000, live)
+}
+
+skill touched(desk) {
+    recount(desk, no)
+    desk.dirty = yes
+    desk.unsaved = yes
+    desk.changed = moment(desk.base)
+    out none
+}
+
+skill shift(desk, dx, dy) {
+    touched(desk)
+    @view = desk.view
+    (view.chosen < 0) {
+        view.x = view.x + dx * PAN
+        view.y = view.y + dy * PAN
+        out none
+    }
+    @node = group.get(desk.nodes.nodes, view.chosen)
+    node.x = node.x + dx * NUDGE
+    node.y = node.y + dy * NUDGE
+    out none
+}
+
+skill steer(desk, key) {
+    (key.ready == no) { out no }
+    (key.scan == SCAN_ESCAPE) { out yes }
+    desk.dirty = yes
+    @view = desk.view
+    (key.char == TAB) {
+        view.chosen = view.chosen + 1
+        (view.chosen >= group.count(desk.nodes.nodes)) { view.chosen = -1 }
+    }
+    @count = group.count(desk.catalog.entries)
+    (key.char == BACK) { desk.wanted = (desk.catalog.open + count - 1) % count }
+    (key.char == NEXT) { desk.wanted = (desk.catalog.open + 1) % count }
+    (key.scan == SCAN_LEFT) { shift(desk, -1, 0) }
+    (key.scan == SCAN_RIGHT) { shift(desk, 1, 0) }
+    (key.scan == SCAN_UP) { shift(desk, 0, -1) }
+    (key.scan == SCAN_DOWN) { shift(desk, 0, 1) }
+    out no
+}
+
+skill widen(desk) {
+    desk.wide = yes
+    desk.dirty = yes
+    @view = desk.view
+    view.x = view.x + graphics.side_width(desk.whole.width)
+    @link = desk.link
+    (link) |link| { remote.hide_panels(link) }
+    out none
+}
+
+skill show(desk) {
+    desk.dirty = no
+    @screen = desk.narrow
+    @front = desk.middle
+    (desk.wide == yes) {
+        screen = desk.back
+        front = desk.whole
+    }
+    @text = status(desk)
+    @names = []
+    drum (desk.catalog.entries) { names = group.add(names, beat.name) }
+    look.draw(desk.base, screen, desk.nodes, desk.view, desk.palette, text, [names, desk.catalog.open])
+    graphics.push(desk.base, front, screen)
+    @link = desk.link
+    (link) |link| { remote.tell(link, "nodus: {text}") }
+    out none
+}
+
+skill answer(desk, link, packet) {
+    @call = mrpc.decode(packet.text)
+    @text = commands.run(desk, call) rescue |err| {
+        remote.fail_mrpc(link, packet, "{err}")
+        out none
+    }
+    desk.dirty = yes
+    @asked = call.cmd == "nodes"
+    (call.cmd == "programs") { asked = yes }
+    (asked == no) { touched(desk) }
+    out remote.reply_mrpc(link, packet, text)
+}
+
+program() {
+    @base = firmware.guest_base()
+    uefi.forget_keys(base)
+    @middle = graphics.open(base)
+    @whole = graphics.open_whole(base)
+    @back = graphics.buffer_like(base, whole)
+    @narrow = graphics.Screen { width = middle.width, height = middle.height, stride = back.stride, format = back.format, frame = back.frame, memory = back.memory, accel = back.accel }
+    @link = remote.open_remote() rescue |err| { none }
+    (link) |link| {
+        remote.own(link, back.frame, graphics.buffer_pages(whole))
+        remote.offer(link, commands.COMMANDS)
+    }
+    @view = look.View {}
+    @registry = catalog.load(base)
+    @nodes = opened(base, registry, view)
+    @desk = Desk { catalog = registry, base = base, middle = middle, whole = whole, back = back, narrow = narrow, nodes = nodes, view = view, palette = look.palette(whole), started = moment(base), link = link }
+    recount(desk, no)
+    always {
+        (link) |link| {
+            drum (remote.serve(link)) { answer(desk, link, beat) }
+        }
+        (steer(desk, uefi.poll_key(base, PAUSE)) == yes) {
+            (desk.unsaved == yes) { save_now(desk) }
+            uefi.free_pages(base, back.frame, graphics.buffer_pages(whole))
+            reply.home("nodus: вышла")
+            out none
+        }
+        desk.rounds = desk.rounds + 1
+        @rounds = desk.rounds
+        (desk.wanted >= 0) { switch(desk) }
+        (rounds % TICK_EVERY == 0) {
+            (run.ticking(desk.nodes) == yes) {
+                recount(desk, yes)
+                desk.dirty = yes
+            }
+        }
+        (desk.unsaved == yes) {
+            (rounds % CLOCK_EVERY == 0) {
+                ((moment(base) - desk.changed + DAY) % DAY >= SAVE_AFTER) {
+                    save_now(desk)
+                    desk.unsaved = no
+                }
+            }
+        }
+        (desk.wide == no) {
+            (rounds % CLOCK_EVERY == 0) {
+                ((moment(base) - desk.started + DAY) % DAY >= WIDE_AFTER) { widen(desk) }
+            }
+        }
+        (desk.dirty == yes) { show(desk) }
+    }
+    out none
+}

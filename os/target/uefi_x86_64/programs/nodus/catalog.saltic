@@ -1,0 +1,99 @@
+-- catalog — программы Nodus: у каждой свой граф в своём файле (N001.TXT…,
+-- имена файлов на диске — только латиница), а русские имена и какая открыта
+-- — в каталоге \SALTIC\NODCAT.TXT, по строке:
+--   program|файл|=имя
+--   open|номер
+-- Каталога нет — первой программой становится прежний граф NODUS.TXT
+-- («пример»), ничего не копируется.
+--
+-- Entry { file, name } — программа; Catalog { entries, open } — список и
+-- номер открытой
+-- load(base) -> Catalog; save(base, catalog)
+-- add(catalog, name) -> номер новой программы (файл — следующий свободный)
+-- entry_at(catalog, index) -> Entry; NoSuchProgram
+-- find_file(catalog, file) -> номер или -1
+
+use core.str
+use core.num
+use core.group
+use os.target.uefi_x86_64.storage.notes
+use os.target.uefi_x86_64.programs.nodus.graph
+
+CATALOG = "NODCAT.TXT"
+FIRST = "NODUS.TXT"
+
+Entry = Box {
+    file = "",
+    name = ""
+}
+
+Catalog = Box {
+    entries = [],
+    open = 0
+}
+
+skill plain(text) {
+    (str.starts_with(text, "=") == yes) { out str.slice(text, 1, str.bytes(text)) }
+    out text
+}
+
+skill load(base) {
+    @text = notes.load_note(base, CATALOG) rescue |err| { "" }
+    @catalog = Catalog {}
+    drum (str.lines(text)) {
+        @parts = str.split(beat, "|")
+        @kind = group.get(parts, 0)
+        (kind == "program") {
+            (group.count(parts) == 3) { catalog.entries = group.add(catalog.entries, Entry { file = group.get(parts, 1), name = plain(group.get(parts, 2)) }) }
+        }
+        (kind == "open") {
+            (group.count(parts) == 2) { catalog.open = graph.whole(group.get(parts, 1)) rescue |err| { 0 } }
+        }
+    }
+    (group.count(catalog.entries) == 0) { catalog.entries = [Entry { file = FIRST, name = "пример" }] }
+    (catalog.open >= group.count(catalog.entries)) { catalog.open = 0 }
+    out catalog
+}
+
+skill save(base, catalog) {
+    @lines = []
+    drum (catalog.entries) {
+        @entry = beat
+        @name = str.join(str.split(entry.name, "|"), "/")
+        lines = group.add(lines, "program|{entry.file}|={name}")
+    }
+    lines = group.add(lines, "open|{catalog.open}")
+    notes.save_note(base, CATALOG, str.join(lines, "\n")) rescue |err| { none }
+    out none
+}
+
+skill file_name(number) {
+    @digits = num.text(number)
+    drum (3 - str.bytes(digits)) { digits = "0{digits}" }
+    out "N{digits}.TXT"
+}
+
+skill find_file(catalog, file) {
+    drum (group.count(catalog.entries)) {
+        @entry = group.get(catalog.entries, beat)
+        (entry.file == file) { out beat }
+    }
+    out -1
+}
+
+skill add(catalog, name) {
+    @number = 1
+    always {
+        (find_file(catalog, file_name(number)) < 0) { leave }
+        number = number + 1
+    }
+    @count = group.count(catalog.entries)
+    catalog.entries = group.add(catalog.entries, Entry { file = file_name(number), name = name })
+    out count
+}
+
+skill entry_at(catalog, index) {
+    (index < 0) { out error.NoSuchProgram }
+    (index >= group.count(catalog.entries)) { out error.NoSuchProgram }
+    out group.get(catalog.entries, index)
+}

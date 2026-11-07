@@ -24,6 +24,13 @@
 -- serve(remote) -> группа пакетов Udp для программы
 -- tell(remote, text) — сообщить своё состояние (отвечает на state)
 -- own(remote, place, pages) — страницы прошивки, которые вернуть при quit
+-- offer(remote, commands) — свои команды mRPC программы (mrpc.Command): видны
+--     в help, запрос с ними remote не отвечает, а отдаёт программе пакетом
+-- reply_mrpc(remote, packet, text) / fail_mrpc(remote, packet, message) —
+--     ответ программы на свой запрос mRPC: успех с текстом / ошибка
+--     invalid_param
+-- hide_panels(remote) — больше не рисовать панели (программа на весь экран):
+--     ни системную, ни сетевой журнал; журнал эти пакеты не запоминает
 -- reply_text(remote, packet, text) — ответить отправителю
 -- send_to(remote, packet, port, text_bytes) — ответить на другой порт
 -- answer(remote, bytes) -> пакет или none — разбор одного кадра (для serve)
@@ -66,6 +73,8 @@ Remote = Box {
     shot_bytes = 0,
     state = "",
     owned = [],
+    commands = [],
+    panels = yes,
     rounds = 0,
     meter = system_panel.Meter {},
     wifi = none,
@@ -107,7 +116,7 @@ skill transmit(remote, frame) {
 }
 
 skill reply_text(remote, packet, text) {
-    netlog.say_text(remote.card.base, text)
+    (remote.panels == yes) { netlog.say_text(remote.card.base, text) }
     out transmit(remote, net.udp_frame(our_mac(remote), my_ip(remote), packet.from_mac, packet.from_ip, PORT, packet.from_port, text))
 }
 
@@ -128,8 +137,9 @@ skill answer(remote, bytes) {
         shot.send_chunk(remote.card, remote.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(PART), str.bytes(packet.text))))
         out none
     }
-    netlog.ask(remote.card.base, packet.payload)
+    (remote.panels == yes) { netlog.ask(remote.card.base, packet.payload) }
     (mrpc.is_request(packet.payload) == yes) {
+        (theirs(remote, packet) == yes) { out packet }
         answer_mrpc(remote, packet)
         out none
     }
@@ -185,15 +195,18 @@ skill answer_mrpc(remote, packet) {
         (asked.ok == no) { out send_to(remote, packet, packet.from_port, mrpc.failure(call, "missing_param", "нужен параметр key", "key", 0)) }
         out send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode(key_reply(str.slice(asked.text, 4, str.bytes(asked.text)))), 0, REPLY_LIMIT))
     }
-    (call.cmd == "help") { out send_to(remote, packet, packet.from_port, mrpc.help(call, COMMANDS, 0, REPLY_LIMIT)) }
-    out send_to(remote, packet, packet.from_port, mrpc.unknown(call, COMMANDS, 0))
+    @registry = group.concat(COMMANDS, remote.commands)
+    (call.cmd == "help") { out send_to(remote, packet, packet.from_port, mrpc.help(call, registry, 0, REPLY_LIMIT)) }
+    out send_to(remote, packet, packet.from_port, mrpc.unknown(call, registry, 0))
 }
 
 skill serve(remote) {
     remote.rounds = remote.rounds + 1
     @meter = remote.meter
     meter.rounds = remote.rounds
-    (remote.rounds % PANEL_EVERY == 0) { system_panel.tick(remote.card.base, remote.card, meter) rescue |err| { none } }
+    (remote.rounds % PANEL_EVERY == 0) {
+        (remote.panels == yes) { system_panel.tick(remote.card.base, remote.card, meter) rescue |err| { none } }
+    }
     @packets = []
     drum (rtl8111.RX_COUNT) {
         (rtl8111.received(remote.card, beat) == yes) {
@@ -217,12 +230,40 @@ skill serve(remote) {
 }
 
 skill send_to(remote, packet, port, text_bytes) {
-    netlog.say(remote.card.base, text_bytes)
+    (remote.panels == yes) { netlog.say(remote.card.base, text_bytes) }
     out transmit(remote, net.udp_frame_bytes(our_mac(remote), my_ip(remote), packet.from_mac, packet.from_ip, PORT, port, text_bytes))
 }
 
 skill tell(remote, text) {
     remote.state = text
+    out none
+}
+
+skill offer(remote, commands) {
+    remote.commands = commands
+    out none
+}
+
+skill theirs(remote, packet) {
+    @call = mrpc.decode(packet.text)
+    (call.ok == no) { out no }
+    @found = mrpc.find(remote.commands, call.cmd)
+    (found) |found| { out yes }
+    out no
+}
+
+skill reply_mrpc(remote, packet, text) {
+    @call = mrpc.decode(packet.text)
+    out send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode(text), 0, REPLY_LIMIT))
+}
+
+skill fail_mrpc(remote, packet, message) {
+    @call = mrpc.decode(packet.text)
+    out send_to(remote, packet, packet.from_port, mrpc.failure(call, "invalid_param", message, "", 0))
+}
+
+skill hide_panels(remote) {
+    remote.panels = no
     out none
 }
 

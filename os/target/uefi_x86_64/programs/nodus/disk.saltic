@@ -1,0 +1,88 @@
+-- disk — граф одной программы Nodus на диске: файл в \SALTIC (storage.notes,
+-- до 32 КБ; какой — говорит каталог, nodus/catalog), по строке на запись,
+-- поля через |:
+--   node|=заголовок|x|y|ширина|вид|=вход;вход|=выход;выход|=значение|=программа
+--   link|откуда|выход|куда|вход
+--   view|x|y
+-- | и ; в текстах при записи становятся / — иначе строка развалится.
+-- Текстовое поле начинается с = : пустых полей не бывает (str.split пустые
+-- выбрасывает, и поля бы съехали).
+--
+-- Строки без поля «программа» (прежний формат) читаются тоже.
+-- save(base, file, nodes_graph, view) — записать (ошибка записи — молча мимо)
+-- load(base, file, view) -> Graph из файла или none — файла нет или он
+--     пустой; сдвиг холста — в view
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.storage.notes
+use os.target.uefi_x86_64.programs.nodus.graph
+
+skill clean(text) {
+    out str.join(str.split(str.join(str.split(text, "|"), "/"), ";"), "/")
+}
+
+skill joined(items) {
+    @made = []
+    drum (items) { made = group.add(made, clean(beat)) }
+    out str.join(made, ";")
+}
+
+skill save(base, file, nodes_graph, view) {
+    @lines = ["view|{view.x}|{view.y}"]
+    drum (nodes_graph.nodes) {
+        @node = beat
+        @title = clean(node.title)
+        @inputs = joined(node.inputs)
+        @outputs = joined(node.outputs)
+        @shown = clean(node.value)
+        lines = group.add(lines, "node|={title}|{node.x}|{node.y}|{node.width}|{node.kind}|={inputs}|={outputs}|={shown}|={node.called}")
+    }
+    drum (nodes_graph.links) {
+        @link = beat
+        lines = group.add(lines, "link|{link.from}|{link.exit}|{link.to}|{link.entry}")
+    }
+    notes.save_note(base, file, str.join(lines, "\n")) rescue |err| { none }
+    out none
+}
+
+skill plain(text) {
+    (str.starts_with(text, "=") == yes) { out str.slice(text, 1, str.bytes(text)) }
+    out text
+}
+
+skill names(text) {
+    @bare = plain(text)
+    (str.bytes(bare) == 0) { out [] }
+    out str.split(bare, ";")
+}
+
+skill field(parts, index) {
+    out graph.whole(group.get(parts, index))
+}
+
+skill load(base, file, view) {
+    @text = notes.load_note(base, file) rescue |err| { "" }
+    (str.bytes(text) == 0) { out none }
+    @nodes = []
+    @links = []
+    drum (str.lines(text)) {
+        @parts = str.split(beat, "|")
+        @kind = group.get(parts, 0)
+        (kind == "view") {
+            (group.count(parts) == 3) {
+                view.x = field(parts, 1)
+                view.y = field(parts, 2)
+            }
+        }
+        (kind == "node") {
+            @called = ""
+            (group.count(parts) == 10) { called = plain(group.get(parts, 9)) }
+            (group.count(parts) >= 9) { nodes = group.add(nodes, graph.Node { called = called, title = plain(group.get(parts, 1)), x = field(parts, 2), y = field(parts, 3), width = field(parts, 4), kind = field(parts, 5), inputs = names(group.get(parts, 6)), outputs = names(group.get(parts, 7)), value = plain(group.get(parts, 8)) }) }
+        }
+        (kind == "link") {
+            (group.count(parts) == 5) { links = group.add(links, graph.Link { from = field(parts, 1), exit = field(parts, 2), to = field(parts, 3), entry = field(parts, 4) }) }
+        }
+    }
+    out graph.Graph { nodes = nodes, links = links }
+}

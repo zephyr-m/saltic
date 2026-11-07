@@ -1,0 +1,248 @@
+-- commands — команды mRPC Nodus (remote.offer): по ним граф собирают по сети,
+-- например агент через acer_call. Числа — целые, со знаком; inputs и outputs
+-- — массивы строк JSON. Узлы и связи — по номерам из nodes; после remove
+-- номера узлов дальше удалённого сдвигаются на один.
+--
+-- Программы: new, open, rename, programs; use — вставить программу узлом
+-- (вид «программа»: входы и выходы — подписи её узлов «вход» и «выход»).
+-- Открыть другую программу команда не может сама — она кладёт номер в
+-- desk.wanted, переключает программа (сохранив текущую).
+--
+-- COMMANDS — реестр для remote.offer и help
+-- run(desk, call) -> текст ответа; desk — Desk программы (nodes, view, base,
+--     catalog, wanted); ошибки — NoSuchCommand, NoSuchNode, NoSuchLink,
+--     NoSuchPort, NotNumber, NeedTitle, NeedName, NoSuchKind, NoSuchProgram
+-- listing(nodes_graph) -> узлы и связи текстом
+-- Внутри: given / number / names — поля запроса; drop(nodes_graph, index) — убрать узел и его связи
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.network.mrpc
+use craft.protocols.data.json
+use craft.protocols.data.json.value
+use os.target.uefi_x86_64.programs.nodus.graph
+use os.target.uefi_x86_64.programs.nodus.look
+use os.target.uefi_x86_64.programs.nodus.disk
+use os.target.uefi_x86_64.programs.nodus.catalog
+
+COMMANDS = [
+    mrpc.Command { name = "nodes", kind = "query", about = "узлы и связи текстом: номер, заголовок, место, входы, выходы, значение" },
+    mrpc.Command { name = "node", kind = "exec", params = ["title"], options = ["x", "y", "width", "inputs", "outputs", "value", "kind", "program"], about = "новый узел; inputs и outputs — массивы строк; kind — обычный, кривая, вход, выход; program — номер программы для «свернуть»; ответ — номер" },
+    mrpc.Command { name = "link", kind = "exec", params = ["from", "to"], options = ["exit", "entry"], about = "связь от выхода exit узла from ко входу entry узла to (по умолчанию 0)" },
+    mrpc.Command { name = "set", kind = "exec", params = ["id"], options = ["title", "x", "y", "width", "inputs", "outputs", "value", "kind", "program"], about = "поменять узел id" },
+    mrpc.Command { name = "remove", kind = "exec", params = ["id"], about = "убрать узел id вместе с его связями" },
+    mrpc.Command { name = "unlink", kind = "exec", params = ["id"], about = "убрать связь номер id" },
+    mrpc.Command { name = "clear", kind = "exec", about = "пустой холст" },
+    mrpc.Command { name = "view", kind = "exec", options = ["x", "y"], about = "сдвиг холста" },
+    mrpc.Command { name = "programs", kind = "query", about = "программы: номер, имя, файл; открытая помечена" },
+    mrpc.Command { name = "new", kind = "exec", params = ["name"], about = "новая пустая программа, сразу открывается; ответ — номер" },
+    mrpc.Command { name = "open", kind = "exec", params = ["id"], about = "открыть программу номер id (текущая сохраняется)" },
+    mrpc.Command { name = "rename", kind = "exec", params = ["id", "name"], about = "переименовать программу" },
+    mrpc.Command { name = "use", kind = "exec", params = ["program"], options = ["x", "y"], about = "вставить программу номер program узлом: входы и выходы — её узлы «вход» и «выход»" }
+]
+
+skill given(call, name) {
+    @found = value.get(call.request, name)
+    (found.found == no) { out none }
+    out mrpc.plain(found.value)
+}
+
+skill number(call, name, fallback) {
+    @text = given(call, name)
+    (text) |text| { out graph.whole(text) }
+    out fallback
+}
+
+skill names(call, name, fallback) {
+    @found = value.get(call.request, name)
+    (found.found == no) { out fallback }
+    (value.is_kind(found.value, json.JsonKind.ARRAY) == no) { out [mrpc.plain(found.value)] }
+    @made = []
+    drum (found.value.items) { made = group.add(made, mrpc.plain(beat)) }
+    out made
+}
+
+skill node_at(nodes_graph, index) {
+    (index < 0) { out error.NoSuchNode }
+    (index >= group.count(nodes_graph.nodes)) { out error.NoSuchNode }
+    out group.get(nodes_graph.nodes, index)
+}
+
+skill listing(nodes_graph) {
+    @lines = []
+    drum (group.count(nodes_graph.nodes)) {
+        @node = group.get(nodes_graph.nodes, beat)
+        @n = beat
+        @inputs = str.join(node.inputs, ", ")
+        @outputs = str.join(node.outputs, ", ")
+        @result = ""
+        (str.bytes(node.result) > 0) { result = " = {node.result}" }
+        lines = group.add(lines, "#{n} {node.title} ({node.x}, {node.y}) входы [{inputs}] выходы [{outputs}] значение «{node.value}»{result}")
+    }
+    drum (group.count(nodes_graph.links)) {
+        @link = group.get(nodes_graph.links, beat)
+        @n = beat
+        lines = group.add(lines, "связь #{n}: {link.from}.{link.exit} → {link.to}.{link.entry}")
+    }
+    (group.count(lines) == 0) { out "холст пуст" }
+    out str.join(lines, "\n")
+}
+
+skill fill(desk, node, call) {
+    @title = given(call, "title")
+    (title) |title| { node.title = title }
+    @placed = given(call, "value")
+    (placed) |placed| { node.value = placed }
+    node.x = number(call, "x", node.x)
+    node.y = number(call, "y", node.y)
+    node.width = number(call, "width", node.width)
+    node.inputs = names(call, "inputs", node.inputs)
+    node.outputs = names(call, "outputs", node.outputs)
+    @kind = given(call, "kind")
+    (kind) |kind| { node.kind = graph.kind_of(kind) }
+    @used = given(call, "program")
+    (used) |used| {
+        @entry = catalog.entry_at(desk.catalog, graph.whole(used))
+        node.called = entry.file
+    }
+    out node
+}
+
+skill drop(nodes_graph, index) {
+    @kept = []
+    drum (group.count(nodes_graph.nodes)) {
+        ((beat == index) == no) { kept = group.add(kept, group.get(nodes_graph.nodes, beat)) }
+    }
+    @links = []
+    drum (group.count(nodes_graph.links)) {
+        @link = group.get(nodes_graph.links, beat)
+        @touches = link.from == index
+        (link.to == index) { touches = yes }
+        (touches == no) {
+            @from = link.from
+            @to = link.to
+            (from > index) { from = from - 1 }
+            (to > index) { to = to - 1 }
+            links = group.add(links, graph.Link { from = from, exit = link.exit, to = to, entry = link.entry })
+        }
+    }
+    nodes_graph.nodes = kept
+    nodes_graph.links = links
+    out none
+}
+
+skill program_list(desk) {
+    @lines = []
+    @registry = desk.catalog
+    drum (group.count(registry.entries)) {
+        @entry = group.get(registry.entries, beat)
+        @n = beat
+        @mark = ""
+        (beat == registry.open) { mark = " — открыта" }
+        lines = group.add(lines, "#{n} {entry.name} ({entry.file}){mark}")
+    }
+    out str.join(lines, "\n")
+}
+
+skill embed(desk, call) {
+    @registry = desk.catalog
+    @index = number(call, "program", -1)
+    @entry = catalog.entry_at(registry, index)
+    @spot = look.View {}
+    @loaded = disk.load(desk.base, entry.file, spot) rescue |err| { none }
+    @inside = graph.Graph {}
+    (loaded) |loaded| { inside = loaded }
+    @face = graph.face(inside)
+    @nodes_graph = desk.nodes
+    @count = group.count(nodes_graph.nodes)
+    @node = graph.Node { title = entry.name, kind = graph.CALL, called = entry.file, inputs = group.get(face, 0), outputs = group.get(face, 1), x = number(call, "x", 40 + count * 30), y = number(call, "y", 40 + count * 30) }
+    nodes_graph.nodes = group.add(nodes_graph.nodes, node)
+    out "#{count}"
+}
+
+skill run(desk, call) {
+    @nodes_graph = desk.nodes
+    @view = desk.view
+    @registry = desk.catalog
+    (call.cmd == "programs") { out program_list(desk) }
+    (call.cmd == "new") {
+        @name = given(call, "name")
+        (name) |name| {
+            @index = catalog.add(registry, name)
+            catalog.save(desk.base, registry)
+            desk.wanted = index
+            out "#{index}"
+        }
+        out error.NeedName
+    }
+    (call.cmd == "open") {
+        @index = number(call, "id", -1)
+        catalog.entry_at(registry, index)
+        desk.wanted = index
+        out "открываю #{index}"
+    }
+    (call.cmd == "rename") {
+        @entry = catalog.entry_at(registry, number(call, "id", -1))
+        @name = given(call, "name")
+        (name) |name| {
+            entry.name = name
+            catalog.save(desk.base, registry)
+            out "переименована: {name}"
+        }
+        out error.NeedName
+    }
+    (call.cmd == "use") { out embed(desk, call) }
+    (call.cmd == "nodes") { out listing(nodes_graph) }
+    (call.cmd == "node") {
+        @title = given(call, "title")
+        (title) |named| {
+            @count = group.count(nodes_graph.nodes)
+            @node = fill(desk, graph.Node { x = 40 + count * 30, y = 40 + count * 30 }, call)
+            nodes_graph.nodes = group.add(nodes_graph.nodes, node)
+            out "#{count}"
+        }
+        out error.NeedTitle
+    }
+    (call.cmd == "link") {
+        @from = node_at(nodes_graph, number(call, "from", -1))
+        @to = node_at(nodes_graph, number(call, "to", -1))
+        @exit = number(call, "exit", 0)
+        @entry = number(call, "entry", 0)
+        (exit >= group.count(from.outputs)) { out error.NoSuchPort }
+        (entry >= group.count(to.inputs)) { out error.NoSuchPort }
+        @count = group.count(nodes_graph.links)
+        nodes_graph.links = group.add(nodes_graph.links, graph.Link { from = number(call, "from", 0), exit = exit, to = number(call, "to", 0), entry = entry })
+        out "связь #{count}"
+    }
+    (call.cmd == "set") {
+        @index = number(call, "id", -1)
+        fill(desk, node_at(nodes_graph, index), call)
+        out "#{index}"
+    }
+    (call.cmd == "remove") {
+        @index = number(call, "id", -1)
+        node_at(nodes_graph, index)
+        drop(nodes_graph, index)
+        (view.chosen >= group.count(nodes_graph.nodes)) { view.chosen = -1 }
+        out "убран #{index}"
+    }
+    (call.cmd == "unlink") {
+        @index = number(call, "id", -1)
+        (index < 0) { out error.NoSuchLink }
+        (index >= group.count(nodes_graph.links)) { out error.NoSuchLink }
+        nodes_graph.links = group.concat(group.slice(nodes_graph.links, 0, index), group.slice(nodes_graph.links, index + 1, group.count(nodes_graph.links)))
+        out "убрана связь #{index}"
+    }
+    (call.cmd == "clear") {
+        nodes_graph.nodes = []
+        nodes_graph.links = []
+        view.chosen = -1
+        out "холст пуст"
+    }
+    (call.cmd == "view") {
+        view.x = number(call, "x", view.x)
+        view.y = number(call, "y", view.y)
+        out "холст сдвинут"
+    }
+    out error.NoSuchCommand
+}
