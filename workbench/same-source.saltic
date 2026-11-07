@@ -8,18 +8,16 @@
 -- Вместо workbench/same-source.sh (в .archive/); вызывается `just same-source`.
 --
 -- program() — собрать ENTRIES и программы из TEST_DIRS, напечатать итог по каждой
--- Внутри: say(text), shell(script, args, folder) -> код, sorted(items),
---     sources() -> пути, verdict(run, out, name, source, must), explain(run, base);
---     must — обязана собраться (образ ОС), иначе пустые обе — «не программа»
+-- Внутри: say(run, text), sources() -> пути, verdict(run, out, name, source,
+--     must), explain(run, base); must — обязана собраться (образ ОС), иначе
+--     пустые обе — «не программа»; общее — workbench.kit
 
-use io
 use io.file
 use io.clock
 use core.str
-use core.time
 use core.group
-use core.bytes
 use core.process
+use workbench.kit
 
 WORK = ".cache/build/workbench/same-source"
 HEAD_DIR = ".cache/build/workbench/same-source/head"
@@ -29,57 +27,13 @@ TOOLCHAIN_HEAP = "536870912"
 ENTRIES = ["soul/seed/selfhost/toolchain.saltic", "soul/canonical/main.saltic", "os/target/qemu_virt/toolchain.saltic"]
 TEST_DIRS = ["soul/seed/tests", "tests"]
 
-Clock = Box {
-    zone = 0
-}
-
 Run = Box {
-    clock = Clock {},
+    zone = 0,
     failed = no
 }
 
 skill say(run, text) {
-    io.show("[", time.text(time.now() + run.clock.zone), "] ", text)
-    out none
-}
-
-skill shell(script, args, folder) {
-    @command = group.concat(["bash", "-c", script], args)
-    @done = process.capture(command, folder)
-    out done.code
-}
-
-skill before(left, right) {
-    @shorter = str.bytes(left)
-    (str.bytes(right) < shorter) { shorter = str.bytes(right) }
-    drum (shorter) {
-        @a = str.byte(left, beat)
-        @b = str.byte(right, beat)
-        (a < b) { out yes }
-        (a > b) { out no }
-    }
-    out str.bytes(left) < str.bytes(right)
-}
-
-skill sorted(items) {
-    @result = []
-    drum (items) {
-        @item = beat
-        @placed = []
-        @put = no
-        drum (result) {
-            (put == no) {
-                (before(item, beat) == yes) {
-                    placed = group.add(placed, item)
-                    put = yes
-                }
-            }
-            placed = group.add(placed, beat)
-        }
-        (put == no) { placed = group.add(placed, item) }
-        result = placed
-    }
-    out result
+    out kit.line(run.zone, text)
 }
 
 skill sources() {
@@ -90,66 +44,37 @@ skill sources() {
         drum (file.list(folder)) {
             (str.ends_with(beat, ".saltic") == yes) { found = group.add(found, "{folder}/{beat}") }
         }
-        all = group.concat(all, sorted(found))
+        all = group.concat(all, kit.sorted(found))
     }
     out all
 }
 
-skill size(path) {
-    @buffer = file.read_bytes(path) rescue |err| { out 0 }
-    out bytes.count(buffer)
-}
-
-skill same(left, right) {
-    @a = file.read_bytes(left)
-    @b = file.read_bytes(right)
-    ((bytes.count(a) == bytes.count(b)) == no) { out no }
-    drum (bytes.count(a)) {
-        ((bytes.get(a, beat) == bytes.get(b, beat)) == no) { out no }
-    }
-    out yes
-}
-
-skill first_difference(left, right) {
-    @a = file.read_bytes(left)
-    @b = file.read_bytes(right)
-    @count = bytes.count(a)
-    (bytes.count(b) < count) { count = bytes.count(b) }
-    drum (count) {
-        ((bytes.get(a, beat) == bytes.get(b, beat)) == no) { out beat + 1 }
-    }
-    out count + 1
-}
-
 skill last_log_line(path) {
-    @text = file.read(path) rescue |err| { out "" }
-    @last = ""
-    drum (str.lines(text)) {
-        (str.starts_with(beat, "warning") == no) { last = beat }
-    }
-    out last
+    @lines = kit.tail(path, 1)
+    (group.count(lines) == 0) { out "" }
+    out group.get(lines, 0)
 }
 
 skill explain(run, base) {
     drum (["head", "work"]) {
-        (size("{base}.{beat}") == 0) {
+        (kit.size("{base}.{beat}") == 0) {
             @line = last_log_line("{base}.{beat}.log")
             say(run, "    {beat} не собрался: {line}")
             out none
         }
     }
-    @head = size("{base}.head")
-    @work = size("{base}.work")
+    @head = kit.size("{base}.head")
+    @work = kit.size("{base}.work")
     say(run, "    размер: head {head}, work {work} байт")
-    @at = first_difference("{base}.head", "{base}.work")
+    @at = kit.first_difference("{base}.head", "{base}.work")
     say(run, "    первое расхождение: байт {at}")
     out none
 }
 
 skill verdict(run, out_dir, name, source, must) {
     @base = "{out_dir}/{name}"
-    @head = size("{base}.head")
-    @work = size("{base}.work")
+    @head = kit.size("{base}.head")
+    @work = kit.size("{base}.work")
     (head + work == 0) {
         (must == no) {
             say(run, "не программа: {source}")
@@ -158,7 +83,7 @@ skill verdict(run, out_dir, name, source, must) {
     }
     (head > 0) {
         (work > 0) {
-            (same("{base}.head", "{base}.work") == yes) {
+            (kit.same_file("{base}.head", "{base}.work") == yes) {
                 say(run, "одинаково: {source}")
                 out none
             }
@@ -183,15 +108,15 @@ skill name_of(source) {
 
 program() {
     @run = Run {}
-    run.clock.zone = clock.zone()
+    run.zone = clock.zone()
     process.run(["mkdir", "-p", WORK], "")
     process.run(["rm", "-rf", HEAD_DIR, OUT_DIR], "")
     process.run(["mkdir", "-p", OUT_DIR], "")
     @found = process.capture(["bash", "-c", "source bootstrap/names.sh && realpath \"$(saltic_native_compiler)\""], "")
     ((found.code == 0) == no) { out error.NoNativeCompiler }
     @compiler = str.slice(found.output, 0, str.bytes(found.output) - 1)
-    shell("git worktree remove --force \"$0\" >/dev/null 2>&1", [HEAD_DIR], "")
-    @added = shell("git worktree add --detach \"$0\" HEAD >/dev/null 2>&1", [HEAD_DIR], "")
+    kit.shell("git worktree remove --force \"$0\" >/dev/null 2>&1", [HEAD_DIR], "")
+    @added = kit.shell("git worktree add --detach \"$0\" HEAD >/dev/null 2>&1", [HEAD_DIR], "")
     ((added == 0) == no) {
         say(run, "не удалось создать worktree HEAD")
         out error.NoWorktree
@@ -205,18 +130,18 @@ program() {
         @heap = HEAP
         (str.ends_with(source, "/toolchain.saltic") == yes) { heap = TOOLCHAIN_HEAP }
         @base = "{out_dir}/{name}"
-        shell(compile, [compiler, source, "{base}.head", heap, "{base}.head.log"], HEAD_DIR)
-        shell(compile, [compiler, source, "{base}.work", heap, "{base}.work.log"], "")
-        shell("chmod +x \"$0\" \"$1\" 2>/dev/null", ["{base}.head", "{base}.work"], "")
+        kit.shell(compile, [compiler, source, "{base}.head", heap, "{base}.head.log"], HEAD_DIR)
+        kit.shell(compile, [compiler, source, "{base}.work", heap, "{base}.work.log"], "")
+        kit.shell("chmod +x \"$0\" \"$1\" 2>/dev/null", ["{base}.head", "{base}.work"], "")
         verdict(run, out_dir, name, source, no)
     }
     @toolchain = "{out_dir}/os_target_qemu_virt_toolchain"
     @image = "{out_dir}/os"
     @inner = "(cd \"$0\" && qemu-riscv32 -B 0x100000000 \"$1.head\" os/main.saltic \"$2.head\" \"$3\" > \"$2.head.log\" 2>&1); qemu-riscv32 -B 0x100000000 \"$1.work\" os/main.saltic \"$2.work\" \"$3\" > \"$2.work.log\" 2>&1"
     @nix = "nix --extra-experimental-features \"nix-command flakes\" develop --command bash -c \"$4\" \"$0\" \"$1\" \"$2\" \"$3\" 2>/dev/null"
-    shell(nix, [HEAD_DIR, toolchain, image, HEAP, inner], "")
+    kit.shell(nix, [HEAD_DIR, toolchain, image, HEAP, inner], "")
     verdict(run, out_dir, "os", "os/main.saltic", yes)
-    shell("git worktree remove --force \"$0\" >/dev/null 2>&1", [HEAD_DIR], "")
+    kit.shell("git worktree remove --force \"$0\" >/dev/null 2>&1", [HEAD_DIR], "")
     (run.failed == yes) { out error.SourcesDiffer }
     out none
 }

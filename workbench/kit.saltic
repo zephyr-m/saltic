@@ -1,0 +1,115 @@
+-- kit — общее у проверок workbench на Saltic (same, same-source, hosts):
+-- строка со временем, запуск через bash, файлы по байтам, сортировка.
+--
+-- line(zone, text) — напечатать "[ЧЧ:ММ:СС] text"; zone — io.clock.zone()
+-- shell(script, args, folder) -> код выхода `bash -c script args…`
+--     (args — $0, $1…; stdout ребёнка — в трубу и пропадает, stderr — общий)
+-- exists(path) -> yes/no; size(path) -> байты, 0 — нет файла
+-- same_file(left, right) -> yes, если оба есть и совпадают побайтово
+-- first_difference(left, right) -> номер первого другого байта (с 1)
+-- tail(path, count) -> последние count строк файла без строк "warning…"
+-- sorted(items) -> строки по возрастанию байтов; before(left, right) -> yes/no
+-- base_name(path) -> имя файла без папки и ".saltic"
+
+use io
+use io.file
+use core.str
+use core.time
+use core.group
+use core.bytes
+use core.process
+
+skill line(zone, text) {
+    io.show("[", time.text(time.now() + zone), "] ", text)
+    out none
+}
+
+skill shell(script, args, folder) {
+    @done = process.capture(group.concat(["bash", "-c", script], args), folder)
+    out done.code
+}
+
+skill exists(path) {
+    @buffer = file.read_bytes(path) rescue |err| { out no }
+    out yes
+}
+
+skill size(path) {
+    @buffer = file.read_bytes(path) rescue |err| { out 0 }
+    out bytes.count(buffer)
+}
+
+skill same_file(left, right) {
+    @a = file.read_bytes(left) rescue |err| { out no }
+    @b = file.read_bytes(right) rescue |err| { out no }
+    ((bytes.count(a) == bytes.count(b)) == no) { out no }
+    drum (bytes.count(a)) {
+        ((bytes.get(a, beat) == bytes.get(b, beat)) == no) { out no }
+    }
+    out yes
+}
+
+skill first_difference(left, right) {
+    @a = file.read_bytes(left)
+    @b = file.read_bytes(right)
+    @count = bytes.count(a)
+    (bytes.count(b) < count) { count = bytes.count(b) }
+    drum (count) {
+        ((bytes.get(a, beat) == bytes.get(b, beat)) == no) { out beat + 1 }
+    }
+    out count + 1
+}
+
+skill tail(path, count) {
+    @text = file.read(path) rescue |err| { out [] }
+    @kept = []
+    drum (str.lines(text)) {
+        (str.starts_with(beat, "warning") == no) { kept = group.add(kept, beat) }
+    }
+    @start = group.count(kept) - count
+    (start < 0) { start = 0 }
+    out group.slice(kept, start, group.count(kept))
+}
+
+skill before(left, right) {
+    @shorter = str.bytes(left)
+    (str.bytes(right) < shorter) { shorter = str.bytes(right) }
+    drum (shorter) {
+        @a = str.byte(left, beat)
+        @b = str.byte(right, beat)
+        (a < b) { out yes }
+        (a > b) { out no }
+    }
+    out str.bytes(left) < str.bytes(right)
+}
+
+skill sorted(items) {
+    @result = []
+    drum (items) {
+        @item = beat
+        @placed = []
+        @put = no
+        drum (result) {
+            (put == no) {
+                (before(item, beat) == yes) {
+                    placed = group.add(placed, item)
+                    put = yes
+                }
+            }
+            placed = group.add(placed, beat)
+        }
+        (put == no) { placed = group.add(placed, item) }
+        result = placed
+    }
+    out result
+}
+
+skill base_name(path) {
+    @start = 0
+    drum (str.bytes(path)) {
+        (str.get(path, beat) == "/") { start = beat + 1 }
+    }
+    @end = str.bytes(path)
+    (str.ends_with(path, ".saltic") == yes) { end = end - 7 }
+    out str.slice(path, start, end)
+}

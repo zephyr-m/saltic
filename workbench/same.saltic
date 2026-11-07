@@ -7,19 +7,16 @@
 -- Вместо workbench/same.sh (в .archive/); вызывается `just same [файлы…]`.
 --
 -- program(extra) — extra: дополнительные исходники через пробел или ""
--- Внутри: say(run, text), shell(script, args) -> код, size_text(path),
---     same(left, right), tail(path, count), sorted(items) — по байтам,
---     compare(run, shelf, stage, source),
---     errors_same(run, checker)
+-- Внутри: say(run, text), shell(script, args) -> код, size_text(path) — "" без
+--     файла, compare(run, shelf, stage, source), errors_same(run, checker);
+--     общее — workbench.kit
 
-use io
 use io.file
 use io.clock
 use core.str
-use core.time
 use core.group
-use core.bytes
 use core.process
+use workbench.kit
 
 WORK = ".cache/build/workbench/same"
 HEAP = "4026531840"
@@ -34,85 +31,21 @@ Run = Box {
 }
 
 skill say(run, text) {
-    io.show("[", time.text(time.now() + run.zone), "] ", text)
-    out none
+    out kit.line(run.zone, text)
 }
 
 skill shell(script, args) {
-    @done = process.capture(group.concat(["bash", "-c", script], args), "")
-    out done.code
+    out kit.shell(script, args, "")
 }
 
 skill size_text(path) {
-    @buffer = file.read_bytes(path) rescue |err| { out "" }
-    @count = bytes.count(buffer)
+    (kit.exists(path) == no) { out "" }
+    @count = kit.size(path)
     out "{count}"
 }
 
-skill same(left, right) {
-    @a = file.read_bytes(left) rescue |err| { out no }
-    @b = file.read_bytes(right) rescue |err| { out no }
-    ((bytes.count(a) == bytes.count(b)) == no) { out no }
-    drum (bytes.count(a)) {
-        ((bytes.get(a, beat) == bytes.get(b, beat)) == no) { out no }
-    }
-    out yes
-}
-
-skill tail(path, count) {
-    @text = file.read(path) rescue |err| { out [] }
-    @kept = []
-    drum (str.lines(text)) {
-        (str.starts_with(beat, "warning") == no) { kept = group.add(kept, beat) }
-    }
-    @start = group.count(kept) - count
-    (start < 0) { start = 0 }
-    out group.slice(kept, start, group.count(kept))
-}
-
-skill before(left, right) {
-    @shorter = str.bytes(left)
-    (str.bytes(right) < shorter) { shorter = str.bytes(right) }
-    drum (shorter) {
-        @a = str.byte(left, beat)
-        @b = str.byte(right, beat)
-        (a < b) { out yes }
-        (a > b) { out no }
-    }
-    out str.bytes(left) < str.bytes(right)
-}
-
-skill sorted(items) {
-    @result = []
-    drum (items) {
-        @item = beat
-        @placed = []
-        @put = no
-        drum (result) {
-            (put == no) {
-                (before(item, beat) == yes) {
-                    placed = group.add(placed, item)
-                    put = yes
-                }
-            }
-            placed = group.add(placed, beat)
-        }
-        (put == no) { placed = group.add(placed, item) }
-        result = placed
-    }
-    out result
-}
-
-skill base_name(path) {
-    @start = 0
-    drum (str.bytes(path)) {
-        (str.get(path, beat) == "/") { start = beat + 1 }
-    }
-    out str.slice(path, start, str.bytes(path) - 7)
-}
-
 skill compare(run, shelf, stage, source) {
-    @name = base_name(source)
+    @name = kit.base_name(source)
     drum (TARGETS) {
         @target = beat
         @old = "{WORK}/old-{name}-{target}.out"
@@ -120,14 +53,14 @@ skill compare(run, shelf, stage, source) {
         @log = "{WORK}/new-{name}-{target}.log"
         shell("\"$0\" \"$1\" \"$2\" \"$3\" \"$4\" >/dev/null 2>&1", [shelf, source, old, HEAP, target])
         shell("\"$0\" \"$1\" \"$2\" \"$3\" \"$4\" > \"$5\" 2>&1", [stage, source, new, HEAP, target, log])
-        @equal = same(old, new)
+        @equal = kit.same_file(old, new)
         (equal == yes) { say(run, "одинаково: {name} ({target})") }
         (equal == no) {
             say(run, "РАЗЛИЧАЕТСЯ: {name} ({target})")
             @was = size_text(old)
             @now = size_text(new)
             say(run, "    размер: было {was}, стало {now} байт")
-            drum (tail(log, 3)) { say(run, beat) }
+            drum (kit.tail(log, 3)) { say(run, beat) }
             run.failed = yes
         }
     }
@@ -140,7 +73,7 @@ skill errors_same(run, checker) {
         (str.ends_with(beat, ".saltic") == yes) { cases = group.add(cases, beat) }
     }
     @all_same = yes
-    drum (sorted(cases)) {
+    drum (kit.sorted(cases)) {
         @name = str.slice(beat, 0, str.bytes(beat) - 7)
         @got = "{WORK}/errors-{name}.txt"
         shell("\"$0\" \"$1\" > \"$2\"", [checker, "{ERRORS}/{beat}", got])
@@ -169,7 +102,7 @@ program(extra) {
     say(run, "== stage-1 из текущих исходников")
     @built = shell("\"$0\" soul/seed/selfhost/toolchain.saltic \"$1\" \"$2\" x86_64 > \"$3\" 2>&1", [shelf, stage, HEAP, "{WORK}/stage.log"])
     ((built == 0) == no) {
-        drum (tail("{WORK}/stage.log", 5)) { say(run, beat) }
+        drum (kit.tail("{WORK}/stage.log", 5)) { say(run, beat) }
         out error.StageFailed
     }
     shell("chmod +x \"$0\"", [stage])
