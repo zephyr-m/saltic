@@ -43,7 +43,8 @@ qemu-graphics-check:
     bash os/target/qemu_virt/build-graphics.sh --check
 
 bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic":
-    bash bootstrap/refresh.sh "$1"
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh bootstrap/refresh.saltic .cache/build/workbench/refresh >/dev/null
+    .cache/build/workbench/refresh "$1"
 
 global-check:
     bash workbench/global-check.sh

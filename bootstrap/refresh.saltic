@@ -1,0 +1,256 @@
+-- refresh — самосборка полки bootstrap/ на x86-64: каждое поколение собирается
+-- родным x86-64 и под rv64 и rv32i; fixed point у всех трёх — stage-2 = stage-3
+-- для rv64 (эталон в git), x86-64 (родной собирает сам себя) и rv32i (вторая
+-- сверка, в git не лежит). Самосборка на самом RV64 — bootstrap/refresh-rv64.saltic.
+-- Новый компилятор заменяет прежнюю версию на полке, паспорта — функции
+-- bootstrap/names.sh. Окружение как у прежнего refresh.sh: SALTIC_BOOTSTRAP_COMPILER,
+-- SALTIC_BOOTSTRAP_REFRESH_DIR, SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES; нет
+-- qemu-riscv32 — перезапуск себя (BINARY) в проектном Nix shell. Строки без
+-- времени, если SALTIC_STAMPED (их ищет global-check). Вместо bootstrap/refresh.sh
+-- (в .archive/); вызывают just bootstrap-refresh, global-check и CI релиза.
+--
+-- program(source) — source: исходник компилятора или "" (SOURCE)
+-- Внутри: Refresh — настройки прогона; say, names(call), stage(run, compiler,
+--     target, output), same_or_fail, passport(path, …), replace(run, kind, path),
+--     cpu_text(file) -> "15.6" (user + sys из вывода time)
+
+use io
+use io.file
+use io.clock
+use core.str
+use core.time
+use core.group
+use core.process
+use workbench.kit
+
+SOURCE = "soul/seed/selfhost/toolchain.saltic"
+WORK = ".cache/build/bootstrap-refresh"
+HEAP = "4026531840"
+BINARY = ".cache/build/workbench/refresh"
+IN_SHELL = "SALTIC_BOOTSTRAP_REFRESH_IN_DEV_SHELL"
+KEPT = ["SALTIC_BOOTSTRAP_COMPILER", "SALTIC_BOOTSTRAP_REFRESH_DIR", "SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES"]
+TARGETS = "rv32i, rv64, x86_64"
+
+Refresh = Box {
+    zone = 0,
+    stamped = no,
+    source = "",
+    work = "",
+    heap = "",
+    timer = ""
+}
+
+skill setting(name) {
+    drum (process.environment()) {
+        (str.starts_with(beat, "{name}=") == yes) { out str.slice(beat, str.bytes(name) + 1, str.bytes(beat)) }
+    }
+    out ""
+}
+
+skill say(run, text) {
+    (run.stamped == yes) {
+        io.show("bootstrap refresh: {text}")
+        out none
+    }
+    out kit.line(run.zone, "bootstrap refresh: {text}")
+}
+
+skill names(call) {
+    @done = process.capture(["bash", "-c", "source bootstrap/names.sh && {call}"], "")
+    ((done.code == 0) == no) { out error.NamesFailed }
+    out str.slice(done.output, 0, str.bytes(done.output) - 1)
+}
+
+skill stage(run, compiler, target, output) {
+    @measure = ""
+    (str.bytes(run.timer) > 0) { measure = "\"$5\" -o \"$2.time\" -f \"%M %U %S\"" }
+    @script = "{measure} \"$0\" \"$1\" \"$2\" \"$3\" \"$4\" > \"$2.log\" 2>&1 && chmod +x \"$2\""
+    (kit.shell(script, [compiler, run.source, output, run.heap, target, run.timer], "") == 0) { out none }
+    drum (kit.tail("{output}.log", 5)) { io.show(beat) }
+    out error.StageFailed
+}
+
+skill same_or_fail(left, right) {
+    (kit.same_file(left, right) == yes) { out none }
+    @at = kit.first_difference(left, right)
+    io.show("{left} {right} differ: byte {at}")
+    out error.FixedPointBroken
+}
+
+skill passport(path, runs_on, parent, run, how, seconds, word, times) {
+    @script = "source bootstrap/names.sh && saltic_write_passport \"$0\" \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" \"$8\""
+    @written = kit.shell(script, [path, runs_on, TARGETS, parent, run.heap, how, seconds, word, times], "")
+    ((written == 0) == no) { out error.PassportFailed }
+    out none
+}
+
+skill replace(kind, path) {
+    @ending = "-compiler-{kind}"
+    drum (file.list("bootstrap")) {
+        @old = "bootstrap/{beat}"
+        (str.starts_with(beat, "saltic-") == yes) {
+            (str.ends_with(beat, ending) == yes) {
+                ((old == path) == no) {
+                    @passport_path = old
+                    (str.ends_with(old, ".elf") == yes) { passport_path = str.slice(old, 0, str.bytes(old) - 4) }
+                    process.run(["rm", "-f", old, "{passport_path}.txt"], "")
+                }
+            }
+        }
+    }
+    out none
+}
+
+skill hundredths(text) {
+    @parts = str.split(text, ".")
+    @value = 0
+    drum (str.bytes(group.get(parts, 0))) { value = value * 10 + str.byte(group.get(parts, 0), beat) - 48 }
+    value = value * 100
+    (group.count(parts) > 1) {
+        @fraction = group.get(parts, 1)
+        @scale = 10
+        drum (str.bytes(fraction)) {
+            (beat < 2) {
+                value = value + (str.byte(fraction, beat) - 48) * scale
+                scale = scale / 10
+            }
+        }
+    }
+    out value
+}
+
+skill cpu_text(numbers) {
+    @total = hundredths(group.get(numbers, 1)) + hundredths(group.get(numbers, 2))
+    @tenths = (total + 5) / 10
+    @whole = tenths / 10
+    @part = tenths - whole * 10
+    out "{whole}.{part}"
+}
+
+skill copy_in(from, path) {
+    process.run(["cp", from, path], "")
+    process.run(["chmod", "+x", path], "")
+    out none
+}
+
+program(source) {
+    @run = Refresh {}
+    run.zone = clock.zone()
+    run.stamped = str.bytes(setting("SALTIC_STAMPED")) > 0
+    run.source = source
+    (str.bytes(source) == 0) { run.source = SOURCE }
+    @qemu = process.locate("qemu-riscv32") rescue |err| { "" }
+    (str.bytes(qemu) == 0) {
+        (setting(IN_SHELL) == "1") {
+            io.show("bootstrap refresh: qemu-riscv32 отсутствует внутри проектного Nix shell")
+            out error.NoQemu
+        }
+        say(run, "вхожу в проектный Nix shell")
+        @command = ["nix", "--extra-experimental-features", "nix-command flakes", "develop", "--command", "env", "{IN_SHELL}=1"]
+        drum (KEPT) {
+            @value = setting(beat)
+            command = group.add(command, "{beat}={value}")
+        }
+        command = group.concat(command, [BINARY, source])
+        (process.run(command, "") == 0) { out none }
+        out error.StageFailed
+    }
+    run.work = setting("SALTIC_BOOTSTRAP_REFRESH_DIR")
+    (str.bytes(run.work) == 0) { run.work = WORK }
+    run.heap = setting("SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES")
+    (str.bytes(run.heap) == 0) { run.heap = HEAP }
+    @timer = process.locate("time") rescue |err| { "" }
+    run.timer = timer
+    @work = run.work
+    process.run(["mkdir", "-p", "{work}/stage-1", "{work}/stage-2", "{work}/stage-3", "{work}/previous"], "")
+    kit.shell("rm -f \"$0\"/previous/* \"$0\"/stage-*/toolchain*", [work], "")
+    @bootstrap = names("saltic_bootstrap_compiler")
+    @bootstrap_name = kit.base_name(bootstrap)
+    @previous = "{work}/previous/{bootstrap_name}"
+    process.run(["cp", bootstrap, previous], "")
+    say(run, "исходный compiler {bootstrap}")
+    @shelf_native = names("saltic_native_compiler")
+    @native_name = kit.base_name(shelf_native)
+    @previous_native = "{work}/previous/{native_name}"
+    process.run(["cp", shelf_native, previous_native], "")
+    @stage1 = "{work}/stage-1/toolchain"
+    say(run, "текущее поколение собирает stage-1 (x86-64)")
+    stage(run, shelf_native, "x86_64", stage1)
+    say(run, "stage-1 собирает stage-2 (rv64, x86-64 и rv32i)")
+    stage(run, stage1, "rv64", "{work}/stage-2/toolchain-rv64")
+    stage(run, stage1, "x86_64", "{work}/stage-2/toolchain")
+    stage(run, stage1, "rv32i", "{work}/stage-2/toolchain.elf")
+    @stage2 = "{work}/stage-2/toolchain"
+    say(run, "stage-2 собирает stage-3 (rv64)")
+    @started = time.now()
+    stage(run, stage2, "rv64", "{work}/stage-3/toolchain-rv64")
+    @self_seconds = kit.seconds_since(started)
+    say(run, "новый компилятор собрал себя за {self_seconds} с")
+    @measured = file.read("{work}/stage-3/toolchain-rv64.time") rescue |err| { "" }
+    @numbers = []
+    @measured_lines = str.lines(measured)
+    (group.count(measured_lines) > 0) { numbers = str.split(group.get(measured_lines, 0), " ") }
+    (group.count(numbers) == 3) {
+        @megabytes = hundredths(group.get(numbers, 0)) / 100 / 1024
+        @cpu = cpu_text(numbers)
+        say(run, "память самосборки {megabytes} МБ, процессор {cpu} с")
+    }
+    say(run, "stage-2 собирает stage-3 (x86-64)")
+    @native_started = time.now()
+    stage(run, stage2, "x86_64", "{work}/stage-3/toolchain")
+    @native_seconds = kit.seconds_since(native_started)
+    say(run, "родной x86-64 собрал себя за {native_seconds} с")
+    say(run, "stage-2 собирает stage-3 (rv32i, вторая сверка)")
+    @narrow_started = time.now()
+    stage(run, stage2, "rv32i", "{work}/stage-3/toolchain.elf")
+    @narrow_seconds = kit.seconds_since(narrow_started)
+    say(run, "проверяю fixed point (rv64, x86-64 и rv32i)")
+    same_or_fail("{work}/stage-2/toolchain-rv64", "{work}/stage-3/toolchain-rv64")
+    same_or_fail("{work}/stage-2/toolchain", "{work}/stage-3/toolchain")
+    same_or_fail("{work}/stage-2/toolchain.elf", "{work}/stage-3/toolchain.elf")
+    @compiler = names("saltic_compiler_path rv64 linux")
+    @native_path = names("saltic_compiler_path x86_64 linux")
+    @kept = no
+    (kit.same_file("{work}/stage-3/toolchain-rv64", compiler) == yes) { kept = kit.exists("{compiler}.txt") }
+    (kept == yes) {
+        @unchanged = kit.base_name(compiler)
+        say(run, "{unchanged} не изменился")
+        (kit.same_file(stage2, native_path) == yes) {
+            @text = file.read("{native_path}.txt") rescue |err| { "" }
+            (str.contains(text, "время самосборки") == no) {
+                passport(native_path, "x86_64, linux", previous_native, run, "сходится на x86-64 (stage-2 = stage-3)", native_seconds, "самосборки", "{work}/stage-3/toolchain.time")
+                @native_file = kit.base_name(native_path)
+                say(run, "паспорт {native_file} обновлён")
+            }
+        }
+    }
+    (kept == no) {
+        replace("rv64-linux", compiler)
+        copy_in("{work}/stage-3/toolchain-rv64", compiler)
+        passport(compiler, "rv64, linux (qemu-riscv64 -B 0x100000000)", previous, run, "сходится на x86-64 (stage-2 = stage-3); на RV64 — just rv64", self_seconds, "самосборки", "{work}/stage-3/toolchain-rv64.time")
+        replace("x86_64-linux", native_path)
+        copy_in(stage2, native_path)
+        passport(native_path, "x86_64, linux", previous_native, run, "сходится на x86-64 (stage-2 = stage-3)", native_seconds, "самосборки", "{work}/stage-3/toolchain.time")
+        @updated = kit.base_name(compiler)
+        say(run, "{updated} обновлён")
+    }
+    @sum = process.capture(["sha256sum", compiler], "")
+    io.show(str.slice(sum.output, 0, str.bytes(sum.output) - 1))
+    @narrow_path = names("saltic_compiler_path rv32i linux .elf")
+    @narrow_passport = str.slice(narrow_path, 0, str.bytes(narrow_path) - 4)
+    @narrow_kept = no
+    (kit.same_file("{work}/stage-3/toolchain.elf", narrow_path) == yes) { narrow_kept = kit.exists("{narrow_passport}.txt") }
+    @narrow_name = kit.base_name(narrow_path)
+    (narrow_kept == yes) { say(run, "{narrow_name} не изменился") }
+    (narrow_kept == no) {
+        replace("rv32i-linux.elf", narrow_path)
+        copy_in("{work}/stage-3/toolchain.elf", narrow_path)
+        passport(narrow_path, "rv32i, linux (qemu-riscv32 -B 0x100000000)", native_path, run, "вторая сверка: сходится на x86-64 (stage-2 = stage-3)", narrow_seconds, "сборки", "{work}/stage-3/toolchain.elf.time")
+        say(run, "{narrow_name} обновлён (вторая сверка)")
+    }
+    @ready = kit.base_name(names("saltic_native_compiler"))
+    say(run, "{ready} готов")
+    @virt = kit.base_name(names("saltic_qemu_virt_compiler"))
+    say(run, "{virt} готов")
+    out none
+}

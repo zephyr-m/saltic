@@ -109,7 +109,7 @@ saltic_native_fresh() {
     compiler="$(saltic_bootstrap_compiler)" || return 1
     [[ -x "$native" && -f "$native.txt" ]] || return 1
     # Свежий — либо переведён из нынешнего эталона rv32i, либо сам сошёлся
-    # на x86-64 (stage-2 = stage-3, refresh.sh) из нынешних исходников.
+    # на x86-64 (stage-2 = stage-3, refresh.saltic) из нынешних исходников.
     grep -q "sha256 $(sha256sum "$compiler" | cut -c1-16))" "$native.txt" && return 0
     grep -q "сходится на x86-64" "$native.txt" \
         && grep -q "исходники: *$(saltic_source_hash)$" "$native.txt"

@@ -39,7 +39,11 @@ if [[ "$limits_status" != "0" ]]; then
     exit "$limits_status"
 fi
 echo "== 🔨 самосборка"
-bash bootstrap/refresh.sh 2>&1 | tee .cache/build/workbench/refresh.log \
+run_refresh() {
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh bootstrap/refresh.saltic .cache/build/workbench/refresh >/dev/null || return 1
+    .cache/build/workbench/refresh ""
+}
+run_refresh 2>&1 | tee .cache/build/workbench/refresh.log \
     | grep "^bootstrap refresh: \(saltic\|прове\|новый\|родной\|памят\)\|^[0-9a-f]\{64\}" | decorate
 refresh_status=${PIPESTATUS[0]}
 if [[ "$refresh_status" != "0" ]]; then
