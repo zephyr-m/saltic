@@ -68,7 +68,8 @@ same-source:
     .cache/build/workbench/same-source-check
 
 same *sources:
-    bash workbench/same.sh "$@"
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/same.saltic .cache/build/workbench/same-check >/dev/null
+    .cache/build/workbench/same-check "$*"
 
 test case="all":
     nix --extra-experimental-features "nix-command flakes" develop --command bash tests/run.sh "$1"
