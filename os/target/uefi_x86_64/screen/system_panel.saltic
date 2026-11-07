@@ -7,22 +7,25 @@
 -- memory(base) -> Memory; NoMemoryMap
 -- measure_disk(base) — размер и свободное место тома Saltic в netlog
 --     (агент зовёт при старте и после записи на диск); нет тома — нули
--- Meter { rounds, mark, rates } — кадры программы: rounds — сколько раз она
---     позвала сеть (раз в кадр), rates — кадров в секунду за последние RATES
---     секунд; у агента rounds = 0, и графика нет
+-- Meter { rounds, mark, rates, received } — кадры программы: rounds — сколько
+--     раз она позвала сеть (раз в кадр), rates — кадров в секунду за последние
+--     RATES секунд (у агента rounds = 0, графика кадров нет); received — приём
+--     по кабелю, байт в секунду за те же секунды (график приёма)
 -- tick(base, card, meter) — раз в секунду: счётчики карты в netlog, кадры в
 --     meter и show без принуждения; чаще — ничего не делает; звать из цикла сети
 -- flush(base, card) — счётчики карты в итоги netlog и в ноль (перед сменой образа)
--- draw(base, card) — перерисовать панель / show(base, card, forced, rates) —
---     то же, но при forced = no — только если подписи изменились; rates — график
---     кадров (пусто — без графика); рисует в задний
+-- draw(base, card) — перерисовать панель / show(base, card, forced, meter) —
+--     то же, но при forced = no — только если подписи изменились; meter — графики
+--     кадров и приёма (пусто — без них); рисует в задний
 --     буфер (netlog.canvas) и кладёт на экран одним копированием
--- link_speed(status) -> «100 Мбит/с» или «нет»
+-- link_speed(status) -> «100 Мбит/с» или «нет»; cable_text(status) —
+--     «подключён · 1000 Мбит/с · дуплекс» или «не подключён»
 -- Сверху — Wi-Fi: иконка (серая, пока не подключён; бирюзовая — подключён)
 -- и ход подъёма или адрес с сетью — со страницы qca9377.handoff (stage).
--- Внутри: wifi_icon — иконка WIFI_ICON (16 × 16, # — точка); gauge — подпись,
+-- Внутри: icon — значок 16 × 16 (# — точка: WIFI_ICON, CABLE_ICON); gauge — подпись,
 --     полоса и «занято X из Y»; frames — график кадров;
 --     record — кадры за секунду в meter; add_bytes — КБ и остаток;
+--     cable_icon — вилка CABLE_ICON; received_graph — график приёма;
 --     signature — отпечаток подписей
 
 use core.str
@@ -81,14 +84,35 @@ WIFI_ICON = [
     "................",
     "................"
 ]
+CABLE_ICON = [
+    "................",
+    ".....######.....",
+    ".....#....#.....",
+    "...##########...",
+    "...#........#...",
+    "...#.#.##.#.#...",
+    "...#.#.##.#.#...",
+    "...#........#...",
+    "...##########...",
+    ".......##.......",
+    ".......##.......",
+    ".......##.......",
+    "......####......",
+    "................",
+    "................",
+    "................"
+]
 RATES = 40
 GRAPH = 56
+RECEIVED_GRAPH = 40
 FLOOR_RATE = 30
+FLOOR_BYTES = 1024
 
 Meter = Box {
     rounds = 0,
     mark = 0,
-    rates = []
+    rates = [],
+    received = []
 }
 
 Memory = Box {
@@ -170,9 +194,12 @@ skill tick(base, card, meter) {
     netlog.set_number(base, log, MARK, mark)
     netlog.set_number(base, log, RX_SPEED, card.received_bytes / elapsed)
     netlog.set_number(base, log, TX_SPEED, card.sent_bytes / elapsed)
+    @received = group.add(meter.received, card.received_bytes / elapsed)
+    (group.count(received) > RATES) { received = group.slice(received, group.count(received) - RATES, group.count(received)) }
+    meter.received = received
     flush(base, card)
     (meter.rounds > 0) { record(meter, elapsed) }
-    out show(base, card, no, meter.rates)
+    out show(base, card, no, meter)
 }
 
 skill link_speed(status) {
@@ -180,6 +207,14 @@ skill link_speed(status) {
     (rtl8111.has_bit(status, rtl8111.PHY_1000) == yes) { out "1000 Мбит/с" }
     (rtl8111.has_bit(status, rtl8111.PHY_100) == yes) { out "100 Мбит/с" }
     out "10 Мбит/с"
+}
+
+skill cable_text(status) {
+    (rtl8111.has_bit(status, rtl8111.PHY_LINK) == no) { out "не подключён" }
+    @duplex = "полудуплекс"
+    (rtl8111.has_bit(status, rtl8111.PHY_FULL_DUPLEX) == yes) { duplex = "дуплекс" }
+    @speed = link_speed(status)
+    out "подключён · {speed} · {duplex}"
 }
 
 skill gauge(screen, x, y, width, title, used_mb, total_mb) {
@@ -225,9 +260,27 @@ skill frames(screen, x, y, width, rates) {
     out none
 }
 
-skill wifi_icon(screen, x, y, ink) {
+skill received_graph(screen, x, y, width, received) {
+    @most = FLOOR_BYTES
+    drum (received) {
+        (beat > most) { most = beat }
+    }
+    graphics.fill(screen, x, y, width, RECEIVED_GRAPH, graphics.color(screen, 39, 39, 42))
+    @bar = width / RATES
+    @first = RATES - group.count(received)
+    @teal = graphics.color(screen, 45, 212, 191)
+    drum (group.count(received)) {
+        @tall = group.get(received, beat) * RECEIVED_GRAPH / most
+        (tall > 0) { graphics.fill(screen, x + (first + beat) * bar, y + RECEIVED_GRAPH - tall, bar - 1, tall, teal) }
+    }
+    @scale = sizes.speed_text(most)
+    lettering.paint_text(screen, FACE, x, y + RECEIVED_GRAPH + 6, "за {RATES} с, шкала до {scale}", graphics.color(screen, 161, 161, 170))
+    out y + RECEIVED_GRAPH + ROW + 10
+}
+
+skill icon(screen, x, y, picture, ink) {
     drum (16) {
-        @line = group.get(WIFI_ICON, beat)
+        @line = group.get(picture, beat)
         @row = beat
         drum (16) {
             (str.get(line, beat) == "#") { graphics.fill(screen, x + beat, y + row, 1, 1, ink) }
@@ -237,17 +290,19 @@ skill wifi_icon(screen, x, y, ink) {
 }
 
 skill draw(base, card) {
-    out show(base, card, yes, [])
+    out show(base, card, yes, Meter {})
 }
 
-skill show(base, card, forced, rates) {
+skill show(base, card, forced, meter) {
+    @rates = meter.rates
     @log = netlog.find(base)
     @known = memory(base) rescue |err| { Memory {} }
     @memory_used = known.total_mb - known.free_mb
     @memory_total = known.total_mb
     @disk_total = netlog.number_at(base, log, DISK_SIZE)
     @disk_used = disk_total - netlog.number_at(base, log, DISK_FREE)
-    @link = link_speed(rtl8111.status(card))
+    @status = rtl8111.status(card)
+    @cable = cable_text(status)
     @incoming = sizes.speed_text(netlog.number_at(base, log, RX_SPEED))
     @outgoing = sizes.speed_text(netlog.number_at(base, log, TX_SPEED))
     @received = sizes.kb_text(netlog.number_at(base, log, RX_KB))
@@ -258,7 +313,8 @@ skill show(base, card, forced, rates) {
     @shown = group.count(rates)
     @latest = 0
     (shown > 0) { latest = group.get(rates, shown - 1) }
-    @mark = signature("{memory_used}/{memory_total}/{disk_used}/{disk_total}/{link}/{incoming}/{outgoing}/{received}/{sent}/{shown}/{latest}/{wifi_step}/{wifi_text}")
+    @heard = group.count(meter.received)
+    @mark = signature("{memory_used}/{memory_total}/{disk_used}/{disk_total}/{cable}/{incoming}/{outgoing}/{received}/{sent}/{shown}/{latest}/{heard}/{wifi_step}/{wifi_text}")
     (forced == no) {
         (mark == netlog.number_at(base, log, SIGNATURE)) { out none }
     }
@@ -275,17 +331,21 @@ skill show(base, card, forced, rates) {
     (wifi_step == handoff.CONNECTED) { wifi_ink = graphics.color(whole, 45, 212, 191) }
     @wifi_line = wifi_text
     (str.bytes(wifi_line) == 0) { wifi_line = "выключен" }
-    wifi_icon(panel, MARGIN, MARGIN + ROW * 2, wifi_ink)
+    icon(panel, MARGIN, MARGIN + ROW * 2, WIFI_ICON, wifi_ink)
     lettering.paint_text(panel, FACE, MARGIN + 24, MARGIN + ROW * 2, "Wi-Fi", graphics.color(whole, 228, 228, 231))
     lettering.paint_text(panel, FACE, MARGIN, MARGIN + ROW * 3, wifi_line, wifi_ink)
     @y = gauge(panel, MARGIN, MARGIN + ROW * 5, width, "память", memory_used, memory_total)
     y = gauge(panel, MARGIN, y, width, "диск Saltic", disk_used, disk_total)
-    lettering.paint_text(panel, FACE, MARGIN, y, "сеть", graphics.color(whole, 228, 228, 231))
-    lettering.paint_text(panel, FACE, MARGIN, y + ROW, "линк {link}", grey)
+    @cable_ink = grey
+    (rtl8111.has_bit(status, rtl8111.PHY_LINK) == yes) { cable_ink = graphics.color(whole, 45, 212, 191) }
+    icon(panel, MARGIN, y, CABLE_ICON, cable_ink)
+    lettering.paint_text(panel, FACE, MARGIN + 24, y, "кабель", graphics.color(whole, 228, 228, 231))
+    lettering.paint_text(panel, FACE, MARGIN, y + ROW, cable, cable_ink)
     lettering.paint_text(panel, FACE, MARGIN, y + ROW * 2, "приём {incoming}", grey)
-    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 3, "отправка {outgoing}", grey)
-    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 4, "принято всего {received}", grey)
-    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 5, "отправлено всего {sent}", grey)
-    (shown > 0) { frames(panel, MARGIN, y + ROW * 7, width, rates) }
+    y = received_graph(panel, MARGIN, y + ROW * 3 + 4, width, meter.received)
+    lettering.paint_text(panel, FACE, MARGIN, y, "отправка {outgoing}", grey)
+    lettering.paint_text(panel, FACE, MARGIN, y + ROW, "принято всего {received}", grey)
+    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 2, "отправлено всего {sent}", grey)
+    (shown > 0) { frames(panel, MARGIN, y + ROW * 4, width, rates) }
     out graphics.put(base, panel, whole, whole.width - side)
 }
