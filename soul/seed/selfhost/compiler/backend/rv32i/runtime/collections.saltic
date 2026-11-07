@@ -15,13 +15,17 @@
 -- emit_group_add(compiler) — rt_group_add(VALUE, ERROR item) -> новая группа
 -- emit_tree_switch(compiler) — переход в tree_add для больших групп
 -- emit_group_tree_at / emit_group_tree_parts / emit_group_tree_make(compiler)
+-- emit_times_shift(compiler, target, scratch) — target × TREE_SHIFT для спуска по
+--     уровням: x + (x << k), годится для TREE_SHIFT = 1 + 2^k, иначе TreeShiftUnsupported
 -- emit_group_flatten(compiler) — rt_group_flatten: дерево → плоская
 
+use core.num
 use selfhost.abi
 use selfhost.compiler.state
 use selfhost.compiler.constants
 use selfhost.compiler.backend
 use selfhost.compiler.backend.rv32i.runtime.memory
+use selfhost.compiler.backend.rv32i.runtime.tails
 
 skill emit_box_get(compiler) {
     @executor = compiler.executor
@@ -32,13 +36,12 @@ skill emit_box_get(compiler) {
     compiler = executor.branch_greater_equal_unsigned(compiler, backend.ARG2, backend.SCRATCH0, ".L_box_get_scan")
     compiler = executor.shift_left(compiler, backend.SCRATCH1, backend.ARG2, words.shift + 1)
     compiler = executor.add(compiler, backend.SCRATCH1, backend.VALUE, backend.SCRATCH1)
-    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH1, words.payload + words.bytes)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH1, words.payload + words.box_fields)
     compiler = executor.branch_not_equal(compiler, backend.SCRATCH2, backend.ERROR, ".L_box_get_scan")
-    compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH1, words.payload + words.bytes * 2)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    compiler = executor.ret(compiler)
+    compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH1, words.payload + words.box_fields + words.box_field_value)
+    compiler = tails.ok(compiler)
     compiler = executor.label(compiler, ".L_box_get_scan")
-    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.payload + words.bytes)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.payload + words.box_fields)
     compiler = executor.label(compiler, ".L_box_get_loop")
     compiler = executor.branch_zero(compiler, backend.SCRATCH0, "rt_missing_field")
     compiler = executor.load(compiler, backend.SCRATCH1, backend.VALUE, 0)
@@ -48,8 +51,7 @@ skill emit_box_get(compiler) {
     compiler = executor.jump(compiler, ".L_box_get_loop")
     compiler = executor.label(compiler, ".L_box_get_found")
     compiler = executor.load(compiler, backend.VALUE, backend.VALUE, words.box_field_value)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    out tails.ok(compiler)
 }
 
 skill emit_box_set(compiler) {
@@ -62,14 +64,14 @@ skill emit_box_set(compiler) {
     compiler = executor.branch_greater_equal_unsigned(compiler, backend.ARG3, backend.SCRATCH0, ".L_box_set_scan")
     compiler = executor.shift_left(compiler, backend.SCRATCH1, backend.ARG3, words.shift + 1)
     compiler = executor.add(compiler, backend.SCRATCH1, memory.BARRIER_OBJECT, backend.SCRATCH1)
-    compiler = executor.load(compiler, backend.SCRATCH3, backend.SCRATCH1, words.payload + words.bytes)
+    compiler = executor.load(compiler, backend.SCRATCH3, backend.SCRATCH1, words.payload + words.box_fields)
     compiler = executor.branch_not_equal(compiler, backend.SCRATCH3, backend.ERROR, ".L_box_set_scan")
-    compiler = executor.store(compiler, backend.ARG2, backend.SCRATCH1, words.payload + words.bytes * 2)
+    compiler = executor.store(compiler, backend.ARG2, backend.SCRATCH1, words.payload + words.box_fields + words.box_field_value)
     compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
     compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
     compiler = executor.jump(compiler, "rt_region_barrier")
     compiler = executor.label(compiler, ".L_box_set_scan")
-    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.payload + words.bytes)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.payload + words.box_fields)
     compiler = executor.label(compiler, ".L_box_set_loop")
     compiler = executor.branch_zero(compiler, backend.SCRATCH0, "rt_missing_field")
     compiler = executor.load(compiler, backend.SCRATCH1, backend.VALUE, 0)
@@ -87,10 +89,7 @@ skill emit_box_set(compiler) {
 
 skill emit_missing_field(compiler) {
     @executor = compiler.executor
-    compiler = executor.label(compiler, "rt_missing_field")
-    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_MISSING_FIELD)
-    out executor.ret(compiler)
+    out tails.fail(compiler, "rt_missing_field", abi.ERROR_MISSING_FIELD)
 }
 
 skill emit_group_count(compiler) {
@@ -100,8 +99,7 @@ skill emit_group_count(compiler) {
     compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
     compiler = executor.load(compiler, backend.VALUE, backend.VALUE, words.payload)
     compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    out tails.ok(compiler)
 }
 
 skill emit_group_at(compiler) {
@@ -117,17 +115,13 @@ skill emit_group_at(compiler) {
     compiler = executor.branch_greater_equal_unsigned(compiler, backend.ERROR, backend.SCRATCH0, "rt_group_bounds")
     compiler = executor.shift_left(compiler, backend.ERROR, backend.ERROR, words.shift)
     compiler = executor.add(compiler, backend.VALUE, backend.VALUE, backend.ERROR)
-    compiler = executor.load(compiler, backend.VALUE, backend.VALUE, words.payload + words.bytes)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    compiler = executor.load(compiler, backend.VALUE, backend.VALUE, words.payload + words.group_items)
+    out tails.ok(compiler)
 }
 
 skill emit_group_bounds(compiler) {
     @executor = compiler.executor
-    compiler = executor.label(compiler, "rt_group_bounds")
-    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_GROUP_BOUNDS)
-    out executor.ret(compiler)
+    out tails.fail(compiler, "rt_group_bounds", abi.ERROR_GROUP_BOUNDS)
 }
 
 skill emit_group_add(compiler) {
@@ -157,21 +151,35 @@ skill emit_group_add(compiler) {
     compiler = executor.branch_equal(compiler, backend.SCRATCH2, backend.SCRATCH1, ".L_group_copy_done")
     compiler = executor.shift_left(compiler, backend.SCRATCH3, backend.SCRATCH2, words.shift)
     compiler = executor.add(compiler, backend.SCRATCH4, backend.SCRATCH0, backend.SCRATCH3)
-    compiler = executor.load(compiler, backend.SCRATCH5, backend.SCRATCH4, words.payload + words.bytes)
+    compiler = executor.load(compiler, backend.SCRATCH5, backend.SCRATCH4, words.payload + words.group_items)
     compiler = executor.add(compiler, backend.SCRATCH4, backend.VALUE, backend.SCRATCH3)
-    compiler = executor.store(compiler, backend.SCRATCH5, backend.SCRATCH4, words.payload + words.bytes)
+    compiler = executor.store(compiler, backend.SCRATCH5, backend.SCRATCH4, words.payload + words.group_items)
     compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
     compiler = executor.jump(compiler, ".L_group_copy")
     compiler = executor.label(compiler, ".L_group_copy_done")
     compiler = executor.shift_left(compiler, backend.SCRATCH3, backend.SCRATCH1, words.shift)
     compiler = executor.add(compiler, backend.SCRATCH3, backend.VALUE, backend.SCRATCH3)
     compiler = executor.load(compiler, backend.SCRATCH4, backend.STACK, words.bytes)
-    compiler = executor.store(compiler, backend.SCRATCH4, backend.SCRATCH3, words.payload + words.bytes)
+    compiler = executor.store(compiler, backend.SCRATCH4, backend.SCRATCH3, words.payload + words.group_items)
     compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_GROUP)
     compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_times_shift(compiler, target, scratch) {
+    @executor = compiler.executor
+    @high = constants.TREE_SHIFT - 1
+    @bit = 0
+    always {
+        (high < 2) { leave }
+        (num.mod(high, 2) == 1) { out error.TreeShiftUnsupported }
+        high = high / 2
+        bit = bit + 1
+    }
+    ((high == 1) == no) { out error.TreeShiftUnsupported }
+    compiler = executor.shift_left(compiler, scratch, target, bit)
+    out executor.add(compiler, target, target, scratch)
 }
 
 skill emit_group_tree_at(compiler) {
@@ -189,32 +197,29 @@ skill emit_group_tree_at(compiler) {
     compiler = executor.load(compiler, backend.SCRATCH5, backend.VALUE, words.payload + words.tree_root)
     compiler = executor.and_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, abi.PAYLOAD_MASK)
     compiler = executor.add_immediate(compiler, backend.ARG2, backend.SCRATCH4, -1)
-    compiler = executor.shift_left(compiler, backend.SCRATCH3, backend.ARG2, 2)
-    compiler = executor.add(compiler, backend.ARG2, backend.ARG2, backend.SCRATCH3)
+    compiler = emit_times_shift(compiler, backend.ARG2, backend.SCRATCH3)
     compiler = executor.label(compiler, ".L_tree_down")
     compiler = executor.branch_zero(compiler, backend.ARG2, ".L_tree_leaf")
     compiler = executor.shift_right_unsigned_by(compiler, backend.SCRATCH3, backend.ERROR, backend.ARG2)
-    compiler = executor.and_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, 31)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, constants.TREE_MASK)
     compiler = executor.shift_left(compiler, backend.SCRATCH3, backend.SCRATCH3, words.shift)
     compiler = executor.add(compiler, backend.SCRATCH3, backend.SCRATCH5, backend.SCRATCH3)
     compiler = executor.load(compiler, backend.SCRATCH5, backend.SCRATCH3, words.payload + words.group_items)
     compiler = executor.and_immediate(compiler, backend.SCRATCH5, backend.SCRATCH5, abi.PAYLOAD_MASK)
-    compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, -5)
+    compiler = executor.add_immediate(compiler, backend.ARG2, backend.ARG2, 0 - constants.TREE_SHIFT)
     compiler = executor.jump(compiler, ".L_tree_down")
     compiler = executor.label(compiler, ".L_tree_leaf")
-    compiler = executor.and_immediate(compiler, backend.SCRATCH3, backend.ERROR, 31)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH3, backend.ERROR, constants.TREE_MASK)
     compiler = executor.shift_left(compiler, backend.SCRATCH3, backend.SCRATCH3, words.shift)
     compiler = executor.add(compiler, backend.SCRATCH3, backend.SCRATCH5, backend.SCRATCH3)
     compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH3, words.payload + words.group_items)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    compiler = executor.ret(compiler)
+    compiler = tails.ok(compiler)
     compiler = executor.label(compiler, ".L_tree_tail")
     compiler = executor.sub(compiler, backend.SCRATCH3, backend.ERROR, backend.SCRATCH3)
     compiler = executor.shift_left(compiler, backend.SCRATCH3, backend.SCRATCH3, words.shift)
     compiler = executor.add(compiler, backend.SCRATCH3, backend.SCRATCH1, backend.SCRATCH3)
     compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH3, words.payload + words.group_items)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    out tails.ok(compiler)
 }
 
 skill emit_tree_switch(compiler) {
@@ -273,8 +278,7 @@ skill emit_group_tree_parts(compiler) {
     compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_GROUP)
     compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    out tails.ok(compiler)
 }
 
 skill emit_group_tree_make(compiler) {
@@ -304,8 +308,7 @@ skill emit_group_tree_make(compiler) {
     compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_GROUP)
     compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 7)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 8)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    out tails.ok(compiler)
 }
 
 skill emit_group_flatten(compiler) {
@@ -316,8 +319,7 @@ skill emit_group_flatten(compiler) {
     compiler = executor.load32(compiler, backend.SCRATCH1, backend.SCRATCH0, abi.OBJECT_HEADER_KIND_OFFSET)
     compiler = executor.load_immediate(compiler, backend.SCRATCH2, abi.OBJECT_KIND_TREE)
     compiler = executor.branch_equal(compiler, backend.SCRATCH1, backend.SCRATCH2, ".L_flatten_tree")
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    compiler = executor.ret(compiler)
+    compiler = tails.ok(compiler)
     compiler = executor.label(compiler, ".L_flatten_tree")
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - words.bytes * 4)
     compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
@@ -354,6 +356,5 @@ skill emit_group_flatten(compiler) {
     compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_GROUP)
     compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
-    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
-    out executor.ret(compiler)
+    out tails.ok(compiler)
 }
