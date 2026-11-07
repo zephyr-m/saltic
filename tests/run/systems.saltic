@@ -1,0 +1,101 @@
+-- systems — случаи tests/run про ОС и платформы: модули ОС (набор os: jtml,
+-- tasks, panels, mrpc) и платформы (набор platforms: qemu-virt — графическая
+-- ОС через os/target/qemu_virt/build-graphics.saltic, UEFI — сборка и запуск
+-- образа скриптами os/target/uefi_x86_64, closure — канон в ELF rv32i и запуск
+-- под QEMU). Провал — TestFailed.
+--
+-- run_case(t, name) -> yes, если случай отсюда (и он прошёл); no — чужой
+-- Внутри: own_program(t, name, source, target)
+
+use io
+use io.file
+use core.str
+use core.bytes
+use core.group
+use core.process
+use workbench.kit
+use tests.run.core
+
+ELF = [127, 69, 76, 70]
+CANON_HEAP = "67108864"
+
+skill own_program(t, name, source, target) {
+    @work = "{t.work}/{name}"
+    process.run(["mkdir", "-p", work], "", [])
+    core.build(t, name, source, "{work}/program.elf", core.HEAP, target)
+    out core.must(core.run(t, target, ["{work}/program.elf"], ""), "{name}: программа упала")
+}
+
+skill is_elf(path) {
+    @image = file.read_bytes(path) rescue |err| { out no }
+    (bytes.count(image) < 4) { out no }
+    drum (group.count(ELF)) {
+        ((bytes.get(image, beat) == group.get(ELF, beat)) == no) { out no }
+    }
+    out yes
+}
+
+skill test_qemu_virt(t) {
+    @work = "{t.work}/qemu-virt"
+    process.run(["mkdir", "-p", work], "", [])
+    core.build(t, "build-graphics", "os/target/qemu_virt/build-graphics.saltic", "{work}/build-graphics", core.HEAP, "x86_64")
+    @env = group.concat(t.env, ["SALTIC_QEMU_GRAPHICS_DIR={work}"])
+    out core.must(process.run(["{work}/build-graphics", "--check"], "", env), "qemu-virt: графика не собралась")
+}
+
+skill test_uefi(t) {
+    @env = group.concat(t.env, ["SALTIC_UEFI_DIR={t.work}/uefi"])
+    core.must(process.run(["bash", "os/target/uefi_x86_64/build.sh"], "", env), "uefi: образ не собрался")
+    out core.must(process.run(["bash", "os/target/uefi_x86_64/run.sh", "--check"], "", env), "uefi: образ не прошёл проверку")
+}
+
+skill test_closure(t) {
+    @work = "{t.work}/closure"
+    process.run(["mkdir", "-p", work], "", [])
+    io.show("closure: канон → ELF rv32i")
+    core.build(t, "closure", "soul/canonical/main.saltic", "{work}/canonical.elf", CANON_HEAP, "rv32i")
+    core.expect(is_elf("{work}/canonical.elf"), "closure: не ELF")
+    process.run(["cp", "tests/fixtures/input.txt", "{work}/input.txt"], "", [])
+    io.show("closure: ELF исполняется в QEMU")
+    core.run(t, "rv32i", ["{work}/canonical.elf", "{work}/input.txt", "{work}/output.txt"], "{work}/stdout.txt")
+    core.same("soul/canonical/expected/output.txt", "{work}/stdout.txt")
+    @written = core.contents("{work}/output.txt")
+    core.expect(str.starts_with(written, "pip:0") == yes, "closure: в файле вывода не pip:0")
+    out io.show("closure: ok")
+}
+
+skill run_case(t, name) {
+    (name == "jtml") {
+        own_program(t, name, "tests/jtml.saltic", t.host)
+        io.show("JTML: дерево, раскладка и ввод подтверждены")
+        out yes
+    }
+    (name == "tasks") {
+        own_program(t, name, "tests/tasks.saltic", t.host)
+        io.show("tasks: модель и интерфейс подтверждены")
+        out yes
+    }
+    (name == "panels") {
+        own_program(t, name, "tests/panels.saltic", t.host)
+        io.show("panels: строки журнала и подписи системной панели подтверждены")
+        out yes
+    }
+    (name == "mrpc") {
+        own_program(t, name, "tests/mrpc.saltic", "x86_64")
+        io.show("mrpc: запросы и ответы mRPC/1.0 агента подтверждены")
+        out yes
+    }
+    (name == "qemu-virt") {
+        test_qemu_virt(t)
+        out yes
+    }
+    (name == "uefi") {
+        test_uefi(t)
+        out yes
+    }
+    (name == "closure") {
+        test_closure(t)
+        out yes
+    }
+    out no
+}

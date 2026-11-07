@@ -1,0 +1,65 @@
+-- run — все проверки языка, ОС и платформ (`just test [набор]`, ветки
+-- global-check). Набор: all — язык (по умолчанию), os — модули ОС, platforms —
+-- qemu-virt, UEFI, closure; или имена случаев через пробел. Печатает «случаи:» и
+-- перед каждым «случай: имя» — по ним global-check рисует случаи ветки; в конце —
+-- таблица метрик. Хост тестовых программ — SALTIC_TEST_HOST (rv32i, x86_64,
+-- rv64), запускать из проектного Nix shell (нужны qemu). Провал — ошибка
+-- случая, артефакты остаются в папке прогона. Вместо tests/run.sh и metrics.sh
+-- (в .archive/); собирается x86-64 через bootstrap/build.sh.
+--
+-- program(chosen) — chosen: набор или имена случаев, "" — all
+-- Внутри: expand(chosen) -> имена случаев, one(t, name)
+
+use io
+use io.clock
+use core.str
+use core.time
+use core.group
+use core.process
+use workbench.kit
+use tests.run.core
+use tests.run.language
+use tests.run.systems
+use tests.run.metrics
+
+ALL = ["checker", "fixed-types", "modules", "json-rpc", "diagnostics", "groups", "bytes", "edges", "always", "rva23", "rv64", "x86-encoder", "dict", "seed-contract", "machine", "abi", "memory", "platform", "process", "native"]
+OS = ["jtml", "tasks", "panels", "mrpc"]
+PLATFORMS = ["qemu-virt", "uefi", "closure"]
+
+skill expand(chosen) {
+    (str.bytes(chosen) == 0) { out ALL }
+    (chosen == "all") { out ALL }
+    (chosen == "os") { out OS }
+    (chosen == "platforms") { out PLATFORMS }
+    out str.split(chosen, " ")
+}
+
+skill one(t, name) {
+    (language.run_case(t, name) == yes) { out none }
+    (systems.run_case(t, name) == yes) { out none }
+    io.show("неизвестная проверка: {name}")
+    out error.UnknownCase
+}
+
+program(chosen) {
+    @t = core.begin(clock.zone())
+    @names = expand(chosen)
+    @listed = str.join(names, " ")
+    io.show("случаи: {listed}")
+    drum (names) {
+        @name = beat
+        io.show("случай: {name}")
+        t.current = name
+        @started = time.now()
+        one(t, name) rescue |err| {
+            io.show("проверка: артефакты сохранены в {t.work}")
+            out err
+        }
+        @spent = time.now() - started
+        (spent < 0) { spent = spent + time.DAY_MILLISECONDS }
+        metrics.finish_case(t, name, spent / 10)
+    }
+    metrics.report(t, names)
+    process.run(["rm", "-rf", t.work], "", [])
+    out none
+}

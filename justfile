@@ -78,7 +78,8 @@ same *sources:
     .cache/build/workbench/same-check "$*"
 
 test case="all":
-    nix --extra-experimental-features "nix-command flakes" develop --command bash tests/run.sh "$1"
+    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-tests bash bootstrap/build.sh tests/run.saltic .cache/build/workbench/tests >/dev/null
+    nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/tests "$1"
 
 package:
     bash .github/package.sh

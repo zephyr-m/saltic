@@ -1,0 +1,387 @@
+-- language — случаи tests/run про язык (набор all): чекер и канон ошибок,
+-- фиксированные типы, модули, json-rpc, диагностика, группы, байты, граничные
+-- случаи, always, rv64, кодировщики RVA23 и x86, словарь, контракты seed и ABI,
+-- машина, память, платформа (ошибки, аргументы, часы, stamp), process и родной
+-- x86-64. Каждый случай — навык с именем как в наборе; провал — TestFailed.
+--
+-- run_case(t, name) -> yes, если случай отсюда (и он прошёл); no — чужой
+-- Внутри: checker, plain(t, name, source, expected, heap), pair(…) — rv32i и
+--     x86-64 с одним эталоном, trimmed(text), normalized(text), clock_seconds
+
+use io
+use io.file
+use core.str
+use core.time
+use core.group
+use core.bytes
+use core.process
+use workbench.kit
+use tests.run.core
+
+HUGE_HEAP = "4831838208"
+BIG_NUMBERS = "-268435455 268435455 33554432 -33554433 100000000 33554431 -256 255 4096 -4097 200000001 268435455 4294967296 1099511627784 1152921504606846975 "
+SMALL_HEAP = "1048576"
+MIDDLE_HEAP = "2097152"
+CANON_HEAP = "67108864"
+
+skill trimmed(value) {
+    @end = str.bytes(value)
+    always {
+        (end == 0) { leave }
+        ((str.byte(value, end - 1) == 10) == no) { leave }
+        end = end - 1
+    }
+    out str.slice(value, 0, end)
+}
+
+skill folder(t, name) {
+    @path = "{t.work}/{name}"
+    process.run(["mkdir", "-p", path], "", [])
+    out path
+}
+
+skill checker_program(t) {
+    @path = "{t.work}/checker/checker.elf"
+    (kit.exists(path) == yes) { out path }
+    folder(t, "checker")
+    core.build(t, "checker", "tests/checker.saltic", path, core.HEAP, t.host)
+    out path
+}
+
+skill sorted_cases(path) {
+    @found = []
+    drum (file.list(path)) {
+        (str.ends_with(beat, ".saltic") == yes) { found = group.add(found, beat) }
+    }
+    out kit.sorted(found)
+}
+
+skill test_checker(t) {
+    @checker = checker_program(t)
+    @work = folder(t, "checker")
+    core.run(t, t.host, [checker, "soul/canonical/main.saltic"], "{work}/canonical.txt")
+    core.expect(str.bytes(core.contents("{work}/canonical.txt")) == 0, "чекер: у канона есть замечания")
+    drum (sorted_cases("soul/canonical/errors")) {
+        @name = kit.base_name(beat)
+        core.run(t, t.host, [checker, "soul/canonical/errors/{beat}"], "{work}/errors-{name}.txt")
+        core.same("soul/canonical/expected/errors/{name}.txt", "{work}/errors-{name}.txt")
+    }
+    drum (sorted_cases("soul/canonical/errors/parser")) {
+        @name = kit.base_name(beat)
+        @code = core.run(t, t.host, [checker, "soul/canonical/errors/parser/{beat}"], "{work}/parser-{name}.txt")
+        core.expect((code == 0) == no, "чекер: soul/canonical/errors/parser/{beat} разобрался, а должен упасть с ParseFailed")
+        core.same("soul/canonical/expected/errors/parser/{name}.txt", "{work}/parser-{name}.txt")
+    }
+    out io.show("чекер: нативная проверка пройдена")
+}
+
+skill normalized(value) {
+    @result = ""
+    drum (str.lines(value)) {
+        @parts = str.split(beat, "|")
+        @line = beat
+        (group.count(parts) >= 4) {
+            @first = group.get(parts, 0)
+            @rest = str.slice(beat, str.bytes(first) + str.bytes(group.get(parts, 1)) + str.bytes(group.get(parts, 2)) + 3, str.bytes(beat))
+            line = "{first}|{rest}"
+        }
+        result = str.concat(result, "{line}\n")
+    }
+    out result
+}
+
+skill passed(path) {
+    drum (str.lines(core.contents(path))) {
+        (str.starts_with(beat, "итог: пройдено ") == yes) { out str.ends_with(beat, ", провалено 0") }
+    }
+    out no
+}
+
+skill test_fixed_types(t) {
+    @checker = checker_program(t)
+    @work = folder(t, "fixed-types")
+    core.run(t, t.host, [checker, "soul/seed/tests/fixed.saltic"], "{work}/valid-diagnostics.txt")
+    core.run(t, t.host, [checker, "soul/seed/tests/fixed-errors.saltic"], "{work}/errors.txt")
+    core.expect(str.bytes(core.contents("{work}/valid-diagnostics.txt")) == 0, "фиксированные типы: у верного файла есть замечания")
+    file.write("{work}/errors-normalized.txt", normalized(core.contents("{work}/errors.txt")))
+    core.same("soul/seed/tests/expected/fixed-errors.txt", "{work}/errors-normalized.txt")
+    core.build(t, "fixed-types", "soul/seed/tests/fixed.saltic", "{work}/program.elf", core.HEAP, t.host)
+    core.run(t, t.host, ["{work}/program.elf"], "{work}/stdout.txt")
+    core.expect(passed("{work}/stdout.txt"), "фиксированные типы: не все проверки прошли")
+    out io.show("фиксированные типы: нативная проверка пройдена")
+}
+
+skill test_modules(t) {
+    @checker = checker_program(t)
+    @work = folder(t, "modules")
+    core.run(t, t.host, [checker, "tests/fixtures/modules/main.saltic"], "{work}/main-diagnostics.txt")
+    core.run(t, t.host, [checker, "tests/fixtures/modules/errors.saltic"], "{work}/errors.txt")
+    core.expect(str.bytes(core.contents("{work}/main-diagnostics.txt")) == 0, "модули: у main.saltic есть замечания")
+    core.same("tests/expected/module-errors.txt", "{work}/errors.txt")
+    core.build(t, "modules", "tests/fixtures/modules/main.saltic", "{work}/program.elf", core.HEAP, t.host)
+    core.run(t, t.host, ["{work}/program.elf"], "{work}/stdout.txt")
+    core.same("tests/expected/modules.txt", "{work}/stdout.txt")
+    out io.show("модули: нативная проверка пройдена")
+}
+
+skill plain(t, name, source, expected, heap) {
+    @work = folder(t, name)
+    core.build(t, name, source, "{work}/program.elf", heap, t.host)
+    (str.bytes(expected) == 0) {
+        out core.must(core.run(t, t.host, ["{work}/program.elf"], ""), "{name}: программа упала")
+    }
+    core.run(t, t.host, ["{work}/program.elf"], "{work}/stdout.txt")
+    out core.same(expected, "{work}/stdout.txt")
+}
+
+skill pair(t, name, source, expected, heap) {
+    @work = folder(t, name)
+    core.build(t, "{name}-rv32i", source, "{work}/rv32i.elf", heap, "rv32i")
+    core.build(t, "{name}-x86_64", source, "{work}/x86_64", heap, "x86_64")
+    core.run(t, "rv32i", ["{work}/rv32i.elf"], "{work}/rv32i.txt")
+    core.run(t, "x86_64", ["{work}/x86_64"], "{work}/x86_64.txt")
+    core.same(expected, "{work}/rv32i.txt")
+    out core.same(expected, "{work}/x86_64.txt")
+}
+
+skill test_rva23(t) {
+    @work = folder(t, "rva23")
+    core.build(t, "rva23", "tests/rva23.saltic", "{work}/program", core.HEAP, "x86_64")
+    core.run(t, "x86_64", ["{work}/program"], "{work}/lines.txt")
+    core.must(process.run(["python3", "workbench/rva23/verify.py", "{work}/lines.txt"], "", []), "rva23: сверка с GNU-ассемблером не сошлась")
+    out io.show("rva23: кодировщик RV64 сошёлся с GNU-ассемблером на всех командах таблицы")
+}
+
+skill canon_run(t, target, binary, work, prefix) {
+    process.run(["cp", "tests/fixtures/input.txt", "{work}/input.txt"], "", [])
+    core.run(t, target, [binary, "{work}/input.txt", "{work}/{prefix}output.txt"], "{work}/{prefix}stdout.txt")
+    core.same("soul/canonical/expected/output.txt", "{work}/{prefix}stdout.txt")
+    out core.expect(trimmed(core.contents("{work}/{prefix}output.txt")) == "pip:0", "канон: в файле вывода не pip:0")
+}
+
+skill numbers_line(t, target, binary, work) {
+    core.run(t, target, [binary], "{work}/big-numbers.txt")
+    @joined = str.concat(str.join(str.lines(core.contents("{work}/big-numbers.txt")), " "), " ")
+    out core.expect(joined == BIG_NUMBERS, "большие числа: {joined}")
+}
+
+skill test_rv64(t) {
+    @work = folder(t, "rv64")
+    core.build(t, "edges-rv64", "tests/edges.saltic", "{work}/edges", core.HEAP, "rv64")
+    core.build(t, "always-rv64", "tests/always.saltic", "{work}/always", SMALL_HEAP, "rv64")
+    core.run(t, "rv64", ["{work}/edges"], "{work}/edges.txt")
+    core.run(t, "rv64", ["{work}/always"], "{work}/always.txt")
+    core.same("tests/expected/edges.txt", "{work}/edges.txt")
+    core.same("tests/expected/always.txt", "{work}/always.txt")
+    core.build(t, "canonical-rv64", "soul/canonical/main.saltic", "{work}/canonical", CANON_HEAP, "rv64")
+    canon_run(t, "rv64", "{work}/canonical", work, "")
+    core.build(t, "big-numbers-rv64", "tests/fixtures/big-numbers.saltic", "{work}/big-numbers", SMALL_HEAP, "rv64")
+    numbers_line(t, "rv64", "{work}/big-numbers", work)
+    core.build(t, "huge-heap-rv64", "soul/canonical/main.saltic", "{work}/huge-heap", HUGE_HEAP, "rv64")
+    canon_run(t, "rv64", "{work}/huge-heap", work, "huge-")
+    out io.show("rv64: канон (и с кучей 4,5 ГБ), edges, always и большие числа под qemu-riscv64 — те же выводы, что у rv32i и x86_64")
+}
+
+skill per_target(t, name, source, expected) {
+    @work = folder(t, name)
+    drum (["rv32i", "x86_64", "rv64"]) {
+        core.build(t, "{name}-{beat}", source, "{work}/{beat}", core.HEAP, beat)
+        core.run(t, beat, ["{work}/{beat}"], "{work}/{beat}.txt")
+        core.same(expected, "{work}/{beat}.txt")
+    }
+    out none
+}
+
+skill clock_seconds(text) {
+    @parts = str.split(text, ":")
+    ((group.count(parts) == 3) == no) { out 0 }
+    @result = 0
+    drum (parts) { result = result * 60 + core.hundredths(beat) / 100 }
+    out result
+}
+
+skill platform_target(t, target, work) {
+    core.build(t, "platform-{target}", "tests/platform.saltic", "{work}/{target}", core.HEAP, target)
+    core.build(t, "uncaught-{target}", "tests/fixtures/uncaught.saltic", "{work}/uncaught-{target}", core.HEAP, target)
+    core.build(t, "needs-args-{target}", "tests/fixtures/needs-args.saltic", "{work}/needs-args-{target}", core.HEAP, target)
+    core.run(t, target, ["{work}/{target}"], "{work}/{target}.txt")
+    core.same("tests/expected/platform.txt", "{work}/{target}.txt")
+    @uncaught = core.run(t, target, ["{work}/uncaught-{target}"], "{work}/uncaught-{target}.txt")
+    core.expect((uncaught == 0) == no, "платформа: непойманная ошибка не стала кодом выхода ({target})")
+    core.expect(trimmed(core.contents("{work}/uncaught-{target}.txt")) == "до ошибки\nошибка: Boom", "платформа: вывод непойманной ошибки ({target})")
+    @short = core.run(t, target, ["{work}/needs-args-{target}"], "{work}/needs-args-{target}.txt")
+    core.expect((short == 0) == no, "платформа: нехватка аргументов не стала кодом выхода ({target})")
+    core.expect(trimmed(core.contents("{work}/needs-args-{target}.txt")) == "нужно 2 аргументов", "платформа: вывод нехватки аргументов ({target})")
+    core.run(t, target, ["{work}/needs-args-{target}", "раз", "два"], "{work}/args-{target}.txt")
+    core.expect(trimmed(core.contents("{work}/args-{target}.txt")) == "раз два", "платформа: аргументы не дошли ({target})")
+    core.build(t, "stamp-{target}", "workbench/stamp.saltic", "{work}/stamp-{target}", core.HEAP, target)
+    @before = clock_seconds(time.text(time.now() + t.zone))
+    @stamped = core.run(t, target, ["{work}/stamp-{target}", "echo \"раз два\"; exit 3"], "{work}/stamp-{target}.txt")
+    @after = clock_seconds(time.text(time.now() + t.zone))
+    core.expect((stamped == 0) == no, "платформа: stamp не передал провал команды ({target})")
+    @lines = str.lines(core.contents("{work}/stamp-{target}.txt"))
+    core.expect(group.count(lines) == 2, "платформа: stamp — не две строки ({target})")
+    @first = group.get(lines, 0)
+    core.expect(str.slice(first, 11, str.bytes(first)) == "раз два", "платформа: stamp — строка без времени ({target})")
+    core.expect(group.get(lines, 1) == "ошибка: StampedFailed", "платформа: stamp — нет StampedFailed ({target})")
+    @moment = clock_seconds(str.slice(first, 1, 9))
+    core.expect(moment >= before, "платформа: время stamp раньше запуска ({target})")
+    out core.expect(moment <= after, "платформа: время stamp позже конца ({target})")
+}
+
+skill test_platform(t) {
+    @work = folder(t, "platform")
+    drum (["rv32i", "x86_64", "rv64"]) { platform_target(t, beat, work) }
+    out io.show("платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются, часы и stamp идут — одинаково под rv32i, x86_64 и rv64")
+}
+
+skill shell_output(t, script, args) {
+    @done = process.capture(group.concat(["bash", "-c", script], args), "", t.env)
+    out done
+}
+
+skill test_native(t) {
+    @work = folder(t, "native")
+    core.build(t, "native-canonical", "soul/canonical/main.saltic", "{work}/canonical", CANON_HEAP, "x86_64")
+    canon_run(t, "x86_64", "{work}/canonical", work, "")
+    core.build(t, "native-memory", "soul/seed/tests/memory.saltic", "{work}/memory", MIDDLE_HEAP, "x86_64")
+    core.must(core.run(t, "x86_64", ["{work}/memory"], ""), "x86-64: память упала")
+    core.build(t, "native-deep", "tests/fixtures/deep-recursion.saltic", "{work}/deep", SMALL_HEAP, "x86_64")
+    @deep = shell_output(t, "(ulimit -c 0; \"$0\") > \"$1\" 2>&1", ["{work}/deep", "{work}/deep.txt"])
+    core.expect((deep.code == 0) == no, "x86-64: переполнение стека прошло молча")
+    core.expect(str.contains(core.contents("{work}/deep.txt"), "вынырнул") == no, "x86-64: переполненный стек вернулся из рекурсии")
+    core.build(t, "native-keys", "tests/fixtures/keys.saltic", "{work}/keys", SMALL_HEAP, "x86_64")
+    @keys = shell_output(t, "printf 'a\\t\\177 z\\nq' | \"$0\"", ["{work}/keys"])
+    core.expect(trimmed(keys.output) == "[a][tab][backspace][ ][z][enter]", "x86-64: нажатия — {keys.output}")
+    core.build(t, "native-imports", "tests/fixtures/imports.saltic", "{work}/imports", CANON_HEAP, "x86_64")
+    core.run(t, "x86_64", ["{work}/imports"], "{work}/imports.txt")
+    core.expect(trimmed(core.contents("{work}/imports.txt")) == "длина: 6\nпусто: yes\nстрок: 3\nфайл прочитан: yes\nбайт 259: ByteOutsideRange", "x86-64: импорт")
+    core.build(t, "native-big-numbers", "tests/fixtures/big-numbers.saltic", "{work}/big-numbers", SMALL_HEAP, "x86_64")
+    numbers_line(t, "x86_64", "{work}/big-numbers", work)
+    core.build(t, "native-huge-heap", "soul/canonical/main.saltic", "{work}/huge-heap", HUGE_HEAP, "x86_64")
+    canon_run(t, "x86_64", "{work}/huge-heap", work, "huge-")
+    @huge = HUGE_HEAP
+    @env = ["SALTIC_BUILD_DIR={t.work}/build/narrow-huge-heap", "SALTIC_HEAP_BYTES={huge}", "SALTIC_TARGET=rv32i"]
+    @narrow = process.capture(["bash", "-c", "bash bootstrap/build.sh \"$0\" \"$1\" > \"$2\" 2>&1", "soul/canonical/main.saltic", "{work}/narrow-huge", "{work}/narrow-huge.txt"], "", group.concat(t.env, env))
+    core.expect((narrow.code == 0) == no, "x86-64: куча {huge} на 4-байтном слове должна быть отвергнута")
+    core.expect(str.contains(core.contents("{work}/narrow-huge.txt"), "ValueOutsideRange"), "x86-64: нет ValueOutsideRange")
+    out io.show("x86-64 (x86_64): канон и память работают на родном процессоре, переполнение стека падает сразу, нажатия читаются, импорт работает, большие числа точны, куча 4,5 ГБ работает, на rv32i отвергается")
+}
+
+skill test_machine(t) {
+    @work = folder(t, "machine")
+    core.build(t, "machine", "soul/seed/tests/machine.saltic", "{work}/program.elf", core.HEAP, t.host)
+    core.must(core.run(t, t.host, ["{work}/program.elf", "{work}/ordinary.elf"], ""), "машина: проверки упали")
+    core.expect(kit.size("{work}/ordinary.elf") > 0, "машина: образ ordinary.elf пуст")
+    process.run(["chmod", "+x", "{work}/ordinary.elf"], "", [])
+    core.must(process.run(["qemu-riscv32", "-B", core.QEMU_BASE, "{work}/ordinary.elf"], "", []), "машина: ordinary.elf упал")
+    core.build(t, "testing-failure", "tests/fixtures/testing-failure.saltic", "{work}/testing-failure.elf", core.HEAP, t.host)
+    @code = core.run(t, t.host, ["{work}/testing-failure.elf"], "{work}/testing-failure.txt")
+    core.expect((code == 0) == no, "проверка: намеренно проваленный тест завершился успешно")
+    @shown = core.contents("{work}/testing-failure.txt")
+    core.expect(str.contains(shown, "контроль провала -> 1  [FAIL]"), "проверка: нет строки провала")
+    core.expect(str.contains(shown, "итог: пройдено 0, провалено 1"), "проверка: нет итога")
+    core.expect(str.contains(shown, "проваленные проверки:"), "проверка: нет списка провалов")
+    @lines = str.lines(shown)
+    @count = group.count(lines)
+    core.expect(count >= 2, "проверка: вывод короче двух строк")
+    core.expect(str.contains(group.get(lines, count - 2), "- контроль провала -> 1  [FAIL] (ожидалось 2)"), "проверка: нет строки «ожидалось 2»")
+    core.expect(group.get(lines, count - 1) == "ошибка: TestsFailed", "проверка: последняя строка не TestsFailed")
+    out io.show("машина: кодирование и образ подтверждены")
+}
+
+skill run_case(t, name) {
+    (name == "checker") {
+        test_checker(t)
+        out yes
+    }
+    (name == "fixed-types") {
+        test_fixed_types(t)
+        out yes
+    }
+    (name == "modules") {
+        test_modules(t)
+        out yes
+    }
+    (name == "json-rpc") {
+        plain(t, name, "tests/json-rpc.saltic", "tests/expected/json-rpc.txt", core.HEAP)
+        io.show("json-rpc: ok")
+        out yes
+    }
+    (name == "diagnostics") {
+        plain(t, name, "tests/diagnostics.saltic", "tests/expected/diagnostics.txt", core.HEAP)
+        io.show("диагностика: всё согласовано")
+        out yes
+    }
+    (name == "groups") {
+        plain(t, name, "tests/groups.saltic", "tests/expected/groups.txt", core.HEAP)
+        io.show("группы: деревья от 33 элементов подтверждены")
+        out yes
+    }
+    (name == "bytes") {
+        plain(t, name, "tests/bytes.saltic", "tests/expected/bytes.txt", core.HEAP)
+        io.show("буфер байтов: нули, запись на месте, ошибки по имени подтверждены")
+        out yes
+    }
+    (name == "edges") {
+        pair(t, name, "tests/edges.saltic", "tests/expected/edges.txt", core.HEAP)
+        io.show("граничные случаи: ошибки по имени, дерево Box, строки — одинаково под rv32i и x86_64")
+        out yes
+    }
+    (name == "always") {
+        pair(t, name, "tests/always.saltic", "tests/expected/always.txt", SMALL_HEAP)
+        io.show("always: регион на оборот — 200 000 оборотов в 1 МБ, внешнее переживает уборку, под rv32i и x86_64")
+        out yes
+    }
+    (name == "rva23") {
+        test_rva23(t)
+        out yes
+    }
+    (name == "rv64") {
+        test_rv64(t)
+        out yes
+    }
+    (name == "x86-encoder") {
+        pair(t, name, "tests/x86-encoder.saltic", "tests/expected/x86-encoder.txt", core.HEAP)
+        io.show("кодировщик x86-64: байты команд совпадают с GNU as — одинаково под rv32i и x86_64")
+        out yes
+    }
+    (name == "dict") {
+        pair(t, name, "tests/dict.saltic", "tests/expected/dict.txt", core.HEAP)
+        io.show("словарь: запись на месте, UnknownKey, вложенный навык, рост таблицы — одинаково под rv32i и x86_64")
+        out yes
+    }
+    (name == "seed-contract") {
+        plain(t, name, "soul/seed/tests/contract.saltic", "", core.HEAP)
+        io.show("seed: единый контракт подтверждён")
+        out yes
+    }
+    (name == "machine") {
+        test_machine(t)
+        out yes
+    }
+    (name == "abi") {
+        plain(t, name, "soul/seed/tests/abi.saltic", "", core.HEAP)
+        io.show("ABI: единый контракт подтверждён")
+        out yes
+    }
+    (name == "memory") {
+        plain(t, name, "soul/seed/tests/memory.saltic", "", MIDDLE_HEAP)
+        io.show("память: регионы освобождают мусор на куче 1 МБ")
+        out yes
+    }
+    (name == "platform") {
+        test_platform(t)
+        out yes
+    }
+    (name == "process") {
+        per_target(t, name, "tests/process.saltic", "tests/expected/process.txt")
+        io.show("process: run, capture, lines, папка, PATH, окружение, список файлов — одинаково под rv32i, x86_64 и rv64")
+        out yes
+    }
+    (name == "native") {
+        test_native(t)
+        out yes
+    }
+    out no
+}

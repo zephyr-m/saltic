@@ -1,0 +1,163 @@
+-- core — общее у проверок tests/run: сборка программы компилятором с полки
+-- (bootstrap/build.sh), запуск под нужным процессором (x86-64 — прямо, rv32i и
+-- rv64 — под qemu), сравнение вывода с эталоном (разница — `diff -u`), замер
+-- каждой сборки и запуска GNU time. Провал — ошибка TestFailed с причиной на
+-- экране. Хост тестовых программ — SALTIC_TEST_HOST (rv32i по умолчанию), папка —
+-- SALTIC_TEST_DIR/run.XXXXXX; детям — SALTIC_SCRATCH = эта папка.
+--
+-- Test { host, root, work, env, timer, measures, current, stamped, zone } — прогон:
+--     measures — строки [случай, вид, всего, user, sys, КБ] (время — сотые секунды)
+-- begin() -> Test; setting(name, fallback) -> значение окружения
+-- say(t, text) — строка прогона; build(t, name, source, output, heap, target)
+-- runner(target) -> [qemu…] или []; run(t, target, args, output) -> код выхода,
+--     stdout — в файл output ("" — на экран)
+-- same(expected, actual) / expect(ok, why) / must(code, why) — проверки
+-- contents(path) -> содержимое файла, "" — нет; hundredths(text) -> сотые из "1.25"
+-- Внутри: measured(t, kind, command, output) -> код
+
+use io
+use io.file
+use core.str
+use core.time
+use core.group
+use core.process
+use workbench.kit
+
+HEAP = "536870912"
+QEMU_BASE = "0x100000000"
+
+Test = Box {
+    host = "rv32i",
+    root = "",
+    work = "",
+    env = [],
+    timer = "",
+    measures = [],
+    current = "-",
+    stamped = no,
+    zone = 0
+}
+
+skill setting(name, fallback) {
+    drum (process.environment()) {
+        (str.starts_with(beat, "{name}=") == yes) {
+            @value = str.slice(beat, str.bytes(name) + 1, str.bytes(beat))
+            (str.bytes(value) > 0) { out value }
+        }
+    }
+    out fallback
+}
+
+skill begin(zone) {
+    @t = Test { zone = zone }
+    t.host = setting("SALTIC_TEST_HOST", "rv32i")
+    t.stamped = str.bytes(setting("SALTIC_STAMPED", "")) > 0
+    @root = setting("SALTIC_TEST_DIR", ".cache/build/tests")
+    t.root = root
+    process.run(["mkdir", "-p", root], "", [])
+    @made = process.capture(["mktemp", "-d", "{root}/run.XXXXXX"], "", [])
+    t.work = str.slice(made.output, 0, str.bytes(made.output) - 1)
+    t.env = ["SALTIC_SCRATCH={t.work}"]
+    @timer = process.locate("time") rescue |err| { "" }
+    t.timer = timer
+    out t
+}
+
+skill say(t, text) {
+    (t.stamped == yes) { out io.show(text) }
+    out kit.line(t.zone, text)
+}
+
+skill contents(path) {
+    @read = file.read(path) rescue |err| { "" }
+    out read
+}
+
+skill hundredths(value) {
+    @parts = str.split(value, ".")
+    (group.count(parts) == 0) { out 0 }
+    @whole = 0
+    @head = group.get(parts, 0)
+    drum (str.bytes(head)) {
+        (str.is_digit(str.get(head, beat)) == yes) { whole = whole * 10 + str.byte(head, beat) - 48 }
+    }
+    whole = whole * 100
+    (group.count(parts) > 1) {
+        @fraction = group.get(parts, 1)
+        @scale = 10
+        drum (str.bytes(fraction)) {
+            (beat < 2) {
+                (str.is_digit(str.get(fraction, beat)) == yes) { whole = whole + (str.byte(fraction, beat) - 48) * scale }
+                scale = scale / 10
+            }
+        }
+    }
+    out whole
+}
+
+skill measured(t, kind, command, output) {
+    @full = command
+    @times = "{t.work}/measure.time"
+    (str.bytes(t.timer) > 0) {
+        process.run(["rm", "-f", times], "", [])
+        full = group.concat([t.timer, "-q", "-o", times, "-f", "%e %U %S %M"], command)
+    }
+    @code = 0
+    (str.bytes(output) == 0) { code = process.run(full, "", t.env) }
+    (str.bytes(output) > 0) {
+        @done = process.capture(full, "", t.env)
+        file.write(output, done.output)
+        code = done.code
+    }
+    (str.bytes(t.timer) > 0) {
+        @lines = str.lines(contents(times))
+        (group.count(lines) > 0) {
+            @numbers = str.split(group.get(lines, 0), " ")
+            (group.count(numbers) == 4) {
+                @kb = hundredths(group.get(numbers, 3)) / 100
+                @row = [t.current, kind, hundredths(group.get(numbers, 0)), hundredths(group.get(numbers, 1)), hundredths(group.get(numbers, 2)), kb]
+                t.measures = group.add(t.measures, row)
+            }
+        }
+    }
+    out code
+}
+
+skill build(t, name, source, output, heap, target) {
+    @env = group.concat(t.env, ["SALTIC_BUILD_DIR={t.work}/build/{name}", "SALTIC_HEAP_BYTES={heap}", "SALTIC_TARGET={target}"])
+    @saved = t.env
+    t.env = env
+    @code = measured(t, "build", ["bash", "bootstrap/build.sh", source, output], "")
+    t.env = saved
+    ((code == 0) == no) {
+        io.show("сборка {source} ({target}) упала, код {code}")
+        out error.TestFailed
+    }
+    out none
+}
+
+skill runner(target) {
+    (str.starts_with(target, "x86_64") == yes) { out [] }
+    (target == "rv64") { out ["qemu-riscv64", "-B", QEMU_BASE] }
+    out ["qemu-riscv32", "-B", QEMU_BASE]
+}
+
+skill run(t, target, args, output) {
+    out measured(t, "run", group.concat(runner(target), args), output)
+}
+
+skill same(expected, actual) {
+    (kit.same_file(expected, actual) == yes) { out none }
+    process.run(["diff", "-u", expected, actual], "", [])
+    out error.TestFailed
+}
+
+skill expect(ok, why) {
+    (ok == yes) { out none }
+    io.show(why)
+    out error.TestFailed
+}
+
+skill must(code, why) {
+    out expect(code == 0, why)
+}

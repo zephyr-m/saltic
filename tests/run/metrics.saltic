@@ -1,0 +1,163 @@
+-- metrics — таблица прогона tests/run: по каждому случаю всего (по часам),
+-- сборка, запуск, процессор (user + sys) и пик памяти — из замеров GNU time в
+-- core.measured; итог, строки в историю <SALTIC_TEST_DIR>/metrics-history.tsv
+-- (дата, набор, случай, всего, процессор, пик КБ; дописываются — ветки идут
+-- разом) и «было / стало» против
+-- прошлого прогона того же набора. Нет GNU time — таблицы нет.
+--
+-- finish_case(t, name, hundredths) — время случая по часам
+-- report(t, names)
+-- Внутри: decimal(hundredths, digits), padded / right(text, room), megabytes(kb), trend
+
+use io
+use io.file
+use core.str
+use core.group
+use core.process
+use tests.run.core
+
+skill finish_case(t, name, spent) {
+    t.measures = group.add(t.measures, [name, "all", spent, 0, 0, 0])
+    out none
+}
+
+skill decimal(value, digits) {
+    (digits == 1) {
+        @tenths = (value + 5) / 10
+        @whole = tenths / 10
+        @part = tenths % 10
+        out "{whole}.{part}"
+    }
+    @whole = value / 100
+    @part = value % 100
+    (part < 10) { out "{whole}.0{part}" }
+    out "{whole}.{part}"
+}
+
+skill padded(text, room) {
+    @result = text
+    @missing = room - str.count(text)
+    (missing < 0) { missing = 0 }
+    drum (missing) { result = str.concat(result, " ") }
+    out result
+}
+
+skill right(text, room) {
+    @result = text
+    @missing = room - str.count(text)
+    (missing < 0) { missing = 0 }
+    drum (missing) { result = str.concat(" ", result) }
+    out result
+}
+
+skill megabytes(kb) {
+    out (kb + 512) / 1024
+}
+
+skill trend(was, now) {
+    (now * 100 < was * 95) { out "🟢" }
+    (now * 100 > was * 105) { out "🔴" }
+    out "⚪"
+}
+
+skill sum_of(t, name, kind, column) {
+    @result = 0
+    drum (t.measures) {
+        (group.get(beat, 0) == name) {
+            (kind == "cpu") {
+                ((group.get(beat, 1) == "all") == no) { result = result + group.get(beat, 3) + group.get(beat, 4) }
+            }
+            (group.get(beat, 1) == kind) { result = result + group.get(beat, column) }
+            (kind == "peak") {
+                (group.get(beat, 5) > result) { result = group.get(beat, 5) }
+            }
+        }
+    }
+    out result
+}
+
+skill report(t, names) {
+    (str.bytes(t.timer) == 0) { out none }
+    @key = str.concat("{t.host} ", str.join(names, " "))
+    @now = process.capture(["date", "+%Y-%m-%d %H:%M"], "", [])
+    @stamp = str.slice(now.output, 0, str.bytes(now.output) - 1)
+    @history = "{t.root}/metrics-history.tsv"
+    @added = ""
+    @head = str.concat(str.concat(padded("проверка", 14), " "), str.concat(right("всего", 8), " "))
+    head = str.concat(head, str.concat(str.concat(right("сборка", 8), " "), str.concat(right("запуск", 9), " ")))
+    head = str.concat(head, str.concat(str.concat(right("процессор", 8), " "), right("память", 9)))
+    io.show("метрики: 📊 {head}")
+    @total_wall = 0
+    @total_cpu = 0
+    @total_peak = 0
+    drum (names) {
+        @name = beat
+        @wall = sum_of(t, name, "all", 2)
+        @build = sum_of(t, name, "build", 2)
+        @run = sum_of(t, name, "run", 2)
+        @cpu = sum_of(t, name, "cpu", 0)
+        @peak = sum_of(t, name, "peak", 0)
+        @mark = "🐢"
+        (wall < 3000) { mark = "🔹" }
+        (wall < 500) { mark = "⚡" }
+        @row = str.concat(padded(name, 14), str.concat(" ", right(str.concat(decimal(wall, 1), "с"), 8)))
+        row = str.concat(row, str.concat(" ", right(str.concat(decimal(build, 1), "с"), 8)))
+        row = str.concat(row, str.concat(" ", right(str.concat(decimal(run, 1), "с"), 9)))
+        row = str.concat(row, str.concat(" ", right(str.concat(decimal(cpu, 1), "с"), 9)))
+        @shown_peak = megabytes(peak)
+        row = str.concat(row, str.concat(" ", right("{shown_peak}", 7)))
+        io.show("метрики: {mark} {row} МБ")
+        total_wall = total_wall + wall
+        total_cpu = total_cpu + cpu
+        (peak > total_peak) { total_peak = peak }
+        @wall_text = decimal(wall, 2)
+        @cpu_text = decimal(cpu, 2)
+        added = str.concat(added, "{stamp}\t{key}\t{name}\t{wall_text}\t{cpu_text}\t{peak}\n")
+    }
+    @row = str.concat(padded("всего", 14), str.concat(" ", right(str.concat(decimal(total_wall, 1), "с"), 8)))
+    row = str.concat(row, str.concat(" ", right("", 8)))
+    row = str.concat(row, str.concat(" ", right("", 9)))
+    row = str.concat(row, str.concat(" ", right(str.concat(decimal(total_cpu, 1), "с"), 9)))
+    @all_peak = megabytes(total_peak)
+    row = str.concat(row, str.concat(" ", right("{all_peak}", 7)))
+    io.show("метрики: 🧮 {row} МБ")
+    @total_text = decimal(total_wall, 2)
+    @total_cpu_text = decimal(total_cpu, 2)
+    added = str.concat(added, "{stamp}\t{key}\tвсего\t{total_text}\t{total_cpu_text}\t{total_peak}\n")
+    process.run(["sh", "-c", "printf '%s' \"$1\" >> \"$2\"", "sh", added, history], "", [])
+    @before = []
+    @latest = []
+    drum (str.lines(core.contents(history))) {
+        @fields = str.split(beat, "\t")
+        (group.count(fields) == 6) {
+            (group.get(fields, 1) == key) {
+                (group.get(fields, 2) == "всего") {
+                    before = latest
+                    latest = fields
+                }
+            }
+        }
+    }
+    (group.count(before) == 0) {
+        io.show("метрики: 🆕 прошлого прогона с таким набором нет — сравню в следующий раз")
+        out none
+    }
+    @was_wall = core.hundredths(group.get(before, 3))
+    @was_cpu = core.hundredths(group.get(before, 4))
+    @was_peak = core.hundredths(group.get(before, 5)) / 100
+    @shown_wall = decimal(was_wall, 1)
+    @shown_cpu = decimal(was_cpu, 1)
+    @shown_memory = megabytes(was_peak)
+    io.show("метрики: 🕰️ было {shown_wall} с, процессор {shown_cpu} с, память {shown_memory} МБ")
+    @mood = "😌"
+    (total_wall * 100 < was_wall * 95) { mood = "🚀" }
+    (total_wall * 100 > was_wall * 105) { mood = "🐌" }
+    @now_wall = decimal(total_wall, 1)
+    @now_cpu = decimal(total_cpu, 1)
+    @now_memory = megabytes(total_peak)
+    @t1 = trend(was_wall, total_wall)
+    @t2 = trend(was_cpu, total_cpu)
+    @t3 = trend(was_peak, total_peak)
+    io.show("метрики: {mood} стало {now_wall} с {t1}, процессор {now_cpu} с {t2}, память {now_memory} МБ {t3}")
+    out none
+}
