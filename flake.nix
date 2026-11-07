@@ -26,7 +26,7 @@
               gzip
               just
               qemu
-              pkgsCross.riscv32-embedded.buildPackages.gcc
+              pkgsCross.riscv32-embedded.buildPackages.binutils
             ];
           };
         });
