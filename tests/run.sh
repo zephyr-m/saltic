@@ -333,11 +333,15 @@ test_process() {
 test_platform() {
     mkdir -p "$work/platform"
     local target host_run
-    for target in rv32i x86_64; do
+    for target in rv32i x86_64 rv64; do
         SALTIC_TARGET=$target build platform-$target tests/platform.saltic "$work/platform/$target"
         SALTIC_TARGET=$target build uncaught-$target tests/fixtures/uncaught.saltic "$work/platform/uncaught-$target"
         SALTIC_TARGET=$target build needs-args-$target tests/fixtures/needs-args.saltic "$work/platform/needs-args-$target"
-        if [[ "$target" == rv32i ]]; then host_run=(qemu-riscv32 -B 0x100000000); else host_run=(); fi
+        case "$target" in
+            rv32i) host_run=(qemu-riscv32 -B 0x100000000) ;;
+            rv64) host_run=(qemu-riscv64 -B 0x100000000) ;;
+            *) host_run=() ;;
+        esac
         "${host_run[@]}" "$work/platform/$target" >"$work/platform/$target.txt"
         diff -u tests/expected/platform.txt "$work/platform/$target.txt"
         if "${host_run[@]}" "$work/platform/uncaught-$target" >"$work/platform/uncaught-$target.txt"; then
@@ -363,7 +367,7 @@ test_platform() {
         test "$(sed -n 2p <<<"$stamped")" = "ошибка: StampedFailed"
         [[ ! "${stamped:1:8}" < "$before" && ! "${stamped:1:8}" > "$after" ]]
     done
-    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются, часы и stamp идут — одинаково под rv32i и x86_64"
+    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются, часы и stamp идут — одинаково под rv32i, x86_64 и rv64"
 }
 
 test_memory() {

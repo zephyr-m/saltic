@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # Глобальная проверка любого изменения: лимиты канона (workbench/limits.sh),
 # самосборка с паспортами в bootstrap/, время самосборки против прошлого
-# прогона, тесты на rv32i.
+# прогона, тесты на rv32i; в самом конце — сколько заняла вся проверка.
 # Полный лог тестов сохраняется в .cache/build/workbench/global-check.log
 source "$(dirname "$0")/../bootstrap/stamp.sh"
 saltic_stamp_output "$0" "$@"
 cd "$(dirname "$0")/.." || exit 1
 source bootstrap/names.sh
+started="$EPOCHREALTIME"
+report_duration() {
+    local seconds
+    seconds="$(saltic_seconds_since "$started")"
+    echo "== ⏱️ глобальная проверка заняла $((${seconds%.*} / 60)) мин $((${seconds%.*} % 60)) с"
+}
+trap report_duration EXIT
 mkdir -p .cache/build/workbench
 prev=.cache/build/workbench/compiler-prev
 cp "$(saltic_bootstrap_compiler)" "$prev.elf"
