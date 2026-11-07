@@ -1,0 +1,107 @@
+-- refresh-rv64 — самосборка на самом RV64, доказательство для релиза (just rv64),
+-- не для каждого global-check: под qemu-riscv64 она идёт около минуты. Родной
+-- x86-64 компилятор с полки собирает компилятор под RV64 (stage-2), тот под
+-- qemu-riscv64 собирает себя (stage-3); stage-2 = stage-3 = эталон в git
+-- (saltic-<версия>-compiler-rv64-linux, его пишет refresh.sh). Паспорт эталона
+-- дополняется временем самосборки под QEMU. Куча — HEAP, та же, что у
+-- refresh.sh: иначе байты с эталоном не сойдутся. Выбор компиляторов и паспорт —
+-- функции bootstrap/names.sh. Нет qemu-riscv64 — перезапуск себя (BINARY) в
+-- проектном Nix shell. Вместо bootstrap/refresh-rv64.sh (в .archive/).
+--
+-- program(source) — source: исходник компилятора или "" (SOURCE)
+-- Внутри: say(zone, text), names(call) -> вывод функции names.sh, stage(zone,
+--     log, script, args) — шаг с журналом, seconds(start) -> "41.5"
+
+use io
+use io.clock
+use core.str
+use core.time
+use core.group
+use core.process
+use workbench.kit
+
+WORK = ".cache/build/bootstrap-rv64"
+HEAP = "4026531840"
+SOURCE = "soul/seed/selfhost/toolchain.saltic"
+BINARY = ".cache/build/workbench/refresh-rv64"
+IN_SHELL = "SALTIC_REFRESH_RV64_IN_DEV_SHELL=1"
+QEMU = "qemu-riscv64 -B 0x100000000"
+
+skill say(zone, text) {
+    out kit.line(zone, "bootstrap rv64: {text}")
+}
+
+skill names(call) {
+    @done = process.capture(["bash", "-c", "source bootstrap/names.sh && {call}"], "")
+    ((done.code == 0) == no) { out error.NamesFailed }
+    out str.slice(done.output, 0, str.bytes(done.output) - 1)
+}
+
+skill stage(zone, log, script, args) {
+    (kit.shell(script, args, "") == 0) { out none }
+    drum (kit.tail(log, 5)) { kit.line(zone, beat) }
+    out error.StageFailed
+}
+
+skill seconds(start) {
+    @spent = time.now() - start
+    (spent < 0) { spent = spent + time.DAY_MILLISECONDS }
+    @tenths = (spent + 50) / 100
+    @whole = tenths / 10
+    @part = tenths - whole * 10
+    out "{whole}.{part}"
+}
+
+skill same_or_fail(zone, left, right) {
+    (kit.same_file(left, right) == yes) { out none }
+    @at = kit.first_difference(left, right)
+    kit.line(zone, "{left} и {right} различаются: байт {at}")
+    out error.FixedPointBroken
+}
+
+skill tool(name) {
+    @path = process.locate(name) rescue |err| { "" }
+    out path
+}
+
+program(source) {
+    @zone = clock.zone()
+    (str.bytes(source) == 0) { source = SOURCE }
+    (str.bytes(tool("qemu-riscv64")) == 0) {
+        (group.contains(process.environment(), IN_SHELL) == yes) {
+            kit.line(zone, "bootstrap rv64: qemu-riscv64 отсутствует внутри проектного Nix shell")
+            out error.NoQemu
+        }
+        say(zone, "вхожу в проектный Nix shell")
+        @again = process.run(["nix", "--extra-experimental-features", "nix-command flakes", "develop", "--command", "env", IN_SHELL, BINARY, source], "")
+        (again == 0) { out none }
+        out error.StageFailed
+    }
+    process.run(["mkdir", "-p", WORK], "")
+    kit.shell("rm -f \"$0\"/toolchain-rv64*", [WORK], "")
+    @shelf_compiler = names("saltic_native_compiler")
+    @stage2 = "{WORK}/toolchain-rv64-stage2"
+    @stage3 = "{WORK}/toolchain-rv64-stage3"
+    @shelf = kit.base_name(shelf_compiler)
+    say(zone, "{shelf} собирает компилятор под RV64")
+    stage(zone, "{WORK}/stage2.log", "\"$0\" \"$1\" \"$2\" \"$3\" rv64 > \"$4\" 2>&1 && chmod +x \"$2\"", [shelf_compiler, source, stage2, HEAP, "{WORK}/stage2.log"])
+    say(zone, "компилятор RV64 собирает себя под qemu-riscv64")
+    @measure = ""
+    @timer = tool("time")
+    (str.bytes(timer) > 0) { measure = "\"$5\" -o \"$4/stage3.time\" -f \"%M %U %S\"" }
+    @start = time.now()
+    stage(zone, "{WORK}/stage3.log", "{measure} {QEMU} \"$0\" \"$1\" \"$2\" \"$3\" rv64 > \"$4/stage3.log\" 2>&1", [stage2, source, stage3, HEAP, WORK, timer])
+    @spent = seconds(start)
+    say(zone, "проверяю fixed point на RV64 (stage-2 = stage-3)")
+    same_or_fail(zone, stage2, stage3)
+    say(zone, "самосборка под qemu-riscv64 за {spent} с")
+    @path = names("saltic_bootstrap_compiler")
+    @reference = kit.base_name(path)
+    say(zone, "сверяю с эталоном {reference}")
+    same_or_fail(zone, stage3, path)
+    @passport = "saltic_write_passport \"$0\" \"rv64, linux (qemu-riscv64 -B 0x100000000)\" \"rv32i, rv64, x86_64\" \"$1\" \"$2\" \"сходится на RV64 (stage-2 = stage-3 под qemu-riscv64) и на x86-64\" \"$3\" самосборки \"$4/stage3.time\""
+    @written = kit.shell("source bootstrap/names.sh && {passport}", [path, shelf_compiler, HEAP, spent, WORK], "")
+    ((written == 0) == no) { out error.PassportFailed }
+    say(zone, "{reference} собирает себя, паспорт обновлён")
+    out none
+}

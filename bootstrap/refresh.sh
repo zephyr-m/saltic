@@ -48,7 +48,7 @@ cp "$bootstrap_compiler" "$previous"
 # под rv64 и rv32i; fixed point — у всех трёх: байты stage-2 и stage-3 для
 # rv64 (эталон в git), x86-64 (родной собирает сам себя) и rv32i (вторая
 # сверка). Самосборка на самом RV64 (под qemu-riscv64, ~минута) — отдельно:
-# bootstrap/refresh-rv64.sh, just rv64 — доказывает, что эталон собирает себя.
+# bootstrap/refresh-rv64.saltic, just rv64 — доказывает, что эталон собирает себя.
 stage_time="$(type -P time || true)"
 stage() {
     local compiler="$1" target="$2" output="$3"

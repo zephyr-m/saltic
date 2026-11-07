@@ -57,7 +57,8 @@ hosts:
     .cache/build/workbench/hosts
 
 rv64:
-    bash bootstrap/refresh-rv64.sh
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh bootstrap/refresh-rv64.saltic .cache/build/workbench/refresh-rv64 >/dev/null
+    .cache/build/workbench/refresh-rv64 ""
 
 release-draft base="":
     SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/release-draft.saltic .cache/build/workbench/release-draft >/dev/null
