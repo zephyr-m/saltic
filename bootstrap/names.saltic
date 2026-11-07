@@ -2,9 +2,10 @@
 -- .archive/). Формат имени: saltic-<версия>-compiler-<процессор>-<платформа>
 -- [.расширение], процессор — тот, на котором компилятор запускается; хэши —
 -- только в паспорте. Версия — счёт Football Versioning: в VERSION «142:37:77»,
--- в именах «142-37-77». Первый камень — bootstrap/build.sh — берёт компилятор
--- с полки по маске сам; свежесть родного x86-64 и его перевод из эталона RV64
--- решает native_compiler (его зовут refresh и проверки).
+-- в именах «142-37-77». Первый камень — родной x86-64 на полке, его постоянное
+-- имя — ссылка bootstrap/saltic (LINK; justfile и CI зовут её прямо); свежесть
+-- родного и его перевод из эталона RV64 решает native_compiler (refresh и
+-- проверки), программы на Saltic собираются через build.
 --
 -- version() -> "211-59-209"; compiler_path(processor, platform, ending) -> путь
 -- bootstrap_compiler() -> эталон RV64 из git; после смены VERSION — единственный
@@ -17,6 +18,10 @@
 -- write_passport(card) — паспорт <binary без .elf>.txt
 -- native_compiler() -> родной x86-64; не свежий — переводится из эталона
 -- qemu_virt_compiler() -> toolchain rv32i для голого железа qemu-virt
+-- link(path) — LINK указывает на path (имя файла на полке)
+-- build(source, output, heap, target) — собрать родным компилятором с полки;
+--     BuildFailed; finish(output, target) — проверить подпись (ELF, у UEFI — MZ)
+--     и поставить право на запуск; NotProgram
 -- Внутри: sha(path), file_name(path), saltic_files(folder), source_volume,
 --     fresh(own, compiler), remove_others, timed(times, command, log, env)
 
@@ -32,6 +37,7 @@ use workbench.kit
 TRANSLATE_HEAP = "4026531840"
 QEMU_VIRT_HEAP = "536870912"
 SCRATCH = ".cache/build/names"
+LINK = "bootstrap/saltic"
 
 Passport = Box {
     binary = "",
@@ -266,13 +272,14 @@ skill native_compiler() {
     process.run(["mkdir", "-p", ".cache/build"], "", [])
     @started = time.now()
     @heap = TRANSLATE_HEAP
-    @env = ["SALTIC_BOOTSTRAP_COMPILER={compiler}", "SALTIC_BUILD_DIR=.cache/build/bootstrap-native", "SALTIC_HEAP_BYTES={heap}", "SALTIC_TARGET=x86_64", "SALTIC_NATIVE=0"]
     @log = ".cache/build/bootstrap-native.log"
-    @code = timed(".cache/build/bootstrap-native.time", ["bash", "bootstrap/build.sh", "soul/seed/selfhost/toolchain.saltic", own], log, env)
+    @code = timed(".cache/build/bootstrap-native.time", ["qemu-riscv64", "-B", "0x100000000", compiler, "soul/seed/selfhost/toolchain.saltic", own, heap, "x86_64"], log, [])
     ((code == 0) == no) {
         drum (kit.tail(log, 5)) { io.show(beat) }
         out error.TranslateFailed
     }
+    finish(own, "x86_64")
+    link(own)
     @spent = kit.seconds_since(started)
     write_passport(Passport { binary = own, runs_on = "x86_64, linux", emits = "rv32i, rv64, x86_64", parent = compiler, heap = TRANSLATE_HEAP, how = "переведён из {name}", seconds = spent, times = ".cache/build/bootstrap-native.time" })
     out own
@@ -309,4 +316,32 @@ skill qemu_virt_compiler() {
     @spent = kit.seconds_since(started)
     write_passport(Passport { binary = toolchain, runs_on = "rv32i, linux (qemu-riscv32 -B 0x100000000)", emits = "rv32i, qemu-virt (голое железо)", parent = own, heap = QEMU_VIRT_HEAP, how = "собран родным компилятором", seconds = spent, times = ".cache/build/bootstrap-qemu_virt.time" })
     out toolchain
+}
+
+skill link(path) {
+    out process.run(["ln", "-sfn", file_name(path), LINK], "", [])
+}
+
+skill finish(output, target) {
+    @image = file.read_bytes(output) rescue |err| { out error.NotProgram }
+    @signature = [127, 69, 76, 70]
+    (str.starts_with(target, "x86_64-uefi") == yes) { signature = [77, 90] }
+    (bytes.count(image) < group.count(signature)) { out error.NotProgram }
+    drum (group.count(signature)) {
+        ((bytes.get(image, beat) == group.get(signature, beat)) == no) {
+            io.show("bootstrap: {output} — не программа (нет подписи)")
+            out error.NotProgram
+        }
+    }
+    out process.run(["chmod", "+x", output], "", [])
+}
+
+skill build(source, output, heap, target) {
+    @compiler = native_compiler()
+    @part = "{output}.part"
+    process.run(["rm", "-f", part], "", [])
+    @code = process.run([compiler, source, part, heap, target], "", [])
+    ((code == 0) == no) { out error.BuildFailed }
+    finish(part, target)
+    out process.run(["mv", "-f", part, output], "", [])
 }

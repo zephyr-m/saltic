@@ -1,33 +1,36 @@
 set shell := ["bash", "-uc"]
 set positional-arguments
-
 default:
     just --list
+
+# папки для собранных инструментов: компилятор с полки пишет только в готовую папку
+_dirs:
+    mkdir -p .cache/build/workbench .cache/build/qemu_virt
 
 playground:
     node os/ui/playground/server.mjs
 
 compile file="soul/canonical/main.saltic" output="/tmp/saltic.elf":
-    bash bootstrap/build.sh "$1" "$2"
+    bootstrap/saltic "$1" "$2" 536870912 rv32i && chmod +x "$2"
 
 run file="soul/canonical/main.saltic" output="/tmp/saltic.elf" *args:
-    bash bootstrap/build.sh "$1" "$2"
+    bootstrap/saltic "$1" "$2" 536870912 rv32i && chmod +x "$2"
     nix --extra-experimental-features "nix-command flakes" develop --command qemu-riscv32 -B 0x100000000 "$2" "${@:3}"
 
 native file="soul/canonical/main.saltic" output="/tmp/saltic-native" *args:
-    SALTIC_TARGET=x86_64 bash bootstrap/build.sh "$1" "$2"
+    bootstrap/saltic "$1" "$2" 536870912 x86_64 && chmod +x "$2"
     "$2" "${@:3}"
 
 qemu file="os/target/qemu_virt/smoke.saltic":
     mkdir -p .cache/build/qemu_virt
-    bash bootstrap/build.sh "$1" .cache/build/qemu_virt/program.elf
+    bootstrap/saltic "$1" .cache/build/qemu_virt/program.elf 536870912 rv32i && chmod +x .cache/build/qemu_virt/program.elf
 
-qemu-graphics:
-    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-build-graphics bash bootstrap/build.sh os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics >/dev/null
+qemu-graphics: _dirs
+    bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/build-graphics
     nix --extra-experimental-features "nix-command flakes" develop --command bash -c '.cache/build/workbench/build-graphics "" && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -device virtio-tablet-device -audiodev pipewire,id=saltic_audio -device virtio-sound-device,audiodev=saltic_audio -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
 
-os port="46321":
-    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-build-graphics bash bootstrap/build.sh os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics >/dev/null
+os port="46321": _dirs
+    bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/build-graphics
     nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/build-graphics ""
 
 os-send command port="46321":
@@ -41,44 +44,44 @@ os-send command port="46321":
     fi
     printf '%s\n' "$response"
 
-qemu-graphics-check:
-    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-build-graphics bash bootstrap/build.sh os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics >/dev/null
+qemu-graphics-check: _dirs
+    bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/build-graphics
     nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/build-graphics --check
 
-bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic":
-    SALTIC_TARGET=x86_64 bash bootstrap/build.sh bootstrap/refresh.saltic .cache/build/workbench/refresh >/dev/null
+bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic": _dirs
+    bootstrap/saltic bootstrap/refresh.saltic .cache/build/workbench/refresh 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/refresh
     .cache/build/workbench/refresh "$1"
 
-global-check:
-    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-global-check bash bootstrap/build.sh workbench/global-check.saltic .cache/build/workbench/global-check >/dev/null
+global-check: _dirs
+    bootstrap/saltic workbench/global-check.saltic .cache/build/workbench/global-check 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/global-check
     .cache/build/workbench/global-check
 
-limits:
-    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/limits.saltic .cache/build/workbench/limits
+limits: _dirs
+    bootstrap/saltic workbench/limits.saltic .cache/build/workbench/limits 536870912 x86_64 && chmod +x .cache/build/workbench/limits
     .cache/build/workbench/limits
 
-rv64:
-    SALTIC_TARGET=x86_64 bash bootstrap/build.sh bootstrap/refresh-rv64.saltic .cache/build/workbench/refresh-rv64 >/dev/null
+rv64: _dirs
+    bootstrap/saltic bootstrap/refresh-rv64.saltic .cache/build/workbench/refresh-rv64 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/refresh-rv64
     .cache/build/workbench/refresh-rv64 ""
 
-release-draft base="":
-    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/release-draft.saltic .cache/build/workbench/release-draft >/dev/null
+release-draft base="": _dirs
+    bootstrap/saltic workbench/release-draft.saltic .cache/build/workbench/release-draft 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/release-draft
     .cache/build/workbench/release-draft "$1"
 
-same-source:
-    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/same-source.saltic .cache/build/workbench/same-source-check >/dev/null
+same-source: _dirs
+    bootstrap/saltic workbench/same-source.saltic .cache/build/workbench/same-source-check 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/same-source-check
     .cache/build/workbench/same-source-check
 
-x86-golden mode="":
-    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/x86-encoder-golden.saltic .cache/build/workbench/x86-encoder-golden >/dev/null
+x86-golden mode="": _dirs
+    bootstrap/saltic workbench/x86-encoder-golden.saltic .cache/build/workbench/x86-encoder-golden 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/x86-encoder-golden
     .cache/build/workbench/x86-encoder-golden "$1"
 
-same *sources:
-    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/same.saltic .cache/build/workbench/same-check >/dev/null
+same *sources: _dirs
+    bootstrap/saltic workbench/same.saltic .cache/build/workbench/same-check 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/same-check
     .cache/build/workbench/same-check "$*"
 
-test case="all":
-    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-tests bash bootstrap/build.sh tests/run.saltic .cache/build/workbench/tests >/dev/null
+test case="all": _dirs
+    bootstrap/saltic tests/run.saltic .cache/build/workbench/tests 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/tests
     nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/tests "$1"
 
 package:
