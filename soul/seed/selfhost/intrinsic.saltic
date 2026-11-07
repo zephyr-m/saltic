@@ -1,8 +1,12 @@
 -- intrinsic — таблица встроенных операций core.* и io.*: какие бывают, сколько
 -- берут аргументов, что отдают и какой навык рантайма rt_* их исполняет.
--- Имя операции — полный путь ("core.group.get"); kind — вариант Kind.
--- Типы результата и аргументов — тексты чекера; особые: "group-item",
--- "group-add", "memory-load" (считаются по входному типу в contract).
+-- Одна операция — одна строка TABLE: [имя, вид, число аргументов, результат,
+-- типы аргументов, метка rt_*]. Имя — полный путь ("core.group.get"), вид —
+-- вариант Kind; число -1 — переменное (io.show: 1…ARGUMENT_LIMIT). Типы —
+-- тексты чекера; последний тип в списке — и для всех следующих аргументов,
+-- пустой список — "unknown". Особые результаты: "group-item", "group-add",
+-- "memory-load" (считаются по входному типу в contract). Метка "" — у памяти
+-- и io.show (их ведут дети и кодоген).
 --
 -- Kind = enum { UNKNOWN, GROUP_*, MEM_*, CPU_*, FILE_*, STR_*, NUM_TEXT, IO_*, PROCESS_*, ENVIRONMENT, TIME_NOW,
 --     U8_FROM…USIZE_FROM, BITS32_FROM, ADDRESS_FROM, NUM_FROM, BITS32_*,
@@ -12,10 +16,12 @@
 -- minimum_arguments / maximum_arguments(kind) -> число (io.show: 1…8)
 -- result(kind) -> тип результата или "unknown"
 -- argument_type(kind, index) -> ожидаемый тип аргумента или "unknown"
--- target(kind) -> имя rt_* или "" (память и фиксированные — в детях)
+-- target(kind) -> имя rt_* или ""
+-- Внутри: row(kind) -> строка TABLE или []
 --
 -- Дети: contract (общий вход для чекера и компилятора), fixed, memory.
 
+use core.group
 use selfhost.abi.call
 
 Kind = enum {
@@ -41,149 +47,101 @@ Kind = enum {
     PROCESS_EXECUTABLE, ENVIRONMENT, FILE_LIST, TIME_NOW
 }
 
+TABLE = [
+    ["core.group.count", Kind.GROUP_COUNT, 1, "number", ["group:unknown"], "rt_group_count"],
+    ["core.group.get", Kind.GROUP_GET, 2, "group-item", ["group:unknown", "number"], "rt_group_at"],
+    ["core.group.add", Kind.GROUP_ADD, 2, "group-add", ["group:unknown", "unknown"], "rt_group_add"],
+    ["core.group.tree_parts", Kind.GROUP_TREE_PARTS, 1, "group:unknown", ["group:unknown"], "rt_group_tree_parts"],
+    ["core.group.tree_make", Kind.GROUP_TREE_MAKE, 4, "group:unknown", ["number", "number", "group:unknown"], "rt_group_tree_make"],
+    ["core.bytes.make", Kind.BYTES_MAKE, 1, "bytes", ["number"], "rt_bytes_make"],
+    ["core.bytes.count", Kind.BYTES_COUNT, 1, "number", ["bytes"], "rt_string_len"],
+    ["core.bytes.load", Kind.BYTES_LOAD, 2, "number", ["bytes", "number"], "rt_string_byte"],
+    ["core.bytes.store", Kind.BYTES_STORE, 3, "none", ["bytes", "number"], "rt_bytes_store"],
+    ["core.bytes.copy", Kind.BYTES_COPY, 3, "bytes", ["bytes", "number"], "rt_string_slice"],
+    ["io.file.write_buffer", Kind.FILE_WRITE_BUFFER, 2, "none", ["string", "bytes"], "rt_platform_file_write"],
+    ["io.file.read_bytes", Kind.FILE_READ_BYTES, 1, "bytes", ["string"], "rt_platform_file_read"],
+    ["io.file.list", Kind.FILE_LIST, 1, "group:string", ["string"], "rt_platform_file_list"],
+    ["core.process.spawn", Kind.PROCESS_SPAWN, 4, "number", ["string", "unknown", "string", "answer"], "rt_platform_process_spawn"],
+    ["core.process.pipe_end", Kind.PROCESS_PIPE, 0, "number", [], "rt_platform_process_pipe"],
+    ["core.process.wait", Kind.PROCESS_WAIT, 1, "number", ["number"], "rt_platform_process_wait"],
+    ["core.process.read_output", Kind.PROCESS_READ, 1, "string", ["number"], "rt_platform_process_read"],
+    ["core.process.close_output", Kind.PROCESS_CLOSE, 1, "none", ["number"], "rt_platform_process_close"],
+    ["core.process.executable", Kind.PROCESS_EXECUTABLE, 1, "answer", ["string"], "rt_platform_process_executable"],
+    ["core.process.environment", Kind.ENVIRONMENT, 0, "group:string", [], "rt_platform_environment"],
+    ["core.time.now", Kind.TIME_NOW, 0, "number", [], "rt_platform_now"],
+    ["core.mem.load8", Kind.MEM_LOAD8, 2, "memory-load", [], ""],
+    ["core.mem.load16", Kind.MEM_LOAD16, 2, "memory-load", [], ""],
+    ["core.mem.load32", Kind.MEM_LOAD32, 2, "memory-load", [], ""],
+    ["core.mem.store8", Kind.MEM_STORE8, 3, "none", [], ""],
+    ["core.mem.store16", Kind.MEM_STORE16, 3, "none", [], ""],
+    ["core.mem.store32", Kind.MEM_STORE32, 3, "none", [], ""],
+    ["core.mem.store_address32", Kind.MEM_STORE_ADDRESS32, 3, "none", [], ""],
+    ["core.mem.arena", Kind.MEM_ARENA, 1, "number", ["number"], "rt_mem_arena"],
+    ["core.cpu.wait", Kind.CPU_WAIT, 0, "none", [], "rt_cpu_wait"],
+    ["core.cpu.fence", Kind.CPU_FENCE, 0, "none", [], "rt_cpu_fence"],
+    ["core.cpu.firmware", Kind.CPU_FIRMWARE, 1, "number", ["number"], "rt_cpu_firmware"],
+    ["core.cpu.call", Kind.CPU_CALL, 2, "number", ["number"], "rt_cpu_call"],
+    ["io.file.read", Kind.FILE_READ, 1, "string", ["string"], "rt_platform_file_read"],
+    ["io.file.write", Kind.FILE_WRITE, 2, "none", ["string"], "rt_platform_file_write"],
+    ["io.file.write_raw_bytes", Kind.FILE_WRITE_BYTES, 2, "none", ["string", "unknown"], "rt_file_write_bytes"],
+    ["core.str.line_count", Kind.STR_LINE_COUNT, 1, "number", ["string"], "rt_line_count"],
+    ["core.str.concat", Kind.STR_ADD, 2, "string", ["string"], "rt_string_add"],
+    ["core.str.bytes", Kind.STR_LEN, 1, "number", ["string"], "rt_string_len"],
+    ["core.str.get", Kind.STR_GET, 2, "string", ["string", "number"], "rt_string_at"],
+    ["core.str.byte", Kind.STR_BYTE, 2, "number", ["string", "number"], "rt_string_byte"],
+    ["core.str.from_byte", Kind.STR_FROM_BYTE, 1, "string", ["number"], "rt_string_from_byte"],
+    ["core.str.slice", Kind.STR_SLICE, 3, "string", ["string", "number"], "rt_string_slice"],
+    ["core.str.contains", Kind.STR_CONTAINS, 2, "answer", ["string"], "rt_string_contains"],
+    ["core.str.starts_with", Kind.STR_STARTS_WITH, 2, "answer", ["string"], "rt_string_starts_with"],
+    ["core.str.ends_with", Kind.STR_ENDS_WITH, 2, "answer", ["string"], "rt_string_ends_with"],
+    ["core.str.lower", Kind.STR_LOWER, 1, "string", ["string"], "rt_string_lower"],
+    ["core.str.upper", Kind.STR_UPPER, 1, "string", ["string"], "rt_string_upper"],
+    ["core.num.text", Kind.NUM_TEXT, 1, "string", ["number"], "rt_number_text"],
+    ["io.show", Kind.IO_SHOW, -1, "none", [], ""],
+    ["io.key", Kind.IO_KEY, 0, "string", [], "rt_io_key"],
+    ["io.clear", Kind.IO_CLEAR, 0, "none", [], "rt_io_clear"],
+    ["core.u8.from", Kind.U8_FROM, 1, "u8", [], ""],
+    ["core.u16.from", Kind.U16_FROM, 1, "u16", [], ""],
+    ["core.u32.from", Kind.U32_FROM, 1, "u32", [], ""],
+    ["core.i32.from", Kind.I32_FROM, 1, "i32", [], ""],
+    ["core.usize.from", Kind.USIZE_FROM, 1, "usize", [], ""],
+    ["core.bits32.from", Kind.BITS32_FROM, 1, "bits32", [], ""],
+    ["core.address.from", Kind.ADDRESS_FROM, 1, "address", [], ""],
+    ["core.num.from", Kind.NUM_FROM, 1, "number", [], ""],
+    ["core.bits32.and", Kind.BITS32_AND, 2, "bits32", [], ""],
+    ["core.bits32.or", Kind.BITS32_OR, 2, "bits32", [], ""],
+    ["core.bits32.xor", Kind.BITS32_XOR, 2, "bits32", [], ""],
+    ["core.bits32.not", Kind.BITS32_NOT, 1, "bits32", [], ""],
+    ["core.bits32.shift_left", Kind.BITS32_SHIFT_LEFT, 2, "bits32", [], ""],
+    ["core.bits32.shift_right", Kind.BITS32_SHIFT_RIGHT, 2, "bits32", [], ""],
+    ["core.address.add", Kind.ADDRESS_ADD, 2, "address", [], ""]
+]
+
+NAME = 0
+KIND = 1
+COUNT = 2
+RESULT = 3
+ARGUMENTS = 4
+TARGET = 5
+
+skill row(kind) {
+    drum (TABLE) {
+        (group.get(beat, KIND) == kind) { out beat }
+    }
+    out []
+}
+
 skill find(name) {
-    (name == "core.group.count") { out Kind.GROUP_COUNT }
-    (name == "core.group.get") { out Kind.GROUP_GET }
-    (name == "core.group.add") { out Kind.GROUP_ADD }
-    (name == "core.group.tree_parts") { out Kind.GROUP_TREE_PARTS }
-    (name == "core.group.tree_make") { out Kind.GROUP_TREE_MAKE }
-    (name == "core.bytes.make") { out Kind.BYTES_MAKE }
-    (name == "core.bytes.count") { out Kind.BYTES_COUNT }
-    (name == "core.bytes.load") { out Kind.BYTES_LOAD }
-    (name == "core.bytes.store") { out Kind.BYTES_STORE }
-    (name == "core.bytes.copy") { out Kind.BYTES_COPY }
-    (name == "io.file.write_buffer") { out Kind.FILE_WRITE_BUFFER }
-    (name == "io.file.read_bytes") { out Kind.FILE_READ_BYTES }
-    (name == "io.file.list") { out Kind.FILE_LIST }
-    (name == "core.process.spawn") { out Kind.PROCESS_SPAWN }
-    (name == "core.process.pipe_end") { out Kind.PROCESS_PIPE }
-    (name == "core.process.wait") { out Kind.PROCESS_WAIT }
-    (name == "core.process.read_output") { out Kind.PROCESS_READ }
-    (name == "core.process.close_output") { out Kind.PROCESS_CLOSE }
-    (name == "core.process.executable") { out Kind.PROCESS_EXECUTABLE }
-    (name == "core.process.environment") { out Kind.ENVIRONMENT }
-    (name == "core.time.now") { out Kind.TIME_NOW }
-    (name == "core.mem.load8") { out Kind.MEM_LOAD8 }
-    (name == "core.mem.load16") { out Kind.MEM_LOAD16 }
-    (name == "core.mem.load32") { out Kind.MEM_LOAD32 }
-    (name == "core.mem.store8") { out Kind.MEM_STORE8 }
-    (name == "core.mem.store16") { out Kind.MEM_STORE16 }
-    (name == "core.mem.store32") { out Kind.MEM_STORE32 }
-    (name == "core.mem.store_address32") { out Kind.MEM_STORE_ADDRESS32 }
-    (name == "core.mem.arena") { out Kind.MEM_ARENA }
-    (name == "core.cpu.wait") { out Kind.CPU_WAIT }
-    (name == "core.cpu.fence") { out Kind.CPU_FENCE }
-    (name == "core.cpu.firmware") { out Kind.CPU_FIRMWARE }
-    (name == "core.cpu.call") { out Kind.CPU_CALL }
-    (name == "io.file.read") { out Kind.FILE_READ }
-    (name == "io.file.write") { out Kind.FILE_WRITE }
-    (name == "io.file.write_raw_bytes") { out Kind.FILE_WRITE_BYTES }
-    (name == "core.str.line_count") { out Kind.STR_LINE_COUNT }
-    (name == "core.str.concat") { out Kind.STR_ADD }
-    (name == "core.str.bytes") { out Kind.STR_LEN }
-    (name == "core.str.get") { out Kind.STR_GET }
-    (name == "core.str.byte") { out Kind.STR_BYTE }
-    (name == "core.str.from_byte") { out Kind.STR_FROM_BYTE }
-    (name == "core.str.slice") { out Kind.STR_SLICE }
-    (name == "core.str.contains") { out Kind.STR_CONTAINS }
-    (name == "core.str.starts_with") { out Kind.STR_STARTS_WITH }
-    (name == "core.str.ends_with") { out Kind.STR_ENDS_WITH }
-    (name == "core.str.lower") { out Kind.STR_LOWER }
-    (name == "core.str.upper") { out Kind.STR_UPPER }
-    (name == "core.num.text") { out Kind.NUM_TEXT }
-    (name == "io.show") { out Kind.IO_SHOW }
-    (name == "io.key") { out Kind.IO_KEY }
-    (name == "io.clear") { out Kind.IO_CLEAR }
-    (name == "core.u8.from") { out Kind.U8_FROM }
-    (name == "core.u16.from") { out Kind.U16_FROM }
-    (name == "core.u32.from") { out Kind.U32_FROM }
-    (name == "core.i32.from") { out Kind.I32_FROM }
-    (name == "core.usize.from") { out Kind.USIZE_FROM }
-    (name == "core.bits32.from") { out Kind.BITS32_FROM }
-    (name == "core.address.from") { out Kind.ADDRESS_FROM }
-    (name == "core.num.from") { out Kind.NUM_FROM }
-    (name == "core.bits32.and") { out Kind.BITS32_AND }
-    (name == "core.bits32.or") { out Kind.BITS32_OR }
-    (name == "core.bits32.xor") { out Kind.BITS32_XOR }
-    (name == "core.bits32.not") { out Kind.BITS32_NOT }
-    (name == "core.bits32.shift_left") { out Kind.BITS32_SHIFT_LEFT }
-    (name == "core.bits32.shift_right") { out Kind.BITS32_SHIFT_RIGHT }
-    (name == "core.address.add") { out Kind.ADDRESS_ADD }
+    drum (TABLE) {
+        (group.get(beat, NAME) == name) { out group.get(beat, KIND) }
+    }
     out Kind.UNKNOWN
 }
 
 skill exact_argument_count(kind) {
-    (kind == Kind.CPU_WAIT) { out 0 }
-    (kind == Kind.CPU_FENCE) { out 0 }
-    (kind == Kind.IO_KEY) { out 0 }
-    (kind == Kind.IO_CLEAR) { out 0 }
-    (kind == Kind.PROCESS_PIPE) { out 0 }
-    (kind == Kind.ENVIRONMENT) { out 0 }
-    (kind == Kind.TIME_NOW) { out 0 }
-    (kind == Kind.PROCESS_SPAWN) { out 4 }
-    (kind == Kind.PROCESS_WAIT) { out 1 }
-    (kind == Kind.PROCESS_READ) { out 1 }
-    (kind == Kind.PROCESS_CLOSE) { out 1 }
-    (kind == Kind.PROCESS_EXECUTABLE) { out 1 }
-    (kind == Kind.FILE_LIST) { out 1 }
-
-    (kind == Kind.GROUP_COUNT) { out 1 }
-    (kind == Kind.GROUP_TREE_PARTS) { out 1 }
-    (kind == Kind.BYTES_MAKE) { out 1 }
-    (kind == Kind.BYTES_COUNT) { out 1 }
-    (kind == Kind.BYTES_LOAD) { out 2 }
-    (kind == Kind.BYTES_STORE) { out 3 }
-    (kind == Kind.BYTES_COPY) { out 3 }
-    (kind == Kind.FILE_WRITE_BUFFER) { out 2 }
-    (kind == Kind.FILE_READ_BYTES) { out 1 }
-    (kind == Kind.CPU_FIRMWARE) { out 1 }
-    (kind == Kind.MEM_ARENA) { out 1 }
-    (kind == Kind.CPU_CALL) { out 2 }
-    (kind == Kind.FILE_READ) { out 1 }
-    (kind == Kind.STR_LINE_COUNT) { out 1 }
-    (kind == Kind.STR_LEN) { out 1 }
-    (kind == Kind.STR_LOWER) { out 1 }
-    (kind == Kind.STR_UPPER) { out 1 }
-    (kind == Kind.NUM_TEXT) { out 1 }
-    (kind == Kind.U8_FROM) { out 1 }
-    (kind == Kind.U16_FROM) { out 1 }
-    (kind == Kind.U32_FROM) { out 1 }
-    (kind == Kind.I32_FROM) { out 1 }
-    (kind == Kind.USIZE_FROM) { out 1 }
-    (kind == Kind.BITS32_FROM) { out 1 }
-    (kind == Kind.ADDRESS_FROM) { out 1 }
-    (kind == Kind.NUM_FROM) { out 1 }
-    (kind == Kind.BITS32_NOT) { out 1 }
-
-    (kind == Kind.GROUP_GET) { out 2 }
-    (kind == Kind.GROUP_ADD) { out 2 }
-    (kind == Kind.MEM_LOAD8) { out 2 }
-    (kind == Kind.MEM_LOAD16) { out 2 }
-    (kind == Kind.MEM_LOAD32) { out 2 }
-    (kind == Kind.FILE_WRITE) { out 2 }
-    (kind == Kind.FILE_WRITE_BYTES) { out 2 }
-    (kind == Kind.STR_ADD) { out 2 }
-    (kind == Kind.STR_GET) { out 2 }
-    (kind == Kind.STR_BYTE) { out 2 }
-    (kind == Kind.STR_FROM_BYTE) { out 1 }
-    (kind == Kind.STR_CONTAINS) { out 2 }
-    (kind == Kind.STR_STARTS_WITH) { out 2 }
-    (kind == Kind.STR_ENDS_WITH) { out 2 }
-    (kind == Kind.BITS32_AND) { out 2 }
-    (kind == Kind.BITS32_OR) { out 2 }
-    (kind == Kind.BITS32_XOR) { out 2 }
-    (kind == Kind.BITS32_SHIFT_LEFT) { out 2 }
-    (kind == Kind.BITS32_SHIFT_RIGHT) { out 2 }
-    (kind == Kind.ADDRESS_ADD) { out 2 }
-
-    (kind == Kind.MEM_STORE8) { out 3 }
-    (kind == Kind.MEM_STORE16) { out 3 }
-    (kind == Kind.MEM_STORE32) { out 3 }
-    (kind == Kind.MEM_STORE_ADDRESS32) { out 3 }
-    (kind == Kind.STR_SLICE) { out 3 }
-    (kind == Kind.GROUP_TREE_MAKE) { out 4 }
-
-    out -1
+    @found = row(kind)
+    (group.count(found) == 0) { out -1 }
+    out group.get(found, COUNT)
 }
 
 skill minimum_arguments(kind) {
@@ -197,199 +155,23 @@ skill maximum_arguments(kind) {
 }
 
 skill result(kind) {
-    (kind == Kind.GROUP_COUNT) { out "number" }
-    (kind == Kind.GROUP_GET) { out "group-item" }
-    (kind == Kind.GROUP_ADD) { out "group-add" }
-    (kind == Kind.GROUP_TREE_PARTS) { out "group:unknown" }
-    (kind == Kind.GROUP_TREE_MAKE) { out "group:unknown" }
-    (kind == Kind.BYTES_MAKE) { out "bytes" }
-    (kind == Kind.BYTES_COUNT) { out "number" }
-    (kind == Kind.BYTES_LOAD) { out "number" }
-    (kind == Kind.BYTES_STORE) { out "none" }
-    (kind == Kind.BYTES_COPY) { out "bytes" }
-    (kind == Kind.FILE_WRITE_BUFFER) { out "none" }
-    (kind == Kind.FILE_READ_BYTES) { out "bytes" }
-    (kind == Kind.PROCESS_SPAWN) { out "number" }
-    (kind == Kind.PROCESS_PIPE) { out "number" }
-    (kind == Kind.PROCESS_WAIT) { out "number" }
-    (kind == Kind.PROCESS_READ) { out "string" }
-    (kind == Kind.PROCESS_CLOSE) { out "none" }
-    (kind == Kind.PROCESS_EXECUTABLE) { out "answer" }
-    (kind == Kind.ENVIRONMENT) { out "group:string" }
-    (kind == Kind.TIME_NOW) { out "number" }
-    (kind == Kind.FILE_LIST) { out "group:string" }
-    (kind == Kind.MEM_LOAD8) { out "memory-load" }
-    (kind == Kind.MEM_LOAD16) { out "memory-load" }
-    (kind == Kind.MEM_LOAD32) { out "memory-load" }
-    (kind == Kind.MEM_STORE8) { out "none" }
-    (kind == Kind.MEM_STORE16) { out "none" }
-    (kind == Kind.MEM_STORE32) { out "none" }
-    (kind == Kind.MEM_STORE_ADDRESS32) { out "none" }
-    (kind == Kind.CPU_WAIT) { out "none" }
-    (kind == Kind.CPU_FENCE) { out "none" }
-    (kind == Kind.CPU_FIRMWARE) { out "number" }
-    (kind == Kind.MEM_ARENA) { out "number" }
-    (kind == Kind.CPU_CALL) { out "number" }
-    (kind == Kind.FILE_READ) { out "string" }
-    (kind == Kind.FILE_WRITE) { out "none" }
-    (kind == Kind.FILE_WRITE_BYTES) { out "none" }
-    (kind == Kind.STR_LINE_COUNT) { out "number" }
-    (kind == Kind.STR_ADD) { out "string" }
-    (kind == Kind.STR_LEN) { out "number" }
-    (kind == Kind.STR_GET) { out "string" }
-    (kind == Kind.STR_BYTE) { out "number" }
-    (kind == Kind.STR_FROM_BYTE) { out "string" }
-    (kind == Kind.STR_SLICE) { out "string" }
-    (kind == Kind.STR_CONTAINS) { out "answer" }
-    (kind == Kind.STR_STARTS_WITH) { out "answer" }
-    (kind == Kind.STR_ENDS_WITH) { out "answer" }
-    (kind == Kind.STR_LOWER) { out "string" }
-    (kind == Kind.STR_UPPER) { out "string" }
-    (kind == Kind.NUM_TEXT) { out "string" }
-    (kind == Kind.IO_SHOW) { out "none" }
-    (kind == Kind.IO_KEY) { out "string" }
-    (kind == Kind.IO_CLEAR) { out "none" }
-    (kind == Kind.U8_FROM) { out "u8" }
-    (kind == Kind.U16_FROM) { out "u16" }
-    (kind == Kind.U32_FROM) { out "u32" }
-    (kind == Kind.I32_FROM) { out "i32" }
-    (kind == Kind.USIZE_FROM) { out "usize" }
-    (kind == Kind.BITS32_FROM) { out "bits32" }
-    (kind == Kind.ADDRESS_FROM) { out "address" }
-    (kind == Kind.NUM_FROM) { out "number" }
-    (kind == Kind.BITS32_AND) { out "bits32" }
-    (kind == Kind.BITS32_OR) { out "bits32" }
-    (kind == Kind.BITS32_XOR) { out "bits32" }
-    (kind == Kind.BITS32_NOT) { out "bits32" }
-    (kind == Kind.BITS32_SHIFT_LEFT) { out "bits32" }
-    (kind == Kind.BITS32_SHIFT_RIGHT) { out "bits32" }
-    (kind == Kind.ADDRESS_ADD) { out "address" }
-    out "unknown"
+    @found = row(kind)
+    (group.count(found) == 0) { out "unknown" }
+    out group.get(found, RESULT)
 }
 
 skill argument_type(kind, index) {
-    (kind == Kind.GROUP_COUNT) { out "group:unknown" }
-    (kind == Kind.GROUP_TREE_PARTS) { out "group:unknown" }
-    (kind == Kind.GROUP_TREE_MAKE) {
-        (index < 2) { out "number" }
-        out "group:unknown"
-    }
-    (kind == Kind.GROUP_GET) {
-        (index == 0) { out "group:unknown" }
-        out "number"
-    }
-    (kind == Kind.GROUP_ADD) {
-        (index == 0) { out "group:unknown" }
-        out "unknown"
-    }
-    (kind == Kind.BYTES_MAKE) { out "number" }
-    (kind == Kind.BYTES_COUNT) { out "bytes" }
-    (kind == Kind.BYTES_LOAD) {
-        (index == 0) { out "bytes" }
-        out "number"
-    }
-    (kind == Kind.BYTES_STORE) {
-        (index == 0) { out "bytes" }
-        out "number"
-    }
-    (kind == Kind.BYTES_COPY) {
-        (index == 0) { out "bytes" }
-        out "number"
-    }
-    (kind == Kind.FILE_WRITE_BUFFER) {
-        (index == 0) { out "string" }
-        out "bytes"
-    }
-    (kind == Kind.FILE_READ_BYTES) { out "string" }
-    (kind == Kind.FILE_READ) { out "string" }
-    (kind == Kind.FILE_WRITE) { out "string" }
-    (kind == Kind.FILE_LIST) { out "string" }
-    (kind == Kind.PROCESS_EXECUTABLE) { out "string" }
-    (kind == Kind.PROCESS_WAIT) { out "number" }
-    (kind == Kind.PROCESS_READ) { out "number" }
-    (kind == Kind.PROCESS_CLOSE) { out "number" }
-    (kind == Kind.PROCESS_SPAWN) {
-        (index == 0) { out "string" }
-        (index == 1) { out "unknown" }
-        (index == 2) { out "string" }
-        out "answer"
-    }
-    (kind == Kind.FILE_WRITE_BYTES) {
-        (index == 0) { out "string" }
-        out "unknown"
-    }
-    (kind == Kind.STR_GET) {
-        (index == 0) { out "string" }
-        out "number"
-    }
-    (kind == Kind.STR_BYTE) {
-        (index == 0) { out "string" }
-        out "number"
-    }
-    (kind == Kind.STR_FROM_BYTE) { out "number" }
-    (kind == Kind.STR_SLICE) {
-        (index == 0) { out "string" }
-        out "number"
-    }
-    (kind == Kind.STR_LINE_COUNT) { out "string" }
-    (kind == Kind.STR_ADD) { out "string" }
-    (kind == Kind.STR_LEN) { out "string" }
-    (kind == Kind.STR_CONTAINS) { out "string" }
-    (kind == Kind.STR_STARTS_WITH) { out "string" }
-    (kind == Kind.STR_ENDS_WITH) { out "string" }
-    (kind == Kind.STR_LOWER) { out "string" }
-    (kind == Kind.STR_UPPER) { out "string" }
-    (kind == Kind.NUM_TEXT) { out "number" }
-    (kind == Kind.CPU_FIRMWARE) { out "number" }
-    (kind == Kind.MEM_ARENA) { out "number" }
-    (kind == Kind.CPU_CALL) { out "number" }
-    out "unknown"
+    @found = row(kind)
+    (group.count(found) == 0) { out "unknown" }
+    @types = group.get(found, ARGUMENTS)
+    @count = group.count(types)
+    (count == 0) { out "unknown" }
+    (index < count) { out group.get(types, index) }
+    out group.get(types, count - 1)
 }
 
 skill target(kind) {
-    (kind == Kind.GROUP_COUNT) { out "rt_group_count" }
-    (kind == Kind.GROUP_GET) { out "rt_group_at" }
-    (kind == Kind.GROUP_ADD) { out "rt_group_add" }
-    (kind == Kind.GROUP_TREE_PARTS) { out "rt_group_tree_parts" }
-    (kind == Kind.GROUP_TREE_MAKE) { out "rt_group_tree_make" }
-    (kind == Kind.BYTES_MAKE) { out "rt_bytes_make" }
-    (kind == Kind.BYTES_COUNT) { out "rt_string_len" }
-    (kind == Kind.BYTES_LOAD) { out "rt_string_byte" }
-    (kind == Kind.BYTES_STORE) { out "rt_bytes_store" }
-    (kind == Kind.BYTES_COPY) { out "rt_string_slice" }
-    (kind == Kind.FILE_WRITE_BUFFER) { out "rt_platform_file_write" }
-    (kind == Kind.FILE_READ_BYTES) { out "rt_platform_file_read" }
-    (kind == Kind.FILE_LIST) { out "rt_platform_file_list" }
-    (kind == Kind.PROCESS_SPAWN) { out "rt_platform_process_spawn" }
-    (kind == Kind.PROCESS_PIPE) { out "rt_platform_process_pipe" }
-    (kind == Kind.PROCESS_WAIT) { out "rt_platform_process_wait" }
-    (kind == Kind.PROCESS_READ) { out "rt_platform_process_read" }
-    (kind == Kind.PROCESS_CLOSE) { out "rt_platform_process_close" }
-    (kind == Kind.PROCESS_EXECUTABLE) { out "rt_platform_process_executable" }
-    (kind == Kind.ENVIRONMENT) { out "rt_platform_environment" }
-    (kind == Kind.TIME_NOW) { out "rt_platform_now" }
-    (kind == Kind.CPU_WAIT) { out "rt_cpu_wait" }
-    (kind == Kind.CPU_FENCE) { out "rt_cpu_fence" }
-    (kind == Kind.CPU_FIRMWARE) { out "rt_cpu_firmware" }
-    (kind == Kind.MEM_ARENA) { out "rt_mem_arena" }
-    (kind == Kind.CPU_CALL) { out "rt_cpu_call" }
-    (kind == Kind.FILE_READ) { out "rt_platform_file_read" }
-    (kind == Kind.FILE_WRITE) { out "rt_platform_file_write" }
-    (kind == Kind.FILE_WRITE_BYTES) { out "rt_file_write_bytes" }
-    (kind == Kind.STR_LINE_COUNT) { out "rt_line_count" }
-    (kind == Kind.STR_ADD) { out "rt_string_add" }
-    (kind == Kind.STR_LEN) { out "rt_string_len" }
-    (kind == Kind.STR_GET) { out "rt_string_at" }
-    (kind == Kind.STR_BYTE) { out "rt_string_byte" }
-    (kind == Kind.STR_FROM_BYTE) { out "rt_string_from_byte" }
-    (kind == Kind.STR_SLICE) { out "rt_string_slice" }
-    (kind == Kind.STR_CONTAINS) { out "rt_string_contains" }
-    (kind == Kind.STR_STARTS_WITH) { out "rt_string_starts_with" }
-    (kind == Kind.STR_ENDS_WITH) { out "rt_string_ends_with" }
-    (kind == Kind.STR_LOWER) { out "rt_string_lower" }
-    (kind == Kind.STR_UPPER) { out "rt_string_upper" }
-    (kind == Kind.NUM_TEXT) { out "rt_number_text" }
-    (kind == Kind.IO_KEY) { out "rt_io_key" }
-    (kind == Kind.IO_CLEAR) { out "rt_io_clear" }
-    out ""
+    @found = row(kind)
+    (group.count(found) == 0) { out "" }
+    out group.get(found, TARGET)
 }
