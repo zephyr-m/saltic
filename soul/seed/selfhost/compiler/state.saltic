@@ -14,9 +14,11 @@
 -- type_find(types, name) / type_set(types, name, type)
 -- safe(text) -> имя для метки; label(compiler, prefix) -> уникальная метка
 -- collect_locals(params, body) -> Names; make_slots(words, names, first_slot) -> слоты
--- collect_expression_names / collect_statement_names / collect_block_names
+-- collect_names(names, node) -> Names: имена и служебные ячейки (drum, always, rescue)
+--     по всему поддереву; обход — ast.children
 -- outer_assigned(block) -> имена снаружи блока, которым блок присваивает
--- expression_uses_beat / statement_uses_beat / block_uses_beat / items_use_beat
+-- uses_beat(node) / block_uses_beat(block) -> yes/no: есть ли beat (во вложенный drum не
+--     заходит — там свой beat); assigned_names(found, node) — кому присваивают
 -- slot(compiler, name) / field(compiler, name) -> смещение / id поля
 -- collect_box / collect_enum(compiler, item, module) / collect_top_level(compiler)
 -- header(compiler) — программа исполнителя с входом _start, heap_size
@@ -147,67 +149,22 @@ skill name_add(names, name) {
     out names
 }
 
-skill collect_expression_names(names, node) {
+skill collect_names(names, node) {
     @plain = ast.plain(node)
     @tag = group.get(plain, 0)
-    (tag == "binary") {
-        names = collect_expression_names(names, group.get(plain, 2))
-        names = collect_expression_names(names, group.get(plain, 3))
-    }
-    (tag == "call") {
-        drum (group.count(plain) - 1) { names = collect_expression_names(names, group.get(plain, beat + 1)) }
-    }
-    (tag == "group") {
-        drum (group.count(plain) - 1) { names = collect_expression_names(names, group.get(plain, beat + 1)) }
-    }
-    (tag == "box-new") {
-        drum (group.count(plain) - 2) { names = collect_expression_names(names, ast.part(group.get(plain, beat + 2), 2)) }
-    }
     (tag == "rescue") {
         names = name_add(names, "$rescue:{names.next_rescue}")
         names.next_rescue = names.next_rescue + 1
-        names = collect_expression_names(names, group.get(plain, 1))
+        names = collect_names(names, group.get(plain, 1))
         names = name_add(names, group.get(plain, 2))
-        names = collect_block_names(names, group.get(plain, 3))
+        out collect_names(names, group.get(plain, 3))
     }
-    out names
-}
-
-skill collect_statement_names(names, node) {
-    @plain = ast.plain(node)
-    @tag = group.get(plain, 0)
-    (tag == "var") {
-        names = name_add(names, group.get(plain, 1))
-        names = collect_expression_names(names, group.get(plain, 2))
-    }
-    (tag == "assign") { names = collect_expression_names(names, group.get(plain, 2)) }
-    (tag == "field-assign") {
-        names = collect_expression_names(names, group.get(plain, 1))
-        names = collect_expression_names(names, group.get(plain, 2))
-    }
-    (tag == "out") { names = collect_expression_names(names, group.get(plain, 1)) }
-    (tag == "expr") { names = collect_expression_names(names, group.get(plain, 1)) }
-    (tag == "if") {
-        names = collect_expression_names(names, group.get(plain, 1))
-        names = collect_block_names(names, group.get(plain, 2))
-    }
-    (tag == "pick") {
-        drum (group.count(plain) - 1) {
-            @choice = ast.plain(group.get(plain, beat + 1))
-            (group.get(choice, 0) == "if") { names = collect_statement_names(names, choice) }
-            (group.get(choice, 0) == "otherwise") { names = collect_block_names(names, group.get(choice, 1)) }
-        }
-    }
-    (tag == "switch") {
-        names = collect_expression_names(names, group.get(plain, 1))
-        drum (group.count(plain) - 2) { names = collect_expression_names(names, ast.part(group.get(plain, beat + 2), 2)) }
-    }
+    (tag == "var") { names = name_add(names, group.get(plain, 1)) }
     (tag == "always") {
         @always_number = num.text(names.next_always)
         names.next_always = names.next_always + 1
         names = name_add(names, "$always_mark:{always_number}")
         names = name_add(names, "$always_escape:{always_number}")
-        names = collect_block_names(names, group.get(plain, 1))
     }
     (tag == "drum") {
         @drum_number = num.text(names.next_drum)
@@ -217,83 +174,21 @@ skill collect_statement_names(names, node) {
         names = name_add(names, "$drum_index:{drum_number}")
         names = name_add(names, "$drum_saved:{drum_number}")
         names = name_add(names, ast.DRUM_BEAT)
-        names = collect_expression_names(names, group.get(plain, 1))
-        names = collect_block_names(names, group.get(plain, 2))
     }
+    drum (ast.children(node)) { names = collect_names(names, beat) }
     out names
 }
 
-skill collect_block_names(names, block) {
-    @plain = ast.plain(block)
-    drum (group.count(plain) - 1) { names = collect_statement_names(names, group.get(plain, beat + 1)) }
-    out names
-}
-
-skill assigned_in_expression(found, node) {
+skill assigned_names(found, node) {
     @plain = ast.plain(node)
-    @tag = group.get(plain, 0)
-    (tag == "binary") {
-        found = assigned_in_expression(found, group.get(plain, 2))
-        out assigned_in_expression(found, group.get(plain, 3))
-    }
-    (tag == "call") {
-        drum (group.count(plain) - 1) { found = assigned_in_expression(found, group.get(plain, beat + 1)) }
-    }
-    (tag == "group") {
-        drum (group.count(plain) - 1) { found = assigned_in_expression(found, group.get(plain, beat + 1)) }
-    }
-    (tag == "box-new") {
-        drum (group.count(plain) - 2) { found = assigned_in_expression(found, ast.part(group.get(plain, beat + 2), 2)) }
-    }
-    (tag == "rescue") {
-        found = assigned_in_expression(found, group.get(plain, 1))
-        out assigned_in_block(found, group.get(plain, 3))
-    }
-    out found
-}
-
-skill assigned_in_statement(found, node) {
-    @plain = ast.plain(node)
-    @tag = group.get(plain, 0)
-    (tag == "assign") {
-        out assigned_in_expression(name_add(found, group.get(plain, 1)), group.get(plain, 2))
-    }
-    (tag == "var") { out assigned_in_expression(found, group.get(plain, 2)) }
-    (tag == "field-assign") { out assigned_in_expression(found, group.get(plain, 2)) }
-    (tag == "out") { out assigned_in_expression(found, group.get(plain, 1)) }
-    (tag == "expr") { out assigned_in_expression(found, group.get(plain, 1)) }
-    (tag == "if") {
-        found = assigned_in_expression(found, group.get(plain, 1))
-        out assigned_in_block(found, group.get(plain, 2))
-    }
-    (tag == "pick") {
-        drum (group.count(plain) - 1) {
-            @choice = ast.plain(group.get(plain, beat + 1))
-            (group.get(choice, 0) == "if") { found = assigned_in_statement(found, choice) }
-            (group.get(choice, 0) == "otherwise") { found = assigned_in_block(found, group.get(choice, 1)) }
-        }
-    }
-    (tag == "switch") {
-        found = assigned_in_expression(found, group.get(plain, 1))
-        drum (group.count(plain) - 2) { found = assigned_in_expression(found, ast.part(group.get(plain, beat + 2), 2)) }
-    }
-    (tag == "always") { out assigned_in_block(found, group.get(plain, 1)) }
-    (tag == "drum") {
-        found = assigned_in_expression(found, group.get(plain, 1))
-        out assigned_in_block(found, group.get(plain, 2))
-    }
-    out found
-}
-
-skill assigned_in_block(found, block) {
-    @plain = ast.plain(block)
-    drum (group.count(plain) - 1) { found = assigned_in_statement(found, group.get(plain, beat + 1)) }
+    (group.get(plain, 0) == "assign") { found = name_add(found, group.get(plain, 1)) }
+    drum (ast.children(node)) { found = assigned_names(found, beat) }
     out found
 }
 
 skill outer_assigned(block) {
-    @declared = collect_block_names(Names {}, block)
-    @assigned = assigned_in_block(Names {}, block)
+    @declared = collect_names(Names {}, block)
+    @assigned = assigned_names(Names {}, block)
     @outer = []
     drum (assigned.names) {
         (symbol_has(declared.names, beat.name) == no) { outer = group.add(outer, beat.name) }
@@ -301,93 +196,25 @@ skill outer_assigned(block) {
     out outer
 }
 
-skill expression_uses_beat(node) {
+skill uses_beat(node) {
     @plain = ast.plain(node)
     @tag = group.get(plain, 0)
     (tag == "path") { out group.get(plain, 1) == ast.DRUM_BEAT }
-    (tag == "binary") {
-        (expression_uses_beat(group.get(plain, 2)) == yes) { out yes }
-        out expression_uses_beat(group.get(plain, 3))
-    }
-    (tag == "call") { out items_use_beat(plain, 1) }
-    (tag == "template") {
-        drum ((group.count(plain) - 2) / 2) {
-            (expression_uses_beat(group.get(plain, beat * 2 + 2)) == yes) { out yes }
-        }
-        out no
-    }
-    (tag == "group") { out items_use_beat(plain, 1) }
-    (tag == "box-new") {
-        drum (group.count(plain) - 2) {
-            (expression_uses_beat(ast.part(group.get(plain, beat + 2), 2)) == yes) { out yes }
-        }
-        out no
-    }
-    (tag == "rescue") {
-        (expression_uses_beat(group.get(plain, 1)) == yes) { out yes }
-        out block_uses_beat(group.get(plain, 3))
-    }
-    out no
-}
-
-skill items_use_beat(plain, first) {
-    drum (group.count(plain) - first) {
-        (expression_uses_beat(group.get(plain, beat + first)) == yes) { out yes }
-    }
-    out no
-}
-
-skill statement_uses_beat(node) {
-    @plain = ast.plain(node)
-    @tag = group.get(plain, 0)
-    (tag == "var") { out expression_uses_beat(group.get(plain, 2)) }
-    (tag == "assign") { out expression_uses_beat(group.get(plain, 2)) }
-    (tag == "field-assign") {
-        (expression_uses_beat(group.get(plain, 1)) == yes) { out yes }
-        out expression_uses_beat(group.get(plain, 2))
-    }
-    (tag == "out") { out expression_uses_beat(group.get(plain, 1)) }
-    (tag == "expr") { out expression_uses_beat(group.get(plain, 1)) }
-    (tag == "if") {
-        (expression_uses_beat(group.get(plain, 1)) == yes) { out yes }
-        out block_uses_beat(group.get(plain, 2))
-    }
-    (tag == "switch") {
-        (expression_uses_beat(group.get(plain, 1)) == yes) { out yes }
-        drum (group.count(plain) - 2) {
-            (expression_uses_beat(ast.part(group.get(plain, beat + 2), 2)) == yes) { out yes }
-        }
-        out no
-    }
-    (tag == "drum") { out expression_uses_beat(group.get(plain, 1)) }
-    (tag == "always") { out block_uses_beat(group.get(plain, 1)) }
-    (tag == "pick") {
-        drum (group.count(plain) - 1) {
-            @choice = ast.plain(group.get(plain, beat + 1))
-            (group.get(choice, 0) == "if") {
-                (statement_uses_beat(choice) == yes) { out yes }
-            }
-            (group.get(choice, 0) == "otherwise") {
-                (block_uses_beat(group.get(choice, 1)) == yes) { out yes }
-            }
-        }
-        out no
+    (tag == "drum") { out uses_beat(group.get(plain, 1)) }
+    drum (ast.children(node)) {
+        (uses_beat(beat) == yes) { out yes }
     }
     out no
 }
 
 skill block_uses_beat(block) {
-    @plain = ast.plain(block)
-    drum (group.count(plain) - 1) {
-        (statement_uses_beat(group.get(plain, beat + 1)) == yes) { out yes }
-    }
-    out no
+    out uses_beat(block)
 }
 
 skill collect_locals(params, body) {
     @names = Names {}
     drum (params) { names = name_add(names, beat) }
-    out collect_block_names(names, body)
+    out collect_names(names, body)
 }
 
 skill make_slots(words, names, first_slot) {
