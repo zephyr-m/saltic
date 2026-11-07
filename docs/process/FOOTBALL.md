@@ -59,7 +59,7 @@ Conventional Commits, как у Release Please от Google):
 | `refactor:`, `docs:`, `perf:`, `chore:`, `style:`, `test:`, `build:`, `ci:` | C — уборка |
 | `release:` | коммит релиза, не считается |
 
-`just release-draft` (`workbench/release-draft.sh`) читает коммиты с
+`just release-draft` (`workbench/release-draft.saltic`) читает коммиты с
 последнего тега, предлагает счёт и пишет черновик раздела `CHANGELOG.md` в
 `.cache/build/release-draft.md`; коммиты без префикса выводит отдельно.
 Скрипт только предлагает: один коммит бывает и несколькими голами, а одна

@@ -59,8 +59,9 @@ hosts:
 rv64:
     bash bootstrap/refresh-rv64.sh
 
-release-draft *base:
-    bash workbench/release-draft.sh "$@"
+release-draft base="":
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/release-draft.saltic .cache/build/workbench/release-draft >/dev/null
+    .cache/build/workbench/release-draft "$1"
 
 same *sources:
     bash workbench/same.sh "$@"

@@ -1,0 +1,158 @@
+-- release-draft — черновик релиза по Football Versioning (docs/process/FOOTBALL.md):
+-- читает коммиты с последнего тега v*, раскладывает их по префиксам и
+-- предлагает счёт и раздел CHANGELOG. feat: — фича (F), fix: — баг (B),
+-- CLEANUP (refactor:, docs:, perf:…) — уборка (C); release: пропускается;
+-- без префикса — отдельно, их раскладывает автор. Только предлагает: одна
+-- строка CHANGELOG — одна единица счёта, финальный счёт подтверждает автор.
+-- Вместо workbench/release-draft.sh (в .archive/).
+--
+-- Draft { features, bugs, cleanup, loose } — заголовки коммитов по кучкам
+-- program(base) — base «F:B:C» или "" (тогда из VERSION); черновик — в DRAFT;
+--     база не счёт — ошибка InvalidBase
+-- Внутри: score(text) -> [F, B, C] или [], sort(draft, subject), section(title, items)
+
+use io
+use io.file
+use core.str
+use core.group
+use core.process
+
+DRAFT = ".cache/build/release-draft.md"
+CLEANUP = ["refactor", "docs", "perf", "chore", "style", "test", "build", "ci"]
+
+Draft = Box {
+    features = [],
+    bugs = [],
+    cleanup = [],
+    loose = []
+}
+
+skill digits(text) {
+    (str.bytes(text) == 0) { out no }
+    drum (str.bytes(text)) {
+        (str.is_digit(str.get(text, beat)) == no) { out no }
+    }
+    out yes
+}
+
+skill number(text) {
+    @value = 0
+    drum (str.bytes(text)) { value = value * 10 + str.byte(text, beat) - 48 }
+    out value
+}
+
+skill score(text) {
+    @parts = str.split(text, ":")
+    @count = group.count(parts)
+    (count < 2) { out [] }
+    (count > 3) { out [] }
+    (str.contains(text, "::") == yes) { out [] }
+    (str.ends_with(text, ":") == yes) { out [] }
+    @numbers = []
+    drum (parts) {
+        (digits(beat) == no) { out [] }
+        numbers = group.add(numbers, number(beat))
+    }
+    out numbers
+}
+
+skill first_line(text) {
+    @lines = str.lines(text)
+    (group.count(lines) == 0) { out "" }
+    out group.get(lines, 0)
+}
+
+skill sort(draft, subject) {
+    @colon = 0 - 1
+    drum (str.bytes(subject)) {
+        (colon < 0) {
+            (str.get(subject, beat) == ":") { colon = beat }
+        }
+    }
+    (colon < 1) {
+        draft.loose = group.add(draft.loose, subject)
+        out none
+    }
+    @kind = str.slice(subject, 0, colon)
+    (str.ends_with(kind, "!") == yes) { kind = str.slice(kind, 0, str.bytes(kind) - 1) }
+    (str.ends_with(kind, ")") == yes) {
+        @open = 0 - 1
+        drum (str.bytes(kind)) {
+            (open < 0) {
+                (str.get(kind, beat) == "(") { open = beat }
+            }
+        }
+        (open > 0) { kind = str.slice(kind, 0, open) }
+    }
+    @from = colon + 1
+    always {
+        (from == str.bytes(subject)) { leave }
+        ((str.get(subject, from) == " ") == no) { leave }
+        from = from + 1
+    }
+    @rest = str.slice(subject, from, str.bytes(subject))
+    (kind == "release") { out none }
+    (kind == "feat") {
+        draft.features = group.add(draft.features, rest)
+        out none
+    }
+    (kind == "fix") {
+        draft.bugs = group.add(draft.bugs, rest)
+        out none
+    }
+    (group.contains(CLEANUP, kind) == yes) {
+        draft.cleanup = group.add(draft.cleanup, rest)
+        out none
+    }
+    draft.loose = group.add(draft.loose, subject)
+    out none
+}
+
+skill section(title, items) {
+    (group.count(items) == 0) { out "" }
+    @text = "\n### {title}\n\n"
+    drum (items) { text = str.concat(text, "- {beat}\n") }
+    out text
+}
+
+program(base) {
+    (str.bytes(base) == 0) { base = first_line(file.read("VERSION")) }
+    @start = score(base)
+    (group.count(start) == 0) {
+        io.show("релиз: база «{base}» — не счёт F:B или F:B:C")
+        out error.InvalidBase
+    }
+    (group.count(start) == 2) {
+        io.show("релиз: ⚠️ в базе {base} нет уборки — считаю её с нуля; дай базу явно: just release-draft F:B:C")
+        start = group.add(start, 0)
+    }
+    @described = process.capture(["git", "describe", "--tags", "--abbrev=0", "--match", "v*"], "")
+    @tag = first_line(described.output)
+    io.show("релиз: база {base}, последний тег {tag}")
+    @log = process.capture(["git", "log", "--no-merges", "--reverse", "--format=%s", "{tag}..HEAD"], "")
+    @draft = Draft {}
+    drum (str.lines(log.output)) { sort(draft, beat) }
+    @f = group.count(draft.features)
+    @b = group.count(draft.bugs)
+    @c = group.count(draft.cleanup)
+    @l = group.count(draft.loose)
+    io.show("релиз: ⚽ фичи {f}, 🐞 баги {b}, 🧹 уборка {c}, ❓ без префикса {l}")
+    @nf = group.get(start, 0) + f
+    @nb = group.get(start, 1) + b
+    @nc = group.get(start, 2) + c
+    @proposed = "{nf}:{nb}:{nc}"
+    io.show("релиз: предлагаю счёт {base} → {proposed} (без префикса не посчитаны)")
+    @date = process.capture(["date", "+%Y-%m-%d"], "")
+    @today = first_line(date.output)
+    @text = "## {proposed} — {today}\n"
+    text = str.concat(text, section("Фичи", draft.features))
+    text = str.concat(text, section("Баги", draft.bugs))
+    text = str.concat(text, section("Уборка", draft.cleanup))
+    text = str.concat(text, section("Без префикса — разложить вручную", draft.loose))
+    process.run(["mkdir", "-p", ".cache/build"], "")
+    file.write(DRAFT, text)
+    io.show("релиз: черновик — {DRAFT}")
+    io.show("")
+    io.show(str.slice(text, 0, str.bytes(text) - 1))
+    out none
+}
