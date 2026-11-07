@@ -52,7 +52,8 @@ limits:
     bash workbench/limits.sh
 
 hosts:
-    bash workbench/hosts.sh
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/hosts.saltic .cache/build/workbench/hosts
+    .cache/build/workbench/hosts
 
 rv64:
     bash bootstrap/refresh-rv64.sh

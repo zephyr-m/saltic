@@ -351,8 +351,19 @@ test_platform() {
         fi
         test "$(<"$work/platform/needs-args-$target.txt")" = "нужно 2 аргументов"
         test "$("${host_run[@]}" "$work/platform/needs-args-$target" раз два)" = "раз два"
+        SALTIC_TARGET=$target build stamp-$target workbench/stamp.saltic "$work/platform/stamp-$target"
+        local before after stamped
+        before="$(date +%H:%M:%S)"
+        if stamped="$("${host_run[@]}" "$work/platform/stamp-$target" 'echo "раз два"; exit 3')"; then
+            echo "платформа: stamp не передал провал команды ($target)" >&2
+            return 1
+        fi
+        after="$(date +%H:%M:%S)"
+        test "$(sed -n 1p <<<"$stamped" | cut -c12-)" = "раз два"
+        test "$(sed -n 2p <<<"$stamped")" = "ошибка: StampedFailed"
+        [[ ! "${stamped:1:8}" < "$before" && ! "${stamped:1:8}" > "$after" ]]
     done
-    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются — одинаково под rv32i и x86_64"
+    echo "платформа: NotSupported ловится, непойманная ошибка и нехватка аргументов печатаются, часы и stamp идут — одинаково под rv32i и x86_64"
 }
 
 test_memory() {

@@ -157,7 +157,10 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   faccessat, getdents64), общие для rv32i, x86-64, rv64; `_start` отдаёт стек
   входа в `rt_environment_capture`; `append_unsupported` закрывает отсутствующие
   действия у qemu-virt и UEFI без правок ОС. Тест `process` на трёх целях, канон.
-  Не сделано: окружение ребёнку (форма не решена), перевод `stamp.sh`/`hosts.sh`.
+  Не сделано: окружение ребёнку (форма не решена). `hosts.sh` →
+  `workbench/hosts.saltic` — 07.11.2026, первый bash на Saltic. Часы на Linux
+  (`core.time.now` — clock_gettime на трёх целях, `io.clock` — пояс из
+  /etc/localtime) и `workbench/stamp.saltic` вместо цикла `stamp.sh` — 07.11.2026.
 - [x] 3. ОС: `Phys { hi, lo }` → число — 06.11.2026 (агент 15).
 - [x] Шапки и документы после RV64: seed/README, word, wide, num, platform,
   linux, x86-64, toolchain, README бэкендов, TESTING, hosts, FOOTBALL —
@@ -185,11 +188,11 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
 - [ ] **решение** Фасад `abi.saltic` (113 имён). → аудит 02.11, Б4
 - [ ] `ast.children`, дерево групп — ребёнком `core/group/tree`, один стиль тестов. → аудит 02.11, Б11, Б12, Б14
 - [ ] `workbench/golden.py` устарел. → PLAN-1 «Рефакторинг»
-- [ ] **решение** Файлы сверх лимитов канона: кода больше 500 — `checker/walk` 513,
-  `rv32i/machine/layout` 514, `rv32i/runtime/fixed` 531, `codegen` 509, `state` 525,
-  `seed/tests/contract` 516; шапка длиннее 16 строк — 38 файлов языка. Список
-  с числами — `workbench/limits-known.txt`; `just limits` (первый шаг
-  `global-check`) не даёт им расти и ловит новые. → аудит 07.11
+- [ ] **решение** Файлы сверх лимитов канона (с 07.11.2026 — 512 строк кода и 32
+  строки шапки): кода больше 512 — `checker/walk` 513, `rv32i/machine/layout` 514,
+  `rv32i/runtime/fixed` 531, `seed/tests/contract` 516; шапка длиннее 32 —
+  `backend.saltic` 61, `layout` 43. Список с числами — `workbench/limits-known.txt`;
+  `just limits` (первый шаг `global-check`) не даёт им расти и ловит новые. → аудит 07.11
 - [x] Проверка лимитов канона в `global-check` — 07.11.2026 (`workbench/limits.sh`).
 - [x] Одно имя у целей: `x86_64-native` и `x86_64-uefi-native` убраны — 07.11.2026.
 - [x] Эталоны `translation` → `runtime_bytes`, «перевод» → «эталон» в названиях

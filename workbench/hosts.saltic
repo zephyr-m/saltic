@@ -1,0 +1,109 @@
+-- hosts — проверка всех хостов перед релизом (`just hosts`, CI релиза): тесты
+-- tests/run.sh на x86-64 прямо на процессоре, там же тесты ОС (группа os), на
+-- RV64 под qemu-riscv64 и платформы под rv32i (qemu-virt, UEFI, closure).
+-- Вывод прогонов читается построчно на лету (core.process.lines): на экран —
+-- итоги и подтверждения со временем, всё — в журнал LOG; оборвавшийся прогон
+-- показывает последние строки. Вместо workbench/hosts.sh (в .archive/).
+-- Время у строк ставит hosts (ребёнку — SALTIC_STAMPED=1, как у stamp.sh);
+-- stderr прогонов идёт на экран как есть и в журнал не попадает.
+--
+-- Run { lines, aborted } — все строки журнала и число оборвавшихся прогонов
+-- program() — все шаги STEPS; оборвался хоть один — HostsAborted
+-- Внутри: step(run, host, group), shown(line), say(text) — время io.clock, save(run)
+
+use io
+use io.file
+use io.clock
+use core.str
+use core.group
+use core.bytes
+use core.process
+
+LOG = ".cache/build/workbench/hosts.log"
+STEPS = [["x86_64", "all"], ["x86_64", "os"], ["rv64", "all"], ["rv32i", "platforms"]]
+SHOWN = ["итог", "проверка:", "error", "подтвержд", "пройдена"]
+TAIL = 12
+
+Run = Box {
+    lines = [],
+    aborted = 0
+}
+
+Reading = Box {
+    ended = no
+}
+
+skill say(text) {
+    io.show("[", clock.stamp(), "] ", text)
+    out none
+}
+
+skill shown(line) {
+    (str.contains(line, "[ok]") == yes) { out no }
+    drum (SHOWN) {
+        (str.contains(line, beat) == yes) { out yes }
+    }
+    (str.ends_with(line, "ок") == yes) { out yes }
+    (str.ends_with(line, "ok") == yes) { out yes }
+    (str.starts_with(line, "x86-64:") == yes) { out yes }
+    out str.starts_with(line, "uefi: образ грузится")
+}
+
+skill save(run) {
+    @total = 0
+    drum (run.lines) { total = total + str.bytes(beat) + 1 }
+    @buffer = bytes.new(total)
+    @at = 0
+    drum (run.lines) {
+        @line = beat
+        drum (str.bytes(line)) { bytes.set(buffer, at + beat, str.byte(line, beat)) }
+        at = at + str.bytes(line)
+        bytes.set(buffer, at, 10)
+        at = at + 1
+    }
+    out file.write_buffer(LOG, buffer)
+}
+
+skill step(run, host, group_name) {
+    say("== {host}: {group_name}")
+    @command = ["env", "SALTIC_TEST_HOST={host}", "SALTIC_STAMPED=1", "nix", "--extra-experimental-features", "nix-command flakes", "develop", "--command", "bash", "tests/run.sh", group_name]
+    @feed = process.lines(command, "")
+    @first = group.count(run.lines)
+    @reading = Reading {}
+    always {
+        @line = feed.next() rescue |err| {
+            reading.ended = yes
+            ""
+        }
+        (reading.ended == yes) { leave }
+        run.lines = group.add(run.lines, line)
+        (shown(line) == yes) { say(line) }
+    }
+    @code = feed.code()
+    save(run)
+    (code == 0) { out none }
+    say("== {host}: {group_name} ОБОРВАЛСЯ (код {code}), последние строки лога:")
+    @kept = []
+    drum (group.count(run.lines) - first) {
+        @line = group.get(run.lines, first + beat)
+        (str.contains(line, "[ok]") == no) { kept = group.add(kept, line) }
+    }
+    @start = group.count(kept) - TAIL
+    (start < 0) { start = 0 }
+    drum (group.count(kept) - start) { say(group.get(kept, start + beat)) }
+    run.aborted = run.aborted + 1
+    out none
+}
+
+program() {
+    process.run(["mkdir", "-p", ".cache/build/workbench"], "")
+    @run = Run {}
+    drum (STEPS) { step(run, group.get(beat, 0), group.get(beat, 1)) }
+    @failed = 0
+    drum (run.lines) {
+        (str.contains(beat, "FAIL]") == yes) { failed = failed + 1 }
+    }
+    say("== упавших проверок: {failed}, оборвавшихся прогонов: {run.aborted}")
+    (run.aborted > 0) { out error.HostsAborted }
+    out none
+}

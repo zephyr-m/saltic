@@ -1,0 +1,83 @@
+-- clock — часы Linux: rt_platform_now (core.time.now) -> миллисекунды от
+-- полуночи UTC, 0…86 399 999 (влезает в число и на 4-байтном слове).
+-- clock_gettime(CLOCK_REALTIME) кладёт timespec { секунды, наносекунды } по
+-- 8 байт в кадр на стеке. На 8-байтном слове — remu / mul / divu исполнителя;
+-- на rv32i деления нет: остаток от суток — сдвиговым делением младшего слова
+-- секунд (без знака, хватит до 2106 года), наносекунды в миллисекунды —
+-- вычитанием по миллиону, умножение на 1000 — сдвигами (1024 − 16 − 8).
+--
+-- emit_now(compiler) — метка rt_platform_now; emit_wide / emit_narrow — счёт,
+--     finish — число с тегом в VALUE и возврат
+
+use core.system
+use selfhost.abi
+use selfhost.compiler.backend
+use selfhost.compiler.platform
+
+CLOCK_REALTIME = 0
+FRAME_BYTES = 16
+NANOSECONDS_OFFSET = 8
+DAY_SECONDS = 86400
+MILLISECOND = 1000
+MILLION = 1000000
+
+skill emit_now(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.NOW)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - FRAME_BYTES)
+    compiler = executor.load_immediate(compiler, backend.VALUE, CLOCK_REALTIME)
+    compiler = executor.move(compiler, backend.ERROR, backend.STACK)
+    compiler = executor.syscall(compiler, system.SYSCALL_CLOCK_GETTIME)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, 0)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, NANOSECONDS_OFFSET)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, FRAME_BYTES)
+    (compiler.words.bytes == 8) { out finish(emit_wide(compiler)) }
+    out finish(emit_narrow(compiler))
+}
+
+skill finish(compiler) {
+    @executor = compiler.executor
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
+}
+
+skill emit_wide(compiler) {
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, DAY_SECONDS)
+    compiler = executor.remainder_unsigned(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH2)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, MILLISECOND)
+    compiler = executor.multiply(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH2)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, MILLION)
+    compiler = executor.divide_unsigned(compiler, backend.SCRATCH1, backend.SCRATCH1, backend.SCRATCH2)
+    out executor.add(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH1)
+}
+
+skill emit_narrow(compiler) {
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, abi.VALUE_WORD_BITS)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, DAY_SECONDS)
+    compiler = executor.label(compiler, ".L_now_day")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH5, backend.SCRATCH0, abi.VALUE_WORD_BITS - 1)
+    compiler = executor.shift_left(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
+    compiler = executor.or(compiler, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH5)
+    compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.SCRATCH0, 1)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH2, backend.SCRATCH4, ".L_now_day_next")
+    compiler = executor.sub(compiler, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH4)
+    compiler = executor.label(compiler, ".L_now_day_next")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, -1)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH3, ".L_now_day")
+    compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.SCRATCH2, 10)
+    compiler = executor.shift_left(compiler, backend.SCRATCH3, backend.SCRATCH2, 4)
+    compiler = executor.sub(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH3)
+    compiler = executor.shift_left(compiler, backend.SCRATCH3, backend.SCRATCH2, 3)
+    compiler = executor.sub(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH3)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, MILLION)
+    compiler = executor.label(compiler, ".L_now_milli")
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH1, backend.SCRATCH4, ".L_now_done")
+    compiler = executor.sub(compiler, backend.SCRATCH1, backend.SCRATCH1, backend.SCRATCH4)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 1)
+    compiler = executor.jump(compiler, ".L_now_milli")
+    out executor.label(compiler, ".L_now_done")
+}

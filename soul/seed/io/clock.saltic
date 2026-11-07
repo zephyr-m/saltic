@@ -1,0 +1,80 @@
+-- clock — местное время: UTC из core.time.now плюс сдвиг пояса из
+-- /etc/localtime (TZif). Сдвиг — из строки POSIX TZ в конце файла, например
+-- "<+05>-5" или "MSK-3" (знак у POSIX обратный: -5 — это UTC+5); летнее
+-- время (правила после запятой) не учитывается. Нет файла или строки — UTC.
+--
+-- local() -> миллисекунды от местной полуночи
+-- stamp() -> "ЧЧ:ММ:СС" местного времени
+-- zone() -> сдвиг пояса в миллисекундах; zone_of(rule) — из строки POSIX TZ
+
+use io.file
+use core.str
+use core.time
+
+ZONE_FILE = "/etc/localtime"
+
+skill local() {
+    out time.now() + zone()
+}
+
+skill stamp() {
+    out time.text(local())
+}
+
+skill zone() {
+    @tzif = file.read(ZONE_FILE) rescue |err| { out 0 }
+    @end = str.bytes(tzif) - 1
+    (end < 1) { out 0 }
+    @start = end
+    always {
+        (start == 0) { out 0 }
+        (str.get(tzif, start - 1) == "\n") { leave }
+        start = start - 1
+    }
+    out zone_of(str.slice(tzif, start, end))
+}
+
+skill zone_of(rule) {
+    @at = 0
+    @size = str.bytes(rule)
+    (size == 0) { out 0 }
+    (str.get(rule, 0) == "<") {
+        always {
+            (at == size) { out 0 }
+            (str.get(rule, at) == ">") { leave }
+            at = at + 1
+        }
+        at = at + 1
+    }
+    always {
+        (at == size) { out 0 }
+        @ch = str.get(rule, at)
+        (ch == "-") { leave }
+        (ch == "+") { leave }
+        (str.is_digit(ch) == yes) { leave }
+        at = at + 1
+    }
+    @sign = 0 - 1
+    (str.get(rule, at) == "-") { sign = 1 }
+    (str.is_digit(str.get(rule, at)) == no) { at = at + 1 }
+    @hours = 0
+    always {
+        (at == size) { leave }
+        (str.is_digit(str.get(rule, at)) == no) { leave }
+        hours = hours * 10 + str.byte(rule, at) - 48
+        at = at + 1
+    }
+    @minutes = 0
+    (at < size) {
+        (str.get(rule, at) == ":") {
+            at = at + 1
+            always {
+                (at == size) { leave }
+                (str.is_digit(str.get(rule, at)) == no) { leave }
+                minutes = minutes * 10 + str.byte(rule, at) - 48
+                at = at + 1
+            }
+        }
+    }
+    out sign * (hours * time.HOUR_MILLISECONDS + minutes * 60000)
+}
