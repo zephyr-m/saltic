@@ -1,0 +1,837 @@
+-- global-check — одна проверка всего (`just global-check`): сперва по очереди
+-- сборка проверок, лимиты канона и самосборка полки, затем разом ветки —
+-- тесты на rv32i, x86-64 и rv64, тесты ОС, платформы, самосборка на RV64,
+-- кодировщик x86. Каждая ветка пишет журнал WORK/<имя>.log, конец — код в
+-- <имя>.log.code. Вид — карточки: пиксельный логотип, рамки «подготовка»,
+-- «проверки разом», «итог»; под веткой её случаи, у случая отрезок на общей
+-- шкале времени (где начался, где кончился). Случаи тестов — из строк
+-- «случаи:» / «случай:» в журнале tests/run.sh, у RV64 и кодировщика — шаги по
+-- их строкам (RV64_STEPS, GOLDEN_STEPS). В терминале блок веток перерисован раз
+-- в секунду; не влезает в экран — под веткой только идущий случай, целиком —
+-- в конце. В CI (CI или SALTIC_PLAIN) — без цвета и перерисовки, раз в
+-- HEARTBEAT строка «идут» (правило автора: программа не крутится молча).
+-- Упало — хвост журнала под случаем и ошибка GlobalCheckFailed.
+-- Вместо workbench/global-check.sh и hosts.saltic (в .archive/).
+--
+-- Step { name, marker, seen, start } — случай ветки; start — десятые секунды
+-- Branch { name, proc, what, script, log, done, code, tenths, cases, steps } — ветка
+-- program() — вся проверка
+-- Внутри: карточки (card_top / card_row / card_bottom), полосы (bar / span),
+--     prep_wait — шаг подготовки со спиннером, scan — случаи из журнала,
+--     branch_rows — строки ветки, wait_all — живой блок, summary — итог
+
+use io
+use io.file
+use io.clock
+use core.str
+use core.time
+use core.group
+use core.process
+use workbench.kit
+
+WORK = ".cache/build/workbench"
+HEARTBEAT = 10
+NIX = "nix --extra-experimental-features \"nix-command flakes\" develop --command"
+TOOLS = [["limits", "workbench/limits.saltic"], ["refresh", "bootstrap/refresh.saltic"], ["refresh-rv64", "bootstrap/refresh-rv64.saltic"], ["x86-encoder-golden", "workbench/x86-encoder-golden.saltic"]]
+TESTS = [["rv32i", "all", "все тесты"], ["x86_64", "all", "все тесты"], ["x86_64", "os", "ОС"], ["rv64", "all", "все тесты"], ["rv32i", "platforms", "платформы"]]
+RV64_STEPS = [["собирает компилятор под RV64", "stage1"], ["собирает себя под qemu-riscv64", "stage2 и stage3"], ["проверяю fixed point", "fixed point"], ["сверяю с эталоном", "сверка с полкой"]]
+GOLDEN_STEPS = [["шаг 1:", "GNU as"], ["шаг 2:", "сборка команд"], ["шаг 3:", "сверка"]]
+COMPILERS = [["compiler-rv64-linux", "rv64"], ["compiler-x86_64-linux", "x86-64"], ["compiler-rv32i-linux.elf", "rv32i"], ["for-qemu_virt", "qemu"]]
+CASES = "случаи: "
+CASE = "случай: "
+TAIL = 6
+CARD = 68
+CELLS = 26
+LIMIT = 60
+LOGO = [
+    "....c............................t....",
+    "...cc............................tt...",
+    "..cc....ww.....w....w...w.........tt..",
+    ".cc....w....ww.w...www......ww.....tt.",
+    "cc......w..w.w.w....w...w..w........tt",
+    ".cc......w.w.w.w....w...w..w.......tt.",
+    "..cc...ww...ww..w....w..w...ww....tt..",
+    "...cc............................tt...",
+    "....c............................t....",
+    "......................................"
+]
+CORAL = "241;150;122"
+TEAL = "99;193;207"
+WHITE = "241;230;216"
+GREEN = "180;216;107"
+GRAY = "130;124;118"
+DIM = "72;68;64"
+LOGO_COLORS = [["c", CORAL], ["t", TEAL], ["w", WHITE]]
+SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+Step = Box {
+    name = "",
+    marker = "",
+    seen = no,
+    start = 0
+}
+
+Branch = Box {
+    name = "",
+    proc = "",
+    what = "",
+    script = "",
+    log = "",
+    done = no,
+    code = 0,
+    tenths = 0,
+    cases = no,
+    steps = []
+}
+
+Run = Box {
+    zone = 0,
+    started = 0,
+    failed = 0,
+    plain = no,
+    screen = 24,
+    drawn = 0,
+    tick = 0
+}
+
+skill paint(run, color, text) {
+    (run.plain == yes) { out text }
+    @escape = str.from_byte(27)
+    out "{escape}[38;2;{color}m{text}{escape}[0m"
+}
+
+skill bold(run, text) {
+    (run.plain == yes) { out text }
+    @escape = str.from_byte(27)
+    out "{escape}[1m{text}{escape}[0m"
+}
+
+skill repeat(text, count) {
+    @result = ""
+    drum (count) { result = str.concat(result, text) }
+    out result
+}
+
+skill visible(text) {
+    @count = 0
+    @escaped = no
+    drum (str.bytes(text)) {
+        @code = str.byte(text, beat)
+        @counted = yes
+        (escaped == yes) {
+            counted = no
+            (code == 109) { escaped = no }
+        }
+        (code == 27) {
+            escaped = yes
+            counted = no
+        }
+        (code >= 128) {
+            (code < 192) { counted = no }
+        }
+        (counted == yes) { count = count + 1 }
+    }
+    out count
+}
+
+skill padded(text, room) {
+    @missing = room - visible(text)
+    (missing < 0) { missing = 0 }
+    out str.concat(text, repeat(" ", missing))
+}
+
+skill right(text, room) {
+    @missing = room - visible(text)
+    (missing < 0) { missing = 0 }
+    out str.concat(repeat(" ", missing), text)
+}
+
+skill clipped(text, limit) {
+    @count = 0
+    drum (str.bytes(text)) {
+        @code = str.byte(text, beat)
+        @lead = yes
+        (code >= 128) {
+            (code < 192) { lead = no }
+        }
+        (lead == yes) {
+            (count == limit) { out str.slice(text, 0, beat) }
+            count = count + 1
+        }
+    }
+    out text
+}
+
+skill spaced(value) {
+    @digits = "{value}"
+    @result = ""
+    drum (str.bytes(digits)) {
+        (beat > 0) {
+            ((str.bytes(digits) - beat) % 3 == 0) { result = str.concat(result, " ") }
+        }
+        result = str.concat(result, str.get(digits, beat))
+    }
+    out result
+}
+
+skill seconds_text(tenths) {
+    @whole = tenths / 10
+    @part = tenths % 10
+    out "{whole}.{part} с"
+}
+
+skill tenths_since(start) {
+    @spent = time.now() - start
+    (spent < 0) { spent = spent + time.DAY_MILLISECONDS }
+    out (spent + 50) / 100
+}
+
+skill card_top(run, title) {
+    @rest = repeat("─", CARD - 5 - str.count(title))
+    @left = paint(run, DIM, "╭─ ")
+    @name = paint(run, CORAL, title)
+    @tail = paint(run, DIM, " {rest}╮")
+    out "  {left}{name}{tail}"
+}
+
+skill card_line(run, text) {
+    @left = paint(run, DIM, "│ ")
+    @body = padded(text, CARD - 4)
+    @edge = paint(run, DIM, " │")
+    out "  {left}{body}{edge}"
+}
+
+skill card_bottom(run) {
+    @rest = repeat("─", CARD - 2)
+    @line = paint(run, DIM, "╰{rest}╯")
+    out "  {line}"
+}
+
+skill show(text) {
+    io.show(text)
+    out none
+}
+
+skill again(run, text) {
+    (run.plain == yes) { out show(text) }
+    @escape = str.from_byte(27)
+    io.show("{escape}[1A{escape}[2K{text}")
+    out none
+}
+
+skill tone(state) {
+    (state == "ok") { out GREEN }
+    (state == "run") { out TEAL }
+    (state == "fail") { out CORAL }
+    out DIM
+}
+
+skill mark_of(run, state) {
+    (state == "ok") { out paint(run, GREEN, "✓") }
+    (state == "fail") { out paint(run, CORAL, "✗") }
+    (state == "run") {
+        @spinner = group.get(SPINNER, run.tick % group.count(SPINNER))
+        out paint(run, TEAL, spinner)
+    }
+    out paint(run, DIM, "○")
+}
+
+skill cell(tenths) {
+    @result = (tenths * CELLS + LIMIT * 5) / (LIMIT * 10)
+    (result > CELLS) { result = CELLS }
+    out result
+}
+
+skill bar(run, tenths, state) {
+    @filled = cell(tenths)
+    (filled < 1) { filled = 1 }
+    @lit = paint(run, tone(state), repeat("▬", filled))
+    @rest = paint(run, DIM, repeat("▬", CELLS - filled))
+    out "{lit}{rest}"
+}
+
+skill span(run, start, finish, state) {
+    (state == "wait") { out paint(run, DIM, repeat("━", CELLS)) }
+    (state == "skip") { out paint(run, DIM, repeat("━", CELLS)) }
+    @from = cell(start)
+    (from > CELLS - 1) { from = CELLS - 1 }
+    @to = cell(finish)
+    (to < from + 1) { to = from + 1 }
+    @before = paint(run, DIM, repeat("━", from))
+    @lit = paint(run, tone(state), repeat("━", to - from))
+    @after = paint(run, DIM, repeat("━", CELLS - to))
+    out "{before}{lit}{after}"
+}
+
+skill time_of(run, tenths, state, main) {
+    (state == "wait") { out paint(run, DIM, "ждёт") }
+    (state == "skip") { out paint(run, DIM, "не дошла") }
+    (state == "run") {
+        @whole = tenths / 10
+        out paint(run, TEAL, "идёт {whole} с")
+    }
+    (state == "fail") { out paint(run, CORAL, seconds_text(tenths)) }
+    (main == yes) { out paint(run, WHITE, seconds_text(tenths)) }
+    out paint(run, GRAY, seconds_text(tenths))
+}
+
+skill pixel_color(pixel) {
+    drum (LOGO_COLORS) {
+        (group.get(beat, 0) == pixel) { out group.get(beat, 1) }
+    }
+    out ""
+}
+
+skill show_logo(run) {
+    @escape = str.from_byte(27)
+    @moment = time.text(time.now() + run.zone)
+    (run.plain == yes) {
+        io.show("<Saltic> global-check · {moment}")
+        out none
+    }
+    io.show("")
+    drum (group.count(LOGO) / 2) {
+        @pair = beat
+        @top = group.get(LOGO, pair * 2)
+        @bottom = group.get(LOGO, pair * 2 + 1)
+        @line = "  "
+        drum (str.bytes(top)) {
+            @upper = pixel_color(str.get(top, beat))
+            @lower = pixel_color(str.get(bottom, beat))
+            @cell_text = "{escape}[0m "
+            (str.bytes(upper) > 0) {
+                cell_text = "{escape}[0m{escape}[38;2;{upper}m▀"
+                (str.bytes(lower) > 0) { cell_text = "{escape}[38;2;{upper}m{escape}[48;2;{lower}m▀" }
+            }
+            (str.bytes(upper) == 0) {
+                (str.bytes(lower) > 0) { cell_text = "{escape}[0m{escape}[38;2;{lower}m▄" }
+            }
+            line = str.concat(line, cell_text)
+        }
+        @title = ""
+        (pair == 2) { title = str.concat("   ", bold(run, "global-check")) }
+        (pair == 3) { title = str.concat("   ", paint(run, GRAY, moment)) }
+        io.show("{line}{escape}[0m{title}")
+    }
+    io.show("")
+    out none
+}
+
+skill launch(branches) {
+    drum (branches) {
+        @branch = beat
+        process.run(["rm", "-f", "{branch.log}.code"], "")
+        @wrapped = "{branch.script} > \"$0\" 2>&1; echo $? > \"$0.code\""
+        @bash = process.locate("bash")
+        process.spawn(bash, ["bash", "-c", wrapped, branch.log], "", no)
+    }
+    out branches
+}
+
+skill poll(branch) {
+    (branch.done == yes) { out no }
+    @text = file.read("{branch.log}.code") rescue |err| { out no }
+    @lines = str.lines(text)
+    (group.count(lines) == 0) { out no }
+    @code = 0
+    @digits = group.get(lines, 0)
+    drum (str.bytes(digits)) { code = code * 10 + str.byte(digits, beat) - 48 }
+    branch.code = code
+    branch.done = yes
+    out yes
+}
+
+skill failure_lines(run, log) {
+    @kept = []
+    drum (kit.tail(log, 1000)) {
+        @useful = yes
+        (str.contains(beat, "[ok]") == yes) { useful = no }
+        (str.bytes(beat) == 0) { useful = no }
+        (useful == yes) { kept = group.add(kept, beat) }
+    }
+    @start = group.count(kept) - TAIL
+    (start < 0) { start = 0 }
+    @result = []
+    @edge = paint(run, CORAL, "╎ ")
+    drum (group.count(kept) - start) {
+        @text = paint(run, GRAY, clipped(group.get(kept, start + beat), CARD - 16))
+        result = group.add(result, "        {edge}{text}")
+    }
+    @where = paint(run, GRAY, clipped("журнал: {log}", CARD - 16))
+    out group.add(result, "        {edge}{where}")
+}
+
+skill prep_row(run, state, label, detail, tenths) {
+    @mark = mark_of(run, state)
+    @name = padded(label, 18)
+    (str.bytes(detail) > 0) {
+        @rest = paint(run, GRAY, detail)
+        out "{mark} {name}{rest}"
+    }
+    @spent = right(time_of(run, tenths, state, yes), CARD - 24)
+    out "{mark} {name}{spent}"
+}
+
+skill prep_wait(run, label, branches) {
+    launch(branches)
+    @started = time.now()
+    (run.plain == no) { io.show(card_line(run, prep_row(run, "run", label, "", 0))) }
+    @ticks = 0
+    always {
+        @left = 0
+        drum (branches) {
+            poll(beat)
+            (beat.done == no) { left = left + 1 }
+        }
+        (left == 0) { leave }
+        process.run(["sleep", "1"], "")
+        ticks = ticks + 1
+        run.tick = run.tick + 1
+        @spent = tenths_since(started)
+        (run.plain == no) { again(run, card_line(run, prep_row(run, "run", label, "", spent))) }
+        (run.plain == yes) {
+            (ticks % HEARTBEAT == 0) {
+                @whole = spent / 10
+                io.show(card_line(run, "⏳ {label} — идёт {whole} с"))
+            }
+        }
+    }
+    @failed = 0
+    drum (branches) {
+        ((beat.code == 0) == no) { failed = failed + 1 }
+    }
+    run.failed = run.failed + failed
+    out tenths_since(started)
+}
+
+skill finish_prep(run, state, label, detail, tenths) {
+    @text = card_line(run, prep_row(run, state, label, detail, tenths))
+    (run.plain == no) { out again(run, text) }
+    out show(text)
+}
+
+skill show_lines(run, lines) {
+    drum (lines) { io.show(card_line(run, beat)) }
+    out none
+}
+
+skill show_failure(run, log) {
+    show_lines(run, failure_lines(run, log))
+    io.show(card_bottom(run))
+    out none
+}
+
+skill number_after(text, prefix) {
+    drum (str.lines(text)) {
+        @line = beat
+        @at = 0 - 1
+        @room = str.bytes(line) - str.bytes(prefix) + 1
+        (room < 0) { room = 0 }
+        drum (room) {
+            (at < 0) {
+                (str.starts_at(line, prefix, beat) == yes) { at = beat + str.bytes(prefix) }
+            }
+        }
+        (at >= 0) {
+            @end = at
+            always {
+                (end == str.bytes(line)) { leave }
+                @ch = str.get(line, end)
+                @digit = str.is_digit(ch)
+                (ch == ".") { digit = yes }
+                (digit == no) { leave }
+                end = end + 1
+            }
+            out str.slice(line, at, end)
+        }
+    }
+    out ""
+}
+
+skill remembered(store, value) {
+    @last = file.read(store) rescue |err| { "" }
+    @previous = str.lines(last)
+    file.write(store, "{value}\n")
+    (group.count(previous) == 0) { out value }
+    out group.get(previous, 0)
+}
+
+skill shelf_size() {
+    @found = process.capture(["bash", "-c", "source bootstrap/names.sh && saltic_bootstrap_compiler"], "")
+    @lines = str.lines(found.output)
+    (group.count(lines) == 0) { out 0 }
+    out kit.size(group.get(lines, 0))
+}
+
+skill compilers_row(run, text) {
+    @result = ""
+    drum (COMPILERS) {
+        @key = group.get(beat, 0)
+        @name = group.get(beat, 1)
+        @state = ""
+        drum (str.lines(text)) {
+            (str.contains(beat, key) == yes) {
+                (str.contains(beat, "не изменился") == yes) { state = paint(run, GRAY, "○") }
+                (str.ends_with(beat, " готов") == yes) { state = paint(run, GREEN, "●") }
+            }
+        }
+        (str.bytes(state) > 0) {
+            @shown = paint(run, WHITE, name)
+            result = str.concat(result, "{shown} {state}   ")
+        }
+    }
+    @legend = paint(run, GRAY, "● собран  ○ как был")
+    out "  {result}{legend}"
+}
+
+skill preparation(run) {
+    io.show(card_top(run, "подготовка"))
+    @builds = []
+    drum (TOOLS) {
+        @name = group.get(beat, 0)
+        @source = group.get(beat, 1)
+        @script = "SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR={WORK}/build-{name} bash bootstrap/build.sh {source} {WORK}/{name}"
+        builds = group.add(builds, Branch { name = name, script = script, log = "{WORK}/build-{name}.log" })
+    }
+    @built = prep_wait(run, "сборка проверок", builds)
+    (run.failed > 0) {
+        finish_prep(run, "fail", "сборка проверок", "", built)
+        drum (builds) {
+            ((beat.code == 0) == no) { show_lines(run, failure_lines(run, beat.log)) }
+        }
+        io.show(card_bottom(run))
+        out error.GlobalCheckFailed
+    }
+    finish_prep(run, "ok", "сборка проверок", "", built)
+
+    @limits = Branch { name = "limits", script = "{WORK}/limits", log = "{WORK}/limits.log" }
+    prep_wait(run, "лимиты канона", [limits])
+    @found = file.read(limits.log) rescue |err| { "" }
+    @files = number_after(found, "файлов ")
+    @known = number_after(found, "нарушений ")
+    @fresh = number_after(found, "новых ")
+    @grown = number_after(found, "выросших ")
+    @counts = "новых {fresh} · известных {known} · файлов {files}"
+    (str.bytes(grown) > 0) {
+        ((grown == "0") == no) { counts = "{counts} · выросших {grown}" }
+    }
+    ((limits.code == 0) == no) {
+        finish_prep(run, "fail", "лимиты канона", counts, 0)
+        show_failure(run, limits.log)
+        out error.GlobalCheckFailed
+    }
+    finish_prep(run, "ok", "лимиты канона", counts, 0)
+
+    @refresh = Branch { name = "refresh", script = "SALTIC_STAMPED=1 {WORK}/refresh \"\"", log = "{WORK}/refresh.log" }
+    @spent = prep_wait(run, "самосборка", [refresh])
+    ((refresh.code == 0) == no) {
+        finish_prep(run, "fail", "самосборка", "", spent)
+        show_failure(run, refresh.log)
+        out error.GlobalCheckFailed
+    }
+    @text = file.read(refresh.log) rescue |err| { "" }
+    @seconds = number_after(text, "новый компилятор собрал себя за ")
+    @memory = number_after(text, "память самосборки ")
+    @bytes = spaced(shelf_size())
+    @was_seconds = remembered("{WORK}/self-build-seconds", seconds)
+    @was_memory = remembered("{WORK}/self-build-memory", memory)
+    @was_bytes = remembered("{WORK}/self-build-size", bytes)
+    finish_prep(run, "ok", "самосборка", "{seconds} с · {memory} МБ · {bytes} байт", 0)
+    @same = yes
+    ((was_seconds == seconds) == no) { same = no }
+    ((was_memory == memory) == no) { same = no }
+    ((was_bytes == bytes) == no) { same = no }
+    (same == no) {
+        @before = paint(run, GRAY, "было {was_seconds} с · {was_memory} МБ · {was_bytes} байт")
+        io.show(card_line(run, "                    {before}"))
+    }
+    io.show(card_line(run, compilers_row(run, text)))
+    io.show(card_bottom(run))
+    out none
+}
+
+skill scan(branch, now) {
+    @text = file.read(branch.log) rescue |err| { out none }
+    drum (str.lines(text)) {
+        @line = beat
+        (branch.cases == yes) {
+            (group.count(branch.steps) == 0) {
+                (str.starts_with(line, CASES) == yes) {
+                    drum (str.split(str.slice(line, str.bytes(CASES), str.bytes(line)), " ")) {
+                        branch.steps = group.add(branch.steps, Step { name = beat, marker = "{CASE}{beat}" })
+                    }
+                }
+            }
+            (str.starts_with(line, CASE) == yes) {
+                drum (branch.steps) {
+                    (beat.seen == no) {
+                        (beat.marker == line) {
+                            beat.seen = yes
+                            beat.start = now
+                        }
+                    }
+                }
+            }
+        }
+        (branch.cases == no) {
+            drum (branch.steps) {
+                (beat.seen == no) {
+                    (str.contains(line, beat.marker) == yes) {
+                        beat.seen = yes
+                        beat.start = now
+                    }
+                }
+            }
+        }
+    }
+    out none
+}
+
+skill step_finish(branch, index, now) {
+    @count = group.count(branch.steps)
+    drum (count - index - 1) {
+        @later = group.get(branch.steps, index + 1 + beat)
+        (later.seen == yes) { out later.start }
+    }
+    (branch.done == yes) { out branch.tenths }
+    out now
+}
+
+skill last_seen(branch) {
+    @result = 0 - 1
+    drum (group.count(branch.steps)) {
+        @item = group.get(branch.steps, beat)
+        (item.seen == yes) { result = beat }
+    }
+    out result
+}
+
+skill step_state(branch, index, last) {
+    @item = group.get(branch.steps, index)
+    (item.seen == no) {
+        (branch.done == yes) { out "skip" }
+        out "wait"
+    }
+    (index == last) {
+        (branch.done == no) { out "run" }
+        ((branch.code == 0) == no) { out "fail" }
+    }
+    out "ok"
+}
+
+skill branch_state(branch) {
+    (branch.done == no) { out "run" }
+    ((branch.code == 0) == no) { out "fail" }
+    out "ok"
+}
+
+skill branch_rows(run, branch, now, full) {
+    @state = branch_state(branch)
+    @spent = branch.tenths
+    (branch.done == no) { spent = now }
+    @mark = mark_of(run, state)
+    @proc = padded(bold(run, branch.proc), 7)
+    @what = padded(bold(run, branch.what), 11)
+    @line = bar(run, spent, state)
+    @spent_text = right(time_of(run, spent, state, yes), 10)
+    @rows = ["{mark} {proc} {what} {line} {spent_text}"]
+    @last = last_seen(branch)
+    @count = group.count(branch.steps)
+    @tail_shown = no
+    drum (count) {
+        @index = beat
+        @item = group.get(branch.steps, index)
+        @child = step_state(branch, index, last)
+        @wanted = full
+        (child == "run") { wanted = yes }
+        (wanted == yes) {
+            @joint = "├ "
+            (index == count - 1) { joint = "└ " }
+            (full == no) { joint = "└ " }
+            @edge = paint(run, DIM, "  {joint}")
+            @child_mark = mark_of(run, child)
+            @tint = GRAY
+            (child == "run") { tint = WHITE }
+            @name = padded(paint(run, tint, item.name), 16)
+            @finish = step_finish(branch, index, now)
+            @strip = span(run, item.start, finish, child)
+            @took = right(time_of(run, finish - item.start, child, no), 9)
+            rows = group.add(rows, "{edge}{child_mark} {name}{strip}  {took}")
+            (child == "fail") {
+                rows = group.concat(rows, failure_lines(run, branch.log))
+                tail_shown = yes
+            }
+        }
+    }
+    (state == "fail") {
+        (tail_shown == no) { rows = group.concat(rows, failure_lines(run, branch.log)) }
+    }
+    out rows
+}
+
+skill block(run, branches, now, full) {
+    @rows = [card_top(run, "проверки разом")]
+    @before = 0
+    drum (branches) {
+        @own = branch_rows(run, beat, now, full)
+        (before > 1) { rows = group.add(rows, card_line(run, "")) }
+        (before == 1) {
+            (group.count(own) > 1) { rows = group.add(rows, card_line(run, "")) }
+        }
+        drum (own) { rows = group.add(rows, card_line(run, beat)) }
+        before = group.count(own)
+    }
+    out group.add(rows, card_bottom(run))
+}
+
+skill draw(run, rows) {
+    @escape = str.from_byte(27)
+    @lines = rows
+    @missing = run.drawn - group.count(rows)
+    (missing < 0) { missing = 0 }
+    drum (missing) { lines = group.add(lines, "") }
+    @first = yes
+    drum (lines) {
+        @text = "{escape}[2K{beat}"
+        (first == yes) {
+            (run.drawn > 0) { text = "{escape}[{run.drawn}A{text}" }
+            first = no
+        }
+        io.show(text)
+    }
+    run.drawn = group.count(lines)
+    out none
+}
+
+skill live_block(run, branches, now) {
+    @rows = block(run, branches, now, yes)
+    (group.count(rows) + 2 > run.screen) { rows = block(run, branches, now, no) }
+    out draw(run, rows)
+}
+
+skill wait_all(run, branches) {
+    @started = time.now()
+    @ticks = 0
+    always {
+        @now = tenths_since(started)
+        @left = []
+        drum (branches) {
+            @branch = beat
+            scan(branch, now)
+            (poll(branch) == yes) {
+                branch.tenths = now
+                ((branch.code == 0) == no) { run.failed = run.failed + 1 }
+                (run.plain == yes) {
+                    @state = branch_state(branch)
+                    @mark = mark_of(run, state)
+                    @took = seconds_text(now)
+                    io.show("{mark} {branch.proc} {branch.what} — {took}")
+                }
+            }
+            (branch.done == no) { left = group.add(left, "{branch.proc} {branch.what}") }
+        }
+        (run.plain == no) { live_block(run, branches, now) }
+        (group.count(left) == 0) { leave }
+        process.run(["sleep", "1"], "")
+        ticks = ticks + 1
+        run.tick = run.tick + 1
+        (run.plain == yes) {
+            (ticks % HEARTBEAT == 0) {
+                @whole = tenths_since(started) / 10
+                @names = str.join(left, ", ")
+                io.show("⏳ идут ({whole} с): {names}")
+            }
+        }
+    }
+    @rows = block(run, branches, 0, yes)
+    (run.plain == no) { draw(run, rows) }
+    (run.plain == yes) { drum (rows) { io.show(beat) } }
+    out branches
+}
+
+skill steps_of(pairs) {
+    @result = []
+    drum (pairs) { result = group.add(result, Step { name = group.get(beat, 1), marker = group.get(beat, 0) }) }
+    out result
+}
+
+skill check_branches() {
+    @result = []
+    drum (TESTS) {
+        @host = group.get(beat, 0)
+        @tests = group.get(beat, 1)
+        @proc = host
+        (host == "x86_64") { proc = "x86-64" }
+        @script = "env SALTIC_TEST_HOST={host} SALTIC_STAMPED=1 {NIX} bash tests/run.sh {tests}"
+        result = group.add(result, Branch { name = "{proc} {tests}", proc = proc, what = group.get(beat, 2), script = script, log = "{WORK}/check-{host}-{tests}.log", cases = yes })
+    }
+    result = group.add(result, Branch { name = "rv64 самосборка", proc = "rv64", what = "самосборка", script = "SALTIC_STAMPED=1 {WORK}/refresh-rv64 \"\"", log = "{WORK}/check-rv64-self.log", steps = steps_of(RV64_STEPS) })
+    result = group.add(result, Branch { name = "x86-64 кодировщик", proc = "x86-64", what = "кодировщик", script = "SALTIC_STAMPED=1 {WORK}/x86-encoder-golden \"\"", log = "{WORK}/check-x86-golden.log", steps = steps_of(GOLDEN_STEPS) })
+    out result
+}
+
+skill summary(run, done) {
+    @checks = 0
+    @slowest = group.get(done, 0)
+    drum (done) {
+        @branch = beat
+        @text = file.read(branch.log) rescue |err| { "" }
+        drum (str.lines(text)) {
+            (str.contains(beat, "FAIL]") == yes) { checks = checks + 1 }
+        }
+        (branch.tenths > slowest.tenths) { slowest = branch }
+    }
+    @total = group.count(done)
+    @head = "{total} из {total}"
+    @state = "ok"
+    (run.failed > 0) {
+        head = "упала {run.failed} из {total}"
+        state = "fail"
+    }
+    @mark = mark_of(run, state)
+    @whole = seconds_text(tenths_since(run.started))
+    @longest = seconds_text(slowest.tenths)
+    @rest = paint(run, GRAY, " · {whole} · дольше всех — {slowest.proc} {slowest.what} {longest}")
+    io.show(card_top(run, "итог"))
+    io.show(card_line(run, "{mark} {head}{rest}"))
+    (checks > 0) { io.show(card_line(run, paint(run, CORAL, "  упавших проверок: {checks}"))) }
+    io.show(card_bottom(run))
+    out none
+}
+
+skill plain_mode() {
+    drum (process.environment()) {
+        (str.starts_with(beat, "CI=") == yes) { out yes }
+        (str.starts_with(beat, "SALTIC_PLAIN=") == yes) { out yes }
+    }
+    out no
+}
+
+skill screen_rows() {
+    @found = process.capture(["bash", "-c", "stty size < /dev/tty"], "")
+    @parts = str.split(found.output, " ")
+    (group.count(parts) == 0) { out 24 }
+    @digits = group.get(parts, 0)
+    @value = 0
+    drum (str.bytes(digits)) {
+        (str.is_digit(str.get(digits, beat)) == yes) { value = value * 10 + str.byte(digits, beat) - 48 }
+    }
+    (value < 10) { out 24 }
+    out value
+}
+
+program() {
+    @run = Run {}
+    run.zone = clock.zone()
+    run.started = time.now()
+    run.plain = plain_mode()
+    (run.plain == no) { run.screen = screen_rows() }
+    process.run(["mkdir", "-p", WORK], "")
+    show_logo(run)
+    preparation(run)
+    (run.plain == no) { io.show("") }
+    @done = wait_all(run, launch(check_branches()))
+    summary(run, done)
+    (run.failed > 0) { out error.GlobalCheckFailed }
+    out none
+}

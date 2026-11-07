@@ -9,6 +9,7 @@ cd "$root"
 work_root="${SALTIC_TEST_DIR:-.cache/build/tests}"
 mkdir -p "$work_root"
 work="$(mktemp -d "$work_root/run.XXXXXX")"
+export SALTIC_SCRATCH="$work"
 
 cleanup() {
     local status=$?
@@ -640,7 +641,10 @@ elif [[ "$1" == "os" ]]; then
     set -- jtml tasks panels mrpc
 fi
 
+# «случаи:» и «случай:» — по ним workbench/global-check рисует случаи ветки
+echo "случаи: $*"
 for name in "$@"; do
+    echo "случай: $name"
     metrics_begin "$name"
     run_case "$name"
     metrics_end

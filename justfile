@@ -47,15 +47,12 @@ bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic":
     .cache/build/workbench/refresh "$1"
 
 global-check:
-    bash workbench/global-check.sh
+    SALTIC_TARGET=x86_64 SALTIC_BUILD_DIR=.cache/build/workbench/build-global-check bash bootstrap/build.sh workbench/global-check.saltic .cache/build/workbench/global-check >/dev/null
+    .cache/build/workbench/global-check
 
 limits:
     SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/limits.saltic .cache/build/workbench/limits
     .cache/build/workbench/limits
-
-hosts:
-    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/hosts.saltic .cache/build/workbench/hosts
-    .cache/build/workbench/hosts
 
 rv64:
     SALTIC_TARGET=x86_64 bash bootstrap/build.sh bootstrap/refresh-rv64.saltic .cache/build/workbench/refresh-rv64 >/dev/null

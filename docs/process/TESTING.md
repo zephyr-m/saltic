@@ -26,7 +26,7 @@
 без имени — `all`. Хост тестовых программ — `SALTIC_TEST_HOST`: `rv32i`
 (по умолчанию, под `qemu-riscv32`), `x86_64` или `rv64` (под `qemu-riscv64`).
 
-`all` — её гоняет `just global-check` на rv32i и `just hosts` на x86_64 и rv64:
+`all` — её гоняет `just global-check` разом на rv32i, x86_64 и rv64:
 
 - `checker` — случаи `soul/canonical/errors/` против `expected/errors/`;
   `errors/parser/` — по файлу на ошибку лексера и парсера, каждый обязан
@@ -61,13 +61,13 @@
 - `memory` — модель памяти и `MemoryExhausted`;
 - `native` — канон, память, переполнение стека, нажатия, импорт и большие
   числа на родном x86-64;
-`os` — модули ОС, не язык; только в `just hosts` (под x86_64):
+`os` — модули ОС, не язык; в `just global-check` (под x86_64):
 
 - `jtml`, `tasks` — `os.ui.jtml` и `os.apps.tasks`;
 - `panels`, `mrpc` — системная панель и mRPC агента (`mrpc` — всегда под
   x86_64: модули ОС UEFI — 61-битный мир).
 
-`platforms` — только в `just hosts`:
+`platforms` — в `just global-check` (под rv32i):
 
 - `qemu-virt` — ОС с графикой собирается и стартует в QEMU;
 - `uefi` — образ UEFI собирается и грузится под OVMF;

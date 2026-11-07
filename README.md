@@ -109,13 +109,13 @@ pip устал
 nix --extra-experimental-features "nix-command flakes" develop
 ```
 
-- `just global-check` — самосборка с паспортами (неподвижная точка rv64,
-  x86-64 и rv32i родными компиляторами) и тесты `all` на rv32i, с метриками и
-  «было / стало»;
+- `just global-check` — проверка всего: самосборка с паспортами (неподвижная
+  точка rv64, x86-64 и rv32i родными компиляторами), затем разом тесты `all`
+  на rv32i, x86-64 и RV64, тесты ОС `os`, платформы (qemu-virt, UEFI, closure),
+  самосборка на RV64 и кодировщик x86 — карточками со случаями каждой ветки;
 - `just rv64` — доказательство: эталон RV64 собирает себя под `qemu-riscv64`
   (около минуты; перед релизом);
-- `just hosts` — тесты `all` на x86-64 и RV64, тесты ОС `os`, платформы: qemu-virt, UEFI, closure
-  (группы — [docs/process/TESTING.md](docs/process/TESTING.md));
+  (группы тестов — [docs/process/TESTING.md](docs/process/TESTING.md));
 - `just qemu-graphics` — ОС с программами в окне QEMU.
 
 Собрать свою программу компилятором с полки:
@@ -160,7 +160,7 @@ qemu-riscv64 -B 0x100000000 ./hello
    проверить по [docs/process/FOOTBALL.md](docs/process/FOOTBALL.md) — фичи, баги и уборку —
    и записать счёт в `VERSION`, `README.md` и `CHANGELOG.md`.
 2. `just global-check` — компиляторы на полке получат имя новой версии и
-   паспорта; `just hosts` — платформы.
+   паспорта, заодно пройдут все хосты и платформы.
 3. Закоммитить `release: Saltic F:B:C`, вместе с обоими компиляторами
    (эталон RV64 и родной x86-64).
 4. Аннотированный тег: `git tag -a vF.B.C -m "Saltic F:B:C — название"`.
