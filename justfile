@@ -67,6 +67,10 @@ same-source:
     SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/same-source.saltic .cache/build/workbench/same-source-check >/dev/null
     .cache/build/workbench/same-source-check
 
+x86-golden mode="":
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/x86-encoder-golden.saltic .cache/build/workbench/x86-encoder-golden >/dev/null
+    .cache/build/workbench/x86-encoder-golden "$1"
+
 same *sources:
     SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/same.saltic .cache/build/workbench/same-check >/dev/null
     .cache/build/workbench/same-check "$*"
