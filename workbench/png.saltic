@@ -1,0 +1,239 @@
+-- png — картинка в файл PNG: один байт на пиксель (номер цвета) и палитра.
+-- Сжатие — deflate с готовыми кодами Хаффмана (fixed); повторы ищутся только
+-- на расстоянии 1 (тот же байт) и на ширине строки (строка выше) — ровным
+-- заливкам и тексту этого хватает. CRC32 — через bits32 (обычное число —
+-- 29 бит), Adler-32 — обычными числами.
+--
+-- encode(pixels, width, height, palette) -> буфер core.bytes с файлом PNG;
+--     pixels — буфер width×height номеров цветов, palette — группа [r, g, b]
+-- Bits { at, acc, count } — запись по битам: позиция, накопитель, сколько бит в нём
+-- Внутри: put_bits, put_symbol, put_match, deflate, adler, crc,
+--     chunk_begin / chunk_end, put_u32
+
+use core.num
+use core.str
+use core.u8
+use core.bits32
+use core.bytes
+use core.group
+
+LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+DISTANCE_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+DISTANCE_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+POWERS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
+LONGEST = 258
+ADLER = 65521
+SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10]
+
+Bits = Box {
+    at = 0,
+    acc = 0,
+    count = 0
+}
+
+skill put_bits(buffer, bits, value, length) {
+    bits.acc = bits.acc + value * group.get(POWERS, bits.count)
+    bits.count = bits.count + length
+    always {
+        (bits.count < 8) { leave }
+        bytes.set(buffer, bits.at, bits.acc % 256)
+        bits.at = bits.at + 1
+        bits.acc = bits.acc / 256
+        bits.count = bits.count - 8
+    }
+    out none
+}
+
+skill reversed(code, length) {
+    @result = 0
+    @rest = code
+    drum (length) {
+        result = result * 2 + rest % 2
+        rest = rest / 2
+    }
+    out result
+}
+
+skill symbol_codes() {
+    @result = []
+    drum (288) {
+        @code = [reversed(48 + beat, 8), 8]
+        (beat >= 144) { code = [reversed(400 + beat - 144, 9), 9] }
+        (beat >= 256) { code = [reversed(beat - 256, 7), 7] }
+        (beat >= 280) { code = [reversed(192 + beat - 280, 8), 8] }
+        result = group.add(result, code)
+    }
+    out result
+}
+
+skill put_symbol(buffer, bits, codes, symbol) {
+    @code = group.get(codes, symbol)
+    out put_bits(buffer, bits, group.get(code, 0), group.get(code, 1))
+}
+
+skill slot(bases, value) {
+    @result = 0
+    drum (group.count(bases)) {
+        (group.get(bases, beat) <= value) { result = beat }
+    }
+    out result
+}
+
+skill put_match(buffer, bits, codes, length, distance) {
+    @kind = slot(LENGTH_BASE, length)
+    put_symbol(buffer, bits, codes, 257 + kind)
+    put_bits(buffer, bits, length - group.get(LENGTH_BASE, kind), group.get(LENGTH_EXTRA, kind))
+    @far = slot(DISTANCE_BASE, distance)
+    put_bits(buffer, bits, reversed(far, 5), 5)
+    out put_bits(buffer, bits, distance - group.get(DISTANCE_BASE, far), group.get(DISTANCE_EXTRA, far))
+}
+
+skill match_length(raw, total, at, distance) {
+    @limit = total - at
+    (limit > LONGEST) { limit = LONGEST }
+    @length = 0
+    always {
+        (length == limit) { leave }
+        ((bytes.get(raw, at + length) == bytes.get(raw, at + length - distance)) == no) { leave }
+        length = length + 1
+    }
+    out length
+}
+
+skill deflate(raw, total, stride, buffer, bits) {
+    @codes = symbol_codes()
+    put_bits(buffer, bits, 1, 1)
+    put_bits(buffer, bits, 1, 2)
+    @at = 0
+    always {
+        (at >= total) { leave }
+        @best = 0
+        @distance = 0
+        (at >= 1) {
+            best = match_length(raw, total, at, 1)
+            distance = 1
+        }
+        (at >= stride) {
+            @above = match_length(raw, total, at, stride)
+            (above > best) {
+                best = above
+                distance = stride
+            }
+        }
+        @step = 1
+        (best >= 3) {
+            put_match(buffer, bits, codes, best, distance)
+            step = best
+        }
+        (best < 3) { put_symbol(buffer, bits, codes, bytes.get(raw, at)) }
+        at = at + step
+    }
+    put_symbol(buffer, bits, codes, 256)
+    (bits.count > 0) { put_bits(buffer, bits, 0, 8 - bits.count) }
+    out bits.at
+}
+
+skill adler(raw, total) {
+    @low = 1
+    @high = 0
+    drum (total) {
+        low = (low + bytes.get(raw, beat)) % ADLER
+        high = (high + low) % ADLER
+    }
+    out [high, low]
+}
+
+skill crc(buffer, start, finish) {
+    @poly = bits32.or(bits32.shift_left(bits32.from(60856), u8.from(16)), bits32.from(33568))
+    @one = bits32.from(1)
+    @shift = u8.from(1)
+    @value = bits32.not(bits32.from(0))
+    drum (finish - start) {
+        value = bits32.xor(value, bits32.from(bytes.get(buffer, start + beat)))
+        drum (8) {
+            @low = bits32.and(value, one)
+            value = bits32.shift_right(value, shift)
+            (low == one) { value = bits32.xor(value, poly) }
+        }
+    }
+    value = bits32.not(value)
+    @mask = bits32.from(255)
+    @result = []
+    drum (4) { result = group.add(result, num.from(bits32.and(bits32.shift_right(value, u8.from(24 - beat * 8)), mask))) }
+    out result
+}
+
+skill put_u32(buffer, at, value) {
+    bytes.set(buffer, at, value / 16777216 % 256)
+    bytes.set(buffer, at + 1, value / 65536 % 256)
+    bytes.set(buffer, at + 2, value / 256 % 256)
+    bytes.set(buffer, at + 3, value % 256)
+    out at + 4
+}
+
+skill put_text(buffer, at, text) {
+    drum (str.bytes(text)) { bytes.set(buffer, at + beat, str.byte(text, beat)) }
+    out at + str.bytes(text)
+}
+
+skill chunk_begin(buffer, at, kind) {
+    out put_text(buffer, at + 4, kind)
+}
+
+skill chunk_end(buffer, start, finish) {
+    put_u32(buffer, start, finish - start - 8)
+    @sum = crc(buffer, start + 4, finish)
+    drum (4) { bytes.set(buffer, finish + beat, group.get(sum, beat)) }
+    out finish + 4
+}
+
+skill encode(pixels, width, height, palette) {
+    @stride = width + 1
+    @total = height * stride
+    @raw = bytes.new(total)
+    drum (height) {
+        @row = beat
+        drum (width) { bytes.set(raw, row * stride + 1 + beat, bytes.get(pixels, row * width + beat)) }
+    }
+    @buffer = bytes.new(total + total / 8 + 1024 + group.count(palette) * 3)
+    @at = 0
+    drum (SIGNATURE) {
+        bytes.set(buffer, at, beat)
+        at = at + 1
+    }
+    @start = at
+    at = chunk_begin(buffer, at, "IHDR")
+    at = put_u32(buffer, at, width)
+    at = put_u32(buffer, at, height)
+    drum ([8, 3, 0, 0, 0]) {
+        bytes.set(buffer, at, beat)
+        at = at + 1
+    }
+    at = chunk_end(buffer, start, at)
+    start = at
+    at = chunk_begin(buffer, at, "PLTE")
+    drum (palette) {
+        drum (beat) {
+            bytes.set(buffer, at, beat)
+            at = at + 1
+        }
+    }
+    at = chunk_end(buffer, start, at)
+    start = at
+    at = chunk_begin(buffer, at, "IDAT")
+    bytes.set(buffer, at, 120)
+    bytes.set(buffer, at + 1, 1)
+    @bits = Bits { at = at + 2 }
+    at = deflate(raw, total, stride, buffer, bits)
+    drum (adler(raw, total)) {
+        bytes.set(buffer, at, beat / 256)
+        bytes.set(buffer, at + 1, beat % 256)
+        at = at + 2
+    }
+    at = chunk_end(buffer, start, at)
+    start = at
+    at = chunk_begin(buffer, at, "IEND")
+    at = chunk_end(buffer, start, at)
+    out bytes.slice(buffer, 0, at)
+}

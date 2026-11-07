@@ -1,0 +1,230 @@
+-- receipt — чек картинкой: строки терминала с цветом (ESC[38;2;r;g;bm — буквы,
+-- ESC[48;2;r;g;bm — фон, ESC[1m — жирный (в чеке — ярче), ESC[0m — сброс) → сетка клеток →
+-- пиксели → PNG (workbench.png). Буквы — Spleen 8×16 (os.fonts.spleen): ASCII
+-- и кириллица; рамки ─ ━ ▬ │ ╎ ╭ ╮ ╰ ╯ ├ └, метки ✓ ✗ ○ ●, полублоки ▀ ▄,
+-- точка · и тире — маски SHAPES здесь же; прочее — «?». Клетка — 8×16
+-- пикселей, всё увеличено в SCALE раз, вокруг поле в MARGIN клеток.
+--
+-- save(lines, path) — нарисовать строки и записать PNG
+-- Cell { code, ink, paper, bold } — клетка: код символа, номера цветов, жирный
+-- Paint { colors } — палитра: группа "r;g;b", номер 0 — фон; Row { cells } — строка
+-- Внутри: parse — строка в клетки, color_of — номер цвета, mask_of — 16 строк
+--     маски символа, draw_cell — клетка в пиксели
+
+use io.file
+use core.str
+use core.bytes
+use core.group
+use os.fonts.spleen
+use workbench.png
+
+SCALE = 2
+MARGIN = 2
+BACKGROUND = "30;29;28"
+TEXT = "214;208;200"
+BRIGHT = "250;246;240"
+BITS = [128, 64, 32, 16, 8, 4, 2, 1]
+SHAPES = [
+    [9472, [0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0]],
+    [9473, [0, 0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0]],
+    [9644, [0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0]],
+    [9474, [16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16]],
+    [9550, [0, 16, 16, 16, 16, 16, 0, 0, 0, 16, 16, 16, 16, 16, 0, 0]],
+    [9581, [0, 0, 0, 0, 0, 0, 0, 0, 7, 8, 16, 16, 16, 16, 16, 16]],
+    [9582, [0, 0, 0, 0, 0, 0, 0, 0, 192, 32, 16, 16, 16, 16, 16, 16]],
+    [9584, [16, 16, 16, 16, 16, 16, 16, 8, 7, 0, 0, 0, 0, 0, 0, 0]],
+    [9583, [16, 16, 16, 16, 16, 16, 16, 32, 192, 0, 0, 0, 0, 0, 0, 0]],
+    [9500, [16, 16, 16, 16, 16, 16, 16, 16, 31, 16, 16, 16, 16, 16, 16, 16]],
+    [9492, [16, 16, 16, 16, 16, 16, 16, 16, 31, 0, 0, 0, 0, 0, 0, 0]],
+    [10003, [0, 0, 0, 0, 0, 3, 6, 140, 216, 112, 32, 0, 0, 0, 0, 0]],
+    [10007, [0, 0, 0, 0, 0, 195, 102, 60, 24, 60, 102, 195, 0, 0, 0, 0]],
+    [9675, [0, 0, 0, 0, 0, 60, 66, 129, 129, 129, 66, 60, 0, 0, 0, 0]],
+    [9679, [0, 0, 0, 0, 0, 60, 126, 255, 255, 255, 126, 60, 0, 0, 0, 0]],
+    [9600, [255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]],
+    [9604, [0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255]],
+    [183, [0, 0, 0, 0, 0, 0, 0, 24, 24, 0, 0, 0, 0, 0, 0, 0]],
+    [8212, [0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0]]
+]
+
+Cell = Box {
+    code = 32,
+    ink = 1,
+    paper = 0,
+    bold = no
+}
+
+Paint = Box {
+    colors = []
+}
+
+Row = Box {
+    cells = []
+}
+
+skill color_of(paint, text) {
+    drum (group.count(paint.colors)) {
+        (group.get(paint.colors, beat) == text) { out beat }
+    }
+    paint.colors = group.add(paint.colors, text)
+    out group.count(paint.colors) - 1
+}
+
+skill number_at(parts, index) {
+    (index >= group.count(parts)) { out 0 }
+    @digits = group.get(parts, index)
+    @value = 0
+    drum (str.bytes(digits)) { value = value * 10 + str.byte(digits, beat) - 48 }
+    out value
+}
+
+skill decode_length(lead) {
+    (lead >= 240) { out 4 }
+    (lead >= 224) { out 3 }
+    (lead >= 192) { out 2 }
+    out 1
+}
+
+skill decode(text, at, length) {
+    @lead = str.byte(text, at)
+    (length == 1) { out lead }
+    @value = lead % 32
+    (length == 3) { value = lead % 16 }
+    (length == 4) { value = lead % 8 }
+    drum (length - 1) { value = value * 64 + str.byte(text, at + 1 + beat) % 64 }
+    out value
+}
+
+skill parse(paint, text) {
+    @row = Row {}
+    @ink = color_of(paint, TEXT)
+    @paper = 0
+    @bold = no
+    @at = 0
+    always {
+        (at >= str.bytes(text)) { leave }
+        @lead = str.byte(text, at)
+        @step = decode_length(lead)
+        (lead == 27) {
+            @end = at + 2
+            always {
+                (end >= str.bytes(text)) { leave }
+                @code = str.byte(text, end)
+                (code >= 64) { leave }
+                end = end + 1
+            }
+            (end < str.bytes(text)) {
+                (str.get(text, end) == "m") {
+                    @parts = str.split(str.slice(text, at + 2, end), ";")
+                    (group.count(parts) == 0) {
+                        ink = color_of(paint, TEXT)
+                        paper = 0
+                        bold = no
+                    }
+                    @index = 0
+                    always {
+                        (index >= group.count(parts)) { leave }
+                        @kind = number_at(parts, index)
+                        (kind == 0) {
+                            ink = color_of(paint, TEXT)
+                            paper = 0
+                            bold = no
+                        }
+                        (kind == 1) {
+                            bold = yes
+                            ink = color_of(paint, BRIGHT)
+                        }
+                        (kind == 38) {
+                            @red = number_at(parts, index + 2)
+                            @green = number_at(parts, index + 3)
+                            @blue = number_at(parts, index + 4)
+                            ink = color_of(paint, "{red};{green};{blue}")
+                            index = index + 4
+                        }
+                        (kind == 48) {
+                            @red = number_at(parts, index + 2)
+                            @green = number_at(parts, index + 3)
+                            @blue = number_at(parts, index + 4)
+                            paper = color_of(paint, "{red};{green};{blue}")
+                            index = index + 4
+                        }
+                        index = index + 1
+                    }
+                }
+            }
+            step = end + 1 - at
+        }
+        ((lead == 27) == no) {
+            row.cells = group.add(row.cells, Cell { code = decode(text, at, step), ink = ink, paper = paper, bold = bold })
+        }
+        at = at + step
+    }
+    out row.cells
+}
+
+skill mask_of(code) {
+    drum (SHAPES) {
+        (group.get(beat, 0) == code) { out group.get(beat, 1) }
+    }
+    @index = 31
+    (code >= 32) {
+        (code <= 126) { index = code - 32 }
+    }
+    (code == 1025) { index = 95 }
+    (code >= 1040) {
+        (code <= 1103) { index = 96 + code - 1040 }
+    }
+    (code == 1105) { index = 160 }
+    out group.get(spleen.GLYPHS_8X16, index)
+}
+
+skill draw_cell(pixels, width, column, row, item) {
+    (item.code == 32) {
+        (item.paper == 0) { out none }
+    }
+    @mask = mask_of(item.code)
+    @left = column * 8 * SCALE
+    @top = row * 16 * SCALE
+    drum (16) {
+        @y = beat
+        @line = group.get(mask, y)
+        drum (8) {
+            @lit = line / group.get(BITS, beat) % 2
+            @color = item.paper
+            (lit == 1) { color = item.ink }
+            (color > 0) {
+                @x = beat
+                drum (SCALE) {
+                    @offset = (top + y * SCALE + beat) * width + left + x * SCALE
+                    drum (SCALE) { bytes.set(pixels, offset + beat, color) }
+                }
+            }
+        }
+    }
+    out none
+}
+
+skill save(lines, path) {
+    @paint = Paint {}
+    color_of(paint, BACKGROUND)
+    @rows = []
+    @columns = 0
+    drum (lines) {
+        @cells = parse(paint, beat)
+        (group.count(cells) > columns) { columns = group.count(cells) }
+        rows = group.add(rows, cells)
+    }
+    @width = (columns + MARGIN * 2) * 8 * SCALE
+    @height = (group.count(rows) + MARGIN) * 16 * SCALE
+    @pixels = bytes.new(width * height)
+    drum (group.count(rows)) {
+        @row = beat
+        @cells = group.get(rows, row)
+        drum (group.count(cells)) { draw_cell(pixels, width, MARGIN + beat, MARGIN / 2 + row, group.get(cells, beat)) }
+    }
+    @palette = []
+    drum (paint.colors) {
+        @parts = str.split(beat, ";")
+        palette = group.add(palette, [number_at(parts, 0), number_at(parts, 1), number_at(parts, 2)])
+    }
+    out file.write_buffer(path, png.encode(pixels, width, height, palette))
+}

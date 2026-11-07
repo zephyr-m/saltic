@@ -1,0 +1,295 @@
+-- cards — вид global-check: цвет (24 бита), ширина видимого текста, карточки
+-- со скруглёнными углами, полосы веток и отрезки случаев, метки, логотип.
+-- В простом виде (look.plain — CI) цвета нет: paint и bold отдают текст как есть.
+-- Палитра — с логотипа: CORAL, TEAL, WHITE, GREEN, GRAY, DIM (строки "r;g;b").
+-- Состояния метки и полосы: ok — готово, run — идёт, fail — упало,
+-- wait — ждёт, skip — не дошла.
+--
+-- Look { plain, tick } — простой ли вид и номер кадра спиннера
+-- paint(look, color, text) / bold(look, text) -> текст с цветом / жирный
+-- repeat(text, count), visible(text) -> букв без ESC-кодов, padded / right(text,
+--     room) — дополнить справа / слева, clipped(text, limit), spaced(value) —
+--     число с пробелами по три, seconds_text(tenths) -> "3.4 с"
+-- card_top(look, title) / card_line(look, text) / card_bottom(look) — строки карточки
+-- tone(state), mark_of(look, state), bar(look, tenths, state) — полоса ветки,
+--     span(look, start, finish, state) — отрезок случая, time_of(look, tenths,
+--     state, main) — время справа; cell(tenths) — клеток на шкале LIMIT секунд
+-- logo_lines(look, moment) -> строки пиксельного логотипа с подписью
+-- compilers_row(look, text) -> строка «rv64 ○ x86-64 ● …» по журналу refresh
+-- plain_mode() -> yes в CI (CI= или SALTIC_PLAIN=); screen_rows() -> строк экрана
+
+use core.str
+use core.group
+use core.process
+
+CARD = 68
+CELLS = 26
+LIMIT = 60
+LOGO = [
+    "....c............................t....",
+    "...cc............................tt...",
+    "..cc....ww.....w....w...w.........tt..",
+    ".cc....w....ww.w...www......ww.....tt.",
+    "cc......w..w.w.w....w...w..w........tt",
+    ".cc......w.w.w.w....w...w..w.......tt.",
+    "..cc...ww...ww..w....w..w...ww....tt..",
+    "...cc............................tt...",
+    "....c............................t....",
+    "......................................"
+]
+CORAL = "241;150;122"
+TEAL = "99;193;207"
+WHITE = "241;230;216"
+GREEN = "180;216;107"
+GRAY = "130;124;118"
+DIM = "72;68;64"
+LOGO_COLORS = [["c", CORAL], ["t", TEAL], ["w", WHITE]]
+SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+COMPILERS = [["compiler-rv64-linux", "rv64"], ["compiler-x86_64-linux", "x86-64"], ["compiler-rv32i-linux.elf", "rv32i"], ["for-qemu_virt", "qemu"]]
+
+Look = Box {
+    plain = no,
+    tick = 0
+}
+
+skill paint(look, color, text) {
+    (look.plain == yes) { out text }
+    @escape = str.from_byte(27)
+    out "{escape}[38;2;{color}m{text}{escape}[0m"
+}
+
+skill bold(look, text) {
+    (look.plain == yes) { out text }
+    @escape = str.from_byte(27)
+    out "{escape}[1m{text}{escape}[0m"
+}
+
+skill repeat(text, count) {
+    @result = ""
+    drum (count) { result = str.concat(result, text) }
+    out result
+}
+
+skill visible(text) {
+    @count = 0
+    @escaped = no
+    drum (str.bytes(text)) {
+        @code = str.byte(text, beat)
+        @counted = yes
+        (escaped == yes) {
+            counted = no
+            (code == 109) { escaped = no }
+        }
+        (code == 27) {
+            escaped = yes
+            counted = no
+        }
+        (code >= 128) {
+            (code < 192) { counted = no }
+        }
+        (counted == yes) { count = count + 1 }
+    }
+    out count
+}
+
+skill padded(text, room) {
+    @missing = room - visible(text)
+    (missing < 0) { missing = 0 }
+    out str.concat(text, repeat(" ", missing))
+}
+
+skill right(text, room) {
+    @missing = room - visible(text)
+    (missing < 0) { missing = 0 }
+    out str.concat(repeat(" ", missing), text)
+}
+
+skill clipped(text, limit) {
+    @count = 0
+    drum (str.bytes(text)) {
+        @code = str.byte(text, beat)
+        @lead = yes
+        (code >= 128) {
+            (code < 192) { lead = no }
+        }
+        (lead == yes) {
+            (count == limit) { out str.slice(text, 0, beat) }
+            count = count + 1
+        }
+    }
+    out text
+}
+
+skill spaced(value) {
+    @digits = "{value}"
+    @result = ""
+    drum (str.bytes(digits)) {
+        (beat > 0) {
+            ((str.bytes(digits) - beat) % 3 == 0) { result = str.concat(result, " ") }
+        }
+        result = str.concat(result, str.get(digits, beat))
+    }
+    out result
+}
+
+skill seconds_text(tenths) {
+    @whole = tenths / 10
+    @part = tenths % 10
+    out "{whole}.{part} с"
+}
+
+skill card_top(look, title) {
+    @rest = repeat("─", CARD - 5 - str.count(title))
+    @left = paint(look, DIM, "╭─ ")
+    @name = paint(look, CORAL, title)
+    @tail = paint(look, DIM, " {rest}╮")
+    out "  {left}{name}{tail}"
+}
+
+skill card_line(look, text) {
+    @left = paint(look, DIM, "│ ")
+    @body = padded(text, CARD - 4)
+    @edge = paint(look, DIM, " │")
+    out "  {left}{body}{edge}"
+}
+
+skill card_bottom(look) {
+    @rest = repeat("─", CARD - 2)
+    @line = paint(look, DIM, "╰{rest}╯")
+    out "  {line}"
+}
+
+skill tone(state) {
+    (state == "ok") { out GREEN }
+    (state == "run") { out TEAL }
+    (state == "fail") { out CORAL }
+    out DIM
+}
+
+skill mark_of(look, state) {
+    (state == "ok") { out paint(look, GREEN, "✓") }
+    (state == "fail") { out paint(look, CORAL, "✗") }
+    (state == "run") {
+        @spinner = group.get(SPINNER, look.tick % group.count(SPINNER))
+        out paint(look, TEAL, spinner)
+    }
+    out paint(look, DIM, "○")
+}
+
+skill cell(tenths) {
+    @result = (tenths * CELLS + LIMIT * 5) / (LIMIT * 10)
+    (result > CELLS) { result = CELLS }
+    out result
+}
+
+skill bar(look, tenths, state) {
+    @filled = cell(tenths)
+    (filled < 1) { filled = 1 }
+    @lit = paint(look, tone(state), repeat("▬", filled))
+    @rest = paint(look, DIM, repeat("▬", CELLS - filled))
+    out "{lit}{rest}"
+}
+
+skill span(look, start, finish, state) {
+    (state == "wait") { out paint(look, DIM, repeat("━", CELLS)) }
+    (state == "skip") { out paint(look, DIM, repeat("━", CELLS)) }
+    @from = cell(start)
+    (from > CELLS - 1) { from = CELLS - 1 }
+    @to = cell(finish)
+    (to < from + 1) { to = from + 1 }
+    @before = paint(look, DIM, repeat("━", from))
+    @lit = paint(look, tone(state), repeat("━", to - from))
+    @after = paint(look, DIM, repeat("━", CELLS - to))
+    out "{before}{lit}{after}"
+}
+
+skill time_of(look, tenths, state, main) {
+    (state == "wait") { out paint(look, DIM, "ждёт") }
+    (state == "skip") { out paint(look, DIM, "не дошла") }
+    (state == "run") {
+        @whole = tenths / 10
+        out paint(look, TEAL, "идёт {whole} с")
+    }
+    (state == "fail") { out paint(look, CORAL, seconds_text(tenths)) }
+    (main == yes) { out paint(look, WHITE, seconds_text(tenths)) }
+    out paint(look, GRAY, seconds_text(tenths))
+}
+
+skill pixel_color(pixel) {
+    drum (LOGO_COLORS) {
+        (group.get(beat, 0) == pixel) { out group.get(beat, 1) }
+    }
+    out ""
+}
+
+skill logo_lines(look, moment) {
+    (look.plain == yes) { out ["<Saltic> global-check · {moment}"] }
+    @escape = str.from_byte(27)
+    @result = [""]
+    drum (group.count(LOGO) / 2) {
+        @pair = beat
+        @top = group.get(LOGO, pair * 2)
+        @bottom = group.get(LOGO, pair * 2 + 1)
+        @line = "  "
+        drum (str.bytes(top)) {
+            @upper = pixel_color(str.get(top, beat))
+            @lower = pixel_color(str.get(bottom, beat))
+            @cell_text = "{escape}[0m "
+            (str.bytes(upper) > 0) {
+                cell_text = "{escape}[0m{escape}[38;2;{upper}m▀"
+                (str.bytes(lower) > 0) { cell_text = "{escape}[38;2;{upper}m{escape}[48;2;{lower}m▀" }
+            }
+            (str.bytes(upper) == 0) {
+                (str.bytes(lower) > 0) { cell_text = "{escape}[0m{escape}[38;2;{lower}m▄" }
+            }
+            line = str.concat(line, cell_text)
+        }
+        @title = ""
+        (pair == 2) { title = str.concat("   ", bold(look, "global-check")) }
+        (pair == 3) { title = str.concat("   ", paint(look, GRAY, moment)) }
+        result = group.add(result, "{line}{escape}[0m{title}")
+    }
+    out group.add(result, "")
+}
+
+skill plain_mode() {
+    drum (process.environment()) {
+        (str.starts_with(beat, "CI=") == yes) { out yes }
+        (str.starts_with(beat, "SALTIC_PLAIN=") == yes) { out yes }
+    }
+    out no
+}
+
+skill screen_rows() {
+    @found = process.capture(["bash", "-c", "stty size < /dev/tty"], "")
+    @parts = str.split(found.output, " ")
+    (group.count(parts) == 0) { out 24 }
+    @digits = group.get(parts, 0)
+    @value = 0
+    drum (str.bytes(digits)) {
+        (str.is_digit(str.get(digits, beat)) == yes) { value = value * 10 + str.byte(digits, beat) - 48 }
+    }
+    (value < 10) { out 24 }
+    out value
+}
+
+skill compilers_row(look, text) {
+    @result = ""
+    drum (COMPILERS) {
+        @key = group.get(beat, 0)
+        @name = group.get(beat, 1)
+        @state = ""
+        drum (str.lines(text)) {
+            (str.contains(beat, key) == yes) {
+                (str.contains(beat, "не изменился") == yes) { state = paint(look, GRAY, "○") }
+                (str.ends_with(beat, " готов") == yes) { state = paint(look, GREEN, "●") }
+            }
+        }
+        (str.bytes(state) > 0) {
+            @shown = paint(look, WHITE, name)
+            result = str.concat(result, "{shown} {state}   ")
+        }
+    }
+    @legend = paint(look, GRAY, "● собран  ○ как был")
+    out "  {result}{legend}"
+}

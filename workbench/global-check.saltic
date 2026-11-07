@@ -16,9 +16,10 @@
 -- Step { name, marker, seen, start } — случай ветки; start — десятые секунды
 -- Branch { name, proc, what, script, log, done, code, tenths, cases, steps } — ветка
 -- program() — вся проверка
--- Внутри: карточки (card_top / card_row / card_bottom), полосы (bar / span),
---     prep_wait — шаг подготовки со спиннером, scan — случаи из журнала,
---     branch_rows — строки ветки, wait_all — живой блок, summary — итог
+-- Внутри: prep_wait — шаг подготовки со спиннером, scan — случаи из журнала,
+--     branch_rows — строки ветки, wait_all — живой блок, summary — итог,
+--     save_receipt — чек картинкой в RECEIPTS (workbench.receipt); вид —
+--     workbench.cards, общее — workbench.kit
 
 use io
 use io.file
@@ -28,41 +29,20 @@ use core.time
 use core.group
 use core.process
 use workbench.kit
+use workbench.cards
+use workbench.receipt
 
 WORK = ".cache/build/workbench"
+RECEIPTS = "чеки"
 HEARTBEAT = 10
 NIX = "nix --extra-experimental-features \"nix-command flakes\" develop --command"
 TOOLS = [["limits", "workbench/limits.saltic"], ["refresh", "bootstrap/refresh.saltic"], ["refresh-rv64", "bootstrap/refresh-rv64.saltic"], ["x86-encoder-golden", "workbench/x86-encoder-golden.saltic"]]
 TESTS = [["rv32i", "all", "все тесты"], ["x86_64", "all", "все тесты"], ["x86_64", "os", "ОС"], ["rv64", "all", "все тесты"], ["rv32i", "platforms", "платформы"]]
 RV64_STEPS = [["собирает компилятор под RV64", "stage1"], ["собирает себя под qemu-riscv64", "stage2 и stage3"], ["проверяю fixed point", "fixed point"], ["сверяю с эталоном", "сверка с полкой"]]
 GOLDEN_STEPS = [["шаг 1:", "GNU as"], ["шаг 2:", "сборка команд"], ["шаг 3:", "сверка"]]
-COMPILERS = [["compiler-rv64-linux", "rv64"], ["compiler-x86_64-linux", "x86-64"], ["compiler-rv32i-linux.elf", "rv32i"], ["for-qemu_virt", "qemu"]]
 CASES = "случаи: "
 CASE = "случай: "
 TAIL = 6
-CARD = 68
-CELLS = 26
-LIMIT = 60
-LOGO = [
-    "....c............................t....",
-    "...cc............................tt...",
-    "..cc....ww.....w....w...w.........tt..",
-    ".cc....w....ww.w...www......ww.....tt.",
-    "cc......w..w.w.w....w...w..w........tt",
-    ".cc......w.w.w.w....w...w..w.......tt.",
-    "..cc...ww...ww..w....w..w...ww....tt..",
-    "...cc............................tt...",
-    "....c............................t....",
-    "......................................"
-]
-CORAL = "241;150;122"
-TEAL = "99;193;207"
-WHITE = "241;230;216"
-GREEN = "180;216;107"
-GRAY = "130;124;118"
-DIM = "72;68;64"
-LOGO_COLORS = [["c", CORAL], ["t", TEAL], ["w", WHITE]]
-SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 Step = Box {
     name = "",
@@ -88,232 +68,29 @@ Run = Box {
     zone = 0,
     started = 0,
     failed = 0,
-    plain = no,
+    look = cards.Look {},
     screen = 24,
     drawn = 0,
-    tick = 0
+    kept = []
 }
 
-skill paint(run, color, text) {
-    (run.plain == yes) { out text }
-    @escape = str.from_byte(27)
-    out "{escape}[38;2;{color}m{text}{escape}[0m"
-}
-
-skill bold(run, text) {
-    (run.plain == yes) { out text }
-    @escape = str.from_byte(27)
-    out "{escape}[1m{text}{escape}[0m"
-}
-
-skill repeat(text, count) {
-    @result = ""
-    drum (count) { result = str.concat(result, text) }
-    out result
-}
-
-skill visible(text) {
-    @count = 0
-    @escaped = no
-    drum (str.bytes(text)) {
-        @code = str.byte(text, beat)
-        @counted = yes
-        (escaped == yes) {
-            counted = no
-            (code == 109) { escaped = no }
-        }
-        (code == 27) {
-            escaped = yes
-            counted = no
-        }
-        (code >= 128) {
-            (code < 192) { counted = no }
-        }
-        (counted == yes) { count = count + 1 }
-    }
-    out count
-}
-
-skill padded(text, room) {
-    @missing = room - visible(text)
-    (missing < 0) { missing = 0 }
-    out str.concat(text, repeat(" ", missing))
-}
-
-skill right(text, room) {
-    @missing = room - visible(text)
-    (missing < 0) { missing = 0 }
-    out str.concat(repeat(" ", missing), text)
-}
-
-skill clipped(text, limit) {
-    @count = 0
-    drum (str.bytes(text)) {
-        @code = str.byte(text, beat)
-        @lead = yes
-        (code >= 128) {
-            (code < 192) { lead = no }
-        }
-        (lead == yes) {
-            (count == limit) { out str.slice(text, 0, beat) }
-            count = count + 1
-        }
-    }
-    out text
-}
-
-skill spaced(value) {
-    @digits = "{value}"
-    @result = ""
-    drum (str.bytes(digits)) {
-        (beat > 0) {
-            ((str.bytes(digits) - beat) % 3 == 0) { result = str.concat(result, " ") }
-        }
-        result = str.concat(result, str.get(digits, beat))
-    }
-    out result
-}
-
-skill seconds_text(tenths) {
-    @whole = tenths / 10
-    @part = tenths % 10
-    out "{whole}.{part} с"
-}
-
-skill tenths_since(start) {
-    @spent = time.now() - start
-    (spent < 0) { spent = spent + time.DAY_MILLISECONDS }
-    out (spent + 50) / 100
-}
-
-skill card_top(run, title) {
-    @rest = repeat("─", CARD - 5 - str.count(title))
-    @left = paint(run, DIM, "╭─ ")
-    @name = paint(run, CORAL, title)
-    @tail = paint(run, DIM, " {rest}╮")
-    out "  {left}{name}{tail}"
-}
-
-skill card_line(run, text) {
-    @left = paint(run, DIM, "│ ")
-    @body = padded(text, CARD - 4)
-    @edge = paint(run, DIM, " │")
-    out "  {left}{body}{edge}"
-}
-
-skill card_bottom(run) {
-    @rest = repeat("─", CARD - 2)
-    @line = paint(run, DIM, "╰{rest}╯")
-    out "  {line}"
-}
-
-skill show(text) {
+skill show(run, text) {
     io.show(text)
+    run.kept = group.add(run.kept, text)
     out none
 }
 
 skill again(run, text) {
-    (run.plain == yes) { out show(text) }
+    (run.look.plain == yes) { out show(run, text) }
     @escape = str.from_byte(27)
     io.show("{escape}[1A{escape}[2K{text}")
+    run.kept = group.add(run.kept, text)
     out none
 }
 
-skill tone(state) {
-    (state == "ok") { out GREEN }
-    (state == "run") { out TEAL }
-    (state == "fail") { out CORAL }
-    out DIM
-}
-
-skill mark_of(run, state) {
-    (state == "ok") { out paint(run, GREEN, "✓") }
-    (state == "fail") { out paint(run, CORAL, "✗") }
-    (state == "run") {
-        @spinner = group.get(SPINNER, run.tick % group.count(SPINNER))
-        out paint(run, TEAL, spinner)
-    }
-    out paint(run, DIM, "○")
-}
-
-skill cell(tenths) {
-    @result = (tenths * CELLS + LIMIT * 5) / (LIMIT * 10)
-    (result > CELLS) { result = CELLS }
-    out result
-}
-
-skill bar(run, tenths, state) {
-    @filled = cell(tenths)
-    (filled < 1) { filled = 1 }
-    @lit = paint(run, tone(state), repeat("▬", filled))
-    @rest = paint(run, DIM, repeat("▬", CELLS - filled))
-    out "{lit}{rest}"
-}
-
-skill span(run, start, finish, state) {
-    (state == "wait") { out paint(run, DIM, repeat("━", CELLS)) }
-    (state == "skip") { out paint(run, DIM, repeat("━", CELLS)) }
-    @from = cell(start)
-    (from > CELLS - 1) { from = CELLS - 1 }
-    @to = cell(finish)
-    (to < from + 1) { to = from + 1 }
-    @before = paint(run, DIM, repeat("━", from))
-    @lit = paint(run, tone(state), repeat("━", to - from))
-    @after = paint(run, DIM, repeat("━", CELLS - to))
-    out "{before}{lit}{after}"
-}
-
-skill time_of(run, tenths, state, main) {
-    (state == "wait") { out paint(run, DIM, "ждёт") }
-    (state == "skip") { out paint(run, DIM, "не дошла") }
-    (state == "run") {
-        @whole = tenths / 10
-        out paint(run, TEAL, "идёт {whole} с")
-    }
-    (state == "fail") { out paint(run, CORAL, seconds_text(tenths)) }
-    (main == yes) { out paint(run, WHITE, seconds_text(tenths)) }
-    out paint(run, GRAY, seconds_text(tenths))
-}
-
-skill pixel_color(pixel) {
-    drum (LOGO_COLORS) {
-        (group.get(beat, 0) == pixel) { out group.get(beat, 1) }
-    }
-    out ""
-}
-
 skill show_logo(run) {
-    @escape = str.from_byte(27)
     @moment = time.text(time.now() + run.zone)
-    (run.plain == yes) {
-        io.show("<Saltic> global-check · {moment}")
-        out none
-    }
-    io.show("")
-    drum (group.count(LOGO) / 2) {
-        @pair = beat
-        @top = group.get(LOGO, pair * 2)
-        @bottom = group.get(LOGO, pair * 2 + 1)
-        @line = "  "
-        drum (str.bytes(top)) {
-            @upper = pixel_color(str.get(top, beat))
-            @lower = pixel_color(str.get(bottom, beat))
-            @cell_text = "{escape}[0m "
-            (str.bytes(upper) > 0) {
-                cell_text = "{escape}[0m{escape}[38;2;{upper}m▀"
-                (str.bytes(lower) > 0) { cell_text = "{escape}[38;2;{upper}m{escape}[48;2;{lower}m▀" }
-            }
-            (str.bytes(upper) == 0) {
-                (str.bytes(lower) > 0) { cell_text = "{escape}[0m{escape}[38;2;{lower}m▄" }
-            }
-            line = str.concat(line, cell_text)
-        }
-        @title = ""
-        (pair == 2) { title = str.concat("   ", bold(run, "global-check")) }
-        (pair == 3) { title = str.concat("   ", paint(run, GRAY, moment)) }
-        io.show("{line}{escape}[0m{title}")
-    }
-    io.show("")
+    drum (cards.logo_lines(run.look, moment)) { show(run, beat) }
     out none
 }
 
@@ -352,30 +129,30 @@ skill failure_lines(run, log) {
     @start = group.count(kept) - TAIL
     (start < 0) { start = 0 }
     @result = []
-    @edge = paint(run, CORAL, "╎ ")
+    @edge = cards.paint(run.look, cards.CORAL, "╎ ")
     drum (group.count(kept) - start) {
-        @text = paint(run, GRAY, clipped(group.get(kept, start + beat), CARD - 16))
+        @text = cards.paint(run.look, cards.GRAY, cards.clipped(group.get(kept, start + beat), cards.CARD - 16))
         result = group.add(result, "        {edge}{text}")
     }
-    @where = paint(run, GRAY, clipped("журнал: {log}", CARD - 16))
+    @where = cards.paint(run.look, cards.GRAY, cards.clipped("журнал: {log}", cards.CARD - 16))
     out group.add(result, "        {edge}{where}")
 }
 
 skill prep_row(run, state, label, detail, tenths) {
-    @mark = mark_of(run, state)
-    @name = padded(label, 18)
+    @mark = cards.mark_of(run.look, state)
+    @name = cards.padded(label, 18)
     (str.bytes(detail) > 0) {
-        @rest = paint(run, GRAY, detail)
+        @rest = cards.paint(run.look, cards.GRAY, detail)
         out "{mark} {name}{rest}"
     }
-    @spent = right(time_of(run, tenths, state, yes), CARD - 24)
+    @spent = cards.right(cards.time_of(run.look, tenths, state, yes), cards.CARD - 24)
     out "{mark} {name}{spent}"
 }
 
 skill prep_wait(run, label, branches) {
     launch(branches)
     @started = time.now()
-    (run.plain == no) { io.show(card_line(run, prep_row(run, "run", label, "", 0))) }
+    (run.look.plain == no) { io.show(cards.card_line(run.look, prep_row(run, "run", label, "", 0))) }
     @ticks = 0
     always {
         @left = 0
@@ -386,13 +163,13 @@ skill prep_wait(run, label, branches) {
         (left == 0) { leave }
         process.run(["sleep", "1"], "")
         ticks = ticks + 1
-        run.tick = run.tick + 1
-        @spent = tenths_since(started)
-        (run.plain == no) { again(run, card_line(run, prep_row(run, "run", label, "", spent))) }
-        (run.plain == yes) {
+        run.look.tick = run.look.tick + 1
+        @spent = kit.tenths_since(started)
+        (run.look.plain == no) { again(run, cards.card_line(run.look, prep_row(run, "run", label, "", spent))) }
+        (run.look.plain == yes) {
             (ticks % HEARTBEAT == 0) {
                 @whole = spent / 10
-                io.show(card_line(run, "⏳ {label} — идёт {whole} с"))
+                io.show(cards.card_line(run.look, "⏳ {label} — идёт {whole} с"))
             }
         }
     }
@@ -401,91 +178,28 @@ skill prep_wait(run, label, branches) {
         ((beat.code == 0) == no) { failed = failed + 1 }
     }
     run.failed = run.failed + failed
-    out tenths_since(started)
+    out kit.tenths_since(started)
 }
 
 skill finish_prep(run, state, label, detail, tenths) {
-    @text = card_line(run, prep_row(run, state, label, detail, tenths))
-    (run.plain == no) { out again(run, text) }
-    out show(text)
+    @text = cards.card_line(run.look, prep_row(run, state, label, detail, tenths))
+    (run.look.plain == no) { out again(run, text) }
+    out show(run, text)
 }
 
 skill show_lines(run, lines) {
-    drum (lines) { io.show(card_line(run, beat)) }
+    drum (lines) { show(run, cards.card_line(run.look, beat)) }
     out none
 }
 
 skill show_failure(run, log) {
     show_lines(run, failure_lines(run, log))
-    io.show(card_bottom(run))
+    show(run, cards.card_bottom(run))
     out none
 }
 
-skill number_after(text, prefix) {
-    drum (str.lines(text)) {
-        @line = beat
-        @at = 0 - 1
-        @room = str.bytes(line) - str.bytes(prefix) + 1
-        (room < 0) { room = 0 }
-        drum (room) {
-            (at < 0) {
-                (str.starts_at(line, prefix, beat) == yes) { at = beat + str.bytes(prefix) }
-            }
-        }
-        (at >= 0) {
-            @end = at
-            always {
-                (end == str.bytes(line)) { leave }
-                @ch = str.get(line, end)
-                @digit = str.is_digit(ch)
-                (ch == ".") { digit = yes }
-                (digit == no) { leave }
-                end = end + 1
-            }
-            out str.slice(line, at, end)
-        }
-    }
-    out ""
-}
-
-skill remembered(store, value) {
-    @last = file.read(store) rescue |err| { "" }
-    @previous = str.lines(last)
-    file.write(store, "{value}\n")
-    (group.count(previous) == 0) { out value }
-    out group.get(previous, 0)
-}
-
-skill shelf_size() {
-    @found = process.capture(["bash", "-c", "source bootstrap/names.sh && saltic_bootstrap_compiler"], "")
-    @lines = str.lines(found.output)
-    (group.count(lines) == 0) { out 0 }
-    out kit.size(group.get(lines, 0))
-}
-
-skill compilers_row(run, text) {
-    @result = ""
-    drum (COMPILERS) {
-        @key = group.get(beat, 0)
-        @name = group.get(beat, 1)
-        @state = ""
-        drum (str.lines(text)) {
-            (str.contains(beat, key) == yes) {
-                (str.contains(beat, "не изменился") == yes) { state = paint(run, GRAY, "○") }
-                (str.ends_with(beat, " готов") == yes) { state = paint(run, GREEN, "●") }
-            }
-        }
-        (str.bytes(state) > 0) {
-            @shown = paint(run, WHITE, name)
-            result = str.concat(result, "{shown} {state}   ")
-        }
-    }
-    @legend = paint(run, GRAY, "● собран  ○ как был")
-    out "  {result}{legend}"
-}
-
 skill preparation(run) {
-    io.show(card_top(run, "подготовка"))
+    show(run, cards.card_top(run.look, "подготовка"))
     @builds = []
     drum (TOOLS) {
         @name = group.get(beat, 0)
@@ -499,7 +213,7 @@ skill preparation(run) {
         drum (builds) {
             ((beat.code == 0) == no) { show_lines(run, failure_lines(run, beat.log)) }
         }
-        io.show(card_bottom(run))
+        show(run, cards.card_bottom(run))
         out error.GlobalCheckFailed
     }
     finish_prep(run, "ok", "сборка проверок", "", built)
@@ -507,10 +221,10 @@ skill preparation(run) {
     @limits = Branch { name = "limits", script = "{WORK}/limits", log = "{WORK}/limits.log" }
     prep_wait(run, "лимиты канона", [limits])
     @found = file.read(limits.log) rescue |err| { "" }
-    @files = number_after(found, "файлов ")
-    @known = number_after(found, "нарушений ")
-    @fresh = number_after(found, "новых ")
-    @grown = number_after(found, "выросших ")
+    @files = kit.number_after(found, "файлов ")
+    @known = kit.number_after(found, "нарушений ")
+    @fresh = kit.number_after(found, "новых ")
+    @grown = kit.number_after(found, "выросших ")
     @counts = "новых {fresh} · известных {known} · файлов {files}"
     (str.bytes(grown) > 0) {
         ((grown == "0") == no) { counts = "{counts} · выросших {grown}" }
@@ -530,23 +244,23 @@ skill preparation(run) {
         out error.GlobalCheckFailed
     }
     @text = file.read(refresh.log) rescue |err| { "" }
-    @seconds = number_after(text, "новый компилятор собрал себя за ")
-    @memory = number_after(text, "память самосборки ")
-    @bytes = spaced(shelf_size())
-    @was_seconds = remembered("{WORK}/self-build-seconds", seconds)
-    @was_memory = remembered("{WORK}/self-build-memory", memory)
-    @was_bytes = remembered("{WORK}/self-build-size", bytes)
+    @seconds = kit.number_after(text, "новый компилятор собрал себя за ")
+    @memory = kit.number_after(text, "память самосборки ")
+    @bytes = cards.spaced(kit.shelf_size())
+    @was_seconds = kit.remembered("{WORK}/self-build-seconds", seconds)
+    @was_memory = kit.remembered("{WORK}/self-build-memory", memory)
+    @was_bytes = kit.remembered("{WORK}/self-build-size", bytes)
     finish_prep(run, "ok", "самосборка", "{seconds} с · {memory} МБ · {bytes} байт", 0)
     @same = yes
     ((was_seconds == seconds) == no) { same = no }
     ((was_memory == memory) == no) { same = no }
     ((was_bytes == bytes) == no) { same = no }
     (same == no) {
-        @before = paint(run, GRAY, "было {was_seconds} с · {was_memory} МБ · {was_bytes} байт")
-        io.show(card_line(run, "                    {before}"))
+        @before = cards.paint(run.look, cards.GRAY, "было {was_seconds} с · {was_memory} МБ · {was_bytes} байт")
+        show(run, cards.card_line(run.look, "                    {before}"))
     }
-    io.show(card_line(run, compilers_row(run, text)))
-    io.show(card_bottom(run))
+    show(run, cards.card_line(run.look, cards.compilers_row(run.look, text)))
+    show(run, cards.card_bottom(run))
     out none
 }
 
@@ -629,11 +343,11 @@ skill branch_rows(run, branch, now, full) {
     @state = branch_state(branch)
     @spent = branch.tenths
     (branch.done == no) { spent = now }
-    @mark = mark_of(run, state)
-    @proc = padded(bold(run, branch.proc), 7)
-    @what = padded(bold(run, branch.what), 11)
-    @line = bar(run, spent, state)
-    @spent_text = right(time_of(run, spent, state, yes), 10)
+    @mark = cards.mark_of(run.look, state)
+    @proc = cards.padded(cards.bold(run.look, branch.proc), 7)
+    @what = cards.padded(cards.bold(run.look, branch.what), 11)
+    @line = cards.bar(run.look, spent, state)
+    @spent_text = cards.right(cards.time_of(run.look, spent, state, yes), 10)
     @rows = ["{mark} {proc} {what} {line} {spent_text}"]
     @last = last_seen(branch)
     @count = group.count(branch.steps)
@@ -648,14 +362,14 @@ skill branch_rows(run, branch, now, full) {
             @joint = "├ "
             (index == count - 1) { joint = "└ " }
             (full == no) { joint = "└ " }
-            @edge = paint(run, DIM, "  {joint}")
-            @child_mark = mark_of(run, child)
-            @tint = GRAY
-            (child == "run") { tint = WHITE }
-            @name = padded(paint(run, tint, item.name), 16)
+            @edge = cards.paint(run.look, cards.DIM, "  {joint}")
+            @child_mark = cards.mark_of(run.look, child)
+            @tint = cards.GRAY
+            (child == "run") { tint = cards.WHITE }
+            @name = cards.padded(cards.paint(run.look, tint, item.name), 16)
             @finish = step_finish(branch, index, now)
-            @strip = span(run, item.start, finish, child)
-            @took = right(time_of(run, finish - item.start, child, no), 9)
+            @strip = cards.span(run.look, item.start, finish, child)
+            @took = cards.right(cards.time_of(run.look, finish - item.start, child, no), 9)
             rows = group.add(rows, "{edge}{child_mark} {name}{strip}  {took}")
             (child == "fail") {
                 rows = group.concat(rows, failure_lines(run, branch.log))
@@ -670,18 +384,18 @@ skill branch_rows(run, branch, now, full) {
 }
 
 skill block(run, branches, now, full) {
-    @rows = [card_top(run, "проверки разом")]
+    @rows = [cards.card_top(run.look, "проверки разом")]
     @before = 0
     drum (branches) {
         @own = branch_rows(run, beat, now, full)
-        (before > 1) { rows = group.add(rows, card_line(run, "")) }
+        (before > 1) { rows = group.add(rows, cards.card_line(run.look, "")) }
         (before == 1) {
-            (group.count(own) > 1) { rows = group.add(rows, card_line(run, "")) }
+            (group.count(own) > 1) { rows = group.add(rows, cards.card_line(run.look, "")) }
         }
-        drum (own) { rows = group.add(rows, card_line(run, beat)) }
+        drum (own) { rows = group.add(rows, cards.card_line(run.look, beat)) }
         before = group.count(own)
     }
-    out group.add(rows, card_bottom(run))
+    out group.add(rows, cards.card_bottom(run))
 }
 
 skill draw(run, rows) {
@@ -713,7 +427,7 @@ skill wait_all(run, branches) {
     @started = time.now()
     @ticks = 0
     always {
-        @now = tenths_since(started)
+        @now = kit.tenths_since(started)
         @left = []
         drum (branches) {
             @branch = beat
@@ -721,31 +435,32 @@ skill wait_all(run, branches) {
             (poll(branch) == yes) {
                 branch.tenths = now
                 ((branch.code == 0) == no) { run.failed = run.failed + 1 }
-                (run.plain == yes) {
+                (run.look.plain == yes) {
                     @state = branch_state(branch)
-                    @mark = mark_of(run, state)
-                    @took = seconds_text(now)
+                    @mark = cards.mark_of(run.look, state)
+                    @took = cards.seconds_text(now)
                     io.show("{mark} {branch.proc} {branch.what} — {took}")
                 }
             }
             (branch.done == no) { left = group.add(left, "{branch.proc} {branch.what}") }
         }
-        (run.plain == no) { live_block(run, branches, now) }
+        (run.look.plain == no) { live_block(run, branches, now) }
         (group.count(left) == 0) { leave }
         process.run(["sleep", "1"], "")
         ticks = ticks + 1
-        run.tick = run.tick + 1
-        (run.plain == yes) {
+        run.look.tick = run.look.tick + 1
+        (run.look.plain == yes) {
             (ticks % HEARTBEAT == 0) {
-                @whole = tenths_since(started) / 10
+                @whole = kit.tenths_since(started) / 10
                 @names = str.join(left, ", ")
                 io.show("⏳ идут ({whole} с): {names}")
             }
         }
     }
     @rows = block(run, branches, 0, yes)
-    (run.plain == no) { draw(run, rows) }
-    (run.plain == yes) { drum (rows) { io.show(beat) } }
+    (run.look.plain == no) { draw(run, rows) }
+    (run.look.plain == yes) { drum (rows) { io.show(beat) } }
+    run.kept = group.concat(run.kept, rows)
     out branches
 }
 
@@ -788,50 +503,53 @@ skill summary(run, done) {
         head = "упала {run.failed} из {total}"
         state = "fail"
     }
-    @mark = mark_of(run, state)
-    @whole = seconds_text(tenths_since(run.started))
-    @longest = seconds_text(slowest.tenths)
-    @rest = paint(run, GRAY, " · {whole} · дольше всех — {slowest.proc} {slowest.what} {longest}")
-    io.show(card_top(run, "итог"))
-    io.show(card_line(run, "{mark} {head}{rest}"))
-    (checks > 0) { io.show(card_line(run, paint(run, CORAL, "  упавших проверок: {checks}"))) }
-    io.show(card_bottom(run))
+    @mark = cards.mark_of(run.look, state)
+    @whole = cards.seconds_text(kit.tenths_since(run.started))
+    @longest = cards.seconds_text(slowest.tenths)
+    @rest = cards.paint(run.look, cards.GRAY, " · {whole} · дольше всех — {slowest.proc} {slowest.what} {longest}")
+    show(run, cards.card_top(run.look, "итог"))
+    show(run, cards.card_line(run.look, "{mark} {head}{rest}"))
+    (checks > 0) { show(run, cards.card_line(run.look, cards.paint(run.look, cards.CORAL, "  упавших проверок: {checks}"))) }
+    show(run, cards.card_bottom(run))
     out none
 }
 
-skill plain_mode() {
-    drum (process.environment()) {
-        (str.starts_with(beat, "CI=") == yes) { out yes }
-        (str.starts_with(beat, "SALTIC_PLAIN=") == yes) { out yes }
-    }
-    out no
-}
-
-skill screen_rows() {
-    @found = process.capture(["bash", "-c", "stty size < /dev/tty"], "")
-    @parts = str.split(found.output, " ")
-    (group.count(parts) == 0) { out 24 }
-    @digits = group.get(parts, 0)
-    @value = 0
-    drum (str.bytes(digits)) {
-        (str.is_digit(str.get(digits, beat)) == yes) { value = value * 10 + str.byte(digits, beat) - 48 }
-    }
-    (value < 10) { out 24 }
-    out value
+skill save_receipt(run) {
+    (run.look.plain == yes) { out none }
+    @stamp = process.capture(["date", "+%Y-%m-%d_%H-%M-%S"], "")
+    @moment = group.get(str.lines(stamp.output), 0)
+    @head = process.capture(["git", "rev-parse", "--short", "HEAD"], "")
+    @commit = group.get(str.lines(head.output), 0)
+    @changes = process.capture(["git", "status", "--porcelain", "--untracked-files=no"], "")
+    (str.bytes(changes.output) > 0) { commit = "{commit} + правки" }
+    @verdict = "зелёный"
+    (run.failed > 0) { verdict = "красный" }
+    @footer = cards.paint(run.look, cards.GRAY, "  {moment} · {commit} · {verdict}")
+    @path = "{RECEIPTS}/{moment}_{verdict}.png"
+    process.run(["mkdir", "-p", RECEIPTS], "")
+    @started = time.now()
+    receipt.save(group.add(group.add(run.kept, ""), footer), path)
+    @spent = cards.seconds_text(kit.tenths_since(started))
+    io.show(cards.paint(run.look, cards.GRAY, "  чек: {path} ({spent})"))
+    out none
 }
 
 program() {
     @run = Run {}
     run.zone = clock.zone()
     run.started = time.now()
-    run.plain = plain_mode()
-    (run.plain == no) { run.screen = screen_rows() }
+    run.look.plain = cards.plain_mode()
+    (run.look.plain == no) { run.screen = cards.screen_rows() }
     process.run(["mkdir", "-p", WORK], "")
     show_logo(run)
-    preparation(run)
-    (run.plain == no) { io.show("") }
+    @prepared = preparation(run) rescue |err| {
+        save_receipt(run)
+        out error.GlobalCheckFailed
+    }
+    (run.look.plain == no) { show(run, "") }
     @done = wait_all(run, launch(check_branches()))
     summary(run, done)
+    save_receipt(run)
     (run.failed > 0) { out error.GlobalCheckFailed }
     out none
 }
