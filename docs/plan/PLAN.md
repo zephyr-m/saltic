@@ -193,7 +193,7 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   `rv32i/runtime/fixed` 531, `seed/tests/contract` 516; шапка длиннее 32 —
   `backend.saltic` 61, `layout` 43. Список с числами — `workbench/limits-known.txt`;
   `just limits` (первый шаг `global-check`) не даёт им расти и ловит новые. → аудит 07.11
-- [x] Проверка лимитов канона в `global-check` — 07.11.2026 (`workbench/limits.sh`).
+- [x] Проверка лимитов канона в `global-check` — 07.11.2026 (`workbench/limits.sh`, с 07.11 — `workbench/limits.saltic`, второй bash на Saltic).
 - [x] Одно имя у целей: `x86_64-native` и `x86_64-uefi-native` убраны — 07.11.2026.
 - [x] Эталоны `translation` → `runtime_bytes`, «перевод» → «эталон» в названиях
   проверок — 07.11.2026.

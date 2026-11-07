@@ -49,7 +49,8 @@ global-check:
     bash workbench/global-check.sh
 
 limits:
-    bash workbench/limits.sh
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/limits.saltic .cache/build/workbench/limits
+    .cache/build/workbench/limits
 
 hosts:
     SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/hosts.saltic .cache/build/workbench/hosts

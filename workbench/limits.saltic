@@ -1,0 +1,154 @@
+-- limits — лимиты канона архитектуры (docs/process/Code_Architecture_канон_для_агентов.md):
+-- не больше LIMIT_CODE строк кода в рукописном .saltic (пустые и `--` не в
+-- счёт) и не больше LIMIT_HEADER строк шапки (всё до первой строки кода).
+-- Смотрит файлы из git (git ls-files), кроме .archive/ и папок generated/.
+-- Известные нарушения — в KNOWN («путь строк_кода строк_шапки», правит
+-- автор): им можно не расти, но не ухудшаться. Новое или выросшее — ошибка
+-- LimitsBroken (код 1). Вместо workbench/limits.sh (в .archive/); вызывается
+-- `just limits` и global-check.
+--
+-- Size { code, header } — замер файла; Tally { checked, old, new, grown } — итог
+-- program() — проверить все файлы, напечатать нарушения и итог
+-- Внутри: measure(text) -> Size, known_record(known, path) -> группа или [],
+--     number(text) -> число, check(tally, known, path)
+
+use io
+use io.file
+use core.str
+use core.group
+use core.process
+
+LIMIT_CODE = 512
+LIMIT_HEADER = 32
+KNOWN = "workbench/limits-known.txt"
+SPACE = 32
+TAB = 9
+NEWLINE = 10
+DASH = 45
+
+Size = Box {
+    code = 0,
+    header = 0,
+    top = yes
+}
+
+Tally = Box {
+    checked = 0,
+    old = 0,
+    new = 0,
+    grown = 0
+}
+
+skill count_line(size, text, start, end) {
+    @first = start
+    always {
+        (first == end) { leave }
+        @ch = str.byte(text, first)
+        @blank = ch == SPACE
+        (ch == TAB) { blank = yes }
+        (blank == no) { leave }
+        first = first + 1
+    }
+    @empty = first == end
+    @comment = no
+    (first + 1 < end) {
+        (str.byte(text, first) == DASH) { comment = str.byte(text, first + 1) == DASH }
+    }
+    (size.top == yes) {
+        (empty == yes) {
+            size.header = size.header + 1
+            out none
+        }
+        (comment == yes) {
+            size.header = size.header + 1
+            out none
+        }
+        size.top = no
+    }
+    (empty == no) {
+        (comment == no) { size.code = size.code + 1 }
+    }
+    out none
+}
+
+skill measure(text) {
+    @size = Size {}
+    @start = 0
+    @total = str.bytes(text)
+    drum (total) {
+        (str.byte(text, beat) == NEWLINE) {
+            count_line(size, text, start, beat)
+            start = beat + 1
+        }
+    }
+    (start < total) { count_line(size, text, start, total) }
+    out size
+}
+
+skill number(text) {
+    @value = 0
+    drum (str.bytes(text)) { value = value * 10 + str.byte(text, beat) - 48 }
+    out value
+}
+
+skill known_record(known, path) {
+    drum (known) {
+        @parts = str.split(beat, " ")
+        (group.count(parts) == 3) {
+            (group.get(parts, 0) == path) { out parts }
+        }
+    }
+    out []
+}
+
+skill check(tally, known, path) {
+    tally.checked = tally.checked + 1
+    @size = measure(file.read(path))
+    @code = size.code
+    @header = size.header
+    ((code > LIMIT_CODE) == no) {
+        ((header > LIMIT_HEADER) == no) { out none }
+    }
+    @record = known_record(known, path)
+    (group.count(record) == 0) {
+        io.show("лимиты канона: новое нарушение {path} — кода {code}, шапка {header}")
+        tally.new = tally.new + 1
+        out none
+    }
+    @known_code = number(group.get(record, 1))
+    @known_header = number(group.get(record, 2))
+    @grew = no
+    (code > LIMIT_CODE) {
+        (code > known_code) { grew = yes }
+    }
+    (header > LIMIT_HEADER) {
+        (header > known_header) { grew = yes }
+    }
+    (grew == yes) {
+        io.show("лимиты канона: выросло {path} — кода {known_code} → {code}, шапка {known_header} → {header}")
+        tally.grown = tally.grown + 1
+        out none
+    }
+    tally.old = tally.old + 1
+    out none
+}
+
+program() {
+    io.show("лимиты канона: код до {LIMIT_CODE} строк, шапка до {LIMIT_HEADER} строк")
+    @known = []
+    drum (str.lines(file.read(KNOWN))) {
+        (str.starts_with(beat, "#") == no) { known = group.add(known, beat) }
+    }
+    @listed = process.capture(["git", "ls-files", "*.saltic"], "")
+    @tally = Tally {}
+    drum (str.lines(listed.output)) {
+        @path = beat
+        @skip = str.starts_with(path, ".archive/")
+        (str.contains(path, "/generated/") == yes) { skip = yes }
+        (skip == no) { check(tally, known, path) }
+    }
+    io.show("лимиты канона: файлов {tally.checked}, известных нарушений {tally.old}, новых {tally.new}, выросших {tally.grown}")
+    (tally.new > 0) { out error.LimitsBroken }
+    (tally.grown > 0) { out error.LimitsBroken }
+    out none
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Глобальная проверка любого изменения: лимиты канона (workbench/limits.sh),
+# Глобальная проверка любого изменения: лимиты канона (workbench/limits.saltic),
 # самосборка с паспортами в bootstrap/, время самосборки против прошлого
 # прогона, тесты на rv32i; в самом конце — сколько заняла вся проверка.
 # Полный лог тестов сохраняется в .cache/build/workbench/global-check.log
@@ -28,7 +28,11 @@ decorate() {
         -e 's/^(\[[0-9:]+\] )?/\1✅ /'
 }
 echo "== 📏 лимиты канона"
-bash workbench/limits.sh 2>&1 | decorate
+run_limits() {
+    SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/limits.saltic .cache/build/workbench/limits >/dev/null || return 1
+    .cache/build/workbench/limits
+}
+run_limits 2>&1 | decorate
 limits_status=${PIPESTATUS[0]}
 if [[ "$limits_status" != "0" ]]; then
     echo "== 🚨 ЛИМИТЫ КАНОНА НАРУШЕНЫ: новый или выросший файл выше; самосборку не начинаю"
