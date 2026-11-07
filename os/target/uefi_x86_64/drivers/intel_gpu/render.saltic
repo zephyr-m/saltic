@@ -15,8 +15,11 @@
 --
 -- Surface { at, pitch, width, height } — поверхность: адрес GGTT, шаг строки
 --     в байтах, размеры в пикселях (32 бита на пиксель, BGRA)
--- Painter { gpu, batch, strip, vertices, memory, count, broken } — broken:
---     движок завис (сброшен) — рисовать процессором; видеокарта, буферы
+-- Painter { gpu, batch, strip, vertices, memory, count, broken, misses,
+--     missed, dropped } — missed — сбоев всего; dropped — фигур, не
+--     влезших в буфер вершин;
+--     broken: движок завис GIVE_UP раз подряд — рисовать процессором; misses —
+--     сбоев подряд (после сброса движка следующий кадр пробует снова); видеокарта, буферы
 --     порций (прямоугольник, треугольники), буфер вершин (memory — он же для core.mem: вершины пишутся прямо в память,
 --     без вызова на слово) и
 --     сколько в нём вершин
@@ -38,7 +41,7 @@
 --     прямой x = limit (edge 0) или y = limit (edge 1) — Сазерленд — Ходжман;
 --     остальные числа точки (цвет, глубина) на срезе делятся в той же доле
 -- triangles(painter, target) -> yes — нарисовать накопленные треугольники;
---     не дождались — сброс движка (intel_gpu.reset_render) и broken = yes
+--     не дождались — сброс движка (intel_gpu.reset_render), misses и missed + 1
 -- blended(painter, target) -> yes — то же, но смешать с целью по альфе
 -- Внутри: put / load(…) — слово в буфер, шаблон в буфер с адресами;
 --     draw_list(painter, target, place, words) — общий ход triangles и blended;
@@ -62,6 +65,7 @@ VERTEX_BYTES = 8
 ONE = 1065353216
 HALF_WORD = 65536
 MARGIN = 1000
+GIVE_UP = 3
 KIND_BATCH = 1
 KIND_TARGET = 2
 KIND_TEXTURE = 3
@@ -81,7 +85,10 @@ Painter = Box {
     vertices = 0,
     memory = [],
     count = 0,
-    broken = no
+    broken = no,
+    misses = 0,
+    missed = 0,
+    dropped = 0
 }
 
 skill painter(gpu, base) {
@@ -123,8 +130,13 @@ skill run(painter, place) {
     (painter.broken == yes) { out no }
     @gpu = painter.gpu
     intel_gpu.submit_render(gpu, group.concat(rect.BEFORE, [rect.START, place, 0]))
-    (intel_gpu.wait_render(gpu) == yes) { out yes }
-    painter.broken = yes
+    (intel_gpu.wait_render(gpu) == yes) {
+        painter.misses = 0
+        out yes
+    }
+    painter.misses = painter.misses + 1
+    painter.missed = painter.missed + 1
+    (painter.misses >= GIVE_UP) { painter.broken = yes }
     intel_gpu.reset_render(gpu)
     out no
 }
@@ -210,7 +222,10 @@ skill add_shape(painter, points, pixel, alpha, width, height) {
     shape = clip(shape, 1, height + MARGIN, yes)
     @count = group.count(shape)
     (count < 3) { out none }
-    (painter.count + (count - 2) * 3 > VERTEX_LIMIT) { out none }
+    (painter.count + (count - 2) * 3 > VERTEX_LIMIT) {
+        painter.dropped = painter.dropped + 1
+        out none
+    }
     @red = pixel / 65536 % 256
     @green = pixel / 256 % 256
     @blue = pixel % 256
@@ -237,7 +252,10 @@ skill add_smooth(painter, corners, pixels, width, height) {
     shape = clip(shape, 1, height + MARGIN, yes)
     @count = group.count(shape)
     (count < 3) { out none }
-    (painter.count + (count - 2) * 3 > VERTEX_LIMIT) { out none }
+    (painter.count + (count - 2) * 3 > VERTEX_LIMIT) {
+        painter.dropped = painter.dropped + 1
+        out none
+    }
     @rgba = []
     drum (count) {
         @point = group.get(shape, beat)

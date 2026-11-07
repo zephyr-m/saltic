@@ -1,18 +1,21 @@
 -- stage — съёмочная площадка «Пластилина»: экран, небо и задний буфер,
--- камера, сцена. Сцена каждый раз новая: зерно — из часов (clay/scene), свет
--- запекается лучами (clay/light), пока на экране бежит полоска. Небо —
--- градиент цветов сезона и облака. Кадр: небо из своего буфера, земля рядами
+-- камера, сцена. Сцена каждый раз новая: зерно — из часов (clay/scene).
+-- Небо — градиент цветов сезона и облака. Кадр: небо из своего буфера, земля рядами
 -- от дальних к ближним, вода, предметы от дальних к ближним; готовый кадр
 -- копируется на экран прошивкой построчно. Камера смотрит на LOOK с орбиты
 -- радиуса RADIUS. Берут программа clay и хранитель экрана агента (agent/saver).
 --
 -- Stage { front, sky, back, camera, scene, faces, painter, baked } — painter —
 --     [intel_gpu/render.Painter], если задний буфер размечен для видеокарты:
---     грани рисует её 3D-движок, иначе процессор; baked — секунд на постройку
---     и запекание
+--     грани рисует её 3D-движок, иначе процессор; baked — секунд на постройку; worst — самые долгие части кадра в
+--     обновлениях экрана: [небо в задний буфер, сбор граней, видеокарта,
+--     вывод на экран]; stalls — последние STALLS долгих кадров видеокарты:
+--     [обновлений экрана, хвост рендера до, хвост копирования до]
 -- open_stage(base, front) -> Stage — буферы неба и кадра (страницы), сцена
 -- remake(stage, base) — новая полянка с новым зерном
 -- moment(base) -> секунда суток по часам прошивки
+-- ticks(stage) -> счётчик кадров экрана с видеокарты (60 в секунду, ровный,
+--     без вызова прошивки); -1 — видеокарты нет
 -- pages(stage) -> страниц одного буфера; close_stage(base, stage) — отдать буферы
 -- draw_sky(screen, world) — градиент неба и облака
 -- render(stage, angle, lift, base) — кадр: камера на угле angle, высоте lift
@@ -23,13 +26,14 @@ use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.screen.geometry
 use os.target.uefi_x86_64.screen.clay.mesh
 use os.target.uefi_x86_64.screen.clay.scene
-use os.target.uefi_x86_64.screen.clay.light
 use os.target.uefi_x86_64.screen.clay.dice
 use os.target.uefi_x86_64.screen.clay.season
+use os.target.uefi_x86_64.drivers.intel_gpu
 use os.target.uefi_x86_64.drivers.intel_gpu.render
 
 RADIUS = 760
 LOOK = [0, 40, 0]
+STALLS = 6
 WHITE = [255, 255, 255]
 
 Stage = Box {
@@ -40,7 +44,9 @@ Stage = Box {
     scene = scene.Scene {},
     faces = 0,
     painter = [],
-    baked = 0
+    baked = 0,
+    worst = [0, 0, 0, 0],
+    stalls = []
 }
 
 skill paint(screen, color) {
@@ -96,6 +102,12 @@ skill draw_sky(screen, world) {
     out none
 }
 
+skill ticks(stage) {
+    @back = stage.back
+    (group.count(back.accel) == 0) { out -1 }
+    out intel_gpu.frames(group.get(back.accel, 0))
+}
+
 skill moment(base) {
     @clock = uefi.now(base)
     out clock.hour * 3600 + clock.minute * 60 + clock.second
@@ -104,7 +116,6 @@ skill moment(base) {
 skill make(stage, base, seed) {
     @began = moment(base)
     @world = scene.build(stage.front, seed)
-    light.bake(stage.front, world) rescue |err| { none }
     draw_sky(stage.sky, world)
     stage.scene = world
     stage.faces = scene.quads(world)
@@ -140,9 +151,26 @@ skill close_stage(base, stage) {
     out uefi.free_pages(base, back.frame, pages(stage))
 }
 
+skill mark(stage, part, from) {
+    @now = ticks(stage)
+    @spent = (now - from + 4294967296) % 4294967296
+    (spent > group.get(stage.worst, part)) {
+        @worst = []
+        drum (4) {
+            @value = group.get(stage.worst, beat)
+            (beat == part) { value = spent }
+            worst = group.add(worst, value)
+        }
+        stage.worst = worst
+    }
+    out now
+}
+
 skill render(stage, angle, lift, base) {
     @back = stage.back
+    @at = ticks(stage)
     graphics.copy_rect(base, back, stage.sky, 0, 0, back.width, back.height)
+    at = mark(stage, 0, at)
     @camera = stage.camera
     @from = [RADIUS * geometry.cosine(angle) / geometry.ONE, lift, RADIUS * geometry.sine(angle) / geometry.ONE]
     mesh.look(camera, from, LOOK)
@@ -159,8 +187,22 @@ skill render(stage, angle, lift, base) {
         mesh.collect_ground(painter, camera, world.ground, scene.CELLS)
         drum (group.count(world.flats)) { mesh.collect(painter, camera, group.get(world.flats, beat)) }
         drum (group.count(bodies)) { mesh.collect(painter, camera, group.get(bodies, beat)) }
+        at = mark(stage, 1, at)
+        @tails = intel_gpu.tails(group.get(back.accel, 0))
         @drawn = render.triangles(painter, render.Surface { at = back.frame, pitch = back.stride * graphics.PIXEL_BYTES, width = back.width, height = back.height })
-        (drawn == yes) { out graphics.push(base, stage.front, back) }
+        @before = at
+        at = mark(stage, 2, at)
+        @spent = (at - before + 4294967296) % 4294967296
+        (spent >= 10) {
+            @stalls = group.add(stage.stalls, [spent, group.get(tails, 0), group.get(tails, 1)])
+            (group.count(stalls) > STALLS) { stalls = group.slice(stalls, 1, group.count(stalls)) }
+            stage.stalls = stalls
+        }
+        (drawn == yes) {
+            graphics.push(base, stage.front, back)
+            mark(stage, 3, at)
+            out none
+        }
         graphics.copy_rect(base, back, stage.sky, 0, 0, back.width, back.height)
     }
     mesh.ground(back, camera, world.ground, scene.CELLS)
