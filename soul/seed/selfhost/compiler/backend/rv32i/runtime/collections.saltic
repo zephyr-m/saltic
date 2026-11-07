@@ -8,7 +8,9 @@
 -- emit_box_get(compiler) — rt_box_get(VALUE box, ERROR id, ARG2 slot) -> VALUE
 -- emit_box_set(compiler) — rt_box_set(VALUE box, ERROR id, ARG2 value, ARG3 slot)
 --     -> none; уходит в rt_region_barrier, адрес Box — в memory.BARRIER_OBJECT
--- emit_missing_field(compiler) — rt_missing_field: ERROR_MISSING_FIELD
+-- emit_missing_field(compiler) — rt_missing_field: ERROR_MISSING_FIELD; emit_empty_touched —
+--     rt_empty_touched: ERROR_EMPTY_TOUCHED; only_box(compiler, label) — у rt_box_get /
+--     rt_box_set: VALUE не Box — none → EmptyTouched, иначе MissingField
 -- emit_group_count(compiler) — rt_group_count(VALUE) -> число
 -- emit_group_at(compiler) — rt_group_at(VALUE, ERROR index) -> элемент; bounds
 -- emit_group_bounds(compiler) — rt_group_bounds: ERROR_GROUP_BOUNDS
@@ -26,10 +28,22 @@ use selfhost.compiler.backend
 use selfhost.compiler.backend.rv32i.runtime.memory
 use selfhost.compiler.backend.rv32i.runtime.tails
 
+skill only_box(compiler, box) {
+    @executor = compiler.executor
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.TAG_MASK)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.TAG_BOX)
+    compiler = executor.branch_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, box)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, abi.NONE)
+    compiler = executor.jump_if_equal(compiler, backend.VALUE, backend.SCRATCH1, "rt_empty_touched")
+    compiler = executor.jump(compiler, "rt_missing_field")
+    out executor.label(compiler, box)
+}
+
 skill emit_box_get(compiler) {
     @executor = compiler.executor
     @words = compiler.words
     compiler = executor.label(compiler, "rt_box_get")
+    compiler = only_box(compiler, ".L_box_get_box")
     compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
     compiler = executor.load(compiler, backend.SCRATCH0, backend.VALUE, words.payload)
     compiler = executor.branch_greater_equal_unsigned(compiler, backend.ARG2, backend.SCRATCH0, ".L_box_get_scan")
@@ -57,6 +71,7 @@ skill emit_box_set(compiler) {
     @executor = compiler.executor
     @words = compiler.words
     compiler = executor.label(compiler, "rt_box_set")
+    compiler = only_box(compiler, ".L_box_set_box")
     compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
     compiler = executor.move(compiler, memory.BARRIER_OBJECT, backend.VALUE)
     compiler = executor.load(compiler, backend.SCRATCH0, backend.VALUE, words.payload)
@@ -89,6 +104,10 @@ skill emit_box_set(compiler) {
 skill emit_missing_field(compiler) {
     @executor = compiler.executor
     out tails.fail(compiler, "rt_missing_field", abi.ERROR_MISSING_FIELD)
+}
+
+skill emit_empty_touched(compiler) {
+    out tails.fail(compiler, "rt_empty_touched", abi.ERROR_EMPTY_TOUCHED)
 }
 
 skill emit_group_count(compiler) {
