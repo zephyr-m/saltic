@@ -20,6 +20,8 @@
 --     буфер (netlog.canvas) и кладёт на экран одним копированием
 -- link_speed(status) -> «100 Мбит/с» или «нет»; cable_text(status) —
 --     «подключён · 1000 Мбит/с · дуплекс» или «не подключён»
+-- Куча программы (core.mem.heap) — того, кто рисует панель: агента или
+-- запущенной программы; растёт у вечной программы — утечка.
 -- Сверху — Wi-Fi: иконка (серая, пока не подключён; бирюзовая — подключён)
 -- и ход подъёма или адрес с сетью — со страницы qca9377.handoff (stage).
 -- Внутри: icon — значок 16 × 16 (# — точка: WIFI_ICON, CABLE_ICON); gauge — подпись,
@@ -30,6 +32,7 @@
 
 use core.str
 use core.group
+use core.mem
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.drivers.rtl8111
@@ -217,18 +220,18 @@ skill cable_text(status) {
     out "подключён · {speed} · {duplex}"
 }
 
-skill gauge(screen, x, y, width, title, used_mb, total_mb) {
+skill gauge(screen, x, y, width, title, used_kb, total_kb) {
     lettering.paint_text(screen, FACE, x, y, title, graphics.color(screen, 228, 228, 231))
     @grey = graphics.color(screen, 161, 161, 170)
-    (total_mb < 1) {
+    (total_kb < 1) {
         lettering.paint_text(screen, FACE, x, y + ROW, "нет сведений", grey)
         out y + ROW * 3
     }
-    @share = sizes.percent(used_mb, total_mb)
+    @share = sizes.percent(used_kb, total_kb)
     graphics.fill(screen, x, y + ROW + 2, width, BAR, graphics.color(screen, 63, 63, 70))
     graphics.fill(screen, x, y + ROW + 2, width * share / 100, BAR, graphics.color(screen, 251, 146, 60))
-    @used = sizes.mb_text(used_mb)
-    @total = sizes.mb_text(total_mb)
+    @used = sizes.kb_text(used_kb)
+    @total = sizes.kb_text(total_kb)
     lettering.paint_text(screen, FACE, x, y + ROW + BAR + 8, "занято {used} из {total}, {share} %", grey)
     out y + ROW * 4
 }
@@ -299,6 +302,9 @@ skill show(base, card, forced, meter) {
     @known = memory(base) rescue |err| { Memory {} }
     @memory_used = known.total_mb - known.free_mb
     @memory_total = known.total_mb
+    @heap_used = mem.heap(0) / 1024
+    @heap_total = mem.heap(2) / 1024
+    @escapes = sizes.kb_text(mem.heap(1) / 1024)
     @disk_total = netlog.number_at(base, log, DISK_SIZE)
     @disk_used = disk_total - netlog.number_at(base, log, DISK_FREE)
     @status = rtl8111.status(card)
@@ -314,7 +320,7 @@ skill show(base, card, forced, meter) {
     @latest = 0
     (shown > 0) { latest = group.get(rates, shown - 1) }
     @heard = group.count(meter.received)
-    @mark = signature("{memory_used}/{memory_total}/{disk_used}/{disk_total}/{cable}/{incoming}/{outgoing}/{received}/{sent}/{shown}/{latest}/{heard}/{wifi_step}/{wifi_text}")
+    @mark = signature("{heap_used}/{escapes}/{memory_used}/{memory_total}/{disk_used}/{disk_total}/{cable}/{incoming}/{outgoing}/{received}/{sent}/{shown}/{latest}/{heard}/{wifi_step}/{wifi_text}")
     (forced == no) {
         (mark == netlog.number_at(base, log, SIGNATURE)) { out none }
     }
@@ -334,8 +340,9 @@ skill show(base, card, forced, meter) {
     icon(panel, MARGIN, MARGIN + ROW * 2, WIFI_ICON, wifi_ink)
     lettering.paint_text(panel, FACE, MARGIN + 24, MARGIN + ROW * 2, "Wi-Fi", graphics.color(whole, 228, 228, 231))
     lettering.paint_text(panel, FACE, MARGIN, MARGIN + ROW * 3, wifi_line, wifi_ink)
-    @y = gauge(panel, MARGIN, MARGIN + ROW * 5, width, "память", memory_used, memory_total)
-    y = gauge(panel, MARGIN, y, width, "диск Saltic", disk_used, disk_total)
+    @y = gauge(panel, MARGIN, MARGIN + ROW * 5, width, "память", memory_used * 1024, memory_total * 1024)
+    y = gauge(panel, MARGIN, y, width, "диск Saltic", disk_used * 1024, disk_total * 1024)
+    y = gauge(panel, MARGIN, y, width, "куча программы · побеги {escapes}", heap_used, heap_total)
     @cable_ink = grey
     (rtl8111.has_bit(status, rtl8111.PHY_LINK) == yes) { cable_ink = graphics.color(whole, 45, 212, 191) }
     icon(panel, MARGIN, y, CABLE_ICON, cable_ink)

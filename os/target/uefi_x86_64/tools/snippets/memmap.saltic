@@ -1,0 +1,94 @@
+-- memmap — кусок для tools/snippet.py: чем занята память ноутбука. Карта
+-- памяти прошивки по типам (МБ на тип, число кусков) и самые большие куски
+-- «данных загрузчика» — это мы: образы программ, куча, свои страницы.
+--
+-- snippet() -> текст: строка на тип и BIGGEST крупнейших наших кусков
+
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+
+BOOT_GET_MEMORY_MAP = 56
+SIZE_AT = 12224
+KEY_AT = 12232
+STEP_AT = 12240
+VERSION_AT = 12248
+MAP_AT = 12288
+MAP_BYTES = 16384
+LOADER_DATA = 2
+BIGGEST = 12
+NAMES = ["резерв", "код загрузчика", "данные загрузчика", "код служб загрузки", "данные служб загрузки", "код служб выполнения", "данные служб выполнения", "свободно", "негодная", "ACPI", "ACPI NVS", "окна устройств", "порты устройств", "PAL", "постоянная"]
+
+skill put(items, index, value) {
+    out group.concat(group.concat(group.slice(items, 0, index), [value]), group.slice(items, index + 1, group.count(items)))
+}
+
+skill mb(pages) {
+    @tenths = pages * 10 / 256
+    @whole = tenths / 10
+    @part = tenths % 10
+    out "{whole}.{part} МБ"
+}
+
+skill snippet() {
+    @base = firmware.guest_base()
+    @size_at = firmware.scratch(base, SIZE_AT)
+    firmware.write64(size_at, base, 0, firmware.number(MAP_BYTES))
+    @map = firmware.scratch(base, MAP_AT)
+    @step_at = firmware.scratch(base, STEP_AT)
+    @asked = firmware.call(base, firmware.pointer(uefi.boot_services(base), base, BOOT_GET_MEMORY_MAP), [size_at, map, firmware.scratch(base, KEY_AT), step_at, firmware.scratch(base, VERSION_AT)])
+    (asked.failed == yes) { out "карта памяти не ответила" }
+    @size = firmware.read16(size_at, base, 0) + firmware.read16(size_at, base, 2) * 65536
+    @step = firmware.read16(step_at, base, 0)
+    @pages = []
+    @pieces = []
+    drum (16) {
+        pages = group.add(pages, 0)
+        pieces = group.add(pieces, 0)
+    }
+    @ours = []
+    drum (size / step) {
+        @entry = firmware.add(map, beat * step)
+        @kind = firmware.read16(entry, base, 0)
+        @count = firmware.read16(entry, base, 24) + firmware.read16(entry, base, 26) * 65536
+        (kind < 15) {
+            pages = put(pages, kind, group.get(pages, kind) + count)
+            pieces = put(pieces, kind, group.get(pieces, kind) + 1)
+        }
+        (kind == LOADER_DATA) {
+            @start = firmware.read32(entry, base, 8)
+            ours = group.add(ours, [count, start])
+        }
+    }
+    @text = "карта: {size} байт, шаг {step}"
+    drum (15) {
+        @kind = beat
+        @n = group.get(pages, kind)
+        (n > 0) {
+            @name = group.get(NAMES, kind)
+            @shown = mb(n)
+            @parts = group.get(pieces, kind)
+            text = "{text}\n{name}: {shown} ({parts} кусков)"
+        }
+    }
+    text = "{text}\nкрупнейшие куски данных загрузчика:"
+    drum (BIGGEST) {
+        @best = -1
+        @best_pages = 0
+        drum (group.count(ours)) {
+            @one = group.get(ours, beat)
+            (group.get(one, 0) > best_pages) {
+                best = beat
+                best_pages = group.get(one, 0)
+            }
+        }
+        (best >= 0) {
+            @one = group.get(ours, best)
+            @shown = mb(group.get(one, 0))
+            @at = firmware.phys_text(group.get(one, 1))
+            text = "{text}\n  {shown} с {at}"
+            ours = put(ours, best, [0, 0])
+        }
+    }
+    out text
+}
