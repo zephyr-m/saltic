@@ -53,11 +53,19 @@ bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic": _dirs
     .cache/build/workbench/refresh "$1"
 
 global-check: _dirs
-    bootstrap/saltic workbench/global-check.saltic .cache/build/workbench/global-check 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/global-check
+    bootstrap/saltic workbench/check/global-check.saltic .cache/build/workbench/global-check 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/global-check
     .cache/build/workbench/global-check
 
+# Сервер MCP saltic_* для агента (.mcp.json): собирает lens и mcp с полки, потом
+# говорит по stdio. Вывод сборки — в stderr: stdout принадлежит протоколу. Сборка —
+# в .part и переименование: работающий сервер свой файл перезаписать не даст.
+lens-serve: _dirs
+    @bootstrap/saltic workbench/agent/lens.saltic .cache/build/workbench/lens.part 1073741824 x86_64 >&2 && chmod +x .cache/build/workbench/lens.part && mv .cache/build/workbench/lens.part .cache/build/workbench/lens
+    @bootstrap/saltic workbench/agent/mcp.saltic .cache/build/workbench/mcp.part 268435456 x86_64 >&2 && chmod +x .cache/build/workbench/mcp.part && mv .cache/build/workbench/mcp.part .cache/build/workbench/mcp
+    @exec .cache/build/workbench/mcp
+
 limits: _dirs
-    bootstrap/saltic workbench/limits.saltic .cache/build/workbench/limits 536870912 x86_64 && chmod +x .cache/build/workbench/limits
+    bootstrap/saltic workbench/check/limits.saltic .cache/build/workbench/limits 536870912 x86_64 && chmod +x .cache/build/workbench/limits
     .cache/build/workbench/limits
 
 rv64: _dirs
@@ -69,15 +77,15 @@ release-draft base="": _dirs
     .cache/build/workbench/release-draft "$1"
 
 same-source: _dirs
-    bootstrap/saltic workbench/same-source.saltic .cache/build/workbench/same-source-check 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/same-source-check
+    bootstrap/saltic workbench/check/same-source.saltic .cache/build/workbench/same-source-check 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/same-source-check
     .cache/build/workbench/same-source-check
 
 x86-golden mode="": _dirs
-    bootstrap/saltic workbench/x86-encoder-golden.saltic .cache/build/workbench/x86-encoder-golden 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/x86-encoder-golden
+    bootstrap/saltic workbench/check/x86-encoder-golden.saltic .cache/build/workbench/x86-encoder-golden 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/x86-encoder-golden
     .cache/build/workbench/x86-encoder-golden "$1"
 
 same *sources: _dirs
-    bootstrap/saltic workbench/same.saltic .cache/build/workbench/same-check 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/same-check
+    bootstrap/saltic workbench/check/same.saltic .cache/build/workbench/same-check 536870912 x86_64 >/dev/null && chmod +x .cache/build/workbench/same-check
     .cache/build/workbench/same-check "$*"
 
 test case="all": _dirs

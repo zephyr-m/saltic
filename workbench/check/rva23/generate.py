@@ -8,7 +8,7 @@
 machine/generated/rva23.saltic.
 
 Запуск (нужен riscv32-none-elf-as из flake.nix):
-  nix develop --command python3 workbench/rva23/generate.py
+  nix develop --command python3 workbench/check/rva23/generate.py
 """
 
 import os
@@ -276,7 +276,7 @@ def write(table, dropped):
         return ",\n".join("    " + ", ".join(items[i:i + per_line]) for i in range(0, len(items), per_line))
 
     head = [
-        "-- rva23 — сгенерировано workbench/rva23/generate.py из GNU-ассемблера, руками не править.",
+        "-- rva23 — сгенерировано workbench/check/rva23/generate.py из GNU-ассемблера, руками не править.",
         f"-- Команд {len(names)}, форм операндов {len(forms)}; отброшено кандидатов {len(dropped)}.",
         "-- NAMES / SHAPES — имя и шаблон команды (% — операнд); ROWS — [байт в команде,",
         "--     b0, b1, b2, b3 — кодировка при базовых операндах, номер формы]. FORMS: на",

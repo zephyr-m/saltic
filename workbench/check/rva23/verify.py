@@ -5,7 +5,7 @@
 (ограничения вроде перекрытия векторных регистров при случайных
 операндах), пропускаются; у каждой команды должна сойтись хотя бы одна.
 
-Запуск: nix develop --command python3 workbench/rva23/verify.py вывод.txt
+Запуск: nix develop --command python3 workbench/check/rva23/verify.py вывод.txt
 """
 
 import os

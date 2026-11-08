@@ -41,14 +41,14 @@
 - `platform` — договор платформы на Linux (rv32i и x86_64): `NotSupported`
   по имени, непойманная ошибка, программа без аргументов;
 - `x86-encoder` — байты команд кодировщика x86-64 (эталоны GNU `as`,
-  `workbench/x86-encoder-golden.sh`);
+  `workbench/check/x86-encoder-golden.sh`);
 - `edges` — ошибки рантайма через `rescue`, дерево Box, строки; одинаково
   под rv32i и x86_64;
 - `rv64` — канон, `edges`, `always` и `big-numbers`, собранные под RV64, под `qemu-riscv64`: тот
   же вывод, что у rv32i и x86_64;
 - `rva23` — кодировщик RV64: каждая из 1054 команд RVA23 с базовыми и
   псевдослучайными операндами сверяется побайтно с GNU-ассемблером
-  (`workbench/rva23/verify.py`); таблицу пишет `workbench/rva23/generate.py`;
+  (`workbench/check/rva23/verify.py`); таблицу пишет `workbench/check/rva23/generate.py`;
   затем «форма = таблица» — команды, которые исполнитель rv64 кодирует по
   форме (`rv64/machine/forms`), сверяются с таблицей на случайных операндах;
 - `process` — `core.process` (run, capture, lines, папка ребёнка, PATH, окружение)

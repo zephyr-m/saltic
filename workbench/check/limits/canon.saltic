@@ -1,0 +1,120 @@
+-- canon — замер файла по лимитам канона (docs/process/Code_Architecture_канон_для_агентов.md):
+-- строки кода (пустые и `--` не в счёт) и шапки (всё до первой строки кода),
+-- сверка с известными нарушениями KNOWN («путь строк_кода строк_шапки»):
+-- им можно не расти, но не ухудшаться. Берут workbench/check/limits (весь
+-- репозиторий) и lens check (один файл).
+--
+-- LIMIT_CODE, LIMIT_HEADER, KNOWN; Size { code, header, top } — замер
+-- measure(text) -> Size; known() -> строки KNOWN без комментариев
+-- verdict(path, text, known) -> "" или «новое нарушение — …» / «выросло — …»
+-- Внутри: count_line, number, known_record(known, path) -> группа или []
+
+use io.file
+use core.str
+use core.group
+
+LIMIT_CODE = 512
+LIMIT_HEADER = 32
+KNOWN = "workbench/check/limits-known.txt"
+SPACE = 32
+TAB = 9
+NEWLINE = 10
+DASH = 45
+
+Size = Box {
+    code = 0,
+    header = 0,
+    top = yes
+}
+
+skill count_line(size, text, start, end) {
+    @first = start
+    always {
+        (first == end) { leave }
+        @ch = str.byte(text, first)
+        @blank = ch == SPACE
+        (ch == TAB) { blank = yes }
+        (blank == no) { leave }
+        first = first + 1
+    }
+    @empty = first == end
+    @comment = no
+    (first + 1 < end) {
+        (str.byte(text, first) == DASH) { comment = str.byte(text, first + 1) == DASH }
+    }
+    (size.top == yes) {
+        (empty == yes) {
+            size.header = size.header + 1
+            out none
+        }
+        (comment == yes) {
+            size.header = size.header + 1
+            out none
+        }
+        size.top = no
+    }
+    (empty == no) {
+        (comment == no) { size.code = size.code + 1 }
+    }
+    out none
+}
+
+skill measure(text) {
+    @size = Size {}
+    @start = 0
+    @total = str.bytes(text)
+    drum (total) {
+        (str.byte(text, beat) == NEWLINE) {
+            count_line(size, text, start, beat)
+            start = beat + 1
+        }
+    }
+    (start < total) { count_line(size, text, start, total) }
+    out size
+}
+
+skill number(text) {
+    @value = 0
+    drum (str.bytes(text)) { value = value * 10 + str.byte(text, beat) - 48 }
+    out value
+}
+
+skill known_record(known, path) {
+    drum (known) {
+        @parts = str.split(beat, " ")
+        (group.count(parts) == 3) {
+            (group.get(parts, 0) == path) { out parts }
+        }
+    }
+    out []
+}
+
+skill known() {
+    @lines = []
+    drum (str.lines(file.read(KNOWN))) {
+        (str.starts_with(beat, "#") == no) { lines = group.add(lines, beat) }
+    }
+    out lines
+}
+
+skill verdict(path, text, known) {
+    @size = measure(text)
+    @code = size.code
+    @header = size.header
+    ((code > LIMIT_CODE) == no) {
+        ((header > LIMIT_HEADER) == no) { out "" }
+    }
+    @record = known_record(known, path)
+    (group.count(record) == 0) { out "новое нарушение — кода {code} из {LIMIT_CODE}, шапка {header} из {LIMIT_HEADER}" }
+    @known_code = number(group.get(record, 1))
+    @known_header = number(group.get(record, 2))
+    @grew = no
+    (code > LIMIT_CODE) {
+        (code > known_code) { grew = yes }
+    }
+    (header > LIMIT_HEADER) {
+        (header > known_header) { grew = yes }
+    }
+    (grew == yes) { out "выросло — кода {known_code} → {code}, шапка {known_header} → {header}" }
+    out ""
+}

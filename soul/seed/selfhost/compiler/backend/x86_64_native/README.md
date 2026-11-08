@@ -18,7 +18,7 @@
 | Что | Где | Строк |
 |---|---|---|
 | Вход: `Executor`, `write` | `../x86_64_native.saltic` | ~330 |
-| Байты команд: REX/ModRM/SIB, ~25 команд; эталоны GNU `as` | `encoder` + `encoder/operand` (`tests/x86-encoder.saltic`, `workbench/x86-encoder-golden.sh`) | ~430 |
+| Байты команд: REX/ModRM/SIB, ~25 команд; эталоны GNU `as` | `encoder` + `encoder/operand` (`tests/x86-encoder.saltic`, `workbench/check/x86-encoder-golden.sh`) | ~430 |
 | Роль → регистр или ячейка первой страницы кода (`[r14 + SLOTS + size·роль]`, size 8 без окна), временные регистры | `roles` | ~100 |
 | Пересылки, арифметика, сдвиги, сравнения в 0/1; особые случаи `STACK` | `ops` | ~280 |
 | load/store слов, байтов, полуслов; push/pop | `access` | ~170 |

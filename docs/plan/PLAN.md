@@ -31,7 +31,7 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   x86-64 и RV64 (тест в группе `platform`). Попутно чтение больше не берёт
   1 МиБ на каждый файл.
 - [x] Поле, которого у Box нет, чекер пропускает, программа падает с segfault.
-  07.11.2026, `workbench/cards.saltic`: `compilers_row(run, text)` брала
+  07.11.2026, `workbench/check/view/cards.saltic`: `compilers_row(run, text)` брала
   `run.look`, а получала `cards.Look { plain, tick }` (поля `look` нет) —
   x86-64, сигнал 11 вместо понятной ошибки. Нужно: чекер отказывает, если
   тип Box известен, иначе рантайм — ошибка с именем поля.
@@ -290,11 +290,11 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
 - [x] Файлы сверх лимитов канона (с 07.11.2026 — 512 строк кода и 32
   строки шапки): кода больше 512 — `checker/walk` 513, `rv32i/machine/layout` 514,
   `rv32i/runtime/fixed` 531, `seed/tests/contract` 516; шапка длиннее 32 —
-  `backend.saltic` 61, `layout` 43. Список с числами — `workbench/limits-known.txt`;
+  `backend.saltic` 61, `layout` 43. Список с числами — `workbench/check/limits-known.txt`;
   `just limits` (первый шаг `global-check`) не даёт им расти и ловит новые. → аудит 07.11
   Решение автора 07.11.2026: пока не трогаем — проверка всех лимитов перед заморозкой
   (первый свисток); до тех пор `just limits` держит, чтобы не росли.
-- [x] Проверка лимитов канона в `global-check` — 07.11.2026 (`workbench/limits.sh`, с 07.11 — `workbench/limits.saltic`, второй bash на Saltic).
+- [x] Проверка лимитов канона в `global-check` — 07.11.2026 (`workbench/limits.sh`, с 07.11 — `workbench/check/limits.saltic`, второй bash на Saltic).
 - [x] Одно имя у целей: `x86_64-native` и `x86_64-uefi-native` убраны — 07.11.2026.
 - [x] Эталоны `translation` → `runtime_bytes`, «перевод» → «эталон» в названиях
   проверок — 07.11.2026.
