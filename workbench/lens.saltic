@@ -1,0 +1,168 @@
+-- lens — Saltic смотрит на свой код: проверка без сборки, публичное лицо
+-- модуля, поиск имени. Им пользуется агент через MCP (workbench/lens_bridge.py,
+-- инструменты saltic_*). Запуск из корня репозитория.
+--   check <файл>  — разбор и чекер, как в toolchain, но без сборки: строки
+--                   «код|строка|столбец|текст» или «ok»; числа 61-битные
+--   api <модуль>  — шапка модуля (по канону это его публичное лицо) и все
+--                   skill, Box и константы верхнего уровня
+--   find <имя>    — где определено (skill, Box, константа) и где встречается
+--                   вызовом или полем, по файлам git ls-files *.saltic
+-- Модуль — путь к файлу или имя через точки; корни core, io, selfhost — в
+-- soul/seed, canonical — в soul, остальное — от корня репозитория.
+--
+-- program(command, subject) — команда и её предмет
+-- path_of(subject) -> путь файла модуля; NoModule
+-- Внутри: check(path), api(path), find(name), header(text) -> строки шапки,
+--     definition(line, name) / mention(line, name) / commented(line) -> yes/no
+
+use io
+use io.file
+use core.str
+use core.group
+use core.process
+use selfhost.parser
+use selfhost.checker
+
+ROOTS = ["core", "io", "selfhost"]
+LIMIT = 200
+
+skill path_of(subject) {
+    (str.ends_with(subject, ".saltic") == yes) { out subject }
+    @parts = str.split(subject, ".")
+    @tail = str.join(parts, "/")
+    @first = group.get(parts, 0)
+    @made = "{tail}.saltic"
+    (group.contains(ROOTS, first) == yes) { made = "soul/seed/{tail}.saltic" }
+    (first == "canonical") { made = "soul/{tail}.saltic" }
+    @text = file.read(made) rescue |err| { "" }
+    (str.bytes(text) > 0) { out made }
+    @last = group.get(parts, group.count(parts) - 1)
+    @folder = str.slice(made, 0, str.bytes(made) - 7)
+    @nested = "{folder}/{last}.saltic"
+    @inside = file.read(nested) rescue |err| { "" }
+    (str.bytes(inside) > 0) { out nested }
+    out error.NoModule
+}
+
+skill check(path) {
+    @loaded = parser.load_file_loc(path, ".")
+    (group.count(loaded.diagnostics) > 0) {
+        drum (loaded.diagnostics) { io.show("{beat.code}|{beat.line}|{beat.col}|{beat.message}") }
+        out none
+    }
+    @checked = checker.check_for(loaded.ast, path, yes)
+    (group.count(checked.diagnostics) > 0) {
+        drum (checked.diagnostics) { io.show("{beat.code}|{beat.line}|{beat.col}|{beat.message}") }
+        out none
+    }
+    out io.show("ok")
+}
+
+skill header(text) {
+    @made = []
+    drum (str.lines(text)) {
+        @line = beat
+        @comment = str.starts_with(line, "--")
+        (str.bytes(line) == 0) { comment = yes }
+        (comment == no) { out made }
+        made = group.add(made, line)
+    }
+    out made
+}
+
+skill top_level(line) {
+    (str.starts_with(line, "skill ") == yes) { out yes }
+    (str.starts_with(line, "program(") == yes) { out yes }
+    (str.starts_with(line, " ") == yes) { out no }
+    (str.starts_with(line, "--") == yes) { out no }
+    (str.starts_with(line, "use ") == yes) { out no }
+    (str.contains(line, " = ") == yes) { out yes }
+    out no
+}
+
+skill api(path) {
+    @text = file.read(path)
+    io.show("файл {path}")
+    drum (header(text)) { io.show(beat) }
+    io.show("-- верхний уровень:")
+    drum (str.lines(text)) {
+        @line = beat
+        (top_level(line) == yes) {
+            @shown = line
+            (str.ends_with(shown, " \{") == yes) { shown = str.slice(shown, 0, str.bytes(shown) - 2) }
+            io.show(shown)
+        }
+    }
+    out none
+}
+
+skill commented(line) {
+    drum (str.bytes(line)) {
+        @letter = str.get(line, beat)
+        ((letter == " ") == no) { out str.starts_with(str.slice(line, beat, str.bytes(line)), "--") }
+    }
+    out no
+}
+
+skill definition(line, name) {
+    (str.starts_with(line, "skill {name}(") == yes) { out yes }
+    (str.starts_with(line, "{name} = ") == yes) { out yes }
+    out no
+}
+
+skill mention(line, name) {
+    (str.contains(line, ".{name}(") == yes) { out yes }
+    (str.contains(line, " {name}(") == yes) { out yes }
+    (str.contains(line, "({name}(") == yes) { out yes }
+    (str.contains(line, ".{name} ") == yes) { out yes }
+    (str.contains(line, ".{name}.") == yes) { out yes }
+    out no
+}
+
+skill find(name) {
+    @listed = process.capture(["git", "ls-files", "*.saltic"], "", [])
+    @shown = 0
+    @defined = []
+    @used = []
+    drum (str.lines(listed.output)) {
+        @path = beat
+        (str.starts_with(path, ".archive/") == no) {
+            @text = file.read(path) rescue |err| { "" }
+            (str.contains(text, name) == yes) {
+                @number = 0
+                drum (str.lines(text)) {
+                    number = number + 1
+                    @line = beat
+                    (commented(line) == no) {
+                        (definition(line, name) == yes) { defined = group.add(defined, "{path}:{number}: {line}") }
+                        (definition(line, name) == no) {
+                            (mention(line, name) == yes) {
+                                (group.count(used) < LIMIT) { used = group.add(used, "{path}:{number}: {line}") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    io.show("-- определено:")
+    drum (defined) { io.show(beat) }
+    @limit = LIMIT
+    io.show("-- встречается ({limit} первых):")
+    drum (used) { io.show(beat) }
+    out none
+}
+
+program(command, subject) {
+    (command == "check") { out check(subject) }
+    (command == "api") {
+        @path = path_of(subject) rescue |err| {
+            io.show("модуль не найден: {subject}")
+            out none
+        }
+        out api(path)
+    }
+    (command == "find") { out find(subject) }
+    io.show("lens: check <файл> | api <модуль> | find <имя>")
+    out none
+}
