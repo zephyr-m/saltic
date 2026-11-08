@@ -1,0 +1,139 @@
+-- terminal — колония os.apps.colony.colony в окне терминала Linux: та же модель,
+-- шаг — её же step_worker для каждого рабочего и grow, правка клетки — её
+-- edit. Поле рисуется символами (клетка — два знака), курсор подсвечен
+-- инверсией, кадр — с возвратом курсора в угол (ESC [H), без мигания.
+-- Клавиши без ожидания — как у змейки (os.apps.snake.terminal): stty «ждать
+-- байт не дольше 0,1 с», одно чтение /dev/tty делает dd.
+-- Стрелки — курсор, пробел — применить инструмент, 1 — еда, 2 — стена,
+-- 3 — стереть, r — заново, q — выход.
+--
+-- Desk { model, x, y, done } — колония и курсор
+-- cell_text(model, x, y) -> два знака клетки
+-- frame(desk) -> текст кадра; turn_once(desk) — клавиши, шаг, кадр
+-- program() — до q
+
+use io
+use core.str
+use core.group
+use core.process
+use os.apps.colony.colony
+
+TTY = "/dev/tty"
+EMPTY = "  "
+NEST = "::"
+WALL = "##"
+FOOD = "**"
+WORKER = "a "
+CARRIER = "A "
+EDGE = "||"
+
+Desk = Box {
+    model = colony.Model {},
+    x = colony.NEST_X,
+    y = colony.NEST_Y - 4,
+    done = no
+}
+
+skill escape(text) {
+    @esc = str.from_byte(27)
+    out "{esc}[{text}"
+}
+
+skill terminal(settings) {
+    out process.run(["sh", "-c", "stty {settings} < {TTY}"], "", [])
+}
+
+skill keys() {
+    @read = process.capture(["sh", "-c", "dd bs=8 count=1 status=none < {TTY}"], "", [])
+    out read.output
+}
+
+skill cell_text(model, x, y) {
+    drum (model.workers) {
+        (beat.x == x) {
+            (beat.y == y) {
+                (beat.carrying == yes) { out CARRIER }
+                out WORKER
+            }
+        }
+    }
+    (colony.wall_at(model, x, y) == yes) { out WALL }
+    (colony.food_at(model, x, y) == yes) { out FOOD }
+    (colony.inside_nest(x, y) == yes) { out NEST }
+    out EMPTY
+}
+
+skill frame(desk) {
+    @model = desk.model
+    @bar = ""
+    drum (colony.BOARD_COLUMNS + 2) { bar = "{bar}=" }
+    bar = "{bar}{bar}"
+    @lines = [bar]
+    @mark = escape("7m")
+    @plain = escape("0m")
+    drum (colony.BOARD_ROWS) {
+        @y = beat
+        @line = EDGE
+        drum (colony.BOARD_COLUMNS) {
+            @shown = cell_text(model, beat, y)
+            @here = beat == desk.x
+            (y == desk.y) {
+                (here == yes) { shown = "{mark}{shown}{plain}" }
+            }
+            line = "{line}{shown}"
+        }
+        lines = group.add(lines, "{line}{EDGE}")
+    }
+    lines = group.add(lines, bar)
+    @workers = group.count(model.workers)
+    @food = colony.food_total(model)
+    @tool = colony.tool_name(model.tool)
+    lines = group.add(lines, "рабочих {workers}  запас {model.stored}  доставлено {model.delivered}  еды на поле {food}  инструмент {tool}        ")
+    lines = group.add(lines, "стрелки — курсор, пробел — применить, 1 еда, 2 стена, 3 стереть, r — заново, q — выход")
+    @home = escape("H")
+    @joined = str.join(lines, "\n")
+    out "{home}{joined}"
+}
+
+skill clamp(value, top) {
+    (value < 0) { out 0 }
+    (value > top - 1) { out top - 1 }
+    out value
+}
+
+skill turn_once(desk) {
+    @pressed = keys()
+    (str.contains(pressed, "q") == yes) {
+        desk.done = yes
+        out none
+    }
+    (str.contains(pressed, "r") == yes) { desk.model = colony.new() }
+    @model = desk.model
+    (str.contains(pressed, "1") == yes) { model.tool = colony.Tool.FOOD }
+    (str.contains(pressed, "2") == yes) { model.tool = colony.Tool.WALL }
+    (str.contains(pressed, "3") == yes) { model.tool = colony.Tool.ERASE }
+    (str.contains(pressed, "[A") == yes) { desk.y = clamp(desk.y - 1, colony.BOARD_ROWS) }
+    (str.contains(pressed, "[B") == yes) { desk.y = clamp(desk.y + 1, colony.BOARD_ROWS) }
+    (str.contains(pressed, "[C") == yes) { desk.x = clamp(desk.x + 1, colony.BOARD_COLUMNS) }
+    (str.contains(pressed, "[D") == yes) { desk.x = clamp(desk.x - 1, colony.BOARD_COLUMNS) }
+    (str.contains(pressed, " ") == yes) { colony.edit(model, desk.x, desk.y) }
+    drum (group.count(model.workers)) { colony.step_worker(model, group.get(model.workers, beat)) }
+    colony.grow(model)
+    out io.show(frame(desk))
+}
+
+program() {
+    terminal("-icanon -echo min 0 time 1")
+    @clear = escape("2J")
+    @hide = escape("?25l")
+    io.show("{clear}{hide}")
+    @desk = Desk { model = colony.new() }
+    always {
+        turn_once(desk)
+        (desk.done == yes) { leave }
+    }
+    terminal("sane")
+    @show_cursor = escape("?25h")
+    io.show(show_cursor)
+    out none
+}

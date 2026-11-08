@@ -1,0 +1,118 @@
+-- terminal — змейка os.apps.snake в окне терминала Linux: та же модель, поле
+-- рисуется символами (клетка — два знака, чтобы была квадратной), курсор
+-- каждый кадр возвращается в угол (ESC [H) — без мигания. Клавиши — без
+-- ожидания: терминал через stty переводится в режим «ждать байт не дольше
+-- 0,1 с» (-icanon -echo min 0 time 1), одно чтение /dev/tty делает dd (у
+-- терминала нет размера — io.file.read его не читает); пусто — змейка
+-- делает шаг. Стрелки или WASD, r — заново, q — выход; после выхода
+-- терминал возвращается (stty sane) и курсор снова виден.
+--
+-- code_of(pressed) -> код клавиши для snake.turn (стрелки и WASD) или 0
+-- frame(model) -> текст кадра: поле, счёт, подсказка
+-- Game { model, done } — партия; turn_once(game) — одно чтение клавиш и шаг
+-- program() — игра до q
+
+use io
+use core.str
+use core.group
+use core.process
+use os.apps.snake
+
+TTY = "/dev/tty"
+EMPTY = "  "
+BODY = "[]"
+HEAD = "()"
+FOOD = "<>"
+WALL = "##"
+
+skill escape(text) {
+    @esc = str.from_byte(27)
+    out "{esc}[{text}"
+}
+
+skill terminal(settings) {
+    out process.run(["sh", "-c", "stty {settings} < {TTY}"], "", [])
+}
+
+skill code_of(pressed) {
+    (str.contains(pressed, "[A") == yes) { out 103 }
+    (str.contains(pressed, "[B") == yes) { out 108 }
+    (str.contains(pressed, "[C") == yes) { out 106 }
+    (str.contains(pressed, "[D") == yes) { out 105 }
+    (str.contains(pressed, "w") == yes) { out 17 }
+    (str.contains(pressed, "s") == yes) { out 31 }
+    (str.contains(pressed, "d") == yes) { out 32 }
+    (str.contains(pressed, "a") == yes) { out 30 }
+    out 0
+}
+
+skill cell_text(model, x, y) {
+    @cell = snake.Cell { x = x, y = y }
+    (snake.same(group.get(model.body, 0), cell) == yes) { out HEAD }
+    (snake.contains(model.body, cell, group.count(model.body)) == yes) { out BODY }
+    (snake.same(model.food, cell) == yes) { out FOOD }
+    out EMPTY
+}
+
+skill border() {
+    @line = ""
+    drum (snake.BOARD_COLUMNS + 2) { line = "{line}{WALL}" }
+    out line
+}
+
+skill frame(model) {
+    @lines = [border()]
+    drum (snake.BOARD_ROWS) {
+        @y = beat
+        @line = WALL
+        drum (snake.BOARD_COLUMNS) {
+            @shown = cell_text(model, beat, y)
+            line = "{line}{shown}"
+        }
+        lines = group.add(lines, "{line}{WALL}")
+    }
+    lines = group.add(lines, border())
+    @score = model.score
+    @status = "счёт {score}   стрелки или WASD — повернуть, q — выход"
+    (model.alive == no) { status = "игра окончена, счёт {score}   r — заново, q — выход        " }
+    lines = group.add(lines, status)
+    @home = escape("H")
+    @joined = str.join(lines, "\n")
+    out "{home}{joined}"
+}
+
+Game = Box {
+    model = snake.Model {},
+    done = no
+}
+
+skill turn_once(game) {
+    @read = process.capture(["sh", "-c", "dd bs=8 count=1 status=none < {TTY}"], "", [])
+    @pressed = read.output
+    (str.contains(pressed, "q") == yes) {
+        game.done = yes
+        out none
+    }
+    (str.contains(pressed, "r") == yes) { game.model = snake.new() }
+    @code = code_of(pressed)
+    ((code == 0) == no) { game.model = snake.turn(game.model, code) }
+    @tick = snake.step(game.model)
+    game.model = tick.model
+    out io.show(frame(game.model))
+}
+
+program() {
+    terminal("-icanon -echo min 0 time 1")
+    @clear = escape("2J")
+    @hide = escape("?25l")
+    io.show("{clear}{hide}")
+    @game = Game { model = snake.new() }
+    always {
+        turn_once(game)
+        (game.done == yes) { leave }
+    }
+    terminal("sane")
+    @show_cursor = escape("?25h")
+    io.show(show_cursor)
+    out none
+}
