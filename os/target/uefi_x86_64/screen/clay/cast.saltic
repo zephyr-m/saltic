@@ -1,0 +1,258 @@
+-- cast — слепок полянки «Пластилина» в своих страницах, а не в куче: точки,
+-- грани и цвета тел словами по 32 бита, рисуется прямо из них.
+-- КОСТЫЛЬ. Полянка живёт в долгом Box (хранитель агента, программа CLAY), а
+-- значение, записанное в поле долгого Box, остаётся в куче, пока жив сам Box:
+-- новая полянка раз в минуту — старая лежит мёртвым грузом, агент падает за
+-- часы. Страницы переписываются на месте. TODO: решить в модели памяти языка
+-- (docs/language/MEMORY-MODEL.md) и вернуть полянку в кучу.
+-- Слова: таблица тел (по BODY_WORDS: начало, точек, граней, вид, есть цвета
+-- точек, flat, центр x y z), дальше данные: точка — x, y, z, цвет; грань — a,
+-- b, c, d, нормаль, центр, цвет (QUAD_WORDS). Числа со знаком — по модулю 2^32.
+--
+-- Cast { place, memory, count, cursor, lost } — страницы и их адрес для
+--     core.mem, число тел, первое свободное слово, тел, не влезших в PAGES
+-- Part { at, points, quads, kind, colored, flat, cx, cy, cz } — одно тело
+-- GROUND, FLAT, SOLID — земля, плоское (вода, кляксы), объёмное
+-- open(base) -> Cast; MemoryExhausted · close(base, cast) — отдать страницы
+-- fill(cast, world) — переписать слепок из scene.Scene
+-- part(cast, row) -> Part · solids(cast, camera) -> номера SOLID от дальних
+-- collect(cast, painter, camera, row) / draw(cast, screen, camera, row) —
+--     тело видеокарте или процессором; ground_*(…, cells) — земля рядами
+
+use core.group
+use core.mem
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.clay.mesh
+use os.target.uefi_x86_64.drivers.intel_gpu.render
+
+PAGES = 1024
+WORDS = 1048576
+BODIES = 256
+BODY_WORDS = 9
+DATA = 2304
+POINT_WORDS = 4
+QUAD_WORDS = 11
+GROUND = 0
+FLAT = 1
+SOLID = 2
+WRAP = 4294967296
+HALF = 2147483648
+
+Cast = Box {
+    place = 0,
+    memory = [],
+    count = 0,
+    cursor = DATA,
+    lost = 0
+}
+
+Part = Box {
+    at = 0,
+    points = 0,
+    quads = 0,
+    kind = 0,
+    colored = no,
+    flat = no,
+    cx = 0,
+    cy = 0,
+    cz = 0
+}
+
+skill open(base) {
+    @place = uefi.pages_in_window(base, PAGES)
+    out Cast { place = place, memory = firmware.guest(place, base) }
+}
+
+skill close(base, cast) {
+    out uefi.free_pages(base, cast.place, PAGES)
+}
+
+skill put(cast, word, value) {
+    out mem.store32(cast.memory, word * 4, (value + WRAP) % WRAP)
+}
+
+skill get(cast, word) {
+    @value = mem.load32(cast.memory, word * 4)
+    (value >= HALF) { out value - WRAP }
+    out value
+}
+
+skill fill(cast, world) {
+    cast.count = 0
+    cast.cursor = DATA
+    cast.lost = 0
+    put_body(cast, world.ground, GROUND)
+    drum (group.count(world.flats)) { put_body(cast, group.get(world.flats, beat), FLAT) }
+    drum (group.count(world.bodies)) { put_body(cast, group.get(world.bodies, beat), SOLID) }
+    out none
+}
+
+skill put_body(cast, body, kind) {
+    @points = group.count(body.points)
+    @quads = group.count(body.quads)
+    @colored = group.count(body.colors) > 0
+    (cast.count >= BODIES) {
+        cast.lost = cast.lost + 1
+        out none
+    }
+    (cast.cursor + points * POINT_WORDS + quads * QUAD_WORDS > WORDS) {
+        cast.lost = cast.lost + 1
+        out none
+    }
+    @row = cast.count * BODY_WORDS
+    @at = cast.cursor
+    put(cast, row, at)
+    put(cast, row + 1, points)
+    put(cast, row + 2, quads)
+    put(cast, row + 3, kind)
+    put(cast, row + 4, 0)
+    (colored == yes) { put(cast, row + 4, 1) }
+    put(cast, row + 5, 0)
+    (body.flat == yes) { put(cast, row + 5, 1) }
+    drum (3) { put(cast, row + 6 + beat, group.get(body.center, beat)) }
+    drum (points) {
+        @point = group.get(body.points, beat)
+        @word = at + beat * POINT_WORDS
+        drum (3) { put(cast, word + beat, group.get(point, beat)) }
+        put(cast, word + 3, 0)
+        (colored == yes) { put(cast, word + 3, group.get(body.colors, beat)) }
+    }
+    @faces = at + points * POINT_WORDS
+    drum (quads) {
+        @quad = group.get(body.quads, beat)
+        @word = faces + beat * QUAD_WORDS
+        put(cast, word, quad.a)
+        put(cast, word + 1, quad.b)
+        put(cast, word + 2, quad.c)
+        put(cast, word + 3, quad.d)
+        put(cast, word + 4, quad.nx)
+        put(cast, word + 5, quad.ny)
+        put(cast, word + 6, quad.nz)
+        put(cast, word + 7, quad.cx)
+        put(cast, word + 8, quad.cy)
+        put(cast, word + 9, quad.cz)
+        put(cast, word + 10, quad.color)
+    }
+    cast.cursor = faces + quads * QUAD_WORDS
+    cast.count = cast.count + 1
+    out none
+}
+
+skill part(cast, row) {
+    @word = row * BODY_WORDS
+    out Part { at = get(cast, word), points = get(cast, word + 1), quads = get(cast, word + 2), kind = get(cast, word + 3), colored = get(cast, word + 4) == 1, flat = get(cast, word + 5) == 1, cx = get(cast, word + 6), cy = get(cast, word + 7), cz = get(cast, word + 8) }
+}
+
+skill projected(cast, camera, body) {
+    @seen = []
+    drum (body.points) {
+        @word = body.at + beat * POINT_WORDS
+        seen = group.add(seen, mesh.project(camera, [get(cast, word), get(cast, word + 1), get(cast, word + 2)]))
+    }
+    out seen
+}
+
+skill facing(cast, camera, body, word, seen) {
+    (body.flat == no) {
+        @toward = (camera.x - get(cast, word + 7)) * get(cast, word + 4) + (camera.y - get(cast, word + 8)) * get(cast, word + 5) + (camera.z - get(cast, word + 9)) * get(cast, word + 6)
+        (toward <= 0) { out none }
+    }
+    @corners = [group.get(seen, get(cast, word)), group.get(seen, get(cast, word + 1)), group.get(seen, get(cast, word + 2)), group.get(seen, get(cast, word + 3))]
+    drum (4) {
+        (group.get(group.get(corners, beat), 2) < mesh.NEAR) { out none }
+    }
+    out corners
+}
+
+skill color_of(cast, body, index) {
+    out get(cast, body.at + index * POINT_WORDS + 3)
+}
+
+skill face(cast, sink, camera, body, index, seen, gpu) {
+    @word = body.at + body.points * POINT_WORDS + index * QUAD_WORDS
+    @corners = facing(cast, camera, body, word, seen)
+    (corners == none) { out none }
+    (gpu == no) { out mesh.fill_quad(sink, corners, get(cast, word + 10)) }
+    (body.colored == yes) { out render.add_smooth(sink, corners, [color_of(cast, body, get(cast, word)), color_of(cast, body, get(cast, word + 1)), color_of(cast, body, get(cast, word + 2)), color_of(cast, body, get(cast, word + 3))], camera.width, camera.height) }
+    out render.add_quad(sink, corners, get(cast, word + 10), camera.width, camera.height)
+}
+
+skill body_pass(cast, sink, camera, row, gpu) {
+    @body = part(cast, row)
+    @seen = projected(cast, camera, body)
+    drum (body.quads) { face(cast, sink, camera, body, beat, seen, gpu) }
+    out none
+}
+
+skill ground_pass(cast, sink, camera, cells, gpu) {
+    @body = part(cast, 0)
+    @seen = projected(cast, camera, body)
+    @rows_down = camera.z < body.cz
+    @columns_down = camera.x < body.cx
+    drum (cells) {
+        @row = beat
+        (rows_down == yes) { row = cells - 1 - beat }
+        drum (cells) {
+            @column = beat
+            (columns_down == yes) { column = cells - 1 - beat }
+            face(cast, sink, camera, body, row * cells + column, seen, gpu)
+        }
+    }
+    out none
+}
+
+skill collect(cast, painter, camera, row) {
+    out body_pass(cast, painter, camera, row, yes)
+}
+
+skill draw(cast, screen, camera, row) {
+    out body_pass(cast, screen, camera, row, no)
+}
+
+skill ground_collect(cast, painter, camera, cells) {
+    out ground_pass(cast, painter, camera, cells, yes)
+}
+
+skill ground_draw(cast, screen, camera, cells) {
+    out ground_pass(cast, screen, camera, cells, no)
+}
+
+skill flats(cast) {
+    @rows = []
+    drum (cast.count) {
+        (get(cast, beat * BODY_WORDS + 3) == FLAT) { rows = group.add(rows, beat) }
+    }
+    out rows
+}
+
+skill solids(cast, camera) {
+    @left = []
+    @far_away = []
+    drum (cast.count) {
+        @word = beat * BODY_WORDS
+        (get(cast, word + 3) == SOLID) {
+            @dx = get(cast, word + 6) - camera.x
+            @dy = get(cast, word + 7) - camera.y
+            @dz = get(cast, word + 8) - camera.z
+            left = group.add(left, beat)
+            far_away = group.add(far_away, dx * dx + dy * dy + dz * dz)
+        }
+    }
+    @sorted = []
+    drum (group.count(left)) {
+        @far = 0
+        @far_distance = -1
+        drum (group.count(left)) {
+            @d = group.get(far_away, beat)
+            (d > far_distance) {
+                far = beat
+                far_distance = d
+            }
+        }
+        sorted = group.add(sorted, group.get(left, far))
+        left = group.concat(group.slice(left, 0, far), group.slice(left, far + 1, group.count(left)))
+        far_away = group.concat(group.slice(far_away, 0, far), group.slice(far_away, far + 1, group.count(far_away)))
+    }
+    out sorted
+}

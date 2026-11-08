@@ -51,7 +51,7 @@
 -- store_chunk(agent, bytes) -> agent — кусок программы в bay, ответ "ok N"
 -- handle(agent, bytes) -> agent — ARP или UDP по портам
 -- greet(card) / watch_link(agent) / last_cry(card, message) — сеть и баннеры
--- wait_second(base) / countdown(agent, seconds) — отсчёт перед перезагрузкой
+-- wait_second(base) / countdown(agent, seconds) — отсчёт; нет памяти — без него
 -- draw_progress(agent) — полоса приёма, если экран наш
 -- tick(agent) — один круг: кадры, клавиши раз в KEY_EVERY, часы и системная
 --     панель раз в CLOCK_EVERY
@@ -100,7 +100,7 @@ use os.target.uefi_x86_64.network.mrpc
 use os.target.uefi_x86_64.network.mrpc.data
 use os.target.uefi_x86_64.platform.utf8
 
-VERSION = 37
+VERSION = 41
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -359,6 +359,7 @@ skill info_fields(info) {
         data.number("commands", info.handled),
         data.number("arp", info.arp),
         data.object("screen", screen),
+        data.object("heap", [data.number("used", mem.heap(0)), data.number("escapes", mem.heap(1)), data.number("quota", mem.heap(2))]),
         data.number("failures", info.failures),
         data.text("last_error", info.last_error),
         data.text("wifi", info.wifi)
@@ -458,8 +459,6 @@ skill wake(agent) {
     agent.active_at = day_second(agent.card.base)
     (agent.saver == no) { out no }
     agent.saver = no
-    saver.stop(agent.card.base, agent.dream) rescue |err| { none }
-    agent.dream = none
     clear_screen(agent)
     out yes
 }
@@ -467,8 +466,8 @@ skill wake(agent) {
 skill doze(agent) {
     @idle = (day_second(agent.card.base) - agent.active_at + DAY_SECONDS) % DAY_SECONDS
     (idle < SAVER_AFTER) { out none }
-    @started = saver.start(agent.card.base) rescue |err| { out none }
-    agent.dream = started
+    (agent.dream) |dream| { saver.again(dream, agent.card.base) }
+    (agent.dream == none) { agent.dream = saver.start(agent.card.base) rescue |err| { out none } }
     agent.saver = yes
     out none
 }
@@ -620,13 +619,12 @@ skill wait_second(base) {
 }
 
 skill countdown(agent, seconds) {
-    @base = agent.card.base
     drum (seconds) {
         @left = seconds - beat
-        feed.banner(base, "перезагрузка через {left}...")
-        wait_second(base)
+        feed.banner(agent.card.base, "перезагрузка через {left}...")
+        wait_second(agent.card.base)
     }
-    feed.banner(base, "перезагружаюсь")
+    feed.banner(agent.card.base, "перезагружаюсь")
     out none
 }
 
@@ -676,7 +674,7 @@ skill answer(agent, bytes) {
         open_program(agent) rescue |err| { feed.show_reply(agent, feed.text_bytes("не открылась: {err}", 200)) }
     }
     (agent.restart == yes) {
-        countdown(agent, COUNTDOWN)
+        countdown(agent, COUNTDOWN) rescue |err| { none }
         uefi.restart(agent.card.base)
     }
     out agent
@@ -923,6 +921,7 @@ skill last_cry(card, message) {
 
 skill survive(agent) {
     tick(agent) rescue |err| {
+        (agent.restart == yes) { uefi.restart(agent.card.base) }
         agent.failures = agent.failures + 1
         agent.last_error = "{err}"
         feed.banner(agent.card.base, "сбой в цикле: {err} (агент продолжает работу)")

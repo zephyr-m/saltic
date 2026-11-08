@@ -5,12 +5,13 @@
 -- копируется на экран прошивкой построчно. Камера смотрит на LOOK с орбиты
 -- радиуса RADIUS. Берут программа clay и хранитель экрана агента (agent/saver).
 --
--- Stage { front, sky, back, camera, scene, faces, painter, baked } — painter —
---     [intel_gpu/render.Painter], если задний буфер размечен для видеокарты:
---     грани рисует её 3D-движок, иначе процессор; baked — секунд на постройку; worst — самые долгие части кадра в
---     обновлениях экрана: [небо в задний буфер, сбор граней, видеокарта,
---     вывод на экран]; stalls — последние STALLS долгих кадров видеокарты:
---     [обновлений экрана, хвост рендера до, хвост копирования до]
+-- Stage { front, sky, back, camera, cast, seed, season, faces, painter, baked,
+--     worst_*, stall_* } — сцена лежит слепком в своих страницах (clay/cast;
+--     костыль: долгий Box держал бы каждую старую полянку в куче); season —
+--     номер в season.SEASONS; painter — [intel_gpu/render.Painter], если буфер
+--     размечен для видеокарты, иначе грани рисует процессор; baked — секунд на
+--     постройку; worst_sky, _collect, _gpu, _screen — самые долгие части кадра в
+--     обновлениях экрана; stall_* — последний долгий кадр видеокарты и их число
 -- open_stage(base, front) -> Stage — буферы неба и кадра (страницы), сцена
 -- remake(stage, base) — новая полянка с новым зерном
 -- moment(base) -> секунда суток по часам прошивки
@@ -25,6 +26,7 @@ use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.screen.geometry
 use os.target.uefi_x86_64.screen.clay.mesh
+use os.target.uefi_x86_64.screen.clay.cast
 use os.target.uefi_x86_64.screen.clay.scene
 use os.target.uefi_x86_64.screen.clay.dice
 use os.target.uefi_x86_64.screen.clay.season
@@ -33,7 +35,6 @@ use os.target.uefi_x86_64.drivers.intel_gpu.render
 
 RADIUS = 760
 LOOK = [0, 40, 0]
-STALLS = 6
 WHITE = [255, 255, 255]
 
 Stage = Box {
@@ -41,12 +42,20 @@ Stage = Box {
     sky = graphics.Screen {},
     back = graphics.Screen {},
     camera = mesh.Camera {},
-    scene = scene.Scene {},
+    cast = cast.Cast {},
+    seed = 0,
+    season = 0,
     faces = 0,
     painter = [],
     baked = 0,
-    worst = [0, 0, 0, 0],
-    stalls = []
+    worst_sky = 0,
+    worst_collect = 0,
+    worst_gpu = 0,
+    worst_screen = 0,
+    stall_long = 0,
+    stall_render = 0,
+    stall_blit = 0,
+    stalls = 0
 }
 
 skill paint(screen, color) {
@@ -117,7 +126,9 @@ skill make(stage, base, seed) {
     @began = moment(base)
     @world = scene.build(stage.front, seed)
     draw_sky(stage.sky, world)
-    stage.scene = world
+    cast.fill(stage.cast, world)
+    stage.seed = seed
+    stage.season = season_number(world.season)
     stage.faces = scene.quads(world)
     stage.baked = moment(base) - began
     out none
@@ -131,13 +142,21 @@ skill open_stage(base, front) {
         @made = render.painter(group.get(back.accel, 0), base) rescue |err| { none }
         (made) |made| { painter = [made] }
     }
-    @stage = Stage { front = front, sky = sky, back = back, camera = mesh.Camera { width = front.width, height = front.height }, painter = painter }
+    @stage = Stage { front = front, sky = sky, back = back, camera = mesh.Camera { width = front.width, height = front.height }, cast = cast.open(base), painter = painter }
     make(stage, base, dice.seed(uefi.now(base)))
     out stage
 }
 
 skill remake(stage, base) {
-    out make(stage, base, (stage.scene.seed * 7 + dice.seed(uefi.now(base)) + 1) % 1000000007)
+    out make(stage, base, (stage.seed * 7 + dice.seed(uefi.now(base)) + 1) % 1000000007)
+}
+
+skill season_number(chosen) {
+    drum (group.count(season.SEASONS)) {
+        @one = group.get(season.SEASONS, beat)
+        (one.name == chosen.name) { out beat }
+    }
+    out 0
 }
 
 skill pages(stage) {
@@ -148,20 +167,24 @@ skill close_stage(base, stage) {
     @sky = stage.sky
     @back = stage.back
     uefi.free_pages(base, sky.frame, pages(stage))
+    cast.close(base, stage.cast)
     out uefi.free_pages(base, back.frame, pages(stage))
 }
 
 skill mark(stage, part, from) {
     @now = ticks(stage)
     @spent = (now - from + 4294967296) % 4294967296
-    (spent > group.get(stage.worst, part)) {
-        @worst = []
-        drum (4) {
-            @value = group.get(stage.worst, beat)
-            (beat == part) { value = spent }
-            worst = group.add(worst, value)
-        }
-        stage.worst = worst
+    (part == 0) {
+        (spent > stage.worst_sky) { stage.worst_sky = spent }
+    }
+    (part == 1) {
+        (spent > stage.worst_collect) { stage.worst_collect = spent }
+    }
+    (part == 2) {
+        (spent > stage.worst_gpu) { stage.worst_gpu = spent }
+    }
+    (part == 3) {
+        (spent > stage.worst_screen) { stage.worst_screen = spent }
     }
     out now
 }
@@ -174,8 +197,9 @@ skill render(stage, angle, lift, base) {
     @camera = stage.camera
     @from = [RADIUS * geometry.cosine(angle) / geometry.ONE, lift, RADIUS * geometry.sine(angle) / geometry.ONE]
     mesh.look(camera, from, LOOK)
-    @world = stage.scene
-    @bodies = mesh.order(camera, world.bodies)
+    @set = stage.cast
+    @flats = cast.flats(set)
+    @bodies = cast.solids(set, camera)
     @gpu_ok = no
     (group.count(stage.painter) > 0) {
         @candidate = group.get(stage.painter, 0)
@@ -184,9 +208,9 @@ skill render(stage, angle, lift, base) {
     (gpu_ok == yes) {
         @painter = group.get(stage.painter, 0)
         render.begin(painter)
-        mesh.collect_ground(painter, camera, world.ground, scene.CELLS)
-        drum (group.count(world.flats)) { mesh.collect(painter, camera, group.get(world.flats, beat)) }
-        drum (group.count(bodies)) { mesh.collect(painter, camera, group.get(bodies, beat)) }
+        cast.ground_collect(set, painter, camera, scene.CELLS)
+        drum (group.count(flats)) { cast.collect(set, painter, camera, group.get(flats, beat)) }
+        drum (group.count(bodies)) { cast.collect(set, painter, camera, group.get(bodies, beat)) }
         at = mark(stage, 1, at)
         @tails = intel_gpu.tails(group.get(back.accel, 0))
         @drawn = render.triangles(painter, render.Surface { at = back.frame, pitch = back.stride * graphics.PIXEL_BYTES, width = back.width, height = back.height })
@@ -194,9 +218,10 @@ skill render(stage, angle, lift, base) {
         at = mark(stage, 2, at)
         @spent = (at - before + 4294967296) % 4294967296
         (spent >= 10) {
-            @stalls = group.add(stage.stalls, [spent, group.get(tails, 0), group.get(tails, 1)])
-            (group.count(stalls) > STALLS) { stalls = group.slice(stalls, 1, group.count(stalls)) }
-            stage.stalls = stalls
+            stage.stall_long = spent
+            stage.stall_render = group.get(tails, 0)
+            stage.stall_blit = group.get(tails, 1)
+            stage.stalls = stage.stalls + 1
         }
         (drawn == yes) {
             graphics.push(base, stage.front, back)
@@ -205,8 +230,8 @@ skill render(stage, angle, lift, base) {
         }
         graphics.copy_rect(base, back, stage.sky, 0, 0, back.width, back.height)
     }
-    mesh.ground(back, camera, world.ground, scene.CELLS)
-    drum (group.count(world.flats)) { mesh.draw(back, camera, group.get(world.flats, beat)) }
-    drum (group.count(bodies)) { mesh.draw(back, camera, group.get(bodies, beat)) }
+    cast.ground_draw(set, back, camera, scene.CELLS)
+    drum (group.count(flats)) { cast.draw(set, back, camera, group.get(flats, beat)) }
+    drum (group.count(bodies)) { cast.draw(set, back, camera, group.get(bodies, beat)) }
     out graphics.push(base, stage.front, back)
 }
