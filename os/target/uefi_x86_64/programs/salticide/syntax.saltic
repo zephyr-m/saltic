@@ -1,0 +1,361 @@
+-- syntax — подсветка Saltic в теме 1 автора (как paint в docs/site/IDE.html):
+-- цвет несёт смысл. Навык красит свои вызовы (up), @ и параметры — переменные
+-- (info), |err| и error.X — ошибки (down), enum и Box — типы (name), значения
+-- enum — value, строки, числа и yes/no/none — string, use — use, out, drum,
+-- always, leave, program, native, beat — keyword, комментарий — comment.
+-- Определение навыка и типа — своим цветом текста (tone "").
+--
+-- Scope { name, line, vars, errs } — навык: строка определения, его
+--     переменные и имена ошибок; Info { scopes, types, members }
+-- scan(lines) -> Info — один проход по файлу
+-- line(text, number, info) -> группа атомов TEXT
+-- Внутри: kind / run_end / pieces — куски строки; scope_at; tone_of;
+--     string_parts / close_of — строка с {имя}
+
+use core.str
+use core.group
+use os.ui.jtml.atom
+
+KEYWORDS = ["out", "drum", "always", "leave", "program", "native", "beat"]
+DATA = ["yes", "no", "none"]
+QUOTE = 34
+AT = 64
+OPEN = 40
+DOT = 46
+OPEN_BRACE = 123
+CLOSE_BRACE = 125
+BAR = 124
+OTHER = 0
+WORD = 1
+STRING = 2
+SPACE = 3
+
+Scope = Box {
+    name = "",
+    line = 0,
+    vars = [],
+    errs = []
+}
+
+Info = Box {
+    scopes = [],
+    types = [],
+    members = []
+}
+
+skill kind(byte) {
+    (byte == QUOTE) { out STRING }
+    (byte == 32) { out SPACE }
+    (byte >= 128) { out WORD }
+    (byte == 95) { out WORD }
+    (byte >= 48) {
+        (byte <= 57) { out WORD }
+    }
+    (byte >= 65) {
+        (byte <= 90) { out WORD }
+    }
+    (byte >= 97) {
+        (byte <= 122) { out WORD }
+    }
+    out OTHER
+}
+
+skill run_end(text, start, sort) {
+    @size = str.bytes(text)
+    (sort == STRING) {
+        drum (size - start - 1) {
+            (str.byte(text, start + 1 + beat) == QUOTE) {
+                ((str.byte(text, start + beat) == 92) == no) { out start + 2 + beat }
+            }
+        }
+        out size
+    }
+    (sort == OTHER) { out start + 1 }
+    drum (size - start - 1) {
+        ((kind(str.byte(text, start + 1 + beat)) == sort) == no) { out start + 1 + beat }
+    }
+    out size
+}
+
+skill pieces(text) {
+    @found = []
+    @size = str.bytes(text)
+    @next = 0
+    drum (size) {
+        (beat >= next) {
+            @sort = kind(str.byte(text, beat))
+            @end = run_end(text, beat, sort)
+            (str.byte(text, beat) == AT) {
+                (beat + 1 < size) {
+                    (kind(str.byte(text, beat + 1)) == WORD) {
+                        end = run_end(text, beat + 1, WORD)
+                        sort = WORD
+                    }
+                }
+            }
+            found = group.add(found, [str.slice(text, beat, end), sort])
+            next = end
+        }
+    }
+    out found
+}
+
+skill word_after(text, start) {
+    @size = str.bytes(text)
+    @end = start
+    drum (size - start) {
+        (end == start + beat) {
+            (kind(str.byte(text, start + beat)) == WORD) { end = start + beat + 1 }
+        }
+    }
+    out str.slice(text, start, end)
+}
+
+skill params(text) {
+    @open = 0
+    drum (str.bytes(text)) {
+        (open == 0) {
+            (str.byte(text, beat) == OPEN) { open = beat + 1 }
+        }
+    }
+    @names = []
+    drum (pieces(str.slice(text, open, str.bytes(text)))) {
+        @part = group.get(beat, 0)
+        (part == ")") { leave }
+        (group.get(beat, 1) == WORD) { names = group.add(names, part) }
+    }
+    out names
+}
+
+skill scan(lines) {
+    @info = Info {}
+    @scope = Scope {}
+    @open = no
+    @in_enum = no
+    drum (group.count(lines)) {
+        @text = group.get(lines, beat)
+        @number = beat + 1
+        (str.starts_with(text, "skill ") == yes) {
+            scope = Scope { name = word_after(text, 6), line = number, vars = params(text) }
+            info.scopes = group.add(info.scopes, scope)
+            open = yes
+        }
+        (str.starts_with(text, "program(") == yes) {
+            scope = Scope { name = "program", line = number, vars = params(text) }
+            info.scopes = group.add(info.scopes, scope)
+            open = yes
+        }
+        (str.contains(text, " = enum") == yes) {
+            info.types = group.add(info.types, [word_after(text, 0), number])
+            in_enum = yes
+        }
+        (str.contains(text, " = Box") == yes) { info.types = group.add(info.types, [word_after(text, 0), number]) }
+        (in_enum == yes) {
+            (str.starts_with(text, "    ") == yes) { info.members = group.add(info.members, word_after(text, 4)) }
+        }
+        (open == yes) {
+            drum (pieces(text)) {
+                @part = group.get(beat, 0)
+                (str.starts_with(part, "@") == yes) { scope.vars = group.add(scope.vars, str.slice(part, 1, str.bytes(part))) }
+            }
+            @bar = 0
+            drum (str.bytes(text)) {
+                (bar == 0) {
+                    (str.byte(text, beat) == BAR) { bar = beat + 1 }
+                }
+            }
+            (bar > 0) {
+                @name = word_after(text, bar)
+                scope.vars = group.add(scope.vars, name)
+                scope.errs = group.add(scope.errs, name)
+            }
+        }
+        (str.starts_with(text, "\}") == yes) {
+            open = no
+            in_enum = no
+        }
+    }
+    out info
+}
+
+skill scope_at(info, number) {
+    @best = Scope {}
+    drum (info.scopes) {
+        (beat.line <= number) { best = beat }
+    }
+    out best
+}
+
+skill defined_skill(info, word, number) {
+    drum (info.scopes) {
+        (beat.name == word) {
+            (beat.line == number) { out yes }
+        }
+    }
+    out no
+}
+
+skill known_skill(info, word) {
+    drum (info.scopes) {
+        (beat.name == word) { out yes }
+    }
+    out no
+}
+
+skill defined_type(info, word, number) {
+    drum (info.types) {
+        (group.get(beat, 0) == word) {
+            (group.get(beat, 1) == number) { out yes }
+        }
+    }
+    out no
+}
+
+skill capital(word) {
+    @first = str.byte(word, 0)
+    (first >= 65) {
+        (first <= 90) { out yes }
+    }
+    out no
+}
+
+skill shouting(word) {
+    drum (str.bytes(word)) {
+        @byte = str.byte(word, beat)
+        (byte >= 97) {
+            (byte <= 122) { out no }
+        }
+    }
+    out capital(word)
+}
+
+skill tone_of(info, scope, word, around, number) {
+    @dotted = group.get(around, 0)
+    @before = group.get(around, 1)
+    @call = group.get(around, 2)
+    (str.starts_with(word, "@") == yes) { out "info" }
+    (str.is_digit(str.get(word, 0)) == yes) { out "string" }
+    (group.contains(DATA, word) == yes) { out "string" }
+    (word == "use") { out "use" }
+    (word == "skill") { out "up" }
+    (word == "enum") { out "name" }
+    (word == "Box") { out "name" }
+    (word == "rescue") { out "down" }
+    (group.contains(KEYWORDS, word) == yes) { out "keyword" }
+    (word == "error") { out "down" }
+    (dotted == yes) {
+        (before == "error") { out "down" }
+    }
+    (group.contains(scope.errs, word) == yes) {
+        (dotted == no) { out "down" }
+    }
+    (defined_skill(info, word, number) == yes) {
+        ((word == "program") == no) { out "" }
+    }
+    (defined_type(info, word, number) == yes) { out "" }
+    (shouting(word) == yes) {
+        (dotted == yes) { out "value" }
+        (group.contains(info.members, word) == yes) { out "value" }
+        out "string"
+    }
+    (capital(word) == yes) { out "name" }
+    (call == yes) {
+        (dotted == yes) { out "up" }
+        (known_skill(info, word) == yes) { out "up" }
+    }
+    (dotted == no) {
+        (group.contains(scope.vars, word) == yes) { out "info" }
+    }
+    out ""
+}
+
+skill piece(value, tone) {
+    @node = atom.text(value)
+    node.tone = tone
+    out node
+}
+
+skill close_of(text, start) {
+    drum (str.bytes(text) - start) {
+        (str.byte(text, start + beat) == CLOSE_BRACE) { out start + beat }
+    }
+    out -1
+}
+
+skill string_parts(text, scope) {
+    @nodes = []
+    @size = str.bytes(text)
+    @next = 0
+    @from = 0
+    drum (size) {
+        @at = beat
+        (at >= next) {
+            (str.byte(text, at) == OPEN_BRACE) {
+                @end = close_of(text, at)
+                (end > at) {
+                    (at > from) { nodes = group.add(nodes, piece(str.slice(text, from, at), "string")) }
+                    @name = str.slice(text, at + 1, end)
+                    @tone = "info"
+                    (group.contains(scope.errs, name) == yes) { tone = "down" }
+                    nodes = group.add(nodes, piece(str.slice(text, at, end + 1), tone))
+                    from = end + 1
+                    next = end + 1
+                }
+            }
+        }
+    }
+    (from < size) { nodes = group.add(nodes, piece(str.slice(text, from, size), "string")) }
+    out nodes
+}
+
+skill line(text, number, info) {
+    @trimmed = 0
+    drum (str.bytes(text)) {
+        (trimmed == beat) {
+            (str.byte(text, beat) == 32) { trimmed = beat + 1 }
+        }
+    }
+    (str.starts_at(text, "--", trimmed) == yes) {
+        out [piece(str.slice(text, 0, trimmed), ""), piece(str.slice(text, trimmed, str.bytes(text)), "comment")]
+    }
+    @scope = scope_at(info, number)
+    @parts = pieces(text)
+    @nodes = []
+    @seen = []
+    drum (group.count(parts)) {
+        @index = beat
+        @part = group.get(parts, index)
+        @value = group.get(part, 0)
+        @sort = group.get(part, 1)
+        (sort == SPACE) { nodes = group.add(nodes, piece(value, "")) }
+        (sort == STRING) {
+            nodes = group.concat(nodes, string_parts(value, scope))
+            seen = group.add(seen, value)
+        }
+        (sort == OTHER) {
+            @tone = ""
+            (value == "|") {
+                (str.contains(text, "rescue") == yes) { tone = "down" }
+            }
+            nodes = group.add(nodes, piece(value, tone))
+            seen = group.add(seen, value)
+        }
+        (sort == WORD) {
+            @count = group.count(seen)
+            @dotted = no
+            @before = ""
+            (count > 0) {
+                (group.get(seen, count - 1) == ".") { dotted = yes }
+            }
+            (count > 1) { before = group.get(seen, count - 2) }
+            @call = no
+            @after = index + 1
+            (after < group.count(parts)) {
+                (group.get(group.get(parts, after), 0) == "(") { call = yes }
+            }
+            nodes = group.add(nodes, piece(value, tone_of(info, scope, value, [dotted, before, call], number)))
+            seen = group.add(seen, value)
+        }
+    }
+    out nodes
+}

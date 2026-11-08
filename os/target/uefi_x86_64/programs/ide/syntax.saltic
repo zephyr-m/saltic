@@ -1,0 +1,104 @@
+-- syntax — подсветка строки Saltic для редактора IDE: строка режется на куски
+-- (слово, число, строка в кавычках, остальное), каждый кусок — атом TEXT со
+-- своим tone: keyword — ключевые слова, string, number, comment — строка от
+-- «--», name — слово с заглавной буквы или имя модуля перед точкой.
+--
+-- KEYWORDS — ключевые слова языка
+-- line(text) -> группа атомов TEXT для ряда без промежутков
+-- Внутри: kind(byte) — 0 прочее, 1 буква, 2 цифра, 3 кавычка; run_end(text,
+--     start, kind) -> конец куска; tone_of(text, word, end) -> tone слова
+
+use core.str
+use core.group
+use os.ui.jtml.atom
+
+KEYWORDS = ["skill", "out", "use", "drum", "always", "program", "leave", "pick", "rescue", "yes", "no", "none", "enum", "native", "Box"]
+QUOTE = 34
+DOT = 46
+UNDERSCORE = 95
+OTHER = 0
+LETTER = 1
+DIGIT = 2
+STRING = 3
+
+skill kind(byte) {
+    (byte == QUOTE) { out STRING }
+    (byte >= 128) { out LETTER }
+    (byte == UNDERSCORE) { out LETTER }
+    (byte >= 48) {
+        (byte <= 57) { out DIGIT }
+    }
+    (byte >= 65) {
+        (byte <= 90) { out LETTER }
+    }
+    (byte >= 97) {
+        (byte <= 122) { out LETTER }
+    }
+    out OTHER
+}
+
+skill run_end(text, start, sort) {
+    @size = str.bytes(text)
+    (sort == STRING) {
+        drum (size - start - 1) {
+            (str.byte(text, start + 1 + beat) == QUOTE) { out start + 2 + beat }
+        }
+        out size
+    }
+    drum (size - start - 1) {
+        @next = kind(str.byte(text, start + 1 + beat))
+        @same = next == sort
+        (sort == LETTER) {
+            (next == DIGIT) { same = yes }
+        }
+        (sort == DIGIT) {
+            (str.byte(text, start + 1 + beat) == DOT) { same = yes }
+        }
+        (same == no) { out start + 1 + beat }
+    }
+    out size
+}
+
+skill tone_of(text, word, end) {
+    (group.contains(KEYWORDS, word) == yes) { out "keyword" }
+    @first = str.byte(word, 0)
+    (first >= 65) {
+        (first <= 90) { out "name" }
+    }
+    (end < str.bytes(text)) {
+        (str.byte(text, end) == DOT) { out "name" }
+    }
+    out ""
+}
+
+skill piece(value, tone) {
+    @node = atom.text(value)
+    node.tone = tone
+    out node
+}
+
+skill line(text) {
+    @size = str.bytes(text)
+    @nodes = []
+    @next = 0
+    drum (size) {
+        (beat >= next) {
+            (str.starts_at(text, "--", beat) == yes) {
+                nodes = group.add(nodes, piece(str.slice(text, beat, size), "comment"))
+                next = size
+            }
+            (beat >= next) {
+                @sort = kind(str.byte(text, beat))
+                @end = run_end(text, beat, sort)
+                @word = str.slice(text, beat, end)
+                @tone = ""
+                (sort == STRING) { tone = "string" }
+                (sort == DIGIT) { tone = "number" }
+                (sort == LETTER) { tone = tone_of(text, word, end) }
+                nodes = group.add(nodes, piece(word, tone))
+                next = end
+            }
+        }
+    }
+    out nodes
+}
