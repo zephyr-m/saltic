@@ -1,0 +1,98 @@
+-- input — ввод программы на Linux: rt_platform_read_line (io.read_line) — одна
+-- строка стандартного ввода без «\n» (и без «\r» перед ним). Читает по байту
+-- (read(0, …, 1)) в буфер на стеке до LINE_LIMIT байт (не в bss: иначе каждая
+-- программа под Linux росла бы на буфер), ставит нуль и отдаёт копию строкой
+-- (rt_cstring). Конец ввода, когда не прочитано ни байта, и ошибка чтения —
+-- File; строка длиннее LINE_LIMIT — остаток придёт следующим вызовом. Байт 0
+-- внутри строки её обрезает. Кадр: возврат, счётчик, буфер.
+--
+-- emit_read_line(compiler) — метка rt_platform_read_line
+-- Внутри: grow / shrink(compiler) — кадр на стеке; buffer(compiler, to) — адрес
+
+use core.system
+use selfhost.abi
+use selfhost.compiler.backend
+use selfhost.compiler.platform
+use selfhost.compiler.backend.rv32i.runtime.tails
+
+LINE_LIMIT = 65536
+NEWLINE = 10
+CARRIAGE = 13
+STDIN = 0
+
+skill frame_bytes(words) {
+    out LINE_LIMIT + words.bytes * 3
+}
+
+skill grow(compiler) {
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 0 - frame_bytes(compiler.words))
+    out executor.add(compiler, backend.STACK, backend.STACK, backend.SCRATCH0)
+}
+
+skill shrink(compiler) {
+    @executor = compiler.executor
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, frame_bytes(compiler.words))
+    out executor.add(compiler, backend.STACK, backend.STACK, backend.SCRATCH0)
+}
+
+skill buffer(compiler, to) {
+    @executor = compiler.executor
+    out executor.add_immediate(compiler, to, backend.STACK, compiler.words.bytes * 2)
+}
+
+skill emit_read_line(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, platform.READ_LINE)
+    compiler = grow(compiler)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.label(compiler, ".L_read_line_next")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, LINE_LIMIT)
+    compiler = executor.branch_greater_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_read_line_done")
+    compiler = buffer(compiler, backend.SCRATCH1)
+    compiler = executor.add(compiler, backend.ERROR, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.load_immediate(compiler, backend.VALUE, STDIN)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 1)
+    compiler = executor.syscall(compiler, system.SYSCALL_READ)
+    compiler = executor.branch_negative(compiler, backend.VALUE, ".L_read_line_failed")
+    compiler = executor.branch_zero(compiler, backend.VALUE, ".L_read_line_end")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = buffer(compiler, backend.SCRATCH1)
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH2, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, NEWLINE)
+    compiler = executor.branch_equal(compiler, backend.SCRATCH3, backend.SCRATCH4, ".L_read_line_done")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.jump(compiler, ".L_read_line_next")
+    compiler = executor.label(compiler, ".L_read_line_end")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_read_line_failed")
+    compiler = executor.label(compiler, ".L_read_line_done")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = buffer(compiler, backend.SCRATCH1)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_read_line_cut")
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, -1)
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH2, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, CARRIAGE)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH3, backend.SCRATCH4, ".L_read_line_cut")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, -1)
+    compiler = executor.label(compiler, ".L_read_line_cut")
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.store_byte_zero(compiler, backend.SCRATCH2, 0)
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH1)
+    compiler = executor.call(compiler, "rt_cstring")
+    compiler = shrink(compiler)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_read_line_failed")
+    compiler = shrink(compiler)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_FILE)
+    out executor.ret(compiler)
+}
