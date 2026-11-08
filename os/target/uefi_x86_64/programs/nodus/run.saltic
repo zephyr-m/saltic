@@ -8,29 +8,43 @@
 -- Что считать — по заголовку:
 --   число, текст — своё значение; время — секунды с запуска
 --   сложить, вычесть, умножить, делить, синус (градусы) — числа
---   равно, меньше, или (1/0), если (условие, а, б; условие не 0 — а),
+--   равно, меньше, или, и, исключающее или (1/0; не 0 — «да»), если (условие, а, б; условие не 0 — а),
 --   склеить (тексты), список (пустой), добавить (список, элемент), взять
 --   (список, номер с 0), длина (символов или элементов)
+--   целое (дробь прочь), остаток (а по модулю б, целые)
+--   цифра — 0…9 → картинка 5×8 (список рядов из 0 и 1, шрифт DIGITS);
+--     рядом (картинка, картинка) — склеить по горизонтали через пустой столбец
+--   регистр — отдаёт то, что запомнил (сначала 0), вход не спрашивает; по
+--     такту (clock) все регистры графа разом запоминают свой вход — так петля
+--     «регистр → сумматор → регистр» не цикл, а счётчик
+--   экран — отдаёт картинку, её точки — в node.picture (рисует look)
 --   свернуть — входы: текст, затем состояния; программа узла (called)
 --     получает состояния и символ и отдаёт новые состояния — по символу
 --   показать, график, выход — отдают пришедшее
--- Вставленная программа (вид CALL) считается внутри: её узлы «вход» по
--- порядку получают пришедшее, её узлы «выход» по порядку — выходы узла.
--- Программы на время одного пересчёта лежат в Shelf (с диска — один раз).
+-- Вставленная программа (вид CALL) считается внутри своей копии графа
+-- (node.inside, с диска один раз на узел): её узлы «вход» по порядку
+-- получают пришедшее, её узлы «выход» по порядку — выходы узла; регистры
+-- копии помнят своё, такт доходит до них на любой глубине.
+-- Прочитанные программы лежат в Shelf, его держит вызывающий: с диска —
+-- один раз, пока граф не правили.
 -- Нет входа, не тот вид значения, неизвестный узел — значения нет.
 -- Результат — в node.result (текст), на диск не пишется; график копит
 -- node.history (последние HISTORY чисел).
 --
 -- Val { kind, number, text, items } — значение; NUMBER, TEXT, LIST
--- Run { base, shelf, nodes, now, slots, depth, values, states } — один
+-- Run { base, shelf, nodes, now, slots, depth, values, states, children } — один
 --     пересчёт одного графа: slots — что получили узлы «вход», states —
---     WAITING, BUSY, DONE, FAILED по узлам
+--     WAITING, BUSY, DONE, FAILED по узлам; children — пересчёты вставленных
+--     программ (для такта)
 -- MILLI, HISTORY, DEPTH — единица, длина истории, глубина вставок
--- evaluate(base, nodes_graph, now, live) — посчитать граф; now — секунды ×
---     MILLI; live = yes — добавить точку графикам
+-- evaluate(base, shelf, nodes_graph, now, live, clock) — посчитать граф;
+--     shelf — прочитанные программы (живут между пересчётами); now —
+--     секунды × MILLI; live = yes — добавить точку графикам; clock = yes —
+--     такт: регистры запоминают входы
 -- number_of(text) -> число из «3», «-2», «0.5»; NotNumber
 -- shown(value) -> текст Val: 3.5, 'слово', [a, b] (кавычек «» нет в шрифте)
--- ticking(nodes_graph) -> yes, если в графе есть «время»
+-- ticking(nodes_graph) -> yes, если в графе есть «время», «регистр» или
+--     вставленная программа (в ней может быть память)
 
 use core.str
 use core.num
@@ -46,6 +60,18 @@ LIST = 2
 MILLI = 1000
 HISTORY = 60
 DEPTH = 64
+DIGITS = [
+    ["01110", "10001", "10011", "10101", "11001", "10001", "01110", "00000"],
+    ["00100", "01100", "00100", "00100", "00100", "00100", "01110", "00000"],
+    ["01110", "10001", "00001", "00010", "00100", "01000", "11111", "00000"],
+    ["11111", "00010", "00100", "00010", "00001", "10001", "01110", "00000"],
+    ["00010", "00110", "01010", "10010", "11111", "00010", "00010", "00000"],
+    ["11111", "10000", "11110", "00001", "00001", "10001", "01110", "00000"],
+    ["00110", "01000", "10000", "11110", "10001", "10001", "01110", "00000"],
+    ["11111", "00001", "00010", "00100", "01000", "01000", "01000", "00000"],
+    ["01110", "10001", "10001", "01110", "10001", "10001", "01110", "00000"],
+    ["01110", "10001", "10001", "01111", "00001", "00010", "01100", "00000"]
+]
 WAITING = 0
 BUSY = 1
 DONE = 2
@@ -71,7 +97,8 @@ Run = Box {
     slots = [],
     depth = 0,
     values = [],
-    states = []
+    states = [],
+    children = []
 }
 
 skill numeric(value) {
@@ -147,6 +174,8 @@ skill same(a, b) {
 skill ticking(nodes_graph) {
     drum (nodes_graph.nodes) {
         (beat.title == "время") { out yes }
+        (beat.title == "регистр") { out yes }
+        (beat.kind == graph.CALL) { out yes }
     }
     out no
 }
@@ -203,6 +232,62 @@ skill arithmetic(title, args) {
     out none
 }
 
+skill glyph(digit) {
+    (digit < 0) { out none }
+    (digit > 9) { out none }
+    @rows = []
+    drum (group.get(DIGITS, digit)) {
+        @line = beat
+        @row = []
+        drum (str.bytes(line)) { row = group.add(row, numeric((str.byte(line, beat) - 48) * MILLI)) }
+        rows = group.add(rows, Val { kind = LIST, items = row })
+    }
+    out Val { kind = LIST, items = rows }
+}
+
+skill beside(a, b) {
+    ((a.kind == LIST) == no) { out none }
+    ((b.kind == LIST) == no) { out none }
+    ((group.count(a.items) == group.count(b.items)) == no) { out none }
+    @rows = []
+    drum (group.count(a.items)) {
+        @left = group.get(a.items, beat)
+        @right = group.get(b.items, beat)
+        rows = group.add(rows, Val { kind = LIST, items = group.concat(group.add(left.items, numeric(0)), right.items) })
+    }
+    out Val { kind = LIST, items = rows }
+}
+
+skill shapes(title, args) {
+    (numbers(args, 1) == no) {
+        (title == "рядом") {
+            (group.count(args) < 2) { out none }
+            @joined = beside(group.get(args, 0), group.get(args, 1))
+            (joined) |joined| { out [joined] }
+        }
+        (title == "экран") {
+            (group.count(args) > 0) { out [group.get(args, 0)] }
+        }
+        out none
+    }
+    @a = group.get(args, 0)
+    (title == "целое") { out [numeric(a.number / MILLI * MILLI)] }
+    (title == "цифра") {
+        @made = glyph(a.number / MILLI)
+        (made) |made| { out [made] }
+        out none
+    }
+    (numbers(args, 2) == yes) {
+        @b = group.get(args, 1)
+        (title == "остаток") {
+            @divisor = b.number / MILLI
+            (divisor == 0) { out none }
+            out [numeric(a.number / MILLI % divisor * MILLI)]
+        }
+    }
+    out none
+}
+
 skill words(title, args) {
     (title == "список") { out [Val { kind = LIST }] }
     (group.count(args) == 0) { out none }
@@ -244,6 +329,15 @@ skill words(title, args) {
             (a.number == 0) {
                 (b.number == 0) { out [numeric(0)] }
             }
+            out [numeric(MILLI)]
+        }
+        (title == "и") {
+            (a.number == 0) { out [numeric(0)] }
+            (b.number == 0) { out [numeric(0)] }
+            out [numeric(MILLI)]
+        }
+        (title == "исключающее или") {
+            ((a.number == 0) == (b.number == 0)) { out [numeric(0)] }
             out [numeric(MILLI)]
         }
     }
@@ -291,7 +385,21 @@ skill start(base, shelf, nodes_graph, now, bound, depth) {
 
 skill outputs_of(run, inside, bound) {
     (run.depth >= DEPTH) { out none }
-    @inner = start(run.base, run.shelf, inside, run.now, bound, run.depth + 1)
+    out outputs_from(start(run.base, run.shelf, inside, run.now, bound, run.depth + 1))
+}
+
+skill instance_of(run, node) {
+    (group.count(node.inside) > 0) { out group.get(node.inside, 0) }
+    @spot = look.View {}
+    @loaded = disk.load(run.base, node.called, spot) rescue |err| { none }
+    @inside = graph.Graph {}
+    (loaded) |loaded| { inside = loaded }
+    node.inside = [inside]
+    out inside
+}
+
+skill outputs_from(inner) {
+    @inside = inner.nodes
     @outputs = []
     drum (group.count(inside.nodes)) {
         @node = group.get(inside.nodes, beat)
@@ -330,7 +438,12 @@ skill compute(run, node, args, slot) {
         (group.count(slot) > 0) { out slot }
         out none
     }
-    (node.kind == graph.CALL) { out outputs_of(run, shelved(run.base, run.shelf, node.called), args) }
+    (node.kind == graph.CALL) {
+        (run.depth >= DEPTH) { out none }
+        @inner = start(run.base, run.shelf, instance_of(run, node), run.now, args, run.depth + 1)
+        run.children = group.add(run.children, inner)
+        out outputs_from(inner)
+    }
     (title == "число") {
         @value = number_of(node.value) rescue |err| { out none }
         out [numeric(value)]
@@ -338,6 +451,8 @@ skill compute(run, node, args, slot) {
     (title == "текст") { out [textual(node.value)] }
     (title == "время") { out [numeric(run.now)] }
     (title == "свернуть") { out fold(run, node, args) }
+    @shaped = shapes(title, args)
+    (shaped) |shaped| { out shaped }
     @counted = arithmetic(title, args)
     (counted) |counted| { out counted }
     @worded = words(title, args)
@@ -352,6 +467,10 @@ skill compute(run, node, args, slot) {
 
 skill work(run, index) {
     @node = group.get(run.nodes.nodes, index)
+    (node.title == "регистр") {
+        (group.count(node.memory) > 0) { out node.memory }
+        out [numeric(0)]
+    }
     (node.title == "если") {
         @condition = input(run, index, 0)
         (condition) |condition| {
@@ -395,8 +514,28 @@ skill demand(run, index) {
     out kept
 }
 
-skill evaluate(base, nodes_graph, now, live) {
-    @run = start(base, Shelf {}, nodes_graph, now, [], 0)
+skill bits_of(value) {
+    @rows = []
+    (value.kind == LIST) {
+        drum (value.items) {
+            @row = []
+            (beat.kind == LIST) {
+                drum (beat.items) {
+                    @dot = 0
+                    (beat.kind == NUMBER) {
+                        ((beat.number == 0) == no) { dot = 1 }
+                    }
+                    row = group.add(row, dot)
+                }
+            }
+            rows = group.add(rows, row)
+        }
+    }
+    out rows
+}
+
+skill evaluate(base, shelf, nodes_graph, now, live, clock) {
+    @run = start(base, shelf, nodes_graph, now, [], 0)
     drum (group.count(nodes_graph.nodes)) {
         @node = group.get(nodes_graph.nodes, beat)
         node.result = ""
@@ -405,6 +544,7 @@ skill evaluate(base, nodes_graph, now, live) {
             (group.count(outputs) > 0) {
                 @first = group.get(outputs, 0)
                 node.result = shown(first)
+                (node.title == "экран") { node.picture = bits_of(first) }
                 (node.title == "график") {
                     (live == yes) {
                         (first.kind == NUMBER) {
@@ -417,5 +557,26 @@ skill evaluate(base, nodes_graph, now, live) {
             }
         }
     }
+    (clock == yes) { latch(run) }
+    out none
+}
+
+skill latch(run) {
+    @latched = []
+    drum (group.count(run.nodes.nodes)) {
+        @node = group.get(run.nodes.nodes, beat)
+        @next = []
+        (node.title == "регистр") {
+            @got = input(run, beat, 0)
+            (got) |got| { next = [got] }
+        }
+        latched = group.add(latched, next)
+    }
+    drum (group.count(run.nodes.nodes)) {
+        @node = group.get(run.nodes.nodes, beat)
+        @next = group.get(latched, beat)
+        (group.count(next) > 0) { node.memory = next }
+    }
+    drum (run.children) { latch(beat) }
     out none
 }

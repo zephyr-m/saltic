@@ -1,9 +1,7 @@
 -- nodus — Nodus: холст живого графа. Узлы — карточки со входами и выходами,
--- связи — плавные кривые (programs/nodus/{graph,look}). Пока только вид:
--- пример из рисунка, значения нарисованы. Первые WIDE_AFTER секунд — в
--- середине экрана между панелями, потом холст на весь экран (remote больше
--- не рисует панели), граф остаётся на том же месте. Кадр рисуется в задний
--- буфер и ложится на экран целиком, только когда что-то поменялось.
+-- связи — плавные кривые (programs/nodus/{graph,look}). Холст сразу на весь
+-- экран: remote больше не рисует панели. Кадр рисуется в задний буфер и
+-- ложится на экран целиком, только когда что-то поменялось.
 -- По mRPC — свои команды (programs/nodus/commands: nodes, node, link, set,
 -- remove, unlink, clear, view): граф собирают по сети.
 -- Программы-ноды: слева список (programs/nodus/catalog), у каждой свой граф
@@ -12,23 +10,24 @@
 -- последней правки, при выходе по Esc и перед открытием другой. [ и ] —
 -- предыдущая и следующая программа; команда open кладёт номер в wanted.
 -- Граф считает (programs/nodus/run): после правки, при открытии и, если в
--- нём есть «время», сам каждые TICK_EVERY проходов (время — по проходам
+-- нём есть «время» или «регистр», сам каждые TICK_EVERY проходов (время — по проходам
 -- цикла, PAUSE на проход).
--- Клавиши: Tab — выбрать следующий узел или холст; стрелки — двигать холст
+-- Клавиши: - и = — масштаб (ZOOM_LEAST…ZOOM_MOST %); Tab — выбрать следующий узел или холст; стрелки — двигать холст
 -- или выбранный узел; Esc — выход. По сети — state, quit, key, shot.
 --
--- Desk { base, middle, whole, back, narrow, nodes, view, palette, wide,
---     started, dirty, unsaved, changed, catalog, wanted, link } — narrow — тот же задний
---     буфер шириной middle; unsaved — есть правки не на диске, changed —
+-- Desk { base, whole, back, nodes, view, palette, dirty, unsaved, changed,
+--     catalog, wanted, link } — unsaved — есть правки не на диске, changed —
 --     секунда последней правки
 -- touched(desk) — граф поменялся: перерисовать и сохранить позже
--- save_now(desk) — на диск; сдвиг холста — как между панелями
+-- save_now(desk) — на диск вместе со сдвигом холста
 -- file(desk) -> файл открытой программы; switch(desk) — открыть wanted
--- recount(desk, live) — посчитать граф; live — добавить точку графикам
+-- zoom(desk, step) — масштаб на step процентов
+-- recount(desk, live) — посчитать граф; live — добавить точку графикам; в
+--     живом пересчёте смена секунды часов — такт для регистров; прочитанные
+--     программы — в desk.shelf, сбрасываются при правке и переключении
 -- moment(base) -> секунда суток
 -- status(desk) -> строка внизу
 -- steer(desk, key) — клавиша; out yes — выход
--- widen(desk) — на весь экран
 -- show(desk) — нарисовать и выложить кадр
 -- answer(desk, link, packet) — ответить на команду mRPC программы
 -- program() — вход
@@ -48,7 +47,6 @@ use os.target.uefi_x86_64.programs.nodus.run
 use os.target.uefi_x86_64.network.mrpc
 
 PAUSE = 10000
-WIDE_AFTER = 10
 SAVE_AFTER = 2
 CLOCK_EVERY = 20
 TICK_EVERY = 10
@@ -61,26 +59,30 @@ SCAN_RIGHT = 3
 SCAN_LEFT = 4
 SCAN_ESCAPE = 23
 TAB = 9
+ZOOM_OUT = 45
+ZOOM_IN = 61
+ZOOM_IN_SHIFTED = 43
+ZOOM_STEP = 10
+ZOOM_LEAST = 30
+ZOOM_MOST = 150
 BACK = 91
 NEXT = 93
 
 Desk = Box {
     base = [],
-    middle = graphics.Screen {},
     whole = graphics.Screen {},
     back = graphics.Screen {},
-    narrow = graphics.Screen {},
     nodes = graph.Graph {},
     view = look.View {},
     palette = look.Palette {},
-    wide = no,
-    started = 0,
     dirty = yes,
     unsaved = no,
     changed = 0,
     catalog = catalog.Catalog {},
     wanted = -1,
     rounds = 0,
+    second = -1,
+    shelf = run.Shelf {},
     link = none
 }
 
@@ -105,10 +107,7 @@ skill status(desk) {
 }
 
 skill save_now(desk) {
-    @view = desk.view
-    @x = view.x
-    (desk.wide == yes) { x = x - graphics.side_width(desk.whole.width) }
-    out disk.save(desk.base, file(desk), desk.nodes, look.View { x = x, y = view.y })
+    out disk.save(desk.base, file(desk), desk.nodes, desk.view)
 }
 
 skill file(desk) {
@@ -136,18 +135,25 @@ skill switch(desk) {
     catalog.save(desk.base, registry)
     @view = look.View {}
     desk.nodes = opened(desk.base, registry, view)
-    (desk.wide == yes) { view.x = view.x + graphics.side_width(desk.whole.width) }
     desk.view = view
+    desk.shelf = run.Shelf {}
     recount(desk, no)
     desk.dirty = yes
     out none
 }
 
 skill recount(desk, live) {
-    out run.evaluate(desk.base, desk.nodes, desk.rounds * PAUSE / 1000, live)
+    @clock = no
+    (live == yes) {
+        @second = moment(desk.base)
+        clock = (second == desk.second) == no
+        desk.second = second
+    }
+    out run.evaluate(desk.base, desk.shelf, desk.nodes, desk.rounds * PAUSE / 1000, live, clock)
 }
 
 skill touched(desk) {
+    desk.shelf = run.Shelf {}
     recount(desk, no)
     desk.dirty = yes
     desk.unsaved = yes
@@ -169,6 +175,14 @@ skill shift(desk, dx, dy) {
     out none
 }
 
+skill zoom(desk, step) {
+    @view = desk.view
+    view.zoom = view.zoom + step
+    (view.zoom < ZOOM_LEAST) { view.zoom = ZOOM_LEAST }
+    (view.zoom > ZOOM_MOST) { view.zoom = ZOOM_MOST }
+    out touched(desk)
+}
+
 skill steer(desk, key) {
     (key.ready == no) { out no }
     (key.scan == SCAN_ESCAPE) { out yes }
@@ -178,6 +192,9 @@ skill steer(desk, key) {
         view.chosen = view.chosen + 1
         (view.chosen >= group.count(desk.nodes.nodes)) { view.chosen = -1 }
     }
+    (key.char == ZOOM_OUT) { zoom(desk, 0 - ZOOM_STEP) }
+    (key.char == ZOOM_IN) { zoom(desk, ZOOM_STEP) }
+    (key.char == ZOOM_IN_SHIFTED) { zoom(desk, ZOOM_STEP) }
     @count = group.count(desk.catalog.entries)
     (key.char == BACK) { desk.wanted = (desk.catalog.open + count - 1) % count }
     (key.char == NEXT) { desk.wanted = (desk.catalog.open + 1) % count }
@@ -188,29 +205,14 @@ skill steer(desk, key) {
     out no
 }
 
-skill widen(desk) {
-    desk.wide = yes
-    desk.dirty = yes
-    @view = desk.view
-    view.x = view.x + graphics.side_width(desk.whole.width)
-    @link = desk.link
-    (link) |link| { remote.hide_panels(link) }
-    out none
-}
-
 skill show(desk) {
     desk.dirty = no
-    @screen = desk.narrow
-    @front = desk.middle
-    (desk.wide == yes) {
-        screen = desk.back
-        front = desk.whole
-    }
+    @screen = desk.back
     @text = status(desk)
     @names = []
     drum (desk.catalog.entries) { names = group.add(names, beat.name) }
     look.draw(desk.base, screen, desk.nodes, desk.view, desk.palette, text, [names, desk.catalog.open])
-    graphics.push(desk.base, front, screen)
+    graphics.push(desk.base, desk.whole, screen)
     @link = desk.link
     (link) |link| { remote.tell(link, "nodus: {text}") }
     out none
@@ -232,19 +234,18 @@ skill answer(desk, link, packet) {
 program() {
     @base = firmware.guest_base()
     uefi.forget_keys(base)
-    @middle = graphics.open(base)
     @whole = graphics.open_whole(base)
     @back = graphics.buffer_like(base, whole)
-    @narrow = graphics.Screen { width = middle.width, height = middle.height, stride = back.stride, format = back.format, frame = back.frame, memory = back.memory, accel = back.accel }
     @link = remote.open_remote() rescue |err| { none }
     (link) |link| {
         remote.own(link, back.frame, graphics.buffer_pages(whole))
         remote.offer(link, commands.COMMANDS)
+        remote.hide_panels(link)
     }
     @view = look.View {}
     @registry = catalog.load(base)
     @nodes = opened(base, registry, view)
-    @desk = Desk { catalog = registry, base = base, middle = middle, whole = whole, back = back, narrow = narrow, nodes = nodes, view = view, palette = look.palette(whole), started = moment(base), link = link }
+    @desk = Desk { catalog = registry, base = base, whole = whole, back = back, nodes = nodes, view = view, palette = look.palette(whole), link = link }
     recount(desk, no)
     always {
         (link) |link| {
@@ -271,11 +272,6 @@ program() {
                     save_now(desk)
                     desk.unsaved = no
                 }
-            }
-        }
-        (desk.wide == no) {
-            (rounds % CLOCK_EVERY == 0) {
-                ((moment(base) - desk.started + DAY) % DAY >= WIDE_AFTER) { widen(desk) }
             }
         }
         (desk.dirty == yes) { show(desk) }

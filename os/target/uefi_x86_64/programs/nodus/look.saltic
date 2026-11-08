@@ -6,7 +6,11 @@
 -- пишет мимо буфера.
 --
 -- Palette — цвета, готовые пиксели экрана; palette(screen) -> Palette
--- View { x, y, chosen } — сдвиг холста и выбранный узел (-1 — холст)
+-- View { x, y, chosen, zoom } — сдвиг холста, выбранный узел (-1 — холст) и
+--     масштаб в процентах: координаты и размеры узлов умножаются на zoom / 100;
+--     шрифт не меняется, поэтому ниже LABELS прячутся подписи портов и
+--     значения, ниже TITLES — и заголовки
+-- spot(view, value) -> значение холста в точках экрана
 -- BAR — высота строки внизу
 -- LIST — ширина списка программ слева
 -- draw(base, screen, graph, view, palette, status, programs) — весь кадр:
@@ -14,7 +18,10 @@
 --     внизу; холст — тот же буфер со сдвигом на LIST (canvas_of)
 -- Внутри: rect / disc / rounded — заливки с обрезкой; label — текст, только
 -- если целиком на экране; segment — линия толщиной 2; curve — связь; grid —
--- точки сетки; trace — кривая по точкам графика (масштаб — от меньшей до
+-- точки сетки; rings / ring — кольца под всем остальным, от большего к
+-- меньшему (окружность и подпись сверху); fit — текст по буквам (UTF-8) до ширины карточки, хвост —
+-- «...»; dots — «экран»: горящие точки горчичные, погашенные —
+-- цвета рамки; trace — кривая по точкам графика (масштаб — от меньшей до
 -- большей); card — узел; bar — строка внизу. Правый край текста режет
 -- сам lettering.paint_text
 
@@ -27,6 +34,8 @@ use os.target.uefi_x86_64.screen.lettering
 use os.target.uefi_x86_64.programs.nodus.graph
 
 BAR = 28
+LABELS = 80
+TITLES = 50
 LIST = 200
 LIST_ROW = 24
 GRID = 24
@@ -53,7 +62,8 @@ Palette = Box {
 View = Box {
     x = 0,
     y = 0,
-    chosen = -1
+    chosen = -1,
+    zoom = 100
 }
 
 skill palette(screen) {
@@ -116,6 +126,24 @@ skill label(screen, face, x, y, text, ink) {
     out lettering.paint_text(screen, face, x, y, text, ink)
 }
 
+skill fit(text, letters) {
+    (str.count(text) <= letters) { out text }
+    @seen = 0
+    drum (str.bytes(text)) {
+        @byte = str.byte(text, beat)
+        @lead = byte < 128
+        (byte >= 192) { lead = yes }
+        (lead == yes) {
+            (seen == letters - 3) {
+                @head = str.slice(text, 0, beat)
+                out "{head}..."
+            }
+            seen = seen + 1
+        }
+    }
+    out text
+}
+
 skill segment(screen, x0, y0, x1, y1, color) {
     @dx = x1 - x0
     @dy = y1 - y0
@@ -146,11 +174,13 @@ skill curve(screen, x0, y0, x3, y3, color) {
 }
 
 skill grid(screen, view, color) {
-    @first_x = (view.x % GRID + GRID) % GRID
-    @first_y = (view.y % GRID + GRID) % GRID
-    drum ((screen.height - BAR) / GRID + 1) {
-        @y = first_y + beat * GRID
-        drum (screen.width / GRID + 1) { rect(screen, first_x + beat * GRID, y, 2, 2, color) }
+    @step = spot(view, GRID)
+    (step < 8) { step = 8 }
+    @first_x = (view.x % step + step) % step
+    @first_y = (view.y % step + step) % step
+    drum ((screen.height - BAR) / step + 1) {
+        @y = first_y + beat * step
+        drum (screen.width / step + 1) { rect(screen, first_x + beat * step, y, 2, 2, color) }
     }
     out none
 }
@@ -165,6 +195,26 @@ skill wave(screen, x, y, width, height, color) {
         segment(screen, px, py, x + step, ny, color)
         px = x + step
         py = ny
+    }
+    out none
+}
+
+skill dots(screen, x, y, width, height, picture, palette) {
+    @rows = group.count(picture)
+    (rows == 0) { out none }
+    @columns = group.count(group.get(picture, 0))
+    (columns == 0) { out none }
+    @cell = width / columns
+    (height / rows < cell) { cell = height / rows }
+    (cell < 2) { cell = 2 }
+    drum (rows) {
+        @row = group.get(picture, beat)
+        @top = y + beat * cell
+        drum (group.count(row)) {
+            @ink = palette.edge
+            (group.get(row, beat) == 1) { ink = palette.chosen }
+            rect(screen, x + beat * cell, top, cell - 1, cell - 1, ink)
+        }
     }
     out none
 }
@@ -197,38 +247,47 @@ skill steps_of(count) {
     out count - 1
 }
 
-skill card(screen, node, sx, sy, chosen, palette) {
-    @tall = graph.height(node)
+skill card(screen, node, sx, sy, chosen, palette, zoom) {
+    @width = node.width * zoom / 100
+    @tall = graph.height(node) * zoom / 100
+    @radius = RADIUS * zoom / 100
+    (radius < 2) { radius = 2 }
     @rim = palette.edge
     @thick = 1
     (chosen == yes) {
         rim = palette.chosen
         thick = 2
     }
-    rounded(screen, sx, sy, node.width, tall, RADIUS, rim)
-    rounded(screen, sx + thick, sy + thick, node.width - 2 * thick, tall - 2 * thick, RADIUS - thick, palette.card)
+    rounded(screen, sx, sy, width, tall, radius, rim)
+    rounded(screen, sx + thick, sy + thick, width - 2 * thick, tall - 2 * thick, radius - thick, palette.card)
     @title_ink = palette.title
     (chosen == yes) { title_ink = palette.chosen }
-    label(screen, lettering.FACE_SMALL, sx + 12, sy + 6, node.title, title_ink)
-    rect(screen, sx + thick, sy + graph.HEADER, node.width - 2 * thick, 1, rim)
+    @header = graph.HEADER * zoom / 100
+    (zoom >= TITLES) { label(screen, lettering.FACE_SMALL, sx + 12, sy + (header - 16) / 2, fit(node.title, (width - 24) / 8), title_ink) }
+    rect(screen, sx + thick, sy + header, width - 2 * thick, 1, rim)
     @port_ink = palette.port
     (chosen == yes) { port_ink = palette.chosen }
+    @dot = PORT * zoom / 100
+    (dot < 2) { dot = 2 }
+    @words = zoom >= LABELS
     drum (group.count(node.inputs)) {
-        @py = sy + graph.port_y(node, beat)
-        disc(screen, sx, py, PORT, port_ink)
-        label(screen, lettering.FACE_SMALL, sx + 12, py - 8, group.get(node.inputs, beat), palette.label)
+        @py = sy + graph.port_y(node, beat) * zoom / 100
+        disc(screen, sx, py, dot, port_ink)
+        (words == yes) { label(screen, lettering.FACE_SMALL, sx + 12, py - 8, group.get(node.inputs, beat), palette.label) }
     }
     drum (group.count(node.outputs)) {
-        @py = sy + graph.port_y(node, beat)
+        @py = sy + graph.port_y(node, beat) * zoom / 100
         @text = group.get(node.outputs, beat)
-        disc(screen, sx + node.width, py, PORT, port_ink)
-        label(screen, lettering.FACE_SMALL, sx + node.width - 12 - str.count(text) * 8, py - 8, text, palette.label)
+        disc(screen, sx + width, py, dot, port_ink)
+        (words == yes) { label(screen, lettering.FACE_SMALL, sx + width - 12 - str.count(text) * 8, py - 8, text, palette.label) }
     }
-    @body = sy + graph.HEADER + graph.rows(node) * graph.ROW + 4
+    @body = sy + (graph.HEADER + graph.rows(node) * graph.ROW + 4) * zoom / 100
+    (graph.screen(node) == yes) { out dots(screen, sx + 12, body + 2, width - 24, (graph.SCREEN_HEIGHT - 8) * zoom / 100, node.picture, palette) }
     (graph.curvy(node) == yes) {
-        (group.count(node.history) > 1) { out trace(screen, sx + 12, body, node.width - 24, graph.CURVE_HEIGHT - 6, node.history, palette.port) }
-        out wave(screen, sx + 12, body, node.width - 24, graph.CURVE_HEIGHT - 6, palette.edge)
+        (group.count(node.history) > 1) { out trace(screen, sx + 12, body, width - 24, (graph.CURVE_HEIGHT - 6) * zoom / 100, node.history, palette.port) }
+        out wave(screen, sx + 12, body, width - 24, (graph.CURVE_HEIGHT - 6) * zoom / 100, palette.edge)
     }
+    (words == no) { out none }
     @text = node.value
     (str.bytes(node.result) > 0) {
         text = "= {node.result}"
@@ -238,7 +297,7 @@ skill card(screen, node, sx, sy, chosen, palette) {
         (node.kind == graph.OUT) { text = node.result }
         (node.title == "время") { text = "{node.result} с" }
     }
-    out label(screen, lettering.FACE_SMALL, sx + 12, body + 4, text, palette.value)
+    out label(screen, lettering.FACE_SMALL, sx + 12, body + 4, fit(text, (width - 24) / 8), palette.value)
 }
 
 skill bar(screen, status, palette) {
@@ -273,11 +332,51 @@ skill programs_list(screen, programs, palette) {
     out label(screen, lettering.FACE_SMALL, 14, screen.height - BAR - 26, "[ ] — листать", palette.label)
 }
 
+skill ring(screen, node, view, palette, chosen) {
+    @r = spot(view, node.width) / 2
+    @cx = spot(view, node.x) + view.x + r
+    @cy = spot(view, node.y) + view.y + r
+    @rim = palette.edge
+    (chosen == yes) { rim = palette.chosen }
+    disc(screen, cx, cy, r, rim)
+    disc(screen, cx, cy, r - 2, palette.back)
+    @title = node.title
+    @ink = palette.label
+    (chosen == yes) { ink = palette.chosen }
+    label(screen, lettering.FACE_SMALL, cx - str.count(title) * 4, cy - r + 10, title, ink)
+    (str.bytes(node.value) > 0) { label(screen, lettering.FACE_SMALL, cx - str.count(node.value) * 4, cy - r + 28, node.value, palette.hint) }
+    out none
+}
+
+skill rings(screen, nodes, view, palette) {
+    @left = []
+    drum (group.count(nodes)) {
+        @node = group.get(nodes, beat)
+        (node.kind == graph.RING) { left = group.add(left, beat) }
+    }
+    drum (group.count(left)) {
+        @widest = 0
+        @width = -1
+        drum (group.count(left)) {
+            @node = group.get(nodes, group.get(left, beat))
+            (node.width > width) {
+                widest = beat
+                width = node.width
+            }
+        }
+        @index = group.get(left, widest)
+        ring(screen, group.get(nodes, index), view, palette, index == view.chosen)
+        left = group.concat(group.slice(left, 0, widest), group.slice(left, widest + 1, group.count(left)))
+    }
+    out none
+}
+
 skill draw(base, whole_screen, nodes_graph, view, palette, status, programs) {
     @screen = canvas_of(base, whole_screen)
     rect(screen, 0, 0, screen.width, screen.height, palette.back)
     grid(screen, view, palette.dot)
     @nodes = nodes_graph.nodes
+    rings(screen, nodes, view, palette)
     drum (group.count(nodes_graph.links)) {
         @link = group.get(nodes_graph.links, beat)
         (link.from < group.count(nodes)) {
@@ -286,12 +385,16 @@ skill draw(base, whole_screen, nodes_graph, view, palette, status, programs) {
     }
     drum (group.count(nodes)) {
         @node = group.get(nodes, beat)
-        card(screen, node, node.x + view.x, node.y + view.y, beat == view.chosen, palette)
+        ((node.kind == graph.RING) == no) { card(screen, node, spot(view, node.x) + view.x, spot(view, node.y) + view.y, beat == view.chosen, palette, view.zoom) }
     }
     programs_list(whole_screen, programs, palette)
     out bar(whole_screen, status, palette)
 }
 
 skill joint(screen, from, to, link, view, palette) {
-    out curve(screen, from.x + from.width + view.x, from.y + graph.port_y(from, link.exit) + view.y, to.x + view.x, to.y + graph.port_y(to, link.entry) + view.y, palette.link)
+    out curve(screen, spot(view, from.x + from.width) + view.x, spot(view, from.y + graph.port_y(from, link.exit)) + view.y, spot(view, to.x) + view.x, spot(view, to.y + graph.port_y(to, link.entry)) + view.y, palette.link)
+}
+
+skill spot(view, value) {
+    out value * view.zoom / 100
 }
