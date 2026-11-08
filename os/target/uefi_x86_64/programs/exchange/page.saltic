@@ -1,0 +1,247 @@
+-- page — страница биржи текстом JTML из четырёх атомов (box, text, field,
+-- slider) и ненастоящий рынок: цена ходит случайными шагами от такта, свечи и
+-- объём — гладкий шум, сдвигаются на одну каждый такт.
+--
+-- State { price, tick, focus, price_text, amount_text, share, leverage }
+-- jtml(state) -> текст страницы
+-- next_price(price, tick) -> цена в центах после такта
+-- money(cents) -> «67 412.50»; within(value, least, most) -> value в пределах
+-- Внутри: строители текста JTML text / mark / box / field / slider / join;
+--     noise / level — шум рынка; header, book, chart, form, trades, balance —
+--     куски страницы
+
+use core.str
+use core.group
+
+START = 6741250
+CANDLES = 64
+CHART = 300
+VOLUME = 56
+ROWS = 9
+TRADES = 6
+
+State = Box {
+    price = START,
+    tick = 0,
+    focus = 0,
+    price_text = "",
+    amount_text = "",
+    share = 0,
+    leverage = 1
+}
+
+skill within(value, least, most) {
+    (value < least) { out least }
+    (value > most) { out most }
+    out value
+}
+
+skill noise(seed) {
+    @value = ((seed + 1000000) * 1103515245 + 12345) % 2147483648 / 65536 % 1000
+    (value < 0) { out 0 - value }
+    out value
+}
+
+skill level(t) {
+    out (noise(t) + noise(t - 1) * 2 + noise(t - 2) * 3 + noise(t - 3) * 2 + noise(t - 4)) / 9
+}
+
+skill next_price(price, tick) {
+    out price + noise(tick + 7) - 500
+}
+
+skill two(value) {
+    (value < 10) { out "0{value}" }
+    out "{value}"
+}
+
+skill thousands(value) {
+    (value < 1000) { out "{value}" }
+    @high = thousands(value / 1000)
+    @low = value % 1000
+    @pad = "{low}"
+    (low < 100) { pad = "0{pad}" }
+    (low < 10) { pad = "0{pad}" }
+    out "{high} {pad}"
+}
+
+skill money(cents) {
+    @whole = thousands(cents / 100)
+    @part = two(cents % 100)
+    out "{whole}.{part}"
+}
+
+skill coins(milli) {
+    @whole = milli / 1000
+    @part = milli % 1000
+    @pad = "{part}"
+    (part < 100) { pad = "0{pad}" }
+    (part < 10) { pad = "0{pad}" }
+    out "{whole}.{pad}"
+}
+
+skill tint(node, tone) {
+    @at = 0
+    drum (str.bytes(node)) {
+        (at == 0) {
+            (str.starts_at(node, ": \{", beat) == yes) { at = beat + 3 }
+        }
+    }
+    @head = str.slice(node, 0, at)
+    @rest = str.slice(node, at, str.bytes(node))
+    out "{head}\"tone\": \"{tone}\", {rest}"
+}
+
+skill join(items) {
+    out str.join(items, ", ")
+}
+
+skill text(value) {
+    out "\{\"text\": \{\"value\": \"{value}\"\}\}"
+}
+
+skill mark(id, value) {
+    out "\{\"text\": \{\"id\": \"{id}\", \"value\": \"{value}\"\}\}"
+}
+
+skill wide(value) {
+    out "\{\"text\": \{\"value\": \"{value}\", \"grow\": 1\}\}"
+}
+
+skill middle(value) {
+    out "\{\"text\": \{\"value\": \"{value}\", \"align\": \"center\"\}\}"
+}
+
+skill box(flow, gap, padding, border, size, grow, items) {
+    @kids = join(items)
+    @width = group.get(size, 0)
+    @height = group.get(size, 1)
+    out "\{\"box\": \{\"flow\": \"{flow}\", \"gap\": {gap}, \"padding\": {padding}, \"border\": {border}, \"width\": {width}, \"height\": {height}, \"grow\": {grow}, \"children\": [{kids}]\}\}"
+}
+
+skill field(id, value) {
+    out "\{\"field\": \{\"id\": \"{id}\", \"value\": \"{value}\", \"grow\": 1\}\}"
+}
+
+skill slider(id, value, least, most) {
+    out "\{\"slider\": \{\"id\": \"{id}\", \"value\": {value}, \"min\": {least}, \"max\": {most}\}\}"
+}
+
+skill header(state) {
+    @price = money(state.price)
+    @change = state.price - START
+    @sign = "+"
+    (change < 0) {
+        sign = "-"
+        change = 0 - change
+    }
+    @percent = change * 10000 / START
+    @whole = percent / 100
+    @part = two(percent % 100)
+    @high = money(START + 60770)
+    @low = money(START - 153250)
+    out box("row", 24, 8, 1, [0, 0], 0, [text("# SALTIC EX"), text("BTC/USDT"), text("# {price}"), tint(text("{sign}{whole}.{part} %"), direction(change_sign(state.price - START))), text("макс {high}"), text("мин {low}"), text("объём 12 840 BTC"), wide(""), tint(text("Зефир"), "info")])
+}
+
+skill book_row(price, amount, tone) {
+    out box("row", 8, 0, 0, [0, 0], 0, [tint(wide(money(price)), tone), text(coins(amount))])
+}
+
+skill change_sign(value) {
+    (value < 0) { out -1 }
+    out 1
+}
+
+skill direction(sign) {
+    (sign < 0) { out "down" }
+    out "up"
+}
+
+skill book(state) {
+    @rows = [tint(text("стакан"), "quiet"), box("row", 8, 0, 0, [0, 0], 0, [wide("цена"), text("кол-во")])]
+    drum (ROWS) {
+        @step = ROWS - beat
+        rows = group.add(rows, book_row(state.price + step * 950, noise(state.tick * 31 + beat) * 3 + 20, "down"))
+    }
+    @price = money(state.price)
+    rows = group.add(rows, tint(middle("— {price} —"), "accent"))
+    drum (ROWS) { rows = group.add(rows, book_row(state.price - (beat + 1) * 950, noise(state.tick * 17 + beat) * 3 + 20, "up")) }
+    out box("column", 4, 10, 1, [250, 0], 0, rows)
+}
+
+skill candle(t) {
+    @now = level(t) * (CHART - 20) / 1000
+    @before = level(t - 1) * (CHART - 20) / 1000
+    @top = now
+    (before > top) { top = before }
+    @size = now - before
+    (size < 0) { size = 0 - size }
+    (size < 3) { size = 3 }
+    out box("column", 0, 0, 0, [9, CHART], 0, [box("column", 0, 0, 0, [0, CHART - 10 - top], 0, []), tint(box("column", 0, 0, 3, [7, size], 0, []), direction(change_sign(now - before)))])
+}
+
+skill volume(t) {
+    @height = noise(t * 13) * (VOLUME - 4) / 1000 + 4
+    @tone = direction(change_sign(level(t) - level(t - 1)))
+    out box("column", 0, 0, 0, [9, VOLUME], 0, [box("column", 0, 0, 0, [0, VOLUME - height], 0, []), tint(box("column", 0, 0, 2, [7, height], 0, []), tone)])
+}
+
+skill chart(state) {
+    @candles = []
+    @volumes = []
+    drum (CANDLES) {
+        @t = state.tick - CANDLES + beat
+        candles = group.add(candles, candle(t))
+        volumes = group.add(volumes, volume(t))
+    }
+    out box("column", 6, 10, 1, [0, 0], 1, [tint(text("BTC/USDT, 15 мин — свечи из box"), "quiet"), box("row", 3, 0, 0, [0, CHART], 0, candles), tint(text("объём"), "quiet"), box("row", 3, 0, 0, [0, VOLUME], 0, volumes)])
+}
+
+skill labelled(name, thing) {
+    out box("row", 10, 0, 0, [0, 0], 0, [box("column", 0, 0, 0, [56, 0], 0, [text(name)]), thing])
+}
+
+skill form(state) {
+    @share = state.share
+    @leverage = state.leverage
+    @total = "итог: цена x кол-во x {leverage}"
+    out box("column", 8, 12, 1, [330, 0], 0, [
+        box("row", 12, 0, 0, [0, 0], 0, [tint(box("row", 0, 6, 1, [0, 0], 0, [tint(text("купить"), "up")]), "up"), box("row", 0, 6, 0, [0, 0], 0, [tint(text("продать"), "quiet")])]),
+        labelled("цена", field("price", state.price_text)),
+        labelled("кол-во", field("amount", state.amount_text)),
+        labelled("доля", box("row", 10, 0, 0, [0, 0], 1, [slider("share", share, 0, 100), text("{share} %")])),
+        labelled("плечо", box("row", 10, 0, 0, [0, 0], 1, [slider("leverage", leverage, 1, 10), text("{leverage}x")])),
+        tint(text(total), "quiet"),
+        tint(box("column", 0, 10, 2, [0, 0], 0, [tint(middle("КУПИТЬ BTC"), "ground")]), "up"),
+        tint(text("Tab — дальше, стрелки — ползунок"), "quiet")
+    ])
+}
+
+skill trades(state) {
+    @rows = [tint(text("сделки"), "quiet")]
+    drum (TRADES) {
+        @second = (state.tick - beat + 3600) % 60
+        @minute = (state.tick - beat + 3600) / 60 % 60
+        @side = "купля"
+        @tone = "up"
+        (noise(state.tick - beat) % 2 == 1) {
+            side = "продажа"
+            tone = "down"
+        }
+        @minutes = two(minute)
+        @seconds = two(second)
+        @at = "17:{minutes}:{seconds}"
+        rows = group.add(rows, box("row", 24, 0, 0, [0, 0], 0, [tint(text(at), "quiet"), tint(text(money(state.price - noise(state.tick - beat) + 500)), tone), text(coins(noise(state.tick * 3 - beat) / 4 + 5)), tint(text(side), tone)]))
+    }
+    out box("column", 3, 10, 1, [0, 0], 1, rows)
+}
+
+skill balance(state) {
+    out box("column", 8, 10, 1, [0, 0], 1, [tint(text("баланс"), "quiet"), box("row", 32, 0, 0, [0, 0], 0, [tint(text("USDT  24 300.00"), "up"), tint(text("BTC  0.4120"), "accent"), tint(text("ETH  3.200"), "info")]), tint(text("в ордерах  1 200.00 USDT"), "quiet"), tint(text("всё на этой странице — box, text, field и slider"), "info")])
+}
+
+skill jtml(state) {
+    @main = box("row", 8, 0, 0, [0, 0], 1, [book(state), chart(state), form(state)])
+    @bottom = box("row", 8, 0, 0, [0, 0], 0, [trades(state), balance(state)])
+    out box("column", 8, 10, 0, [0, 0], 0, [header(state), main, bottom])
+}

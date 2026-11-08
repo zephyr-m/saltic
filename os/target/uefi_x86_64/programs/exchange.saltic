@@ -1,0 +1,143 @@
+-- exchange — пример JTML в деле: страница криптобиржи на весь экран Acer,
+-- собранная только из четырёх атомов (os/ui/jtml): стакан и сделки — ряды
+-- текста, свечи и объём — столбики box, форма — поля и ползунки, кнопка —
+-- box с рамкой. Страница каждый раз пишется JTML-текстом (programs/exchange/
+-- page) и читается jtml/read; рисует screen/atoms. Цены ненастоящие: раз в
+-- секунду случайный шаг.
+-- Клавиши: Tab — следующее поле или ползунок, ← → — ползунок, цифры и точка —
+-- в поле, Backspace — стереть, Esc — выход. По сети — state, quit, key, shot.
+--
+-- Desk { base, whole, back, link, palette, price, tick, second, focus, price_text,
+--     amount_text, share, leverage, dirty } — в долгом Box только числа и
+--     тексты полей (меняются лишь от клавиш): строка в поле долгого Box
+--     остаётся в куче (docs/language/MEMORY-MODEL.md)
+-- steer(desk, key) -> yes — выход; type(text, char) -> текст поля
+-- show(desk) — страница → атомы → экран
+-- program() — вход
+
+use core.str
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.screen.atoms
+use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.remote
+use os.target.uefi_x86_64.programs.exchange.page
+use os.ui.jtml
+use os.ui.jtml.read
+
+PAUSE = 10000
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+SCAN_ESCAPE = 23
+TAB = 9
+BACKSPACE = 8
+DOT = 46
+ZERO = 48
+NINE = 57
+FIELD_LIMIT = 12
+DAY = 86400
+
+Desk = Box {
+    base = 0,
+    whole = graphics.Screen {},
+    back = graphics.Screen {},
+    link = none,
+    palette = atoms.Palette {},
+    price = page.START,
+    tick = 0,
+    second = -1,
+    focus = 0,
+    price_text = "67412.50",
+    amount_text = "0.150",
+    share = 25,
+    leverage = 3,
+    dirty = yes
+}
+
+skill moment(base) {
+    @clock = uefi.now(base)
+    out clock.hour * 3600 + clock.minute * 60 + clock.second
+}
+
+skill type(text, char) {
+    (char == BACKSPACE) {
+        (str.bytes(text) == 0) { out text }
+        out str.slice(text, 0, str.bytes(text) - 1)
+    }
+    (str.bytes(text) >= FIELD_LIMIT) { out text }
+    (char == DOT) { out str.concat(text, ".") }
+    (char < ZERO) { out text }
+    (char > NINE) { out text }
+    out str.concat(text, str.from_byte(char))
+}
+
+skill steer(desk, key) {
+    (key.ready == no) { out no }
+    (key.scan == SCAN_ESCAPE) { out yes }
+    desk.dirty = yes
+    (key.char == TAB) {
+        desk.focus = (desk.focus + 1) % 4
+        out no
+    }
+    @step = 0
+    (key.scan == SCAN_RIGHT) { step = 1 }
+    (key.scan == SCAN_LEFT) { step = -1 }
+    (desk.focus == 2) { desk.share = page.within(desk.share + step * 5, 0, 100) }
+    (desk.focus == 3) { desk.leverage = page.within(desk.leverage + step, 1, 10) }
+    (desk.focus == 0) { desk.price_text = type(desk.price_text, key.char) }
+    (desk.focus == 1) { desk.amount_text = type(desk.amount_text, key.char) }
+    out no
+}
+
+skill show(desk) {
+    desk.dirty = no
+    @state = page.State { price = desk.price, tick = desk.tick, focus = desk.focus, price_text = desk.price_text, amount_text = desk.amount_text, share = desk.share, leverage = desk.leverage }
+    @tree = atoms.measured(read.page(page.jtml(state)), no)
+    @runtime = jtml.focus(jtml.mount(desk.back, tree), group_id(desk.focus)) rescue |err| { jtml.mount(desk.back, tree) }
+    atoms.draw(desk.back, runtime, desk.palette)
+    graphics.push(desk.base, desk.whole, desk.back)
+    @price = page.money(desk.price)
+    @link = desk.link
+    (link) |link| { remote.tell(link, "биржа: BTC/USDT {price}, такт {desk.tick}") }
+    out none
+}
+
+skill group_id(focus) {
+    (focus == 1) { out "amount" }
+    (focus == 2) { out "share" }
+    (focus == 3) { out "leverage" }
+    out "price"
+}
+
+program() {
+    @base = firmware.guest_base()
+    uefi.forget_keys(base)
+    @whole = graphics.open_whole(base)
+    @back = graphics.buffer_like(base, whole)
+    @link = remote.open_remote() rescue |err| { none }
+    (link) |link| {
+        remote.own(link, back.frame, graphics.buffer_pages(whole))
+        remote.hide_panels(link)
+    }
+    @desk = Desk { base = base, whole = whole, back = back, link = link, palette = atoms.palette(whole) }
+    always {
+        (link) |link| {
+            drum (remote.serve(link)) { none }
+        }
+        (steer(desk, uefi.poll_key(base, PAUSE)) == yes) {
+            uefi.free_pages(base, back.frame, graphics.buffer_pages(whole))
+            reply.home("биржа: вышла")
+            out none
+        }
+        @now = moment(base)
+        ((now == desk.second) == no) {
+            desk.second = now
+            desk.tick = desk.tick + 1
+            desk.price = page.next_price(desk.price, desk.tick)
+            desk.dirty = yes
+        }
+        (desk.dirty == yes) { show(desk) }
+    }
+    out none
+}

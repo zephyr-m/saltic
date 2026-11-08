@@ -1,0 +1,170 @@
+-- atoms — четыре атома JTML (os/ui/jtml) на экране Acer: раскладка общая
+-- (jtml.children_layout, jtml.mount), здесь только мерка текста шрифтами
+-- lettering и рисунок. Цвет атома — имя tone из палитры экрана (up, down,
+-- accent, quiet, info, ink, line, ground); без tone рамка толщиной 1 — линия, толще —
+-- заливка цветом ink, у box без рамки с tone — фон; текст с «# » — заголовок.
+--
+-- Palette { ground, line, ink, quiet, accent, up, down, info } — цвета экрана
+-- palette(screen) -> Palette; tone_color(palette, tone, fallback) -> пиксель
+-- measured(node, in_row) -> копия дерева, у TEXT — свои ширина (в ряду) и
+--     высота по шрифту Acer: общая раскладка берёт их вместо шрифта qemu
+-- draw(screen, runtime, palette) — всё дерево runtime.root на screen
+-- Внутри: face_of / shown(text) — шрифт и текст без «# »; letters(text) —
+--     символов UTF-8; draw_node, draw_field, draw_slider, copy_node
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.screen.lettering
+use os.drivers.text_field
+use os.ui.jtml
+use os.ui.jtml.atom
+use os.ui.jtml.slider
+
+HEADING = "# "
+INSET = 6
+KNOB = 8
+TRACK = 4
+
+Palette = Box {
+    ground = 0,
+    line = 0,
+    ink = 0,
+    quiet = 0,
+    accent = 0,
+    up = 0,
+    down = 0,
+    info = 0
+}
+
+skill palette(screen) {
+    out Palette { ground = graphics.color(screen, 16, 18, 24), line = graphics.color(screen, 58, 62, 74), ink = graphics.color(screen, 230, 232, 238), quiet = graphics.color(screen, 140, 146, 160), accent = graphics.color(screen, 240, 185, 11), up = graphics.color(screen, 14, 203, 129), down = graphics.color(screen, 246, 70, 93), info = graphics.color(screen, 82, 156, 255) }
+}
+
+skill tone_color(palette, tone, fallback) {
+    (tone == "up") { out palette.up }
+    (tone == "down") { out palette.down }
+    (tone == "accent") { out palette.accent }
+    (tone == "quiet") { out palette.quiet }
+    (tone == "info") { out palette.info }
+    (tone == "ink") { out palette.ink }
+    (tone == "line") { out palette.line }
+    (tone == "ground") { out palette.ground }
+    out fallback
+}
+
+skill heading(text) {
+    out str.starts_with(text, HEADING)
+}
+
+skill face_of(text) {
+    (heading(text) == yes) { out lettering.FACE_TEXT }
+    out lettering.FACE_SMALL
+}
+
+skill shown(text) {
+    (heading(text) == yes) { out str.slice(text, str.bytes(HEADING), str.bytes(text)) }
+    out text
+}
+
+skill letters(text) {
+    @count = 0
+    drum (str.bytes(text)) {
+        @byte = str.byte(text, beat)
+        (byte < 128) { count = count + 1 }
+        (byte >= 192) { count = count + 1 }
+    }
+    out count
+}
+
+skill copy_node(node, width, height, children) {
+    out atom.Node { kind = node.kind, id = node.id, value = node.value, align = node.align, flow = node.flow, width = width, height = height, grow = node.grow, padding = node.padding, gap = node.gap, border = node.border, children = children, level = node.level, least = node.least, most = node.most, tone = node.tone }
+}
+
+skill measured(node, in_row) {
+    (node.kind == atom.Kind.TEXT) {
+        @face = face_of(node.value)
+        @width = 0
+        (in_row == yes) { width = letters(shown(node.value)) * face.width }
+        out copy_node(node, width, face.height, [])
+    }
+    (node.kind == atom.Kind.BOX) {
+        @children = []
+        drum (group.count(node.children)) { children = group.add(children, measured(group.get(node.children, beat), node.flow == atom.Flow.ROW)) }
+        out copy_node(node, node.width, node.height, children)
+    }
+    out node
+}
+
+skill draw(screen, runtime, palette) {
+    graphics.fill(screen, 0, 0, screen.width, screen.height, palette.ground)
+    out draw_node(screen, runtime, palette, runtime.root, [0, 0, runtime.width, runtime.height])
+}
+
+skill draw_node(screen, runtime, palette, node, place) {
+    @x = group.get(place, 0)
+    @y = group.get(place, 1)
+    @width = group.get(place, 2)
+    @height = group.get(place, 3)
+    (node.kind == atom.Kind.TEXT) {
+        @face = face_of(node.value)
+        @line = shown(node.value)
+        @wide = letters(line) * face.width
+        @left = x
+        (node.align == atom.Align.CENTER) { left = x + (width - wide) / 2 }
+        (node.align == atom.Align.END) { left = x + width - wide }
+        @ink = palette.ink
+        (str.bytes(node.id) > 0) { ink = palette.accent }
+        ink = tone_color(palette, node.tone, ink)
+        lettering.paint_text(screen, face, left, y + (height - face.height) / 2, line, ink)
+        out none
+    }
+    (node.kind == atom.Kind.FIELD) { out draw_field(screen, runtime, palette, node.id) }
+    (node.kind == atom.Kind.SLIDER) { out draw_slider(screen, runtime, palette, node.id) }
+    (node.kind == atom.Kind.BOX) {
+        (node.border == 0) {
+            (str.bytes(node.tone) > 0) { graphics.fill(screen, x, y, width, height, tone_color(palette, node.tone, palette.line)) }
+        }
+        (node.border == 1) { frame(screen, x, y, width, height, tone_color(palette, node.tone, palette.line)) }
+        (node.border > 1) { graphics.fill(screen, x, y, width, height, tone_color(palette, node.tone, palette.ink)) }
+        drum (jtml.children_layout(node, x, y, width, height)) { draw_node(screen, runtime, palette, beat.node, [beat.x, beat.y, beat.width, beat.height]) }
+    }
+    out none
+}
+
+skill frame(screen, x, y, width, height, color) {
+    graphics.fill(screen, x, y, width, 1, color)
+    graphics.fill(screen, x, y + height - 1, width, 1, color)
+    graphics.fill(screen, x, y, 1, height, color)
+    out graphics.fill(screen, x + width - 1, y, 1, height, color)
+}
+
+skill draw_field(screen, runtime, palette, id) {
+    @lookup = jtml.find_field(runtime, id)
+    (lookup.found == no) { out none }
+    @field = lookup.slot.field
+    @face = lettering.FACE_SMALL
+    @height = face.height + INSET * 2
+    @top = field.y + (text_field.TEXT_FIELD_HEIGHT - height) / 2
+    @color = palette.line
+    (id == runtime.focused) { color = palette.accent }
+    frame(screen, field.x, top, field.width, height, color)
+    @end = lettering.paint_text(screen, face, field.x + INSET, top + INSET, field.text, palette.ink)
+    (id == runtime.focused) { graphics.fill(screen, end + 1, top + INSET, 2, face.height, palette.accent) }
+    out none
+}
+
+skill draw_slider(screen, runtime, palette, id) {
+    @lookup = jtml.find_slider(runtime, id)
+    (lookup.found == no) { out none }
+    @slot = lookup.slot
+    @span = slot.most - slot.least
+    (span < 1) { span = 1 }
+    @filled = (slot.level - slot.least) * slot.width / span
+    @middle = slot.y + slider.HEIGHT / 2
+    graphics.fill(screen, slot.x, middle - TRACK / 2, slot.width, TRACK, palette.line)
+    graphics.fill(screen, slot.x, middle - TRACK / 2, filled, TRACK, palette.accent)
+    @knob = palette.ink
+    (id == runtime.focused) { knob = palette.accent }
+    out graphics.fill(screen, slot.x + filled - KNOB / 2, slot.y + 3, KNOB, slider.HEIGHT - 6, knob)
+}
