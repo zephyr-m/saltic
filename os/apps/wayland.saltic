@@ -1,0 +1,328 @@
+-- wayland — одно окно на композиторе хоста.
+-- Сокет XDG_RUNTIME_DIR/WAYLAND_DISPLAY, буфер XRGB8888 в memfd,
+-- xdg_toplevel. Слово 8 байт: на rv32 send/place не работают.
+--
+-- program() — соединиться, дождаться configure, нарисовать, ждать close
+
+use core.str
+use core.bytes
+use core.group
+use core.process
+use core.socket
+use io
+use os.apps.wayland.wire
+
+DISPLAY = 1
+REGISTRY = 2
+CALLBACK = 3
+COMPOSITOR = 4
+SHM = 5
+SHELL = 6
+POOL = 7
+BUFFER = 8
+SURFACE = 9
+XDG_SURFACE = 10
+TOPLEVEL = 11
+
+WIDTH = 480
+HEIGHT = 270
+STRIDE = 1920
+PIXELS = 518400
+FIELD = 3166400
+BAR = 15265012
+
+Session = Box {
+    way_fd = 0,
+    way_memfd = 0,
+    way_compositor_name = 0,
+    way_compositor_version = 0,
+    way_shm_name = 0,
+    way_shm_version = 0,
+    way_shell_name = 0,
+    way_shell_version = 0,
+    way_synced = no,
+    way_configured = no,
+    way_shown = no,
+    way_closed = no,
+    way_failed = no,
+    way_serial = 0,
+    way_ping = 0,
+    way_pinged = no
+}
+
+skill cap(version, limit) {
+    (version > limit) { out limit }
+    (version < 1) { out 1 }
+    out version
+}
+
+skill value_of(name) {
+    @rows = process.environment()
+    @found = ""
+    drum (group.count(rows)) {
+        @row = group.get(rows, beat)
+        @cut = 0
+        drum (str.bytes(row)) {
+            (str.byte(row, beat) == 61) { cut = beat }
+        }
+        (cut > 0) {
+            @key = str.slice(row, 0, cut)
+            (key == name) { found = str.slice(row, cut + 1, str.bytes(row)) }
+        }
+    }
+    out found
+}
+
+skill socket_path() {
+    @dir = value_of("XDG_RUNTIME_DIR")
+    @name = value_of("WAYLAND_DISPLAY")
+    (str.bytes(name) == 0) { out "" }
+    (str.byte(name, 0) == 47) { out name }
+    out "{dir}/{name}"
+}
+
+skill unix_address(path) {
+    @buffer = bytes.new(str.bytes(path) + 3)
+    bytes.set(buffer, 0, 1)
+    drum (str.bytes(path)) {
+        bytes.set(buffer, beat + 2, str.byte(path, beat))
+    }
+    out buffer
+}
+
+skill remember(session, packet, at) {
+    @name = wire.get32(packet, at + 8)
+    @len = wire.get32(packet, at + 12)
+    @text = at + 16
+    @version = wire.get32(packet, text + (len + 3) / 4 * 4)
+    (wire.text_is(packet, text, "wl_compositor") == yes) {
+        session.way_compositor_name = name
+        session.way_compositor_version = version
+    }
+    (wire.text_is(packet, text, "wl_shm") == yes) {
+        session.way_shm_name = name
+        session.way_shm_version = version
+    }
+    (wire.text_is(packet, text, "xdg_wm_base") == yes) {
+        session.way_shell_name = name
+        session.way_shell_version = version
+    }
+    out none
+}
+
+skill reply_ping(session) {
+    (session.way_pinged == no) { out none }
+    @pong = wire.request(SHELL, 3, 12)
+    wire.put32(pong, 8, session.way_ping)
+    socket.write(session.way_fd, pong, 12)
+    session.way_pinged = no
+    out none
+}
+
+skill take(session, packet, count) {
+    @at = 0
+    always {
+        (at + 8 > count) { leave }
+        @size = wire.get16(packet, at + 6)
+        (size < 8) {
+            session.way_failed = yes
+            leave
+        }
+        (at + size > count) { leave }
+        @object = wire.get32(packet, at)
+        @opcode = wire.get16(packet, at + 4)
+        (object == DISPLAY) {
+            (opcode == 0) { session.way_failed = yes }
+        }
+        (object == REGISTRY) {
+            (opcode == 0) { remember(session, packet, at) }
+        }
+        (object == CALLBACK) {
+            (opcode == 0) { session.way_synced = yes }
+        }
+        (object == SHELL) {
+            (opcode == 0) {
+                session.way_ping = wire.get32(packet, at + 8)
+                session.way_pinged = yes
+            }
+        }
+        (object == XDG_SURFACE) {
+            (opcode == 0) {
+                session.way_serial = wire.get32(packet, at + 8)
+                session.way_configured = yes
+            }
+        }
+        (object == TOPLEVEL) {
+            (opcode == 1) { session.way_closed = yes }
+        }
+        at = at + size
+    }
+    out reply_ping(session)
+}
+
+skill pump(session, packet) {
+    @got = socket.read(session.way_fd, packet)
+    (got <= 0) { session.way_failed = yes }
+    (got > 0) { take(session, packet, got) }
+    out got
+}
+
+skill send_buffer(fd, buffer) {
+    out socket.write(fd, buffer, bytes.count(buffer))
+}
+
+skill bind(fd, name, interface, version, id) {
+    @len = str.bytes(interface) + 1
+    @size = 24 + (len + 3) / 4 * 4
+    @buffer = wire.request(REGISTRY, 0, size)
+    wire.put32(buffer, 8, name)
+    @at = wire.put_text(buffer, 12, interface)
+    wire.put32(buffer, at, version)
+    wire.put32(buffer, at + 4, id)
+    out send_buffer(fd, buffer)
+}
+
+skill titled(fd, opcode, text) {
+    @len = str.bytes(text) + 1
+    @size = 12 + (len + 3) / 4 * 4
+    @buffer = wire.request(TOPLEVEL, opcode, size)
+    wire.put_text(buffer, 8, text)
+    out send_buffer(fd, buffer)
+}
+
+skill paint(buffer) {
+    drum (WIDTH * HEIGHT) {
+        @color = FIELD
+        (beat / WIDTH < 36) { color = BAR }
+        wire.put32(buffer, beat * 4, color)
+    }
+    out none
+}
+
+skill present(session, pixels) {
+    @ack = wire.request(XDG_SURFACE, 4, 12)
+    wire.put32(ack, 8, session.way_serial)
+    send_buffer(session.way_fd, ack)
+    socket.place(session.way_memfd, pixels, 0)
+    @attach = wire.request(SURFACE, 1, 20)
+    wire.put32(attach, 8, BUFFER)
+    send_buffer(session.way_fd, attach)
+    @damage = wire.request(SURFACE, 2, 24)
+    wire.put32(damage, 16, WIDTH)
+    wire.put32(damage, 20, HEIGHT)
+    send_buffer(session.way_fd, damage)
+    @commit = wire.request(SURFACE, 6, 8)
+    out send_buffer(session.way_fd, commit)
+}
+
+skill open_window(session) {
+    @fd = session.way_fd
+    @compositor = bind(fd, session.way_compositor_name, "wl_compositor", cap(session.way_compositor_version, 4), COMPOSITOR)
+    (compositor < 0) { out no }
+    @shm = bind(fd, session.way_shm_name, "wl_shm", cap(session.way_shm_version, 1), SHM)
+    (shm < 0) { out no }
+    @shell = bind(fd, session.way_shell_name, "xdg_wm_base", cap(session.way_shell_version, 1), SHELL)
+    (shell < 0) { out no }
+    @memfd = socket.memory("saltic")
+    (memfd < 0) { out no }
+    session.way_memfd = memfd
+    @sized = socket.resize(memfd, PIXELS)
+    (sized < 0) { out no }
+    @pool = wire.request(SHM, 0, 16)
+    wire.put32(pool, 8, POOL)
+    wire.put32(pool, 12, PIXELS)
+    @sent = socket.send(fd, pool, 16, memfd)
+    (sent < 0) { out no }
+    @made = wire.request(POOL, 0, 32)
+    wire.put32(made, 8, BUFFER)
+    wire.put32(made, 16, WIDTH)
+    wire.put32(made, 20, HEIGHT)
+    wire.put32(made, 24, STRIDE)
+    wire.put32(made, 28, 1)
+    send_buffer(fd, made)
+    @surface = wire.request(COMPOSITOR, 0, 12)
+    wire.put32(surface, 8, SURFACE)
+    send_buffer(fd, surface)
+    @xdg = wire.request(SHELL, 2, 16)
+    wire.put32(xdg, 8, XDG_SURFACE)
+    wire.put32(xdg, 12, SURFACE)
+    send_buffer(fd, xdg)
+    @top = wire.request(XDG_SURFACE, 1, 12)
+    wire.put32(top, 8, TOPLEVEL)
+    send_buffer(fd, top)
+    titled(fd, 2, "Saltic")
+    titled(fd, 3, "saltic")
+    @commit = wire.request(SURFACE, 6, 8)
+    send_buffer(fd, commit)
+    out yes
+}
+
+program() {
+    @path = socket_path()
+    (str.bytes(path) == 0) {
+        io.show("нет WAYLAND_DISPLAY")
+        out error.Wayland
+    }
+    @fd = socket.open(1, 1, 0)
+    (fd < 0) {
+        io.show("сокет не открылся")
+        out error.Wayland
+    }
+    @address = unix_address(path)
+    @connected = socket.connect(fd, address)
+    (connected < 0) {
+        io.show("нет соединения с {path}")
+        out error.Wayland
+    }
+    io.show(path)
+    @session = Session { way_fd = fd }
+    @registry = wire.request(DISPLAY, 1, 12)
+    wire.put32(registry, 8, REGISTRY)
+    send_buffer(fd, registry)
+    @sync = wire.request(DISPLAY, 0, 12)
+    wire.put32(sync, 8, CALLBACK)
+    send_buffer(fd, sync)
+    @packet = bytes.new(8192)
+    always {
+        (session.way_synced == yes) { leave }
+        (session.way_failed == yes) { leave }
+        pump(session, packet)
+    }
+    (session.way_failed == yes) {
+        io.show("реестр оборвался")
+        out error.Wayland
+    }
+    (session.way_compositor_name == 0) {
+        io.show("нет wl_compositor")
+        out error.Wayland
+    }
+    (session.way_shm_name == 0) {
+        io.show("нет wl_shm")
+        out error.Wayland
+    }
+    (session.way_shell_name == 0) {
+        io.show("нет xdg_wm_base")
+        out error.Wayland
+    }
+    @opened = open_window(session)
+    (opened == no) {
+        io.show("окно не собралось")
+        out error.Wayland
+    }
+    @pixels = bytes.new(PIXELS)
+    paint(pixels)
+    always {
+        (session.way_closed == yes) { leave }
+        (session.way_failed == yes) { leave }
+        pump(session, packet)
+        (session.way_configured == yes) {
+            (session.way_shown == no) {
+                present(session, pixels)
+                session.way_shown = yes
+                io.show("окно на экране")
+            }
+        }
+    }
+    io.show("окно закрыто")
+    out none
+}
