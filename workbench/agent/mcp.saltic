@@ -1,0 +1,227 @@
+-- mcp — сервер MCP для агента по stdio, на Saltic вместо прежнего моста на
+-- Python (.archive/workbench/agent/lens_bridge.py): запрос — строка JSON-RPC на
+-- вводе (io.read_line), ответ — строка JSON на выводе. Проверку, лицо модуля
+-- и поиск делает программа lens (LENS) дочерним процессом: JSON из craft и
+-- разбор языка из selfhost в одной программе не живут — их enum делят
+-- варианты NUMBER и STRING. Собирает и запускает just lens-serve. Инструменты:
+--   saltic_check — file или code (кусок пишется в SNIPPET) → lens check
+--   saltic_api   — module → lens api
+--   saltic_find  — name → lens find
+--   saltic_build — file, target, output, heap → компилятор с полки COMPILER,
+--                  сначала в «.part», потом на место; ошибки списком
+--   saltic_edit, saltic_rename — правка и переименование с проверкой (mcp/edit)
+--   saltic_run, saltic_test — сборка и запуск под Linux, тесты (mcp/run)
+-- Конец ввода — выход. Запрос без id (уведомление) — без ответа.
+--
+-- Reading { ended } — флаг конца ввода для always
+-- program() — цикл запросов
+-- answer(line) -> строка ответа или "" (уведомление, не JSON)
+-- Внутри: tools — список инструментов; call(name, args) -> [текст, ошибка];
+--     words(item, name) -> строка аргумента; plain(text) — json.Text в UTF-8;
+--     build(args), problems(output) — сборка; reply / failure — обёртки JSON-RPC
+
+use io
+use io.file
+use core.str
+use core.group
+use core.process
+use craft.protocols.data.json
+use craft.protocols.data.json.value
+use craft.protocols.data.json.reader
+use craft.protocols.data.json.writer
+use workbench.agent.mcp.edit
+use workbench.agent.mcp.run
+
+WORK = ".cache/build/workbench"
+SNIPPET = ".cache/build/workbench/lens-snippet.saltic"
+BUILT = ".cache/build/lens"
+COMPILER = "bootstrap/saltic"
+LENS = ".cache/build/workbench/lens"
+BUILD_HEAP = "67108864"
+TARGETS = ["x86_64", "x86_64-uefi", "rv64", "rv32i"]
+VERSION = "2025-06-18"
+NO_METHOD = -32601
+
+Reading = Box {
+    ended = no
+}
+
+skill lens(command, subject) {
+    @done = process.capture([LENS, command, subject], "", [])
+    @text = done.output
+    (str.ends_with(text, "\n") == yes) { text = str.slice(text, 0, str.bytes(text) - 1) }
+    out text
+}
+
+program() {
+    @reading = Reading {}
+    always {
+        @line = io.read_line() rescue |err| {
+            reading.ended = yes
+            ""
+        }
+        (reading.ended == yes) { leave }
+        @said = answer(line)
+        (str.bytes(said) > 0) { io.show(said) }
+    }
+    out none
+}
+
+skill plain(text) {
+    @made = ""
+    drum (text.units) {
+        @unit = beat
+        (unit < 128) { made = str.concat(made, str.from_byte(unit)) }
+        (unit >= 128) {
+            (unit < 2048) { made = str.concat(made, str.concat(str.from_byte(192 + unit / 64), str.from_byte(128 + unit % 64))) }
+            (unit >= 2048) {
+                (unit < 65536) { made = str.concat(made, str.concat(str.from_byte(224 + unit / 4096), str.concat(str.from_byte(128 + unit / 64 % 64), str.from_byte(128 + unit % 64)))) }
+                (unit >= 65536) { made = str.concat(made, str.concat(str.concat(str.from_byte(240 + unit / 262144), str.from_byte(128 + unit / 4096 % 64)), str.concat(str.from_byte(128 + unit / 64 % 64), str.from_byte(128 + unit % 64)))) }
+            }
+        }
+    }
+    out made
+}
+
+skill words(item, name) {
+    @found = value.get(item, name)
+    (found.found == no) { out "" }
+    (value.is_kind(found.value, json.JsonKind.STRING) == no) { out "" }
+    out plain(found.value.string)
+}
+
+skill shape(names, required) {
+    @properties = []
+    drum (names) { properties = group.add(properties, value.field(beat, value.object([value.field("type", value.string("string"))]))) }
+    @must = []
+    drum (required) { must = group.add(must, value.string(beat)) }
+    out value.object([value.field("type", value.string("object")), value.field("properties", value.object(properties)), value.field("required", value.array(must))])
+}
+
+skill tool(name, about, shaped) {
+    out value.object([value.field("name", value.string(name)), value.field("description", value.string(about)), value.field("inputSchema", shaped)])
+}
+
+skill tools() {
+    out value.array([
+        tool("saltic_check", "Проверить Saltic без сборки (разбор и чекер, числа 61-битные): file — путь от корня репозитория или code — текст программы. Ответ: «ok» или строки «код|строка|столбец|текст».", shape(["file", "code"], [])),
+        tool("saltic_api", "Публичное лицо модуля: шапка (по канону в ней описан модуль) и все skill, Box и константы верхнего уровня. module — путь к файлу или имя через точки (core.group, os.target.uefi_x86_64.screen.graphics).", shape(["module"], ["module"])),
+        tool("saltic_find", "Где определено имя (skill, Box, константа) и где встречается вызовом или полем, по *.saltic из git (кроме .archive).", shape(["name"], ["name"])),
+        tool("saltic_build", "Собрать файл компилятором с полки: target — x86_64, x86_64-uefi, rv64, rv32i; output — куда (по умолчанию .cache/build/lens/<имя>); heap — куча в байтах. Ответ: путь собранного или ошибки списком.", shape(["file", "target", "output", "heap"], ["file", "target"])),
+        tool("saltic_edit", "Правка файла с проверкой: old — кусок, который встречается ровно раз, заменяется на new; old пусто — файл целиком становится new. После записи — проверка lens (разбор, чекер, лимиты канона) в ответе. Не откатывает.", shape(["file", "old", "new"], ["file", "new"])),
+        tool("saltic_rename", "Переименовать имя целиком (не часть другого слова) во всех *.saltic из git, кроме .archive, вместе с комментариями; каждый тронутый файл проверяется.", shape(["old", "new"], ["old", "new"])),
+        tool("saltic_run", "Собрать файл под Linux x86-64 и запустить (не дольше 20 с): input — что подать на ввод, heap — куча. Ответ: вывод и код выхода или ошибки сборки.", shape(["file", "input", "heap"], ["file"])),
+        tool("saltic_test", "Прогнать tests/<name>.saltic под Linux x86-64: сверка с tests/expected/<name>.txt, если он есть, иначе провалы [FAIL] и итог.", shape(["name"], ["name"]))
+    ])
+}
+
+skill problems(output) {
+    @found = []
+    drum (str.lines(output)) {
+        @parts = str.split(beat, "|")
+        (group.count(parts) >= 4) {
+            @where = group.get(parts, 1)
+            (str.is_digit(str.get(where, 0)) == yes) {
+                @code = group.get(parts, 0)
+                @column = group.get(parts, 2)
+                @text = str.join(group.slice(parts, 3, group.count(parts)), "|")
+                found = group.add(found, "{text} — {code}, строка {where}, столбец {column}")
+            }
+        }
+    }
+    out found
+}
+
+skill build(args) {
+    @source = words(args, "file")
+    @target = words(args, "target")
+    (group.contains(TARGETS, target) == no) {
+        @listed = str.join(TARGETS, ", ")
+        out ["цель — одна из {listed}", yes]
+    }
+    @name = str.slice(source, 0, str.bytes(source) - 7)
+    @parts = str.split(name, "/")
+    name = group.get(parts, group.count(parts) - 1)
+    (target == "x86_64-uefi") { name = "{name}.efi" }
+    @output = words(args, "output")
+    (str.bytes(output) == 0) { output = "{BUILT}/{name}" }
+    @heap = words(args, "heap")
+    (str.bytes(heap) == 0) { heap = BUILD_HEAP }
+    process.run(["mkdir", "-p", BUILT], "", [])
+    @part = "{output}.part"
+    @made = process.capture([COMPILER, source, part, heap, target], "", [])
+    ((made.code == 0) == no) {
+        @found = problems(made.output)
+        (group.count(found) == 0) { found = [made.output] }
+        @listed = str.join(found, "\n")
+        out ["сборка не прошла:\n{listed}", yes]
+    }
+    process.run(["chmod", "+x", part], "", [])
+    process.run(["mv", part, output], "", [])
+    out ["собрано: {output}", no]
+}
+
+skill call(name, args) {
+    (name == "saltic_check") {
+        @path = words(args, "file")
+        @code = words(args, "code")
+        (str.bytes(code) > 0) {
+            process.run(["mkdir", "-p", WORK], "", [])
+            file.write(SNIPPET, code)
+            path = SNIPPET
+        }
+        (str.bytes(path) == 0) { out ["нужен file или code", yes] }
+        @text = lens("check", path)
+        out [text, (text == "ok") == no]
+    }
+    (name == "saltic_api") {
+        @text = lens("api", words(args, "module"))
+        out [text, str.starts_with(text, "модуль не найден") == yes]
+    }
+    (name == "saltic_find") { out [lens("find", words(args, "name")), no] }
+    (name == "saltic_build") { out build(args) }
+    (name == "saltic_edit") { out edit.apply(words(args, "file"), words(args, "old"), words(args, "new")) }
+    (name == "saltic_rename") { out edit.rename(words(args, "old"), words(args, "new")) }
+    (name == "saltic_run") { out run.launch(words(args, "file"), words(args, "input"), words(args, "heap")) }
+    (name == "saltic_test") { out run.test(words(args, "name")) }
+    out ["нет инструмента {name}", yes]
+}
+
+skill reply(id, result) {
+    out writer.encode(value.object([value.field("jsonrpc", value.string("2.0")), value.field("id", id), value.field("result", result)]))
+}
+
+skill failure(id, code, message) {
+    @problem = value.object([value.field("code", value.number(code)), value.field("message", value.string(message))])
+    out writer.encode(value.object([value.field("jsonrpc", value.string("2.0")), value.field("id", id), value.field("error", problem)]))
+}
+
+skill answer(line) {
+    @read = reader.parse(line)
+    (read.ok == no) { out "" }
+    @request = read.value
+    @id = value.get(request, "id")
+    (id.found == no) { out "" }
+    @method = words(request, "method")
+    @params = value.get(request, "params")
+    (method == "initialize") {
+        @version = VERSION
+        (params.found == yes) {
+            @asked = words(params.value, "protocolVersion")
+            (str.bytes(asked) > 0) { version = asked }
+        }
+        out reply(id.value, value.object([value.field("protocolVersion", value.string(version)), value.field("capabilities", value.object([value.field("tools", value.object([]))])), value.field("serverInfo", value.object([value.field("name", value.string("saltic-lens")), value.field("version", value.string("2.0"))]))]))
+    }
+    (method == "ping") { out reply(id.value, value.object([])) }
+    (method == "tools/list") { out reply(id.value, value.object([value.field("tools", tools())])) }
+    (method == "tools/call") {
+        (params.found == no) { out failure(id.value, NO_METHOD, "нет params") }
+        @args = value.get(params.value, "arguments")
+        @given = value.object([])
+        (args.found == yes) { given = args.value }
+        @done = call(words(params.value, "name"), given)
+        @content = value.array([value.object([value.field("type", value.string("text")), value.field("text", value.string(group.get(done, 0)))])])
+        out reply(id.value, value.object([value.field("content", content), value.field("isError", value.answer_value(group.get(done, 1)))]))
+    }
+    out failure(id.value, NO_METHOD, "нет метода {method}")
+}

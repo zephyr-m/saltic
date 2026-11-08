@@ -1,27 +1,24 @@
--- lens — Saltic смотрит на свой код: проверка без сборки, публичное лицо
--- модуля, поиск имени. Им пользуется агент через MCP (workbench/lens_bridge.py,
--- инструменты saltic_*). Запуск из корня репозитория.
---   check <файл>  — разбор и чекер, как в toolchain, но без сборки: строки
---                   «код|строка|столбец|текст» или «ok»; числа 61-битные
---   api <модуль>  — шапка модуля (по канону это его публичное лицо) и все
---                   skill, Box и константы верхнего уровня
---   find <имя>    — где определено (skill, Box, константа) и где встречается
---                   вызовом или полем, по файлам git ls-files *.saltic
+-- look — то, что lens видит в коде, строками: проверка без сборки (разбор и
+-- чекер, числа 61-битные), публичное лицо модуля, поиск имени. Печатает
+-- родитель workbench/agent/lens.
 -- Модуль — путь к файлу или имя через точки; корни core, io, selfhost — в
 -- soul/seed, canonical — в soul, остальное — от корня репозитория.
 --
--- program(command, subject) — команда и её предмет
 -- path_of(subject) -> путь файла модуля; NoModule
--- Внутри: check(path), api(path), find(name), header(text) -> строки шапки,
---     definition(line, name) / mention(line, name) / commented(line) -> yes/no
+-- check(path) -> ["ok"] или строки «код|строка|столбец|текст»; файл без
+--     program — модуль, missing_program у него не ошибка; лимиты канона
+--     (workbench/check/limits/canon) — строкой «limits|1|1|…»
+-- api(path) -> строки: файл, шапка, верхний уровень (skill, Box, константы)
+-- find(name) -> строки: где определено и где встречается, по git ls-files
+-- Внутри: module(text), header(text), top_level / commented / definition / mention(line…)
 
-use io
 use io.file
 use core.str
 use core.group
 use core.process
 use selfhost.parser
 use selfhost.checker
+use workbench.check.limits.canon
 
 ROOTS = ["core", "io", "selfhost"]
 LIMIT = 200
@@ -44,18 +41,30 @@ skill path_of(subject) {
     out error.NoModule
 }
 
+skill module(text) {
+    (str.starts_with(text, "program(") == yes) { out no }
+    out str.contains(text, "\nprogram(") == no
+}
+
 skill check(path) {
+    @text = file.read(path)
     @loaded = parser.load_file_loc(path, ".")
+    @found = []
     (group.count(loaded.diagnostics) > 0) {
-        drum (loaded.diagnostics) { io.show("{beat.code}|{beat.line}|{beat.col}|{beat.message}") }
-        out none
+        drum (loaded.diagnostics) { found = group.add(found, "{beat.code}|{beat.line}|{beat.col}|{beat.message}") }
+        out found
     }
     @checked = checker.check_for(loaded.ast, path, yes)
-    (group.count(checked.diagnostics) > 0) {
-        drum (checked.diagnostics) { io.show("{beat.code}|{beat.line}|{beat.col}|{beat.message}") }
-        out none
+    @alone = module(text)
+    drum (checked.diagnostics) {
+        @skip = no
+        (beat.code == "missing_program") { skip = alone }
+        (skip == no) { found = group.add(found, "{beat.code}|{beat.line}|{beat.col}|{beat.message}") }
     }
-    out io.show("ok")
+    @said = canon.verdict(path, text, canon.known())
+    (str.bytes(said) > 0) { found = group.add(found, "limits|1|1|{path}: лимиты канона: {said}") }
+    (group.count(found) == 0) { out ["ok"] }
+    out found
 }
 
 skill header(text) {
@@ -82,18 +91,17 @@ skill top_level(line) {
 
 skill api(path) {
     @text = file.read(path)
-    io.show("файл {path}")
-    drum (header(text)) { io.show(beat) }
-    io.show("-- верхний уровень:")
+    @made = group.concat(["файл {path}"], header(text))
+    made = group.add(made, "-- верхний уровень:")
     drum (str.lines(text)) {
         @line = beat
         (top_level(line) == yes) {
             @shown = line
             (str.ends_with(shown, " \{") == yes) { shown = str.slice(shown, 0, str.bytes(shown) - 2) }
-            io.show(shown)
+            made = group.add(made, shown)
         }
     }
-    out none
+    out made
 }
 
 skill commented(line) {
@@ -145,24 +153,7 @@ skill find(name) {
             }
         }
     }
-    io.show("-- определено:")
-    drum (defined) { io.show(beat) }
     @limit = LIMIT
-    io.show("-- встречается ({limit} первых):")
-    drum (used) { io.show(beat) }
-    out none
+    out group.concat(group.concat(["-- определено:"], defined), group.concat(["-- встречается ({limit} первых):"], used))
 }
 
-program(command, subject) {
-    (command == "check") { out check(subject) }
-    (command == "api") {
-        @path = path_of(subject) rescue |err| {
-            io.show("модуль не найден: {subject}")
-            out none
-        }
-        out api(path)
-    }
-    (command == "find") { out find(subject) }
-    io.show("lens: check <файл> | api <модуль> | find <имя>")
-    out none
-}

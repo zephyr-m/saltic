@@ -1,0 +1,101 @@
+-- run — запуск Saltic для сервера MCP: собрать под Linux (x86-64) компилятором
+-- с полки в RUNS и выполнить, не дольше LIMIT секунд (timeout), с вводом или
+-- без. Вывод режется до SHOWN байт.
+--   launch(file, input, heap) — вывод программы и код выхода
+--   test(name) — tests/<name>.saltic: есть tests/expected/<name>.txt — сверка
+--       с ним, иначе из вывода — провалы [FAIL] и строка «итог»
+--
+-- RUNS, LIMIT, SHOWN, COMPILER, HEAP, TEST_HEAP
+-- launch(file, input, heap) / test(name) -> [текст, ошибка yes/no]
+-- Внутри: built(file, heap) -> [путь, ошибки]; executed(binary, input) ->
+--     [вывод, код]; cut(text) — не длиннее SHOWN
+
+use io.file
+use core.str
+use core.group
+use core.process
+
+RUNS = ".cache/build/lens/run"
+LIMIT = "20"
+SHOWN = 20000
+COMPILER = "bootstrap/saltic"
+HEAP = "67108864"
+TEST_HEAP = "536870912"
+
+skill cut(text) {
+    (str.bytes(text) <= SHOWN) { out text }
+    @head = str.slice(text, 0, SHOWN)
+    out "{head}\n… вывод обрезан"
+}
+
+skill built(source, heap) {
+    @parts = str.split(str.slice(source, 0, str.bytes(source) - 7), "/")
+    @name = group.get(parts, group.count(parts) - 1)
+    process.run(["mkdir", "-p", RUNS], "", [])
+    @binary = "{RUNS}/{name}"
+    process.run(["rm", "-f", binary], "", [])
+    @made = process.capture([COMPILER, source, binary, heap, "x86_64"], "", [])
+    ((made.code == 0) == no) { out ["", made.output] }
+    process.run(["chmod", "+x", binary], "", [])
+    out [binary, ""]
+}
+
+skill executed(binary, input) {
+    (str.bytes(input) == 0) {
+        @done = process.capture(["timeout", LIMIT, binary], "", [])
+        out [done.output, done.code]
+    }
+    @talk = process.talk(["timeout", LIMIT, binary], "", [])
+    talk.send(input)
+    talk.close_input()
+    @output = ""
+    drum (1000000) {
+        @line = talk.next() rescue |err| { leave }
+        output = str.concat(output, "{line}\n")
+    }
+    out [output, talk.code()]
+}
+
+skill launch(source, input, heap) {
+    @size = heap
+    (str.bytes(size) == 0) { size = HEAP }
+    @made = built(source, size)
+    @binary = group.get(made, 0)
+    (str.bytes(binary) == 0) {
+        @problems = group.get(made, 1)
+        out ["сборка не прошла:\n{problems}", yes]
+    }
+    @done = executed(binary, input)
+    @code = group.get(done, 1)
+    @output = cut(group.get(done, 0))
+    @note = "код выхода {code}"
+    (code == 124) { note = "остановлено через {LIMIT} с (timeout)" }
+    out ["{output}\n— {note}", (code == 0) == no]
+}
+
+skill test(name) {
+    @source = "tests/{name}.saltic"
+    @made = built(source, TEST_HEAP)
+    @binary = group.get(made, 0)
+    (str.bytes(binary) == 0) {
+        @problems = group.get(made, 1)
+        out ["тест не собрался:\n{problems}", yes]
+    }
+    @done = executed(binary, "")
+    @output = group.get(done, 0)
+    @code = group.get(done, 1)
+    @expected = file.read("tests/expected/{name}.txt") rescue |err| { "" }
+    (str.bytes(expected) > 0) {
+        (output == expected) { out ["{name}: вывод совпал с tests/expected/{name}.txt", no] }
+        @shown_output = cut(output)
+        out ["{name}: вывод не совпал с эталоном\n{shown_output}", yes]
+    }
+    @shown = []
+    drum (str.lines(output)) {
+        (str.contains(beat, "[FAIL]") == yes) { shown = group.add(shown, beat) }
+        (str.starts_with(beat, "итог") == yes) { shown = group.add(shown, beat) }
+    }
+    (group.count(shown) == 0) { shown = [cut(output)] }
+    @listed = str.join(shown, "\n")
+    out ["{name}: код выхода {code}\n{listed}", (code == 0) == no]
+}

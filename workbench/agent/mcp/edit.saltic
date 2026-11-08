@@ -1,0 +1,125 @@
+-- edit — правка кода Saltic для сервера MCP, сразу с проверкой: после записи
+-- каждый тронутый файл проверяет lens (разбор, чекер, лимиты канона), и ответ
+-- говорит, что вышло. Не откатывает: промежуточная правка может быть сломанной.
+--   apply(path, old, new) — old пусто — файл целиком становится new; иначе old
+--       должен встретиться ровно раз и заменяется на new
+--   rename(old, new) — имя целиком (не часть другого слова) во всех *.saltic из
+--       git, кроме .archive, вместе с комментариями; ответ — файлы и проверка
+--
+-- LENS — программа lens; check(path) -> текст проверки ("ok" или строки)
+-- apply(path, old, new) / rename(old, new) -> [текст, ошибка yes/no]
+-- places(text, part) -> начала вхождений part в text
+-- Внутри: word_byte(byte), whole(text, at, size) -> yes, если вхождение — целое
+--     слово; swap(text, at, size, new) -> текст с заменой
+
+use io.file
+use core.str
+use core.group
+use core.process
+
+LENS = ".cache/build/workbench/lens"
+SHOWN = 40
+
+skill check(path) {
+    @done = process.capture([LENS, "check", path], "", [])
+    @text = done.output
+    (str.ends_with(text, "\n") == yes) { text = str.slice(text, 0, str.bytes(text) - 1) }
+    out text
+}
+
+skill places(text, part) {
+    @found = []
+    @size = str.bytes(part)
+    (size == 0) { out found }
+    @next = 0
+    drum (str.bytes(text) - size + 1) {
+        (beat >= next) {
+            (str.starts_at(text, part, beat) == yes) {
+                found = group.add(found, beat)
+                next = beat + size
+            }
+        }
+    }
+    out found
+}
+
+skill swap(text, at, size, new) {
+    out str.concat(str.concat(str.slice(text, 0, at), new), str.slice(text, at + size, str.bytes(text)))
+}
+
+skill apply(path, old, new) {
+    (str.bytes(old) == 0) {
+        file.write(path, new)
+        @checked = check(path)
+        out ["записан целиком: {path}\n{checked}", (checked == "ok") == no]
+    }
+    @text = file.read(path) rescue |err| { out ["нет файла {path}", yes] }
+    @found = places(text, old)
+    @count = group.count(found)
+    (count == 0) { out ["в {path} нет такого куска — правка не сделана", yes] }
+    (count > 1) { out ["в {path} кусок встречается {count} раз — нужен уникальный, правка не сделана", yes] }
+    file.write(path, swap(text, group.get(found, 0), str.bytes(old), new))
+    @checked = check(path)
+    out ["правка в {path}\n{checked}", (checked == "ok") == no]
+}
+
+skill word_byte(byte) {
+    (byte == 95) { out yes }
+    (byte >= 128) { out yes }
+    (byte >= 48) {
+        (byte <= 57) { out yes }
+    }
+    (byte >= 65) {
+        (byte <= 90) { out yes }
+    }
+    (byte >= 97) {
+        (byte <= 122) { out yes }
+    }
+    out no
+}
+
+skill whole(text, at, size) {
+    (at > 0) {
+        (word_byte(str.byte(text, at - 1)) == yes) { out no }
+    }
+    (at + size < str.bytes(text)) {
+        (word_byte(str.byte(text, at + size)) == yes) { out no }
+    }
+    out yes
+}
+
+skill rename(old, new) {
+    (str.bytes(old) == 0) { out ["нужно старое имя", yes] }
+    @listed = process.capture(["git", "ls-files", "*.saltic"], "", [])
+    @report = []
+    @broken = no
+    @files = 0
+    @total = 0
+    drum (str.lines(listed.output)) {
+        @path = beat
+        (str.starts_with(path, ".archive/") == no) {
+            @text = file.read(path) rescue |err| { "" }
+            @changed = text
+            @hits = 0
+            @found = places(text, old)
+            drum (group.count(found)) {
+                @at = group.get(found, group.count(found) - 1 - beat)
+                (whole(text, at, str.bytes(old)) == yes) {
+                    changed = swap(changed, at, str.bytes(old), new)
+                    hits = hits + 1
+                }
+            }
+            (hits > 0) {
+                file.write(path, changed)
+                files = files + 1
+                total = total + hits
+                @checked = check(path)
+                ((checked == "ok") == no) { broken = yes }
+                (group.count(report) < SHOWN) { report = group.add(report, "{path}: замен {hits} — {checked}") }
+            }
+        }
+    }
+    (files == 0) { out ["имя {old} нигде не найдено целым словом", yes] }
+    @listed_report = str.join(report, "\n")
+    out ["{old} → {new}: файлов {files}, замен {total}\n{listed_report}", broken]
+}
