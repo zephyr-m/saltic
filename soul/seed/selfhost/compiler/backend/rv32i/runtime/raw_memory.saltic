@@ -8,12 +8,16 @@
 -- emit_mem_store8 / emit_mem_store16 / emit_mem_store32(compiler) — rt_mem_store*
 -- emit_mem_store_address32(compiler) — записать адрес [hi, lo] как 32 бита
 -- emit_mem_arena(compiler) — rt_mem_arena(VALUE half) -> hi или lo адреса saltic_arena
+-- emit_mem_heap(compiler) — rt_mem_heap(VALUE piece) -> байт кучи: 0 — занято
+--     (HEAP_TOP − saltic_heap), 1 — список побегов (конец кучи − ESCAPE_BOTTOM),
+--     иначе — квота (heap_bytes сборки)
 -- emit_halves(compiler, group, base) — base = адрес группы [hi, lo] из group;
 --     SCRATCH1 = hi << 16, SCRATCH2 = lo (16 бит); склеивает (or) вызывающий
 
 use selfhost.abi
 use selfhost.compiler.backend
 use selfhost.compiler.backend.rv32i.runtime.tails
+use selfhost.machine.wide
 
 skill emit_halves(compiler, group, base) {
     @executor = compiler.executor
@@ -134,6 +138,31 @@ skill emit_mem_arena(compiler) {
     compiler = executor.label(compiler, ".L_mem_arena_low")
     compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.SCRATCH0, words.bits - 16)
     compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.SCRATCH0, words.bits - 16)
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
+    out tails.ok(compiler)
+}
+
+skill emit_mem_heap(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_mem_heap")
+    compiler = executor.load_address(compiler, backend.SCRATCH0, "saltic_heap", 0)
+    pick {
+        (words.bytes == 8) { compiler = executor.load_wide(compiler, backend.SCRATCH1, compiler.heap_bytes) }
+        { compiler = executor.load_word(compiler, backend.SCRATCH1, wide.to_word(compiler.heap_bytes)) }
+    }
+    compiler = executor.branch_zero(compiler, backend.VALUE, ".L_mem_heap_used")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, abi.tagged(1, abi.TAG_NUMBER))
+    compiler = executor.branch_not_equal(compiler, backend.VALUE, backend.SCRATCH2, ".L_mem_heap_quota")
+    compiler = executor.add(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH1)
+    compiler = executor.sub(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.ESCAPE_BOTTOM)
+    compiler = executor.jump(compiler, ".L_mem_heap_done")
+    compiler = executor.label(compiler, ".L_mem_heap_used")
+    compiler = executor.sub(compiler, backend.SCRATCH0, backend.HEAP_TOP, backend.SCRATCH0)
+    compiler = executor.jump(compiler, ".L_mem_heap_done")
+    compiler = executor.label(compiler, ".L_mem_heap_quota")
+    compiler = executor.move(compiler, backend.SCRATCH0, backend.SCRATCH1)
+    compiler = executor.label(compiler, ".L_mem_heap_done")
     compiler = executor.shift_left(compiler, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
     out tails.ok(compiler)
 }
