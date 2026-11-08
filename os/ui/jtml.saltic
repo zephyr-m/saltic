@@ -1,72 +1,40 @@
--- jtml — декларативный интерфейс: дерево Node (формы, текст, поля ввода)
--- раскладывается по экрану и рисуется шрифтом font. FORM — колонка или ряд
--- с padding, gap, рамкой и grow (доля свободного места); размер 0 — по
--- содержимому. Runtime хранит поля ввода и цели щелчков после mount;
--- значения полей живут в Runtime, а не в дереве. Runtime неизменяемый.
+-- jtml — декларативный интерфейс из четырёх атомов (jtml/atom: BOX, TEXT,
+-- FIELD, SLIDER; всё остальное — их сборки): дерево раскладывается по экрану и
+-- рисуется шрифтом font. BOX — колонка или ряд с padding, gap, рамкой и grow
+-- (доля свободного места); размер 0 — по содержимому. Runtime хранит поля,
+-- ползунки и цели щелчков после mount; их значения живут в Runtime, а не в
+-- дереве. Runtime неизменяемый. Текст JTML — jtml/read.
 --
--- Kind — UNKNOWN, FORM, TEXT, FIELD; Flow — COLUMN, ROW; Align — START, CENTER, END
--- Node { kind, id, value, align, flow, width, height, grow, padding, gap,
---     border, children }
--- Runtime { root, fields, targets, focused, width, height }
--- FieldSlot, FieldLookup, TargetSlot, Hit { found, id }, ValueLookup { found,
---     value }, Placement, LayoutState — служебные Box
--- frame(flow, width, height, grow, padding, gap, border, children) -> Node
--- form(children) / row(children) / space(grow) -> Node
--- text(value) / label(value, align) / target_text(id, value) -> Node
--- field(id, value) / field_grow(id, value) -> Node
--- mount(screen, root) -> Runtime; фокус — на первом поле
+-- Runtime { root, fields, sliders, targets, focused, width, height }
+-- FieldSlot, SliderSlot, FieldLookup, SliderLookup, TargetSlot, Hit { found,
+--     id }, ValueLookup { found, value }, Placement, LayoutState — служебные Box
+-- mount(screen, root) -> Runtime; фокус — на первом поле, иначе на ползунке
 -- draw(screen, runtime) — весь экран; draw_root_child(screen, runtime, index)
 --     / draw_root_grandchild(screen, runtime, parent_index, index) — часть
--- draw_focused(screen, runtime) — только поле в фокусе
--- key(runtime, code, shift) -> Runtime — клавиша в поле с фокусом
--- focus(runtime, id) -> Runtime; FieldNotFound; focus_at(runtime, x, y)
+-- draw_focused(screen, runtime) — только поле или ползунок в фокусе
+-- key(runtime, code, shift) -> Runtime — клавиша: Tab — следующий в фокус,
+--     у ползунка стрелки, у поля — ввод
+-- focus(runtime, id) -> Runtime; FieldNotFound; focus_at(runtime, x, y) —
+--     щелчок: фокус, у ползунка ещё и положение
+-- set_level(runtime, id, level) -> Runtime — положение ползунка
 -- hit(runtime, x, y) -> Hit — цель target_text под точкой
--- value(runtime, id) -> ValueLookup; find_field(runtime, id) -> FieldLookup
+-- value(runtime, id) -> ValueLookup (у ползунка — число текстом);
+--     find_field / find_slider(runtime, id)
 -- node_intrinsic_width / node_intrinsic_height / node_height(node) -> пиксели
 -- children_layout(node, x, y, width, height) -> группа Placement
 -- layout_node(node, x, y, width, height, layout) -> LayoutState
 -- draw_node(screen, runtime, node, x, y, width, height); draw_form(...)
--- child_main_size(child, flow) -> размер по главной оси
+-- Внутри: rebuilt, moved_to, next_focus, draw_slider, child_main_size
 
 use core.str
 use core.group
 use os.drivers.graphics
 use os.drivers.font
 use os.drivers.text_field
+use os.ui.jtml.atom
+use os.ui.jtml.slider
 
-DEFAULT_GAP = 20
-Kind = enum {
-    UNKNOWN,
-    FORM,
-    TEXT,
-    FIELD
-}
-
-Flow = enum {
-    COLUMN,
-    ROW
-}
-
-Align = enum {
-    START,
-    CENTER,
-    END
-}
-
-Node = Box {
-    kind = Kind.UNKNOWN,
-    id = "",
-    value = "",
-    align = Align.START,
-    flow = Flow.COLUMN,
-    width = 0,
-    height = 0,
-    grow = 0,
-    padding = 0,
-    gap = 0,
-    border = 0,
-    children = []
-}
+KEY_TAB = 15
 
 FieldSlot = Box {
     id = "",
@@ -91,13 +59,28 @@ Hit = Box {
     id = ""
 }
 
+SliderSlot = Box {
+    id = "",
+    x = 0,
+    y = 0,
+    width = 0,
+    level = 0,
+    least = 0,
+    most = 100
+}
+
+SliderLookup = Box {
+    found = no,
+    slot = SliderSlot {}
+}
+
 ValueLookup = Box {
     found = no,
     value = ""
 }
 
 Placement = Box {
-    node = Node {},
+    node = atom.Node {},
     x = 0,
     y = 0,
     width = 0,
@@ -105,8 +88,9 @@ Placement = Box {
 }
 
 Runtime = Box {
-    root = Node {},
+    root = atom.Node {},
     fields = [],
+    sliders = [],
     targets = [],
     focused = "",
     width = 0,
@@ -115,73 +99,29 @@ Runtime = Box {
 
 LayoutState = Box {
     fields = [],
+    sliders = [],
     targets = []
-}
-
-skill frame(flow, width, height, grow, padding, gap, border, children) {
-    out Node {
-        kind = Kind.FORM,
-        flow = flow,
-        width = width,
-        height = height,
-        grow = grow,
-        padding = padding,
-        gap = gap,
-        border = border,
-        children = children
-    }
-}
-
-skill form(children) {
-    out frame(Flow.COLUMN, 0, 0, 0, 0, DEFAULT_GAP, 0, children)
-}
-
-skill row(children) {
-    out frame(Flow.ROW, 0, 0, 0, 0, DEFAULT_GAP, 0, children)
-}
-
-skill space(grow) {
-    out frame(Flow.COLUMN, 0, 0, grow, 0, 0, 0, [])
-}
-
-skill text(value) {
-    out Node { kind = Kind.TEXT, value = value }
-}
-
-skill target_text(id, value) {
-    out Node { kind = Kind.TEXT, id = id, value = value }
-}
-
-skill label(value, align) {
-    out Node { kind = Kind.TEXT, value = value, align = align }
-}
-
-skill field(id, value) {
-    out Node { kind = Kind.FIELD, id = id, value = value }
-}
-
-skill field_grow(id, value) {
-    out Node { kind = Kind.FIELD, id = id, value = value, grow = 1 }
 }
 
 skill node_intrinsic_width(node) {
     (node.width > 0) { out node.width }
-    (node.kind == Kind.TEXT) {
+    (node.kind == atom.Kind.TEXT) {
         out font.font_text_width(node.value)
     }
-    (node.kind == Kind.FIELD) { out 0 }
-    (node.kind == Kind.FORM) {
+    (node.kind == atom.Kind.FIELD) { out 0 }
+    (node.kind == atom.Kind.SLIDER) { out 0 }
+    (node.kind == atom.Kind.BOX) {
         @width = 0
         @index = 0
         @count = group.count(node.children)
-        (node.flow == Flow.ROW) {
+        (node.flow == atom.Flow.ROW) {
             drum (count) {
                 width = width + node_intrinsic_width(group.get(node.children, index))
                 (index + 1 < count) { width = width + node.gap }
                 index = index + 1
             }
         }
-        (node.flow == Flow.COLUMN) {
+        (node.flow == atom.Flow.COLUMN) {
             drum (count) {
                 @child_width = node_intrinsic_width(group.get(node.children, index))
                 (child_width > width) { width = child_width }
@@ -195,22 +135,23 @@ skill node_intrinsic_width(node) {
 
 skill node_intrinsic_height(node) {
     (node.height > 0) { out node.height }
-    (node.kind == Kind.TEXT) {
+    (node.kind == atom.Kind.TEXT) {
         out font.font_text_height(node.value)
     }
-    (node.kind == Kind.FIELD) { out text_field.TEXT_FIELD_HEIGHT }
-    (node.kind == Kind.FORM) {
+    (node.kind == atom.Kind.FIELD) { out text_field.TEXT_FIELD_HEIGHT }
+    (node.kind == atom.Kind.SLIDER) { out slider.HEIGHT }
+    (node.kind == atom.Kind.BOX) {
         @height = 0
         @index = 0
         @count = group.count(node.children)
-        (node.flow == Flow.COLUMN) {
+        (node.flow == atom.Flow.COLUMN) {
             drum (count) {
                 height = height + node_intrinsic_height(group.get(node.children, index))
                 (index + 1 < count) { height = height + node.gap }
                 index = index + 1
             }
         }
-        (node.flow == Flow.ROW) {
+        (node.flow == atom.Flow.ROW) {
             drum (count) {
                 @child_height = node_intrinsic_height(group.get(node.children, index))
                 (child_height > height) { height = child_height }
@@ -227,7 +168,7 @@ skill node_height(node) {
 }
 
 skill child_main_size(child, flow) {
-    (flow == Flow.ROW) { out node_intrinsic_width(child) }
+    (flow == atom.Flow.ROW) { out node_intrinsic_width(child) }
     out node_intrinsic_height(child)
 }
 
@@ -242,7 +183,7 @@ skill children_layout(node, x, y, width, height) {
     (count > 1) { gap_space = (count - 1) * node.gap }
 
     @main_available = inner_height - gap_space
-    (node.flow == Flow.ROW) { main_available = inner_width - gap_space }
+    (node.flow == atom.Flow.ROW) { main_available = inner_width - gap_space }
     (main_available < 0) { main_available = 0 }
 
     @fixed = 0
@@ -258,7 +199,7 @@ skill children_layout(node, x, y, width, height) {
     @remaining = main_available - fixed
     (remaining < 0) { remaining = 0 }
     @cursor = inner_y
-    (node.flow == Flow.ROW) { cursor = inner_x }
+    (node.flow == atom.Flow.ROW) { cursor = inner_x }
     @items = []
     index = 0
     drum (count) {
@@ -272,7 +213,7 @@ skill children_layout(node, x, y, width, height) {
         @child_y = cursor
         @child_width = inner_width
         @child_height = main_size
-        (node.flow == Flow.ROW) {
+        (node.flow == atom.Flow.ROW) {
             child_x = cursor
             child_y = inner_y
             child_width = main_size
@@ -282,7 +223,7 @@ skill children_layout(node, x, y, width, height) {
                 child_y = inner_y + (inner_height - child_height) / 2
             }
         }
-        (node.flow == Flow.COLUMN) {
+        (node.flow == atom.Flow.COLUMN) {
             (child.width > 0) {
                 child_width = child.width
                 child_x = inner_x + (inner_width - child_width) / 2
@@ -303,10 +244,11 @@ skill children_layout(node, x, y, width, height) {
 }
 
 skill layout_node(node, x, y, width, height, layout) {
-    (node.kind == Kind.TEXT) {
+    (node.kind == atom.Kind.TEXT) {
         (str.bytes(node.id) > 0) {
             out LayoutState {
                 fields = layout.fields,
+                sliders = layout.sliders,
                 targets = group.add(layout.targets, TargetSlot {
                     id = node.id,
                     x = x,
@@ -318,7 +260,7 @@ skill layout_node(node, x, y, width, height, layout) {
         }
         out layout
     }
-    (node.kind == Kind.FIELD) {
+    (node.kind == atom.Kind.FIELD) {
         @field_y = y + (height - text_field.TEXT_FIELD_HEIGHT) / 2
         @field_state = text_field.text_field_sync(text_field.TextField {
             x = x,
@@ -328,10 +270,15 @@ skill layout_node(node, x, y, width, height, layout) {
         })
         out LayoutState {
             fields = group.add(layout.fields, FieldSlot { id = node.id, field = field_state }),
+            sliders = layout.sliders,
             targets = layout.targets
         }
     }
-    (node.kind == Kind.FORM) {
+    (node.kind == atom.Kind.SLIDER) {
+        @slot = SliderSlot { id = node.id, x = x, y = y + (height - slider.HEIGHT) / 2, width = width, level = slider.clamp(node.level, node.least, node.most), least = node.least, most = node.most }
+        out LayoutState { fields = layout.fields, sliders = group.add(layout.sliders, slot), targets = layout.targets }
+    }
+    (node.kind == atom.Kind.BOX) {
         @next = layout
         @placements = children_layout(node, x, y, width, height)
         @index = 0
@@ -356,6 +303,10 @@ skill layout_node(node, x, y, width, height, layout) {
 skill mount(screen, root) {
     @layout = layout_node(root, 0, 0, screen.width, screen.height, LayoutState {})
     @focused = ""
+    (group.count(layout.sliders) > 0) {
+        @first_slider = group.get(layout.sliders, 0)
+        focused = first_slider.id
+    }
     (group.count(layout.fields) > 0) {
         @first_field = group.get(layout.fields, 0)
         focused = first_field.id
@@ -363,6 +314,7 @@ skill mount(screen, root) {
     out Runtime {
         root = root,
         fields = layout.fields,
+        sliders = layout.sliders,
         targets = layout.targets,
         focused = focused,
         width = screen.width,
@@ -381,25 +333,60 @@ skill find_field(runtime, id) {
     out FieldLookup {}
 }
 
+skill find_slider(runtime, id) {
+    drum (group.count(runtime.sliders)) {
+        @slot = group.get(runtime.sliders, beat)
+        (slot.id == id) { out SliderLookup { found = yes, slot = slot } }
+    }
+    out SliderLookup {}
+}
+
 skill value(runtime, id) {
     @lookup = find_field(runtime, id)
     (lookup.found == yes) {
         out ValueLookup { found = yes, value = lookup.slot.field.text }
     }
+    @moved = find_slider(runtime, id)
+    (moved.found == yes) {
+        @level = moved.slot.level
+        out ValueLookup { found = yes, value = "{level}" }
+    }
     out ValueLookup {}
+}
+
+skill rebuilt(runtime, fields, sliders, focused) {
+    out Runtime {
+        root = runtime.root,
+        fields = fields,
+        sliders = sliders,
+        targets = runtime.targets,
+        focused = focused,
+        width = runtime.width,
+        height = runtime.height
+    }
 }
 
 skill focus(runtime, id) {
     @lookup = find_field(runtime, id)
-    (lookup.found == no) { out error.FieldNotFound }
-    out Runtime {
-        root = runtime.root,
-        fields = runtime.fields,
-        targets = runtime.targets,
-        focused = id,
-        width = runtime.width,
-        height = runtime.height
+    @moved = find_slider(runtime, id)
+    (lookup.found == no) {
+        (moved.found == no) { out error.FieldNotFound }
     }
+    out rebuilt(runtime, runtime.fields, runtime.sliders, id)
+}
+
+skill moved_to(slot, level) {
+    out SliderSlot { id = slot.id, x = slot.x, y = slot.y, width = slot.width, level = level, least = slot.least, most = slot.most }
+}
+
+skill set_level(runtime, id, level) {
+    @sliders = []
+    drum (group.count(runtime.sliders)) {
+        @slot = group.get(runtime.sliders, beat)
+        (slot.id == id) { slot = moved_to(slot, slider.clamp(level, slot.least, slot.most)) }
+        sliders = group.add(sliders, slot)
+    }
+    out rebuilt(runtime, runtime.fields, sliders, runtime.focused)
 }
 
 skill focus_at(runtime, x, y) {
@@ -412,17 +399,20 @@ skill focus_at(runtime, x, y) {
         (y < slot.field.y) { inside = no }
         (x >= slot.field.x + slot.field.width) { inside = no }
         (y >= slot.field.y + text_field.TEXT_FIELD_HEIGHT) { inside = no }
-        (inside == yes) {
-            out Runtime {
-                root = runtime.root,
-                fields = runtime.fields,
-                targets = runtime.targets,
-                focused = slot.id,
-                width = runtime.width,
-                height = runtime.height
-            }
-        }
+        (inside == yes) { out rebuilt(runtime, runtime.fields, runtime.sliders, slot.id) }
         index = index + 1
+    }
+    drum (group.count(runtime.sliders)) {
+        @slot = group.get(runtime.sliders, beat)
+        @inside = yes
+        (x < slot.x) { inside = no }
+        (y < slot.y) { inside = no }
+        (x >= slot.x + slot.width) { inside = no }
+        (y >= slot.y + slider.HEIGHT) { inside = no }
+        (inside == yes) {
+            @focused = rebuilt(runtime, runtime.fields, runtime.sliders, slot.id)
+            out set_level(focused, slot.id, slider.at(x, slot.x, slot.width, slot.least, slot.most))
+        }
     }
     out runtime
 }
@@ -443,7 +433,31 @@ skill hit(runtime, x, y) {
     out Hit {}
 }
 
+skill next_focus(runtime) {
+    @ids = []
+    drum (group.count(runtime.fields)) {
+        @slot = group.get(runtime.fields, beat)
+        ids = group.add(ids, slot.id)
+    }
+    drum (group.count(runtime.sliders)) {
+        @slot = group.get(runtime.sliders, beat)
+        ids = group.add(ids, slot.id)
+    }
+    (group.count(ids) == 0) { out runtime }
+    @next = group.get(ids, 0)
+    drum (group.count(ids)) {
+        (group.get(ids, beat) == runtime.focused) { next = group.get(ids, (beat + 1) % group.count(ids)) }
+    }
+    out rebuilt(runtime, runtime.fields, runtime.sliders, next)
+}
+
 skill key(runtime, code, shift) {
+    (code == KEY_TAB) { out next_focus(runtime) }
+    @moved = find_slider(runtime, runtime.focused)
+    (moved.found == yes) {
+        @slot = moved.slot
+        out set_level(runtime, slot.id, slider.step(slot.level, slot.least, slot.most, code))
+    }
     @fields = []
     @index = 0
     @count = group.count(runtime.fields)
@@ -459,14 +473,7 @@ skill key(runtime, code, shift) {
         fields = group.add(fields, next_slot)
         index = index + 1
     }
-    out Runtime {
-        root = runtime.root,
-        fields = fields,
-        targets = runtime.targets,
-        focused = runtime.focused,
-        width = runtime.width,
-        height = runtime.height
-    }
+    out rebuilt(runtime, fields, runtime.sliders, runtime.focused)
 }
 
 skill draw_form(screen, node, x, y, width, height) {
@@ -478,22 +485,23 @@ skill draw_form(screen, node, x, y, width, height) {
 }
 
 skill draw_node(screen, runtime, node, x, y, width, height) {
-    (node.kind == Kind.TEXT) {
+    (node.kind == atom.Kind.TEXT) {
         @text_width = node_intrinsic_width(node)
         @text_height = node_intrinsic_height(node)
         @text_x = x
-        (node.align == Align.CENTER) { text_x = x + (width - text_width) / 2 }
-        (node.align == Align.END) { text_x = x + width - text_width }
+        (node.align == atom.Align.CENTER) { text_x = x + (width - text_width) / 2 }
+        (node.align == atom.Align.END) { text_x = x + width - text_width }
         @text_y = y + (height - text_height) / 2
         font.graphics_text(screen, text_x, text_y, node.value, graphics.Ink.FOREGROUND)
         out none
     }
-    (node.kind == Kind.FIELD) {
+    (node.kind == atom.Kind.FIELD) {
         @lookup = find_field(runtime, node.id)
         (lookup.found == yes) { text_field.text_field_draw(screen, lookup.slot.field) }
         out none
     }
-    (node.kind == Kind.FORM) {
+    (node.kind == atom.Kind.SLIDER) { out draw_slider(screen, runtime, node.id) }
+    (node.kind == atom.Kind.BOX) {
         draw_form(screen, node, x, y, width, height)
         @placements = children_layout(node, x, y, width, height)
         @index = 0
@@ -559,8 +567,15 @@ skill draw_root_grandchild(screen, runtime, parent_index, index) {
     out none
 }
 
+skill draw_slider(screen, runtime, id) {
+    @moved = find_slider(runtime, id)
+    (moved.found == no) { out none }
+    @slot = moved.slot
+    out slider.draw(screen, slot.x, slot.y, slot.width, slot.level, slot.least, slot.most, slot.id == runtime.focused)
+}
+
 skill draw_focused(screen, runtime) {
     @lookup = find_field(runtime, runtime.focused)
     (lookup.found == yes) { text_field.text_field_draw(screen, lookup.slot.field) }
-    out none
+    out draw_slider(screen, runtime, runtime.focused)
 }
