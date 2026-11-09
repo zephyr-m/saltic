@@ -2,7 +2,8 @@
 -- Сокет без блокировки, клавиатура wl_keyboard, шаг по core.time.
 -- Слово 8 байт: на rv32 send/place/sleep не работают.
 --
--- program() — поле 32×20, кнопки W A S D, x закрывает, NEW после смерти
+-- program() — поле 32×20. Клавиатура: стрелки и WASD. Кнопки на экране те же.
+-- x закрывает, NEW или Enter после смерти.
 
 use core.str
 use core.bytes
@@ -28,8 +29,9 @@ XDG_SURFACE = 10
 TOPLEVEL = 11
 SEAT = 12
 POINTER = 13
-DECOR_MANAGER = 14
-DECOR = 15
+KEYBOARD = 14
+DECOR_MANAGER = 15
+DECOR = 16
 
 WIDTH = 496
 HEIGHT = 440
@@ -55,6 +57,7 @@ Session = Box {
     way_pointer_y = 0,
     way_key = 0,
     way_keyed = no,
+    way_hold = 0,
     way_last = 0,
     way_model = snake.Model {},
     way_synced = no,
@@ -197,7 +200,7 @@ skill take(session, packet, count) {
                     @button = wire.get32(packet, at + 16)
                     @state = wire.get32(packet, at + 20)
                     (button == LEFT_BUTTON) {
-                        (state == 0) {
+                        (state == 1) {
                             @hit = board.press(session.way_pointer_x, session.way_pointer_y, WIDTH)
                             (hit == 0 - 1) { session.way_closed = yes }
                             (hit > 0) {
@@ -209,16 +212,33 @@ skill take(session, packet, count) {
                 }
             }
         }
+        (object == KEYBOARD) {
+            (opcode == 3) {
+                (size >= 24) {
+                    @scan = wire.get32(packet, at + 16)
+                    @down = wire.get32(packet, at + 20)
+                    (down == 1) {
+                        session.way_key = scan
+                        session.way_keyed = yes
+                    }
+                }
+            }
+        }
         at = at + size
     }
-    out reply_ping(session)
+    reply_ping(session)
+    out at
 }
 
-skill pump(session, packet) {
+skill pump(session, packet, hold, joined) {
     @got = socket.read(session.way_fd, packet)
     (got == NO_DATA) { out 0 }
     (got <= 0) { session.way_failed = yes }
-    (got > 0) { take(session, packet, got) }
+    (got > 0) {
+        @total = wire.join(hold, session.way_hold, packet, got, joined)
+        @used = take(session, joined, total)
+        session.way_hold = wire.keep(joined, used, total, hold)
+    }
     out got
 }
 
@@ -304,10 +324,13 @@ skill open_window(session) {
     titled(fd, 2, "Snake")
     titled(fd, 3, "saltic")
     (session.way_seat_name > 0) {
-        bind(fd, session.way_seat_name, "wl_seat", cap(session.way_seat_version, 5), SEAT)
+        bind(fd, session.way_seat_name, "wl_seat", 1, SEAT)
         @pointer = wire.request(SEAT, 0, 12)
         wire.put32(pointer, 8, POINTER)
         send_buffer(fd, pointer)
+        @keys = wire.request(SEAT, 1, 12)
+        wire.put32(keys, 8, KEYBOARD)
+        send_buffer(fd, keys)
     }
     (session.way_decor_name > 0) {
         bind(fd, session.way_decor_name, "zxdg_decoration_manager_v1", 1, DECOR_MANAGER)
@@ -350,10 +373,12 @@ program() {
     wire.put32(sync, 8, CALLBACK)
     send_buffer(fd, sync)
     @packet = bytes.new(8192)
+    @hold = bytes.new(4096)
+    @joined = bytes.new(12288)
     always {
         (session.way_synced == yes) { leave }
         (session.way_failed == yes) { leave }
-        pump(session, packet)
+        pump(session, packet, hold, joined)
     }
     (session.way_failed == yes) {
         io.show("реестр оборвался")
@@ -383,7 +408,7 @@ program() {
     always {
         (session.way_closed == yes) { leave }
         (session.way_failed == yes) { leave }
-        pump(session, packet)
+        pump(session, packet, hold, joined)
         (session.way_closed == yes) { leave }
         (session.way_configured == yes) {
             (session.way_shown == no) {
