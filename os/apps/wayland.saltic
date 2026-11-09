@@ -1,8 +1,8 @@
--- wayland — одно окно на композиторе хоста.
+-- wayland — окно счёта на композиторе хоста.
 -- Сокет XDG_RUNTIME_DIR/WAYLAND_DISPLAY, буфер XRGB8888 в memfd,
--- xdg_toplevel. Слово 8 байт: на rv32 send/place не работают.
+-- xdg_toplevel, мышь wl_pointer. Слово 8 байт: на rv32 send/place не работают.
 --
--- program() — соединиться, дождаться configure, нарисовать, ждать close
+-- program() — шапка с «x», кнопки «-» и «+», число на экране
 
 use core.str
 use core.bytes
@@ -11,6 +11,7 @@ use core.process
 use core.socket
 use io
 use os.apps.wayland.wire
+use os.apps.wayland.desk
 
 DISPLAY = 1
 REGISTRY = 2
@@ -23,13 +24,16 @@ BUFFER = 8
 SURFACE = 9
 XDG_SURFACE = 10
 TOPLEVEL = 11
+SEAT = 12
+POINTER = 13
+DECOR_MANAGER = 14
+DECOR = 15
 
 WIDTH = 480
-HEIGHT = 270
+HEIGHT = 300
 STRIDE = 1920
-PIXELS = 518400
-FIELD = 3166400
-BAR = 15265012
+PIXELS = 576000
+LEFT_BUTTON = 272
 
 Session = Box {
     way_fd = 0,
@@ -40,6 +44,13 @@ Session = Box {
     way_shm_version = 0,
     way_shell_name = 0,
     way_shell_version = 0,
+    way_seat_name = 0,
+    way_seat_version = 0,
+    way_decor_name = 0,
+    way_pointer_x = 0,
+    way_pointer_y = 0,
+    way_count = 0,
+    way_dirty = no,
     way_synced = no,
     way_configured = no,
     way_shown = no,
@@ -107,6 +118,13 @@ skill remember(session, packet, at) {
         session.way_shell_name = name
         session.way_shell_version = version
     }
+    (wire.text_is(packet, text, "wl_seat") == yes) {
+        session.way_seat_name = name
+        session.way_seat_version = version
+    }
+    (wire.text_is(packet, text, "zxdg_decoration_manager_v1") == yes) {
+        session.way_decor_name = name
+    }
     out none
 }
 
@@ -132,7 +150,9 @@ skill take(session, packet, count) {
         @object = wire.get32(packet, at)
         @opcode = wire.get16(packet, at + 4)
         (object == DISPLAY) {
-            (opcode == 0) { session.way_failed = yes }
+            (opcode == 0) {
+                session.way_failed = yes
+            }
         }
         (object == REGISTRY) {
             (opcode == 0) { remember(session, packet, at) }
@@ -154,6 +174,40 @@ skill take(session, packet, count) {
         }
         (object == TOPLEVEL) {
             (opcode == 1) { session.way_closed = yes }
+        }
+        (object == POINTER) {
+            (opcode == 0) {
+                (size >= 24) {
+                    session.way_pointer_x = wire.get32(packet, at + 16) / 256
+                    session.way_pointer_y = wire.get32(packet, at + 20) / 256
+                }
+            }
+            (opcode == 2) {
+                (size >= 20) {
+                    session.way_pointer_x = wire.get32(packet, at + 12) / 256
+                    session.way_pointer_y = wire.get32(packet, at + 16) / 256
+                }
+            }
+            (opcode == 3) {
+                (size >= 24) {
+                    @button = wire.get32(packet, at + 16)
+                    @state = wire.get32(packet, at + 20)
+                    (button == LEFT_BUTTON) {
+                        (state == 0) {
+                            @hit = desk.press(session.way_pointer_x, session.way_pointer_y, WIDTH, HEIGHT)
+                            (hit == 1) { session.way_closed = yes }
+                            (hit == 2) {
+                                session.way_count = session.way_count - 1
+                                session.way_dirty = yes
+                            }
+                            (hit == 3) {
+                                session.way_count = session.way_count + 1
+                                session.way_dirty = yes
+                            }
+                        }
+                    }
+                }
+            }
         }
         at = at + size
     }
@@ -190,19 +244,7 @@ skill titled(fd, opcode, text) {
     out send_buffer(fd, buffer)
 }
 
-skill paint(buffer) {
-    drum (WIDTH * HEIGHT) {
-        @color = FIELD
-        (beat / WIDTH < 36) { color = BAR }
-        wire.put32(buffer, beat * 4, color)
-    }
-    out none
-}
-
-skill present(session, pixels) {
-    @ack = wire.request(XDG_SURFACE, 4, 12)
-    wire.put32(ack, 8, session.way_serial)
-    send_buffer(session.way_fd, ack)
+skill frame(session, pixels) {
     socket.place(session.way_memfd, pixels, 0)
     @attach = wire.request(SURFACE, 1, 20)
     wire.put32(attach, 8, BUFFER)
@@ -212,7 +254,16 @@ skill present(session, pixels) {
     wire.put32(damage, 20, HEIGHT)
     send_buffer(session.way_fd, damage)
     @commit = wire.request(SURFACE, 6, 8)
-    out send_buffer(session.way_fd, commit)
+    send_buffer(session.way_fd, commit)
+    session.way_dirty = no
+    out none
+}
+
+skill present(session, pixels) {
+    @ack = wire.request(XDG_SURFACE, 4, 12)
+    wire.put32(ack, 8, session.way_serial)
+    send_buffer(session.way_fd, ack)
+    out frame(session, pixels)
 }
 
 skill open_window(session) {
@@ -252,6 +303,22 @@ skill open_window(session) {
     send_buffer(fd, top)
     titled(fd, 2, "Saltic")
     titled(fd, 3, "saltic")
+    (session.way_seat_name > 0) {
+        bind(fd, session.way_seat_name, "wl_seat", cap(session.way_seat_version, 5), SEAT)
+        @pointer = wire.request(SEAT, 0, 12)
+        wire.put32(pointer, 8, POINTER)
+        send_buffer(fd, pointer)
+    }
+    (session.way_decor_name > 0) {
+        bind(fd, session.way_decor_name, "zxdg_decoration_manager_v1", 1, DECOR_MANAGER)
+        @decor = wire.request(DECOR_MANAGER, 1, 16)
+        wire.put32(decor, 8, DECOR)
+        wire.put32(decor, 12, TOPLEVEL)
+        send_buffer(fd, decor)
+        @mode = wire.request(DECOR, 1, 12)
+        wire.put32(mode, 8, 2)
+        send_buffer(fd, mode)
+    }
     @commit = wire.request(SURFACE, 6, 8)
     send_buffer(fd, commit)
     out yes
@@ -310,16 +377,23 @@ program() {
         out error.Wayland
     }
     @pixels = bytes.new(PIXELS)
-    paint(pixels)
+    desk.paint(pixels, WIDTH, HEIGHT, 0)
     always {
         (session.way_closed == yes) { leave }
         (session.way_failed == yes) { leave }
         pump(session, packet)
+        (session.way_closed == yes) { leave }
         (session.way_configured == yes) {
             (session.way_shown == no) {
                 present(session, pixels)
                 session.way_shown = yes
                 io.show("окно на экране")
+            }
+        }
+        (session.way_dirty == yes) {
+            (session.way_shown == yes) {
+                desk.paint(pixels, WIDTH, HEIGHT, session.way_count)
+                frame(session, pixels)
             }
         }
     }

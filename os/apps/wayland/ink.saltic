@@ -1,0 +1,118 @@
+-- ink — пиксели и текст Spleen в буфере XRGB8888.
+-- Глиф: ASCII 32…126, Ё, А–я, ё. Чужой символ — «?».
+
+use core.str
+use core.group
+use core.bytes
+use os.fonts.spleen
+use os.apps.wayland.wire
+
+EIGHT = [128, 64, 32, 16, 8, 4, 2, 1]
+SIXTEEN = [32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1]
+
+Mark = Box {
+    ink_glyphs = [],
+    ink_w = 8,
+    ink_h = 16
+}
+
+BODY = Mark { ink_glyphs = spleen.GLYPHS_8X16, ink_w = 8, ink_h = 16 }
+LARGE = Mark { ink_glyphs = spleen.GLYPHS_16X32, ink_w = 16, ink_h = 32 }
+
+skill pixel(buffer, width, x, y, color) {
+    (x < 0) { out none }
+    (y < 0) { out none }
+    (x >= width) { out none }
+    wire.put32(buffer, (y * width + x) * 4, color)
+    out none
+}
+
+skill rect(buffer, width, x, y, w, h, color) {
+    drum (h) {
+        @row = y + beat
+        drum (w) {
+            pixel(buffer, width, x + beat, row, color)
+        }
+    }
+    out none
+}
+
+skill inside(x, y, left, top, w, h) {
+    (x < left) { out no }
+    (y < top) { out no }
+    (x >= left + w) { out no }
+    (y >= top + h) { out no }
+    out yes
+}
+
+skill bit(mask, column, glyph_width) {
+    (glyph_width == 16) { out mask / group.get(SIXTEEN, column) % 2 }
+    out mask / group.get(EIGHT, column) % 2
+}
+
+skill glyph_index(code) {
+    (code >= 32) {
+        (code <= 126) { out code - 32 }
+    }
+    (code == 1025) { out 95 }
+    (code >= 1040) {
+        (code <= 1103) { out 96 + code - 1040 }
+    }
+    (code == 1105) { out 160 }
+    out 31
+}
+
+skill glyph(buffer, width, mark, x, y, code, color) {
+    @rows = group.get(mark.ink_glyphs, glyph_index(code))
+    drum (mark.ink_h) {
+        @mask = group.get(rows, beat)
+        @row = beat
+        drum (mark.ink_w) {
+            (bit(mask, beat, mark.ink_w) == 1) {
+                pixel(buffer, width, x + beat, y + row, color)
+            }
+        }
+    }
+    out none
+}
+
+skill text(buffer, width, mark, x, y, line, color) {
+    @index = 0
+    @cursor = x
+    @count = str.bytes(line)
+    always {
+        (index >= count) { leave }
+        @first = str.byte(line, index)
+        @value = first
+        @step = 1
+        (first >= 194) {
+            (first <= 223) {
+                (index + 1 < count) {
+                    @second = str.byte(line, index + 1)
+                    (second >= 128) {
+                        (second <= 191) {
+                            value = (first - 192) * 64 + second - 128
+                            step = 2
+                        }
+                    }
+                }
+            }
+        }
+        glyph(buffer, width, mark, cursor, y, value, color)
+        cursor = cursor + mark.ink_w
+        index = index + step
+    }
+    out none
+}
+
+skill body(buffer, width, x, y, line, color) {
+    out text(buffer, width, BODY, x, y, line, color)
+}
+
+skill large(buffer, width, x, y, line, color) {
+    out text(buffer, width, LARGE, x, y, line, color)
+}
+
+program() {
+    out none
+}
