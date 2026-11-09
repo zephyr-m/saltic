@@ -1,0 +1,110 @@
+-- live — оконный вид global-check, терминал не трогает.
+-- Кадр пишется в FRAME, по окончании — DONE. Если рядом есть check-window
+-- и сессия Wayland, open запускает его. again заменяет последнюю строку кадра,
+-- kept по-прежнему копит все перерисовки для PNG.
+--
+-- show / again / see / draw — как было в global-check, плюс кадр
+-- arm(run) — запомнить шапку перед живым блоком веток
+-- open(run) / finish(run) — окно и метка конца
+
+use io
+use io.file
+use core.str
+use core.group
+use core.process
+
+FRAME = ".cache/build/workbench/view.frame"
+DONE = ".cache/build/workbench/view.done"
+WINDOW = ".cache/build/workbench/check-window"
+
+skill publish(run) {
+    (run.look.plain == yes) { out none }
+    out file.write(FRAME, str.join(run.view, "\n"))
+}
+
+skill note(run, text) {
+    run.view = group.add(run.view, text)
+    out publish(run)
+}
+
+skill show(run, text) {
+    io.show(text)
+    run.kept = group.add(run.kept, text)
+    out note(run, text)
+}
+
+skill again(run, text) {
+    (run.look.plain == yes) { out show(run, text) }
+    @escape = str.from_byte(27)
+    io.show("{escape}[1A{escape}[2K{text}")
+    run.kept = group.add(run.kept, text)
+    @count = group.count(run.view)
+    @next = []
+    (count == 0) { next = group.add(next, text) }
+    (count > 0) {
+        drum (count - 1) { next = group.add(next, group.get(run.view, beat)) }
+        next = group.add(next, text)
+    }
+    run.view = next
+    out publish(run)
+}
+
+skill see(run, text) {
+    io.show(text)
+    out note(run, text)
+}
+
+skill draw(run, rows) {
+    @escape = str.from_byte(27)
+    @lines = rows
+    @missing = run.drawn - group.count(rows)
+    (missing < 0) { missing = 0 }
+    drum (missing) { lines = group.add(lines, "") }
+    @first = yes
+    drum (lines) {
+        @text = "{escape}[2K{beat}"
+        (first == yes) {
+            (run.drawn > 0) { text = "{escape}[{run.drawn}A{text}" }
+            first = no
+        }
+        io.show(text)
+    }
+    run.drawn = group.count(lines)
+    @head = []
+    drum (run.view_base) { head = group.add(head, group.get(run.view, beat)) }
+    drum (rows) { head = group.add(head, beat) }
+    run.view = head
+    out publish(run)
+}
+
+skill arm(run) {
+    run.view_base = group.count(run.view)
+    out none
+}
+
+skill display_set() {
+    drum (process.environment()) {
+        (str.starts_with(beat, "WAYLAND_DISPLAY=") == yes) {
+            (str.bytes(beat) > 16) { out yes }
+        }
+    }
+    out no
+}
+
+skill open(run) {
+    (run.look.plain == yes) { out none }
+    (display_set() == no) { out none }
+    (process.executable(WINDOW) == no) { out none }
+    process.run(["rm", "-f", DONE], "", [])
+    process.open(WINDOW, [WINDOW], "", no, process.environment(), no) rescue |err| { out none }
+    out none
+}
+
+skill finish(run) {
+    (run.look.plain == yes) { out none }
+    out file.write(DONE, "yes")
+}
+
+program() {
+    out none
+}
