@@ -69,6 +69,12 @@ skill check_expression(node, scope, globals, diagnostics) {
     }
     (tag == "enum-value") { out lookup.walked(node, lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.short_enum_outside_match(group.get(plain, 1))))) }
     (tag == "path") { out lookup.check_path(node, scope, globals, diagnostics) }
+    (tag == "negate") {
+        @operand_walked = check_expression(group.get(plain, 1), scope, globals, diagnostics)
+        @operand_type = types.value_type(group.get(plain, 1), scope, globals)
+        (rules.negatable(operand_type) == no) { out lookup.walked(node, lookup.add_diagnostic(operand_walked.diagnostics, lookup.placed(node, errors.negate_expects_number(types.type_text(operand_type))))) }
+        out lookup.walked(ast.with_part(node, 1, ast.typed(operand_type, operand_walked.node)), operand_walked.diagnostics)
+    }
     (tag == "binary") {
         @left_node = group.get(plain, 2)
         @right_node = group.get(plain, 3)
@@ -298,6 +304,7 @@ skill named_block(node, type, scope, globals, diagnostics) {
     @child = names.Scope { names = scope.names, subject = scope.subject, module = scope.module }
     @named = lookup.check_module_name(node, group.get(plain, 2), scope.module, globals, value_walked.diagnostics)
     child.names = names.bind(child.names, group.get(plain, 2), "variable", type)
+    (ast.tag(node) == "rescue") { child.names = names.put(child.names, lookup.VALUE_MARKER, "variable", "unknown") }
     @block_walked = check_block(group.get(plain, 3), child, globals, named)
     out lookup.walked(ast.with_part(ast.with_part(node, 1, value_walked.node), 3, block_walked.node), block_walked.diagnostics)
 }
@@ -471,7 +478,7 @@ skill check_statement(node, scope, globals, diagnostics) {
             @resolved = lookup.case_variant(case_node, subject_type, variant_name, globals, diagnostics)
             (str.bytes(owner) == 0) { owner = lookup.case_owner(resolved.full) }
             @body = ast.case_body(case_node)
-            @body_walked = check_block(body, names.Scope { names = scope.names, subject = scope.subject, module = scope.module }, globals, lookup.check_case_body(case_node, body, resolved.diagnostics))
+            @body_walked = check_block(body, names.Scope { names = names.put(scope.names, lookup.CASE_MARKER, "variable", "unknown"), subject = scope.subject, module = scope.module }, globals, lookup.check_case_body(case_node, body, resolved.diagnostics))
             diagnostics = body_walked.diagnostics
             current = ast.with_part(current, beat + 2, ast.with_part(ast.with_part(case_node, 1, resolved.full), 2, body_walked.node))
         }
@@ -484,7 +491,7 @@ skill check_block(block, scope, globals, diagnostics) {
     @plain = ast.plain(block)
     @current = block
     drum (group.count(plain) - 1) {
-        @statement_walked = check_statement(group.get(plain, beat + 1), scope, globals, diagnostics)
+        @statement_walked = check_statement(group.get(plain, beat + 1), scope, globals, lookup.check_effect(group.get(plain, beat + 1), beat + 2 == group.count(plain), scope, diagnostics))
         diagnostics = statement_walked.diagnostics
         current = ast.with_part(current, beat + 1, statement_walked.node)
     }
