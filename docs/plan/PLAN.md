@@ -249,6 +249,10 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   `Bad*`/`Invalid*`. → аудит 02.11, А15; → Q-022 (ответ 07.11.2026)
 - [ ] Ядро без не-ядра: `crypto`, `graphics.rgb` (пустые `robot`,
   `sync`, `resource`, `io.net` — в архив 07.11.2026). → аудит 03.11, 2.3; → Q-023 (ответ 07.11.2026)
+  11.11.2026 (ждёт global-check): `core.crypto` → `soul/craft/protocols/security/crypto.saltic`
+  (git mv), проверка — свой тест `tests/crypto.saltic` (случай `crypto`), из
+  контракта ядра убрана; `core.graphics` (`rgb`) — в архив
+  `.archive/seed-core-2026-11-11/core/`. README ядра и сайт поправлены.
 - [ ] Битовые операции у обычных чисел (биты регистров — делением). → PLAN-1 «Опыт в бою», 3; → Q-024 (ответ 07.11.2026)
   11.11.2026 (ждёт global-check): `num.and` / `or` / `xor` / `shift_left` /
   `shift_right` / `bit` — рантайм `rt_num_*` (сдвиг 0…ширина числа − 1, влево с
