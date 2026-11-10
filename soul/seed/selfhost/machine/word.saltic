@@ -1,6 +1,7 @@
--- word — 32-битное слово из четырёх байтов (b0 младший): компилятор работает
--- и на RV32I, где обычное число 29-битное. Адреса, размеры, кодировки команд.
--- to_number только до 2^28 (ValueOutsideRange); переполнение — WordOutsideRange.
+-- word — 32-битное слово: хранится четырьмя байтами (b0 младший) — в поле Box и
+-- группе на RV32I u32 не влезает в обычное число (Q-049), а считается в u32
+-- (raw / of_raw). Адреса, размеры, кодировки команд. to_number только до 2^28
+-- (ValueOutsideRange); переполнение — WordOutsideRange.
 --
 -- Word { b0, b1, b2, b3 }
 -- from_bytes(b0, b1, b2, b3) / from_number(value) / from_signed(value) -> Word
@@ -11,15 +12,39 @@
 -- align(word, boundary) -> Word, boundary — делитель 256; InvalidAlignment
 -- align_page(word) -> Word, вверх до 4096
 -- text(word) -> десятичный текст; binary_text / byte_binary_text -> биты
+-- raw(word) -> u32; of_raw(value) -> Word из u32
 
 use core.str
 use core.num
+use core.u32
+use core.bits32
+use core.u8
+
+BYTE = 256
 
 Word = Box {
     b0 = 0,
     b1 = 0,
     b2 = 0,
     b3 = 0
+}
+
+skill raw(value) {
+    @low = u32.from(value.b0) + u32.from(value.b1) * u32.from(BYTE)
+    out low + u32.from(value.b2) * u32.from(65536) + u32.from(value.b3) * u32.from(16777216)
+}
+
+skill of_raw(value) {
+    @rest = u32.from(value)
+    @next = rest / u32.from(BYTE)
+    @b0 = num.from(rest - next * u32.from(BYTE))
+    rest = next
+    next = rest / u32.from(BYTE)
+    @b1 = num.from(rest - next * u32.from(BYTE))
+    rest = next
+    next = rest / u32.from(BYTE)
+    @b2 = num.from(rest - next * u32.from(BYTE))
+    out from_bytes(b0, b1, b2, num.from(next))
 }
 
 skill from_bytes(b0, b1, b2, b3) {
@@ -52,12 +77,8 @@ skill is_zero(value) {
 }
 
 skill add(left, right) {
-    @v0 = left.b0 + right.b0
-    @v1 = left.b1 + right.b1 + v0 / 256
-    @v2 = left.b2 + right.b2 + v1 / 256
-    @v3 = left.b3 + right.b3 + v2 / 256
-    (v3 > 255) { out error.WordOutsideRange }
-    out from_bytes(v0 % 256, v1 % 256, v2 % 256, v3)
+    @sum = raw(left) + raw(right) rescue |err| { out error.WordOutsideRange }
+    out of_raw(sum)
 }
 
 skill add_number(value, amount) {
@@ -80,43 +101,13 @@ skill align_page(value) {
 }
 
 skill text(value) {
-    @current = value
-    @result = ""
-    @active = is_zero(current) == no
-    @step = 0
-    drum (10) {
-        (active == yes) {
-            @v3 = current.b3
-            @q3 = v3 / 10
-            @carry = v3 % 10
-            @v2 = carry * 256 + current.b2
-            @q2 = v2 / 10
-            carry = v2 % 10
-            @v1 = carry * 256 + current.b1
-            @q1 = v1 / 10
-            carry = v1 % 10
-            @v0 = carry * 256 + current.b0
-            @q0 = v0 / 10
-            carry = v0 % 10
-            result = str.concat(str.get("0123456789", carry), result)
-            current = from_bytes(q0, q1, q2, q3)
-            active = is_zero(current) == no
-        }
-        step = step + 1
-    }
-    (str.bytes(result) == 0) { out "0" }
-    out result
+    @whole = raw(value)
+    out "{whole}"
 }
 
 skill negate(value) {
-    @v0 = 256 - value.b0
-    @b0 = v0 % 256
-    @v1 = 255 - value.b1 + v0 / 256
-    @b1 = v1 % 256
-    @v2 = 255 - value.b2 + v1 / 256
-    @b2 = v2 % 256
-    @v3 = 255 - value.b3 + v2 / 256
-    out from_bytes(b0, b1, b2, v3 % 256)
+    (is_zero(value) == yes) { out value }
+    out of_raw(u32.from(bits32.invert(bits32.from(raw(value)))) + u32.from(1))
 }
 
 skill from_signed(value) {
@@ -125,12 +116,7 @@ skill from_signed(value) {
 }
 
 skill shift_left(value, shift) {
-    @scale = num.power2(shift)
-    @v0 = value.b0 * scale
-    @v1 = value.b1 * scale + v0 / 256
-    @v2 = value.b2 * scale + v1 / 256
-    @v3 = value.b3 * scale + v2 / 256
-    out from_bytes(v0 % 256, v1 % 256, v2 % 256, v3 % 256)
+    out of_raw(u32.from(bits32.shift_left(bits32.from(raw(value)), u8.from(shift))))
 }
 
 skill from_decimal(text) {
@@ -142,18 +128,13 @@ skill from_decimal(text) {
         (length == 1) { out error.InvalidWordText }
         first = 1
     }
-    @result = from_bytes(0, 0, 0, 0)
+    @total = u32.from(0)
     drum (length - first) {
         @ch = str.get(text, beat + first)
         (str.is_digit(ch) == no) { out error.InvalidWordText }
-        @digit = num.digit_value(ch)
-        @v0 = result.b0 * 10 + digit
-        @v1 = result.b1 * 10 + v0 / 256
-        @v2 = result.b2 * 10 + v1 / 256
-        @v3 = result.b3 * 10 + v2 / 256
-        (v3 > 255) { out error.WordOutsideRange }
-        result = from_bytes(v0 % 256, v1 % 256, v2 % 256, v3)
+        total = total * u32.from(10) + u32.from(num.digit_value(ch)) rescue |err| { out error.WordOutsideRange }
     }
+    @result = of_raw(total)
     (negative == yes) {
         (result.b3 > 128) { out error.WordOutsideRange }
         (result.b3 == 128) {
