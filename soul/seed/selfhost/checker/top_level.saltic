@@ -8,7 +8,10 @@
 -- Result = Box { diagnostics, globals, tree }
 -- collect(program_ast, path, wide) -> Result без tree; нет program — ошибка в 1|1;
 --     wide = yes — цель с 61-битным числом (RV64): в таблице метка rules.WIDE_MARK
--- check(program_ast, path, wide) -> Result с проверенным tree
+-- check(program_ast, path, wide) -> Result с проверенным tree: тела обходятся,
+--     пока signatures.observe находит новые фиксированные типы параметров и
+--     результатов (каждый проход добавляет хотя бы один ключ — проходов не
+--     больше, чем ключей); check_bodies(program_ast, path, base) — один проход
 -- source(module, path) -> чем подписать сообщения: модуль или путь
 
 use core.str
@@ -21,6 +24,8 @@ use selfhost.checker.types
 use selfhost.checker.lookup
 use selfhost.checker.walk
 use selfhost.checker.rules
+use selfhost.checker.signatures
+use selfhost.abi.call
 
 Result = Box {
     diagnostics = [],
@@ -104,7 +109,19 @@ skill collect(program_ast, path, wide) {
 }
 
 skill check(program_ast, path, wide) {
-    @result = collect(program_ast, path, wide)
+    @base = collect(program_ast, path, wide)
+    @result = check_bodies(program_ast, path, base)
+    drum (group.count(program_ast) * (call.ARGUMENT_LIMIT + 1)) {
+        @seen = signatures.observe(result.tree, result.globals)
+        (seen.changed == no) { leave }
+        base.globals = seen.globals
+        result = check_bodies(program_ast, path, base)
+    }
+    out result
+}
+
+skill check_bodies(program_ast, path, base) {
+    @result = Result { diagnostics = base.diagnostics, globals = base.globals }
     @tree = [group.get(program_ast, 0)]
     drum (group.count(program_ast) - 1) {
         @item = group.get(program_ast, beat + 1)
@@ -119,7 +136,7 @@ skill check(program_ast, path, wide) {
         }
         (tag == "skill") {
             @body_walked = walk.check_params(item, ast.part(item, 2), result.globals, "", module, ast.part(item, 3), result.diagnostics)
-            result.diagnostics = body_walked.diagnostics
+            result.diagnostics = signatures.check_ending(item, signatures.owner_name(item, "", module), ast.part(item, 3), result.globals, body_walked.diagnostics)
             checked_item = ast.with_part(item, 3, body_walked.node)
         }
         (tag == "entry") {
