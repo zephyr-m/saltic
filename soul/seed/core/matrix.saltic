@@ -1,0 +1,109 @@
+-- matrix — матрица дробных (Q-047): rows × columns ячеек по 64 бита в одном
+-- буфере (core.bytes, строка за строкой), только на 64-битных целях. Матрица
+-- изменяемая, как Box: set меняет её на месте. Новая заполнена 0.0. Операции
+-- над матрицами отдают новую; * у матриц нет — multiply.
+--
+-- Matrix = Box { rows, columns, cells }
+-- new(rows, columns) -> Matrix из 0.0; MatrixShape, если размер меньше 1
+-- rows / columns(m) -> число
+-- get(m, row, column) -> дробное; set(m, row, column, value); MatrixBounds вне матрицы
+-- add(a, b) -> Matrix; MatrixShape, если размеры разные
+-- multiply(a, b) -> Matrix rows(a) × columns(b); MatrixShape, если columns(a) ≠ rows(b)
+-- transpose(m) -> Matrix columns × rows
+-- Внутри: place — номер первого байта ячейки; ячейка — биты fraction.bits
+--     (61 бит со знаком): младшие 56 — семь байтов, восьмой — старшие 4 и знак (16)
+
+use core.bytes
+use core.fraction
+
+CELL = 8
+BYTE = 256
+SIGN = 1152921504606846975
+
+Matrix = Box {
+    rows = 0,
+    columns = 0,
+    cells = []
+}
+
+skill new(rows, columns) {
+    (rows < 1) { out error.MatrixShape }
+    (columns < 1) { out error.MatrixShape }
+    out Matrix { rows = rows, columns = columns, cells = bytes.new(rows * columns * CELL) }
+}
+
+skill rows(m) {
+    out m.rows
+}
+
+skill columns(m) {
+    out m.columns
+}
+
+skill place(m, row, column) {
+    (row < 0) { out error.MatrixBounds }
+    (column < 0) { out error.MatrixBounds }
+    (row >= m.rows) { out error.MatrixBounds }
+    (column >= m.columns) { out error.MatrixBounds }
+    out (row * m.columns + column) * CELL
+}
+
+skill get(m, row, column) {
+    @at = place(m, row, column)
+    @high = bytes.get(m.cells, at + 7)
+    @value = high % 16
+    drum (7) { value = value * BYTE + bytes.get(m.cells, at + 6 - beat) }
+    (high >= 16) { value = value - SIGN - 1 }
+    out fraction.from_bits(value)
+}
+
+skill set(m, row, column, value) {
+    @at = place(m, row, column)
+    @rest = fraction.bits(value)
+    @sign = 0
+    (rest < 0) {
+        rest = rest + SIGN + 1
+        sign = 16
+    }
+    drum (7) {
+        bytes.set(m.cells, at + beat, rest % BYTE)
+        rest = rest / BYTE
+    }
+    bytes.set(m.cells, at + 7, rest + sign)
+    out none
+}
+
+skill add(a, b) {
+    ((a.rows == b.rows) == no) { out error.MatrixShape }
+    ((a.columns == b.columns) == no) { out error.MatrixShape }
+    @sum = new(a.rows, a.columns)
+    drum (a.rows) {
+        @row = beat
+        drum (a.columns) { set(sum, row, beat, get(a, row, beat) + get(b, row, beat)) }
+    }
+    out sum
+}
+
+skill multiply(a, b) {
+    ((a.columns == b.rows) == no) { out error.MatrixShape }
+    @product = new(a.rows, b.columns)
+    drum (a.rows) {
+        @row = beat
+        drum (b.columns) {
+            @column = beat
+            @total = 0.0
+            drum (a.columns) { total = total + get(a, row, beat) * get(b, beat, column) }
+            set(product, row, column, total)
+        }
+    }
+    out product
+}
+
+skill transpose(m) {
+    @turned = new(m.columns, m.rows)
+    drum (m.rows) {
+        @row = beat
+        drum (m.columns) { set(turned, beat, row, get(m, row, beat)) }
+    }
+    out turned
+}
