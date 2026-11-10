@@ -194,11 +194,12 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   `core.fraction` — `from`, `bits`, `near`, `text` (кратчайшая обратимая, из двух
   равно близких — с чётной цифрой), `NEAR = 1e-9`; `core.num` — `floor`, `ceil`,
   `trunc`, `round_school`, `round_bank` (на SSE2 — через усечение и сравнение, без
-  `roundsd`, → Q-046). Тест `soul/seed/tests/fraction.saltic` (случай `fraction` в
+  `roundsd` — так и оставить, Q-046). Тест `soul/seed/tests/fraction.saltic` (случай `fraction` в
   tests/run: x86-64 и rv64), канон ошибок `fractions` и `fractions-wide`
   (чекер-обёртка проверяет «-wide.saltic» для 64-битной цели). Сверено с Python
   (Fraction, двойное округление 53 → 50) на 177 случаях: 0 расхождений, x86-64 =
-  rv64. Канон `main.saltic` дробных не показывает — его гоняют на rv32i (→ Q-046).
+  rv64. Канон `main.saltic` дробных не показывает — его гоняют на rv32i; второй
+  канон `wide.saltic` для 64-битных — Q-046 (ответ 11.11.2026).
 - [ ] Матрица: `words` (сплошные 32-битные числа) → дробные → `core.matrix` →
   векторы (SSE/AVX, RVV). → PLAN-1 «До заморозки»
 - [ ] **отложено** `machine` — машина состояний, 16-е ключевое слово. → PLAN-1 «До заморозки»
