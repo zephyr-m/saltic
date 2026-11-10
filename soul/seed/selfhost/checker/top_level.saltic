@@ -14,6 +14,8 @@
 --     параметр обычным; ключ меняется не больше двух раз — проходов конечно;
 --     check_bodies(program_ast, path, base) — один проход
 -- source(module, path) -> чем подписать сообщения: модуль или путь
+-- method_arities(result, item, box_name) -> Result — у метода одного имени одна арность
+--     во всей программе (Q-045; диспетчер rt_method_<имя> один на имя)
 
 use core.str
 use core.group
@@ -37,6 +39,27 @@ Result = Box {
 skill source(module, path) {
     (str.bytes(module) > 0) { out module }
     out path
+}
+
+skill method_arities(result, item, box_name) {
+    drum (group.count(ast.plain(item)) - 2) {
+        @member = ast.part(item, beat + 2)
+        (ast.tag(member) == "subject-skill") {
+            @method = ast.part(member, 1)
+            @count = group.count(ast.part(member, 2))
+            @key = "__method__|{method}"
+            @seen = names.table_find(result.globals, key)
+            pick {
+                (str.bytes(seen.name) == 0) { result.globals = names.table_put_node(result.globals, key, box_name, "{count}", member) }
+                (seen.kind == box_name) { }
+                (("{count}" == seen.type) == no) {
+                    @other = ast.part(seen.node, 2)
+                    result.diagnostics = lookup.add_diagnostic(result.diagnostics, lookup.placed(member, errors.method_arity(method, box_name, count, group.count(other))))
+                }
+            }
+        }
+    }
+    out result
 }
 
 skill collect(program_ast, path, wide) {
@@ -69,7 +92,11 @@ skill collect(program_ast, path, wide) {
         }
         (tag == "const") { name = ast.qualified(module, ast.part(item, 1)) kind = "const" }
         (tag == "enum") { name = ast.qualified(module, ast.part(item, 1)) kind = "enum" }
-        (tag == "box") { name = ast.qualified(module, ast.part(item, 1)) kind = "box" }
+        (tag == "box") {
+            name = ast.qualified(module, ast.part(item, 1))
+            kind = "box"
+            result = method_arities(result, item, name)
+        }
         (tag == "skill") { name = ast.qualified(module, ast.part(item, 1)) kind = "skill" }
         (tag == "native") { name = ast.qualified(module, ast.part(item, 1)) kind = "native" }
         (str.bytes(name) > 0) {
@@ -88,14 +115,16 @@ skill collect(program_ast, path, wide) {
                     (kind == "enum") {
                         drum (ast.enum_variant_count(item)) {
                             @variant = ast.enum_variant(item, beat)
-                            @variant_key = names.variant_key(variant)
-                            @old_variant = names.table_find(result.globals, variant_key)
+                            @own_key = names.enum_variant_key(name, variant)
+                            @short = names.table_find(result.globals, names.variant_key(variant))
                             pick {
-                                (str.bytes(old_variant.name) > 0) {
+                                (names.table_has(result.globals, own_key) == yes) {
                                     result.diagnostics = lookup.add_diagnostic(result.diagnostics, lookup.placed(item, errors.duplicate_enum_variant(variant)))
                                 }
-                                { result.globals = names.table_put_node(result.globals, variant_key, "enum-variant", "enum:{name}", item) }
+                                (str.bytes(short.name) > 0) { result.globals = names.table_update(result.globals, short.name, names.AMBIGUOUS) }
+                                { result.globals = names.table_put_node(result.globals, names.variant_key(variant), "enum-variant", "enum:{name}", item) }
                             }
+                            result.globals = names.table_put_node(result.globals, own_key, "enum-variant", "enum:{name}", item)
                         }
                     }
                 }
