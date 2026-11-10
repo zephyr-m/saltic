@@ -18,6 +18,9 @@
 -- GROUP_* — кадр rt_value_equal на стеке в словах; GROUP_STEP — единица в числе с
 --     тегом (1 << abi.TAG_SHIFT), шаг индекса
 -- emit_number_text(compiler) — rt_number_text -> строка (rt_alloc)
+-- emit_bits(compiler) — биты обычного числа (Q-024): rt_num_and / or / xor(VALUE, ERROR),
+--     rt_num_shift_left / shift_right(VALUE, ERROR сдвиг), rt_num_bit(VALUE, ERROR n) -> yes/no;
+--     сдвиг 0…ширина числа − 1, иначе и при переполнении влево — NumberOverflow
 
 use selfhost.abi
 use selfhost.abi.value
@@ -376,4 +379,54 @@ skill emit_number_text(compiler) {
     compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 11)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 12)
     out tails.ok(compiler)
+}
+
+skill emit_arithmetic_right(compiler, to, from, count, name) {
+    @executor = compiler.executor
+    compiler = executor.branch_not_negative(compiler, from, ".L_{name}_plus")
+    compiler = executor.xor_immediate(compiler, to, from, -1)
+    compiler = executor.shift_right_unsigned_by(compiler, to, to, count)
+    compiler = executor.xor_immediate(compiler, to, to, -1)
+    compiler = executor.jump(compiler, ".L_{name}_done")
+    compiler = executor.label(compiler, ".L_{name}_plus")
+    compiler = executor.shift_right_unsigned_by(compiler, to, from, count)
+    out executor.label(compiler, ".L_{name}_done")
+}
+
+skill emit_shift_count(compiler, name) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, name)
+    compiler = executor.shift_right_signed(compiler, backend.SCRATCH3, backend.ERROR, abi.TAG_SHIFT)
+    compiler = executor.branch_not_negative(compiler, backend.SCRATCH3, ".L_{name}_low")
+    compiler = executor.jump(compiler, "rt_number_overflow")
+    compiler = executor.label(compiler, ".L_{name}_low")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, compiler.words.bits - abi.TAG_SHIFT)
+    compiler = executor.branch_less(compiler, backend.SCRATCH3, backend.SCRATCH4, ".L_{name}_fits")
+    compiler = executor.jump(compiler, "rt_number_overflow")
+    out executor.label(compiler, ".L_{name}_fits")
+}
+
+skill emit_bits(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_num_and")
+    compiler = tails.ok(executor.and(compiler, backend.VALUE, backend.VALUE, backend.ERROR))
+    compiler = executor.label(compiler, "rt_num_or")
+    compiler = tails.ok(executor.or(compiler, backend.VALUE, backend.VALUE, backend.ERROR))
+    compiler = executor.label(compiler, "rt_num_xor")
+    compiler = tails.ok(executor.xor(compiler, backend.VALUE, backend.VALUE, backend.ERROR))
+    compiler = emit_shift_count(compiler, "rt_num_shift_left")
+    compiler = executor.shift_left_by(compiler, backend.SCRATCH5, backend.VALUE, backend.SCRATCH3)
+    compiler = emit_arithmetic_right(compiler, backend.SCRATCH4, backend.SCRATCH5, backend.SCRATCH3, "num_shift_back")
+    compiler = executor.jump_if_not_equal(compiler, backend.SCRATCH4, backend.VALUE, "rt_number_overflow")
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH5)
+    compiler = tails.ok(compiler)
+    compiler = emit_shift_count(compiler, "rt_num_shift_right")
+    compiler = emit_arithmetic_right(compiler, backend.VALUE, backend.VALUE, backend.SCRATCH3, "num_shift_right")
+    compiler = tails.ok(executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK))
+    compiler = emit_shift_count(compiler, "rt_num_bit")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, abi.TAG_SHIFT)
+    compiler = emit_arithmetic_right(compiler, backend.VALUE, backend.VALUE, backend.SCRATCH3, "num_bit")
+    compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, 1)
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    out tails.ok(executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.NO))
 }
