@@ -1,0 +1,387 @@
+-- screen — адаптер экрана Wayland. open отдаёт Screen того же лица, что рисует
+-- Acer: width, height, stride, format, memory как [hi, lo]. atoms.draw и
+-- lettering пишут в него через mem.store32. present показывает кадр.
+-- Память — общее отображение memfd в младших 2 ГБ, формат BGR (XRGB на проводе).
+
+use core.str
+use core.bytes
+use core.group
+use core.process
+use core.socket
+use io
+use os.apps.wayland.wire
+use os.target.uefi_x86_64.screen.graphics
+
+DISPLAY = 1
+REGISTRY = 2
+CALLBACK = 3
+COMPOSITOR = 4
+SHM = 5
+SHELL = 6
+SURFACE = 7
+XDG_SURFACE = 8
+TOPLEVEL = 9
+SEAT = 10
+POINTER = 11
+KEYBOARD = 12
+POOL = 13
+BUFFER = 14
+WIDTH = 1280
+HEIGHT = 720
+STRIDE = 5120
+PIXELS = 3686400
+FORMAT_BGR = 1
+LEFT_BUTTON = 272
+NO_DATA = 0 - 11
+STREAM = 2049
+
+Link = Box {
+    way_fd = 0,
+    way_memfd = 0,
+    way_compositor_name = 0,
+    way_compositor_version = 0,
+    way_shm_name = 0,
+    way_shm_version = 0,
+    way_shell_name = 0,
+    way_shell_version = 0,
+    way_seat_name = 0,
+    way_seat_version = 0,
+    way_pointer_x = 0,
+    way_pointer_y = 0,
+    way_synced = no,
+    way_configured = no,
+    way_closed = no,
+    way_failed = no,
+    way_serial = 0,
+    way_ping = 0,
+    way_pinged = no,
+    way_hold = 0
+}
+
+skill cap(version, limit) {
+    (version > limit) { out limit }
+    (version < 1) { out 1 }
+    out version
+}
+
+skill value_of(name) {
+    @found = ""
+    drum (process.environment()) {
+        @row = beat
+        @cut = 0
+        drum (str.bytes(row)) {
+            (str.byte(row, beat) == 61) { cut = beat }
+        }
+        (cut > 0) {
+            (str.slice(row, 0, cut) == name) { found = str.slice(row, cut + 1, str.bytes(row)) }
+        }
+    }
+    out found
+}
+
+skill socket_path() {
+    @dir = value_of("XDG_RUNTIME_DIR")
+    @name = value_of("WAYLAND_DISPLAY")
+    (str.bytes(name) == 0) { out "" }
+    (str.byte(name, 0) == 47) { out name }
+    out "{dir}/{name}"
+}
+
+skill unix_address(path) {
+    @buffer = bytes.new(str.bytes(path) + 3)
+    bytes.set(buffer, 0, 1)
+    drum (str.bytes(path)) { bytes.set(buffer, beat + 2, str.byte(path, beat)) }
+    out buffer
+}
+
+skill halves(pointer) {
+    out [pointer / 65536, pointer % 65536]
+}
+
+skill send_buffer(fd, buffer) {
+    out socket.write(fd, buffer, bytes.count(buffer))
+}
+
+skill bind(fd, name, interface, version, id) {
+    @len = str.bytes(interface) + 1
+    @size = 24 + (len + 3) / 4 * 4
+    @buffer = wire.request(REGISTRY, 0, size)
+    wire.put32(buffer, 8, name)
+    @at = wire.put_text(buffer, 12, interface)
+    wire.put32(buffer, at, version)
+    wire.put32(buffer, at + 4, id)
+    out send_buffer(fd, buffer)
+}
+
+skill remember(link, packet, at) {
+    @name = wire.get32(packet, at + 8)
+    @len = wire.get32(packet, at + 12)
+    @text = at + 16
+    @version = wire.get32(packet, text + (len + 3) / 4 * 4)
+    (wire.text_is(packet, text, "wl_compositor") == yes) {
+        link.way_compositor_name = name
+        link.way_compositor_version = version
+    }
+    (wire.text_is(packet, text, "wl_shm") == yes) {
+        link.way_shm_name = name
+        link.way_shm_version = version
+    }
+    (wire.text_is(packet, text, "xdg_wm_base") == yes) {
+        link.way_shell_name = name
+        link.way_shell_version = version
+    }
+    (wire.text_is(packet, text, "wl_seat") == yes) {
+        link.way_seat_name = name
+        link.way_seat_version = version
+    }
+    out none
+}
+
+skill reply_ping(link) {
+    (link.way_pinged == no) { out none }
+    @pong = wire.request(SHELL, 3, 12)
+    wire.put32(pong, 8, link.way_ping)
+    socket.write(link.way_fd, pong, 12)
+    link.way_pinged = no
+    out none
+}
+
+skill take(link, packet, count) {
+    @at = 0
+    always {
+        (at + 8 > count) { leave }
+        @size = wire.get16(packet, at + 6)
+        (size < 8) {
+            link.way_failed = yes
+            leave
+        }
+        (at + size > count) { leave }
+        @object = wire.get32(packet, at)
+        @opcode = wire.get16(packet, at + 4)
+        (object == DISPLAY) { (opcode == 0) { link.way_failed = yes } }
+        (object == REGISTRY) { (opcode == 0) { remember(link, packet, at) } }
+        (object == CALLBACK) { (opcode == 0) { link.way_synced = yes } }
+        (object == SHELL) {
+            (opcode == 0) {
+                link.way_ping = wire.get32(packet, at + 8)
+                link.way_pinged = yes
+            }
+        }
+        (object == XDG_SURFACE) {
+            (opcode == 0) {
+                link.way_serial = wire.get32(packet, at + 8)
+                link.way_configured = yes
+            }
+        }
+        (object == TOPLEVEL) { (opcode == 1) { link.way_closed = yes } }
+        (object == POINTER) {
+            (opcode == 0) {
+                (size >= 24) {
+                    link.way_pointer_x = wire.get32(packet, at + 16) / 256
+                    link.way_pointer_y = wire.get32(packet, at + 20) / 256
+                }
+            }
+            (opcode == 2) {
+                (size >= 20) {
+                    link.way_pointer_x = wire.get32(packet, at + 12) / 256
+                    link.way_pointer_y = wire.get32(packet, at + 16) / 256
+                }
+            }
+            (opcode == 3) {
+                (size >= 24) {
+                    @button = wire.get32(packet, at + 16)
+                    @state = wire.get32(packet, at + 20)
+                    (button == LEFT_BUTTON) {
+                        (state == 1) {
+                            (link.way_pointer_x >= WIDTH - 48) {
+                                (link.way_pointer_y < 48) { link.way_closed = yes }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (object == KEYBOARD) {
+            (opcode == 3) {
+                (size >= 24) {
+                    @scan = wire.get32(packet, at + 16)
+                    @down = wire.get32(packet, at + 20)
+                    (down == 1) {
+                        (scan == 1) { link.way_closed = yes }
+                    }
+                }
+            }
+        }
+        at = at + size
+    }
+    reply_ping(link)
+    out at
+}
+
+skill pump(link, packet, hold, joined) {
+    @got = socket.read(link.way_fd, packet)
+    (got == NO_DATA) { out 0 }
+    (got <= 0) { link.way_failed = yes out got }
+    @total = wire.join(hold, link.way_hold, packet, got, joined)
+    @used = take(link, joined, total)
+    link.way_hold = wire.keep(joined, used, total, hold)
+    out got
+}
+
+skill wait(link, packet, hold, joined, until_synced) {
+    always {
+        (link.way_failed == yes) { leave }
+        (until_synced == yes) { (link.way_synced == yes) { leave } }
+        (until_synced == no) { (link.way_configured == yes) { leave } }
+        pump(link, packet, hold, joined)
+        socket.sleep(20)
+    }
+    out none
+}
+
+skill present(link) {
+    @attach = wire.request(SURFACE, 1, 20)
+    wire.put32(attach, 8, BUFFER)
+    send_buffer(link.way_fd, attach)
+    @damage = wire.request(SURFACE, 2, 24)
+    wire.put32(damage, 16, WIDTH)
+    wire.put32(damage, 20, HEIGHT)
+    send_buffer(link.way_fd, damage)
+    @commit = wire.request(SURFACE, 6, 8)
+    out send_buffer(link.way_fd, commit)
+}
+
+skill open() {
+    @path = socket_path()
+    (str.bytes(path) == 0) {
+        io.show("нет сокета")
+        out []
+    }
+    @fd = socket.open(1, STREAM, 0)
+    (fd < 0) {
+        io.show("сокет")
+        out []
+    }
+    (socket.connect(fd, unix_address(path)) < 0) {
+        io.show("соединение")
+        out []
+    }
+    @link = Link { way_fd = fd }
+    @registry = wire.request(DISPLAY, 1, 12)
+    wire.put32(registry, 8, REGISTRY)
+    send_buffer(fd, registry)
+    @sync = wire.request(DISPLAY, 0, 12)
+    wire.put32(sync, 8, CALLBACK)
+    send_buffer(fd, sync)
+    @packet = bytes.new(8192)
+    @hold = bytes.new(4096)
+    @joined = bytes.new(12288)
+    wait(link, packet, hold, joined, yes)
+    (link.way_failed == yes) {
+        io.show("реестр")
+        out []
+    }
+    (link.way_compositor_name == 0) {
+        io.show("нет композитора")
+        out []
+    }
+    (link.way_shm_name == 0) {
+        io.show("нет shm")
+        out []
+    }
+    (link.way_shell_name == 0) {
+        io.show("нет оболочки")
+        out []
+    }
+    (bind(fd, link.way_compositor_name, "wl_compositor", cap(link.way_compositor_version, 4), COMPOSITOR) < 0) {
+        io.show("bind композитора")
+        out []
+    }
+    (bind(fd, link.way_shm_name, "wl_shm", cap(link.way_shm_version, 1), SHM) < 0) {
+        io.show("bind shm")
+        out []
+    }
+    (bind(fd, link.way_shell_name, "xdg_wm_base", cap(link.way_shell_version, 1), SHELL) < 0) {
+        io.show("bind оболочки")
+        out []
+    }
+    @surface = wire.request(COMPOSITOR, 0, 12)
+    wire.put32(surface, 8, SURFACE)
+    send_buffer(fd, surface)
+    @xdg = wire.request(SHELL, 2, 16)
+    wire.put32(xdg, 8, XDG_SURFACE)
+    wire.put32(xdg, 12, SURFACE)
+    send_buffer(fd, xdg)
+    @top = wire.request(XDG_SURFACE, 1, 12)
+    wire.put32(top, 8, TOPLEVEL)
+    send_buffer(fd, top)
+    @title_len = str.bytes("SalticIDE") + 1
+    @title = wire.request(TOPLEVEL, 2, 12 + (title_len + 3) / 4 * 4)
+    wire.put_text(title, 8, "SalticIDE")
+    send_buffer(fd, title)
+    (link.way_seat_name == 0) {
+        io.show("нет места")
+        out []
+    }
+    bind(fd, link.way_seat_name, "wl_seat", 1, SEAT)
+    @point = wire.request(SEAT, 0, 12)
+    wire.put32(point, 8, POINTER)
+    send_buffer(fd, point)
+    @keys = wire.request(SEAT, 1, 12)
+    wire.put32(keys, 8, KEYBOARD)
+    send_buffer(fd, keys)
+    @bare = wire.request(SURFACE, 6, 8)
+    send_buffer(fd, bare)
+    wait(link, packet, hold, joined, no)
+    (link.way_configured == no) {
+        io.show("нет configure")
+        out []
+    }
+    @ack = wire.request(XDG_SURFACE, 4, 12)
+    wire.put32(ack, 8, link.way_serial)
+    send_buffer(fd, ack)
+    @memfd = socket.memory("saltic-screen")
+    (memfd < 0) {
+        io.show("memfd")
+        out []
+    }
+    link.way_memfd = memfd
+    (socket.resize(memfd, PIXELS) < 0) {
+        io.show("размер")
+        out []
+    }
+    @pool = wire.request(SHM, 0, 16)
+    wire.put32(pool, 8, POOL)
+    wire.put32(pool, 12, PIXELS)
+    (socket.send(fd, pool, 16, memfd) < 0) {
+        io.show("пул")
+        out []
+    }
+    @made = wire.request(POOL, 0, 32)
+    wire.put32(made, 8, BUFFER)
+    wire.put32(made, 16, WIDTH)
+    wire.put32(made, 20, HEIGHT)
+    wire.put32(made, 24, STRIDE)
+    wire.put32(made, 28, FORMAT_BGR)
+    send_buffer(fd, made)
+    @address = socket.map(memfd, PIXELS)
+    (address < 0) {
+        io.show("память {address}")
+        out []
+    }
+    @face = graphics.Screen {
+        width = WIDTH,
+        height = HEIGHT,
+        stride = WIDTH,
+        format = FORMAT_BGR,
+        frame = 0,
+        memory = halves(address),
+        accel = [],
+        vsync = no
+    }
+    out [face, link]
+}
+
+program() {
+    out none
+}

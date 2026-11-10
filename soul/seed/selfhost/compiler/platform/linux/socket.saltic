@@ -1,0 +1,287 @@
+-- socket — rt_platform_socket_*: сокет, memfd и запись в него.
+-- Аргументы в VALUE, ERROR, ARG2, ARG3. Результат — число с тегом,
+-- как его вернул системный вызов (0 и выше, либо -errno).
+-- send и place на 4-байтном слове отвечают -1: msghdr и lseek+write
+-- собраны для слова в 8 байт.
+--
+-- append(compiler) — все девять меток
+
+use selfhost.abi
+use core.system
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.runtime.tails
+
+SEEK_SET = 0
+SEND_FRAME = 17
+PLACE_FRAME = 5
+SAVE_FD = 96
+SAVE_PTR = 104
+SAVE_LEN = 112
+SAVE_ATTACHED = 120
+MSG_IOV = 16
+MSG_IOVLEN = 24
+MSG_CONTROL = 32
+MSG_CONTROLLEN = 40
+IOV = 56
+IOV_LEN = 64
+CMSG_LEN = 72
+CMSG_LEVEL = 80
+CMSG_TYPE = 84
+CMSG_FD = 88
+
+skill number(compiler, to, from) {
+    @executor = compiler.executor
+    out executor.shift_right_signed(compiler, to, from, abi.TAG_SHIFT)
+}
+
+skill tag_number(compiler) {
+    @executor = compiler.executor
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    out executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_NUMBER)
+}
+
+skill enter(compiler, frame) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 0 - words.bytes * frame)
+    out executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * (frame - 1))
+}
+
+skill finish(compiler, frame) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * (frame - 1))
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * frame)
+    out executor.ret(compiler)
+}
+
+skill refuse(compiler) {
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0 - 1)
+    compiler = tag_number(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_open(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_platform_socket_open")
+    compiler = number(compiler, backend.VALUE, backend.VALUE)
+    compiler = number(compiler, backend.ERROR, backend.ERROR)
+    compiler = number(compiler, backend.ARG2, backend.ARG2)
+    compiler = executor.syscall(compiler, system.SYSCALL_SOCKET)
+    compiler = tag_number(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_connect(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_platform_socket_connect")
+    compiler = number(compiler, backend.VALUE, backend.VALUE)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ERROR, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.ARG2, backend.SCRATCH0, words.payload)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
+    compiler = executor.syscall(compiler, system.SYSCALL_CONNECT)
+    compiler = tag_number(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_write(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_platform_socket_write")
+    compiler = number(compiler, backend.VALUE, backend.VALUE)
+    compiler = number(compiler, backend.ARG2, backend.ARG2)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ERROR, abi.PAYLOAD_MASK)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
+    compiler = executor.syscall(compiler, system.SYSCALL_WRITE)
+    compiler = tag_number(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_read(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_platform_socket_read")
+    compiler = number(compiler, backend.VALUE, backend.VALUE)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ERROR, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.ARG2, backend.SCRATCH0, words.payload)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
+    compiler = executor.syscall(compiler, system.SYSCALL_READ)
+    compiler = tag_number(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_close(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_platform_socket_close")
+    compiler = number(compiler, backend.VALUE, backend.VALUE)
+    compiler = executor.syscall(compiler, system.SYSCALL_CLOSE)
+    compiler = tag_number(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_memory(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_platform_socket_memory")
+    compiler = number(compiler, backend.ERROR, backend.ERROR)
+    compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.payload + words.string_data)
+    compiler = executor.syscall(compiler, system.SYSCALL_MEMFD)
+    compiler = tag_number(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_resize(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_platform_socket_resize")
+    compiler = number(compiler, backend.VALUE, backend.VALUE)
+    compiler = number(compiler, backend.ERROR, backend.ERROR)
+    compiler = executor.syscall(compiler, system.SYSCALL_FTRUNCATE)
+    compiler = tag_number(compiler)
+    out tails.ok(compiler)
+}
+
+skill emit_send(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_platform_socket_send")
+    (words.bytes == 8) {
+        compiler = enter(compiler, SEND_FRAME)
+        compiler = number(compiler, backend.VALUE, backend.VALUE)
+        compiler = executor.store(compiler, backend.VALUE, backend.STACK, SAVE_FD)
+        compiler = number(compiler, backend.ARG2, backend.ARG2)
+        compiler = executor.store(compiler, backend.ARG2, backend.STACK, SAVE_LEN)
+        compiler = number(compiler, backend.ARG3, backend.ARG3)
+        compiler = executor.store(compiler, backend.ARG3, backend.STACK, SAVE_ATTACHED)
+        compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ERROR, abi.PAYLOAD_MASK)
+        compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, words.payload + words.string_data)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, SAVE_PTR)
+        compiler = executor.store_zero(compiler, backend.STACK, 0)
+        compiler = executor.store_zero(compiler, backend.STACK, 8)
+        compiler = executor.store_zero(compiler, backend.STACK, MSG_IOV)
+        compiler = executor.store_zero(compiler, backend.STACK, MSG_IOVLEN)
+        compiler = executor.store_zero(compiler, backend.STACK, MSG_CONTROL)
+        compiler = executor.store_zero(compiler, backend.STACK, MSG_CONTROLLEN)
+        compiler = executor.store_zero(compiler, backend.STACK, 48)
+        compiler = executor.store_zero(compiler, backend.STACK, IOV)
+        compiler = executor.store_zero(compiler, backend.STACK, IOV_LEN)
+        compiler = executor.store_zero(compiler, backend.STACK, CMSG_LEN)
+        compiler = executor.store_zero(compiler, backend.STACK, CMSG_LEVEL)
+        compiler = executor.store_zero(compiler, backend.STACK, CMSG_FD)
+        compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, SAVE_PTR)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, IOV)
+        compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, SAVE_LEN)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, IOV_LEN)
+        compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.STACK, IOV)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, MSG_IOV)
+        compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, MSG_IOVLEN)
+        compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.STACK, CMSG_LEN)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, MSG_CONTROL)
+        compiler = executor.load_immediate(compiler, backend.SCRATCH0, 24)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, MSG_CONTROLLEN)
+        compiler = executor.load_immediate(compiler, backend.SCRATCH0, 20)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, CMSG_LEN)
+        compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
+        compiler = executor.store32(compiler, backend.SCRATCH0, backend.STACK, CMSG_LEVEL)
+        compiler = executor.store32(compiler, backend.SCRATCH0, backend.STACK, CMSG_TYPE)
+        compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, SAVE_ATTACHED)
+        compiler = executor.store32(compiler, backend.SCRATCH0, backend.STACK, CMSG_FD)
+        compiler = executor.load(compiler, backend.VALUE, backend.STACK, SAVE_FD)
+        compiler = executor.move(compiler, backend.ERROR, backend.STACK)
+        compiler = executor.load_immediate(compiler, backend.ARG2, 0)
+        compiler = executor.syscall(compiler, system.SYSCALL_SENDMSG)
+        compiler = tag_number(compiler)
+        out finish(compiler, SEND_FRAME)
+    }
+    out refuse(compiler)
+}
+
+skill emit_place(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_platform_socket_place")
+    (words.bytes == 8) {
+        compiler = enter(compiler, PLACE_FRAME)
+        compiler = number(compiler, backend.VALUE, backend.VALUE)
+        compiler = executor.store(compiler, backend.VALUE, backend.STACK, 0)
+        compiler = number(compiler, backend.ARG2, backend.ARG2)
+        compiler = executor.store(compiler, backend.ARG2, backend.STACK, words.bytes * 3)
+        compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ERROR, abi.PAYLOAD_MASK)
+        compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, words.payload)
+        compiler = executor.store(compiler, backend.SCRATCH1, backend.STACK, words.bytes * 2)
+        compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, words.payload + words.string_data)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+        compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
+        compiler = executor.load(compiler, backend.ERROR, backend.STACK, words.bytes * 3)
+        compiler = executor.load_immediate(compiler, backend.ARG2, SEEK_SET)
+        compiler = executor.syscall(compiler, system.SYSCALL_LSEEK)
+        compiler = executor.branch_negative(compiler, backend.VALUE, ".L_socket_place_done")
+        compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
+        compiler = executor.load(compiler, backend.ERROR, backend.STACK, words.bytes)
+        compiler = executor.load(compiler, backend.ARG2, backend.STACK, words.bytes * 2)
+        compiler = executor.syscall(compiler, system.SYSCALL_WRITE)
+        compiler = executor.label(compiler, ".L_socket_place_done")
+        compiler = tag_number(compiler)
+        out finish(compiler, PLACE_FRAME)
+    }
+    out refuse(compiler)
+}
+
+skill emit_sleep(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_platform_socket_sleep")
+    (words.bytes == 8) {
+        compiler = enter(compiler, 3)
+        compiler = number(compiler, backend.SCRATCH0, backend.VALUE)
+        compiler = executor.load_immediate(compiler, backend.SCRATCH1, 1000)
+        compiler = executor.divide_unsigned(compiler, backend.SCRATCH2, backend.SCRATCH0, backend.SCRATCH1)
+        compiler = executor.remainder_unsigned(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH1)
+        compiler = executor.load_immediate(compiler, backend.SCRATCH1, 1000000)
+        compiler = executor.multiply(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH1)
+        compiler = executor.store(compiler, backend.SCRATCH2, backend.STACK, 0)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, 8)
+        compiler = executor.move(compiler, backend.VALUE, backend.STACK)
+        compiler = executor.load_immediate(compiler, backend.ERROR, 0)
+        compiler = executor.syscall(compiler, system.SYSCALL_NANOSLEEP)
+        compiler = tag_number(compiler)
+        out finish(compiler, 3)
+    }
+    out refuse(compiler)
+}
+
+skill emit_map(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_platform_socket_map")
+    (compiler.words.bytes == 8) {
+        compiler = number(compiler, backend.SCRATCH0, backend.VALUE)
+        compiler = number(compiler, backend.ERROR, backend.ERROR)
+        compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+        compiler = executor.load_immediate(compiler, backend.ARG2, 3)
+        compiler = executor.load_immediate(compiler, backend.ARG3, 65)
+        compiler = executor.move(compiler, backend.ARG4, backend.SCRATCH0)
+        compiler = executor.load_immediate(compiler, backend.ARG5, 0)
+        compiler = executor.syscall(compiler, system.SYSCALL_MMAP)
+        compiler = tag_number(compiler)
+        out tails.ok(compiler)
+    }
+    out refuse(compiler)
+}
+
+skill append(compiler) {
+    compiler = emit_open(compiler)
+    compiler = emit_connect(compiler)
+    compiler = emit_write(compiler)
+    compiler = emit_read(compiler)
+    compiler = emit_close(compiler)
+    compiler = emit_memory(compiler)
+    compiler = emit_resize(compiler)
+    compiler = emit_send(compiler)
+    compiler = emit_place(compiler)
+    compiler = emit_sleep(compiler)
+    out emit_map(compiler)
+}

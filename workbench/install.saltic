@@ -1,0 +1,151 @@
+-- install — поставить программу Saltic на этот ноут, `just install <имя>`:
+-- собрать, положить бинарник в ~/.local/bin, нарисовать иконку (логотип `<>`,
+-- 64×64 PNG), записать визитку .desktop в меню приложений и ярлык на рабочий
+-- стол (стандарт freedesktop: KDE, GNOME). Программа запускается в корне
+-- проекта (Path=), чтобы видеть его файлы. Печатает ход по шагам.
+--
+-- PROGRAMS — [имя, исходник, название, описание, категории]
+-- program(name) — поставить программу name; нет такой — список доступных
+-- Внутри: entry(name) -> запись PROGRAMS или []; variable(key) -> значение
+--     переменной окружения; folder_of(command) -> вывод команды без «\n»;
+--     covered(px, py, line) / painted(px, py, lines) -> yes, если точка у отрезка
+--     (толщина пера PEN); logo() -> буфер точек иконки; visiting(…) -> текст
+--     визитки; must(code, what) — провал шага → InstallFailed; refresh() — меню KDE
+
+use io
+use io.file
+use core.str
+use core.group
+use core.bytes
+use core.process
+use workbench.check.view.png
+
+PROGRAMS = [
+    ["salticide", "os/target/linux/salticide.saltic", "SalticIDE", "IDE языка Saltic", "Development;"]
+]
+HEAP = "268435456"
+SIZE = 64
+PEN = 49
+INK = [[47, 38, 33], [233, 128, 95], [63, 166, 184]]
+CORAL = [[20, 6, 6, 20], [6, 20, 20, 34]]
+TEAL = [[36, 6, 50, 20], [50, 20, 36, 34]]
+
+skill entry(name) {
+    drum (PROGRAMS) {
+        (group.get(beat, 0) == name) { out beat }
+    }
+    out []
+}
+
+skill variable(key) {
+    @head = "{key}="
+    drum (process.environment()) {
+        (str.starts_with(beat, head) == yes) { out str.slice(beat, str.bytes(head), str.bytes(beat)) }
+    }
+    out ""
+}
+
+skill folder_of(command) {
+    @done = process.capture(command, "", []) rescue |err| { out "" }
+    @text = done.output
+    (str.ends_with(text, "\n") == yes) { text = str.slice(text, 0, str.bytes(text) - 1) }
+    out text
+}
+
+skill covered(px, py, line) {
+    @ax = group.get(line, 0) * 2 + 8
+    @ay = group.get(line, 1) * 2 + 24
+    @bx = group.get(line, 2) * 2 + 8
+    @by = group.get(line, 3) * 2 + 24
+    @abx = bx - ax
+    @aby = by - ay
+    @apx = px - ax
+    @apy = py - ay
+    @dot = apx * abx + apy * aby
+    @length = abx * abx + aby * aby
+    (dot <= 0) { out apx * apx + apy * apy <= PEN }
+    (dot >= length) { out (px - bx) * (px - bx) + (py - by) * (py - by) <= PEN }
+    @cross = apx * aby - apy * abx
+    out cross * cross <= PEN * length
+}
+
+skill painted(px, py, lines) {
+    drum (lines) {
+        (covered(px, py, beat) == yes) { out yes }
+    }
+    out no
+}
+
+skill logo() {
+    @pixels = bytes.new(SIZE * SIZE)
+    drum (SIZE * SIZE) {
+        @px = (beat % SIZE) * 2 + 1
+        @py = (beat / SIZE) * 2 + 1
+        @color = 0
+        (painted(px, py, CORAL) == yes) { color = 1 }
+        (painted(px, py, TEAL) == yes) { color = 2 }
+        bytes.set(pixels, beat, color)
+    }
+    out pixels
+}
+
+skill visiting(title, comment, binary, root, picture, kinds) {
+    @lines = ["[Desktop Entry]", "Type=Application", "Name={title}", "Comment={comment}", "Exec={binary}", "Path={root}", "Icon={picture}", "Terminal=false", "Categories={kinds}"]
+    out str.concat(str.join(lines, "\n"), "\n")
+}
+
+skill refresh() {
+    process.run(["kbuildsycoca6"], "", []) rescue |err| { out none }
+    out none
+}
+
+skill must(code, what) {
+    ((code == 0) == no) {
+        io.show("ошибка: {what} — код {code}")
+        out error.InstallFailed
+    }
+    out none
+}
+
+program(name) {
+    @found = entry(name)
+    (group.count(found) == 0) {
+        io.show("нет программы «{name}». Можно поставить:")
+        drum (PROGRAMS) {
+            @known = group.get(beat, 0)
+            @title = group.get(beat, 2)
+            io.show("  {known} — {title}")
+        }
+        out error.InstallFailed
+    }
+    @source = group.get(found, 1)
+    @title = group.get(found, 2)
+    @home = variable("HOME")
+    @root = folder_of(["pwd"])
+    @built = ".cache/build/{name}"
+    @binary = "{home}/.local/bin/{name}"
+    @icons = "{home}/.local/share/icons"
+    @picture = "{icons}/saltic.png"
+    @menu = "{home}/.local/share/applications"
+    @card = "{menu}/saltic-{name}.desktop"
+    @desk = folder_of(["xdg-user-dir", "DESKTOP"])
+    (str.bytes(desk) == 0) { desk = "{home}/Desktop" }
+
+    io.show("1/5 собираю {source}")
+    must(process.run(["bootstrap/saltic", source, built, HEAP, "x86_64"], "", []), "сборка")
+    io.show("2/5 кладу бинарник в {binary}")
+    must(process.run(["install", "-Dm755", built, binary], "", []), "копирование бинарника")
+    io.show("3/5 рисую иконку {picture}")
+    must(process.run(["mkdir", "-p", icons, menu, desk], "", []), "папки")
+    file.write_buffer(picture, png.encode(logo(), SIZE, SIZE, INK))
+    io.show("4/5 пишу визитку {card} и ярлык на рабочий стол")
+    @text = visiting(title, group.get(found, 3), binary, root, picture, group.get(found, 4))
+    file.write(card, text)
+    @shortcut = "{desk}/saltic-{name}.desktop"
+    file.write(shortcut, text)
+    must(process.run(["chmod", "+x", card, shortcut], "", []), "права визитки")
+    io.show("5/5 обновляю меню приложений")
+    refresh()
+    io.show("готово: «{title}» в меню и на рабочем столе")
+    out none
+}

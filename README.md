@@ -147,6 +147,7 @@ qemu-riscv64 -B 0x100000000 ./hello
 - [docs/laws/MISSION.md](docs/laws/MISSION.md), [docs/laws/ORIGIN.md](docs/laws/ORIGIN.md),
   [docs/laws/PHILOSOPHY.md](docs/laws/PHILOSOPHY.md) — зачем и откуда;
 - [docs/os/OS-core.md](docs/os/OS-core.md) — понимание ОС;
+- [docs/os/SEATS.md](docs/os/SEATS.md) — один компьютер на кабинет, свисток в мониторе;
 - [docs/process/Code_Architecture_канон_для_агентов.md](docs/process/Code_Architecture_канон_для_агентов.md)
   и [AGENTS.md](AGENTS.md) — правила для агентов;
 - [.archive/docs/history/](.archive/docs/history/) — летопись по дням,

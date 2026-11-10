@@ -20,6 +20,7 @@
 --     branch_rows — строки ветки, wait_all — живой блок, summary — итог,
 --     save_receipt — чек картинкой в RECEIPTS (check/view/receipt), в нём —
 --     только последние (receipt.rest), старые — на покой; вид — check/view/cards,
+--     окно — check/view/live, если собран check-window и есть Wayland;
 --     общее — workbench.kit
 
 use io
@@ -32,6 +33,7 @@ use core.process
 use workbench.kit
 use workbench.check.view.cards
 use workbench.check.view.receipt
+use workbench.check.view.live
 use bootstrap.names
 
 WORK = ".cache/build/workbench"
@@ -74,26 +76,14 @@ Run = Box {
     look = cards.Look {},
     screen = 24,
     drawn = 0,
-    kept = []
-}
-
-skill show(run, text) {
-    io.show(text)
-    run.kept = group.add(run.kept, text)
-    out none
-}
-
-skill again(run, text) {
-    (run.look.plain == yes) { out show(run, text) }
-    @escape = str.from_byte(27)
-    io.show("{escape}[1A{escape}[2K{text}")
-    run.kept = group.add(run.kept, text)
-    out none
+    kept = [],
+    view = [],
+    view_base = 0
 }
 
 skill show_logo(run) {
     @moment = time.text(time.now() + run.zone)
-    drum (cards.logo_lines(run.look, moment)) { show(run, beat) }
+    drum (cards.logo_lines(run.look, moment)) { live.show(run, beat) }
     out none
 }
 
@@ -155,7 +145,7 @@ skill prep_row(run, state, label, detail, tenths) {
 skill prep_wait(run, label, branches) {
     launch(branches)
     @started = time.now()
-    (run.look.plain == no) { io.show(cards.card_line(run.look, prep_row(run, "run", label, "", 0))) }
+    (run.look.plain == no) { live.see(run, cards.card_line(run.look, prep_row(run, "run", label, "", 0))) }
     @ticks = 0
     always {
         @left = 0
@@ -168,7 +158,7 @@ skill prep_wait(run, label, branches) {
         ticks = ticks + 1
         run.look.tick = run.look.tick + 1
         @spent = kit.tenths_since(started)
-        (run.look.plain == no) { again(run, cards.card_line(run.look, prep_row(run, "run", label, "", spent))) }
+        (run.look.plain == no) { live.again(run, cards.card_line(run.look, prep_row(run, "run", label, "", spent))) }
         (run.look.plain == yes) {
             (ticks % HEARTBEAT == 0) {
                 @whole = spent / 10
@@ -186,23 +176,23 @@ skill prep_wait(run, label, branches) {
 
 skill finish_prep(run, state, label, detail, tenths) {
     @text = cards.card_line(run.look, prep_row(run, state, label, detail, tenths))
-    (run.look.plain == no) { out again(run, text) }
-    out show(run, text)
+    (run.look.plain == no) { out live.again(run, text) }
+    out live.show(run, text)
 }
 
 skill show_lines(run, lines) {
-    drum (lines) { show(run, cards.card_line(run.look, beat)) }
+    drum (lines) { live.show(run, cards.card_line(run.look, beat)) }
     out none
 }
 
 skill show_failure(run, log) {
     show_lines(run, failure_lines(run, log))
-    show(run, cards.card_bottom(run.look))
+    live.show(run, cards.card_bottom(run.look))
     out none
 }
 
 skill preparation(run) {
-    show(run, cards.card_top(run.look, "подготовка"))
+    live.show(run, cards.card_top(run.look, "подготовка"))
     @builds = []
     @compiler = names.native_compiler()
     drum (TOOLS) {
@@ -223,7 +213,7 @@ skill preparation(run) {
         drum (builds) {
             ((beat.code == 0) == no) { show_lines(run, failure_lines(run, beat.log)) }
         }
-        show(run, cards.card_bottom(run.look))
+        live.show(run, cards.card_bottom(run.look))
         out error.GlobalCheckFailed
     }
     finish_prep(run, "ok", "сборка проверок", "", built)
@@ -267,10 +257,10 @@ skill preparation(run) {
     ((was_bytes == bytes) == no) { same = no }
     (same == no) {
         @before = cards.paint(run.look, cards.GRAY, "было {was_seconds} с · {was_memory} МБ · {was_bytes} байт")
-        show(run, cards.card_line(run.look, "                    {before}"))
+        live.show(run, cards.card_line(run.look, "                    {before}"))
     }
-    show(run, cards.card_line(run.look, cards.compilers_row(run.look, text)))
-    show(run, cards.card_bottom(run.look))
+    live.show(run, cards.card_line(run.look, cards.compilers_row(run.look, text)))
+    live.show(run, cards.card_bottom(run.look))
     out none
 }
 
@@ -408,32 +398,14 @@ skill block(run, branches, now, full) {
     out group.add(rows, cards.card_bottom(run.look))
 }
 
-skill draw(run, rows) {
-    @escape = str.from_byte(27)
-    @lines = rows
-    @missing = run.drawn - group.count(rows)
-    (missing < 0) { missing = 0 }
-    drum (missing) { lines = group.add(lines, "") }
-    @first = yes
-    drum (lines) {
-        @text = "{escape}[2K{beat}"
-        (first == yes) {
-            (run.drawn > 0) { text = "{escape}[{run.drawn}A{text}" }
-            first = no
-        }
-        io.show(text)
-    }
-    run.drawn = group.count(lines)
-    out none
-}
-
 skill live_block(run, branches, now) {
     @rows = block(run, branches, now, yes)
     (group.count(rows) + 2 > run.screen) { rows = block(run, branches, now, no) }
-    out draw(run, rows)
+    out live.draw(run, rows)
 }
 
 skill wait_all(run, branches) {
+    live.arm(run)
     @started = time.now()
     @ticks = 0
     always {
@@ -468,7 +440,7 @@ skill wait_all(run, branches) {
         }
     }
     @rows = block(run, branches, 0, yes)
-    (run.look.plain == no) { draw(run, rows) }
+    (run.look.plain == no) { live.draw(run, rows) }
     (run.look.plain == yes) { drum (rows) { io.show(beat) } }
     run.kept = group.concat(run.kept, rows)
     out branches
@@ -518,10 +490,10 @@ skill summary(run, done) {
     @whole = cards.seconds_text(kit.tenths_since(run.started))
     @longest = cards.seconds_text(slowest.tenths)
     @rest = cards.paint(run.look, cards.GRAY, " · {whole} · дольше всех — {slowest.proc} {slowest.what} {longest}")
-    show(run, cards.card_top(run.look, "итог"))
-    show(run, cards.card_line(run.look, "{mark} {head}{rest}"))
-    (checks > 0) { show(run, cards.card_line(run.look, cards.paint(run.look, cards.CORAL, "  упавших проверок: {checks}"))) }
-    show(run, cards.card_bottom(run.look))
+    live.show(run, cards.card_top(run.look, "итог"))
+    live.show(run, cards.card_line(run.look, "{mark} {head}{rest}"))
+    (checks > 0) { live.show(run, cards.card_line(run.look, cards.paint(run.look, cards.CORAL, "  упавших проверок: {checks}"))) }
+    live.show(run, cards.card_bottom(run.look))
     out none
 }
 
@@ -552,17 +524,20 @@ program() {
     run.look.plain = cards.plain_mode()
     (run.look.plain == no) { run.screen = cards.screen_rows() }
     process.run(["mkdir", "-p", WORK], "", [])
+    live.open(run)
     show_logo(run)
     @prepared = preparation(run) rescue |err| {
         io.show("  подготовка упала: {err}")
         run.failed = run.failed + 1
         save_receipt(run)
+        live.finish(run)
         out error.GlobalCheckFailed
     }
-    (run.look.plain == no) { show(run, "") }
+    (run.look.plain == no) { live.show(run, "") }
     @done = wait_all(run, launch(check_branches()))
     summary(run, done)
     save_receipt(run)
+    live.finish(run)
     (run.failed > 0) { out error.GlobalCheckFailed }
     out none
 }

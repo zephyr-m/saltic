@@ -77,6 +77,12 @@ registry: _dirs
     bootstrap/saltic workbench/registry.saltic .cache/build/workbench/registry 268435456 x86_64 >/dev/null && chmod +x .cache/build/workbench/registry
     .cache/build/workbench/registry
 
+# Поставить программу Saltic на ноут: бинарник в ~/.local/bin, иконка, визитка
+# в меню приложений и ярлык на рабочем столе (workbench/install.saltic).
+install name: _dirs
+    bootstrap/saltic workbench/install.saltic .cache/build/workbench/install 268435456 x86_64 >/dev/null && chmod +x .cache/build/workbench/install
+    .cache/build/workbench/install "$1"
+
 limits: _dirs
     bootstrap/saltic workbench/check/limits.saltic .cache/build/workbench/limits 536870912 x86_64 && chmod +x .cache/build/workbench/limits
     .cache/build/workbench/limits
