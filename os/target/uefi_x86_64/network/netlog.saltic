@@ -13,7 +13,9 @@
 --     или ответ и перерисовать; ошибок не бросают (нет экрана — молчат)
 -- draw(base) — перерисовать панель
 -- find(base) -> адрес журнала; новый, если его нет или он вне окна
--- add(base, kind, bytes) — записать строку и перерисовать
+-- add(base, kind, bytes) — записать строку и перерисовать; put(base, kind, line)
+--     — готовую строку без перерисовки; note(base, bytes) — строка журнала
+--     агента (agent.trace) без перерисовки, ошибок не бросает
 -- number_at(base, log, offset) / set_number(base, log, offset, value) —
 --     число до 2^28 в заголовке, offset от NUMBERS до HEADER
 -- canvas(base, offset, width, whole) -> graphics.Screen — задний буфер панели;
@@ -52,17 +54,25 @@ skill find(base) {
 }
 
 skill add(base, kind, bytes) {
+    put(base, kind, journal.entry(kind, clock.clock_text(clock.local_time(uefi.now(base))), bytes, SLOT - 2))
+    out draw(base)
+}
+
+skill note(base, bytes) {
+    out put(base, journal.NOTE, journal.cut(bytes, SLOT - 2)) rescue |err| { none }
+}
+
+skill put(base, kind, line) {
     @log = find(base)
     @next = firmware.read16(log, base, 0)
     @filled = firmware.read16(log, base, 2)
-    @line = journal.entry(kind, clock.clock_text(clock.local_time(uefi.now(base))), bytes, SLOT - 2)
     @slot = firmware.add(log, HEADER + next * SLOT)
     firmware.write8(slot, base, 0, kind)
     firmware.write8(slot, base, 1, group.count(line))
     drum (group.count(line)) { firmware.write8(slot, base, 2 + beat, group.get(line, beat)) }
     firmware.write16(log, base, 0, (next + 1) % SLOTS)
     (filled < SLOTS) { firmware.write16(log, base, 2, filled + 1) }
-    out draw(base)
+    out none
 }
 
 skill ask(base, bytes) {
@@ -113,12 +123,14 @@ skill draw(base) {
     @y = whole.height - MARGIN
     @ask_ink = graphics.color(whole, 251, 146, 60)
     @say_ink = graphics.color(whole, 228, 228, 231)
+    @note_ink = graphics.color(whole, 125, 211, 252)
     @log = find(base)
     @next = firmware.read16(log, base, 0)
     drum (firmware.read16(log, base, 2)) {
         @slot = firmware.add(log, HEADER + (next - 1 - beat + SLOTS) % SLOTS * SLOT)
         @ink = say_ink
         (firmware.read8(slot, base, 0) == journal.ASK) { ink = ask_ink }
+        (firmware.read8(slot, base, 0) == journal.NOTE) { ink = note_ink }
         @bytes = []
         drum (firmware.read8(slot, base, 1)) { bytes = group.add(bytes, firmware.read8(slot, base, 2 + beat)) }
         @rows = journal.wrap(bytes, letters)

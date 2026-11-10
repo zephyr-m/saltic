@@ -23,8 +23,13 @@
 -- received(card, index) -> yes/no — карта отдала дескриптор RX
 -- read_frame(card, index) -> [байты] / release(card, index) — вернуть карте
 -- link(card) -> текст / status(card) -> байт PHY
--- Внутри: rx_slot / rx_buffer(card, index) -> адрес дескриптора и буфера RX
+-- Tally { tx_ok, rx_ok, tx_errors, rx_errors, missed, align, broadcast, tx_aborted,
+--     tx_underrun } / tally(card) -> Tally — счётчики карты (дамп DMA в хвост
+--     кольца TX); TallyTimeout / interrupts(card) -> ISR, сброшенный записью
+-- rings(card) -> "rx CCHC tx H" — чей дескриптор (C — карты, H — наш)
+-- Внутри: rx_slot / rx_buffer(card, index) -> адрес дескриптора и буфера RX; owner
 
+use core.str
 use core.group
 use os.target.uefi_x86_64.platform.firmware
 
@@ -36,6 +41,8 @@ PCI_BAR2_HIGH = 28
 COMMAND_MEMORY = 2
 COMMAND_BUS_MASTER = 4
 
+REGISTER_COUNTER = 16
+REGISTER_COUNTER_HIGH = 20
 REGISTER_TX_RING = 32
 REGISTER_CHIP_COMMAND = 55
 REGISTER_TX_POLL = 56
@@ -65,6 +72,8 @@ PHY_10 = 4
 PHY_100 = 8
 PHY_1000 = 16
 
+COUNTER_DUMP = 8
+TALLY_OFFSET = 64
 DESCRIPTOR_OWN = 32768
 DESCRIPTOR_END = 16384
 DESCRIPTOR_FIRST_LAST = 12288
@@ -82,6 +91,18 @@ Card = Box {
     rx_buffers = 0,
     sent_bytes = 0,
     received_bytes = 0
+}
+
+Tally = Box {
+    tx_ok = 0,
+    rx_ok = 0,
+    tx_errors = 0,
+    rx_errors = 0,
+    missed = 0,
+    align = 0,
+    broadcast = 0,
+    tx_aborted = 0,
+    tx_underrun = 0
 }
 
 skill has_bit(value, bit) {
@@ -257,4 +278,45 @@ skill link(card) {
 
 skill status(card) {
     out firmware.read8(card.mmio, card.base, REGISTER_PHY_STATUS)
+}
+
+skill tally(card) {
+    @place = firmware.add(card.tx_ring, TALLY_OFFSET)
+    firmware.write_phys32(card.mmio, card.base, REGISTER_COUNTER_HIGH, place / firmware.WORD)
+    firmware.write_phys32(card.mmio, card.base, REGISTER_COUNTER, place % firmware.WORD)
+    firmware.write_phys32(card.mmio, card.base, REGISTER_COUNTER, place % firmware.WORD + COUNTER_DUMP)
+    drum (100000) {
+        (has_bit(firmware.read8(card.mmio, card.base, REGISTER_COUNTER), COUNTER_DUMP) == no) {
+            out Tally {
+                tx_ok = firmware.read32(place, card.base, 0),
+                rx_ok = firmware.read32(place, card.base, 8),
+                tx_errors = firmware.read32(place, card.base, 16),
+                rx_errors = firmware.read32(place, card.base, 24),
+                missed = firmware.read16(place, card.base, 28),
+                align = firmware.read16(place, card.base, 30),
+                broadcast = firmware.read32(place, card.base, 48),
+                tx_aborted = firmware.read16(place, card.base, 60),
+                tx_underrun = firmware.read16(place, card.base, 62)
+            }
+        }
+    }
+    out error.TallyTimeout
+}
+
+skill interrupts(card) {
+    @status = firmware.read16(card.mmio, card.base, REGISTER_INTERRUPT_STATUS)
+    (status > 0) { firmware.write16(card.mmio, card.base, REGISTER_INTERRUPT_STATUS, status) }
+    out status
+}
+
+skill owner(slot, base) {
+    (firmware.read16(slot, base, 2) < DESCRIPTOR_OWN) { out "H" }
+    out "C"
+}
+
+skill rings(card) {
+    @text = "rx "
+    drum (RX_COUNT) { text = str.concat(text, owner(rx_slot(card, beat), card.base)) }
+    @tx = owner(card.tx_ring, card.base)
+    out "{text} tx {tx}"
 }

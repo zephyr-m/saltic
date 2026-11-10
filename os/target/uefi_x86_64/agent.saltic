@@ -12,19 +12,12 @@
 -- Agent { card, frames, commands, arp, expected, received, total, columns,
 --     rows, line, cursor, console, shown_second, rounds, failures, last_error,
 --     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, limit,
---     linked, opening, saver, active_at, wifi, wifi_text, dream, via }
--- my_ip(agent) -> наш IP на входе via / transmit(agent, frame) — кадр в via
--- wifi_up(agent, name) -> текст — прошивка с диска в свои страницы (причал с
---     принятой программой не трогается), qca9377.bring_up; greet по Wi-Fi;
---     затем кабельная карта настраивается заново: за ~10 с подъёма её кольцо
---     приёма (4 места) переполняется, и приём глохнет насовсем
+--     linked, opening, saver, active_at, wifi, wifi_text, dream, via, trace }
+-- Входы (кабель, Wi-Fi: transmit, wifi_up, …) — agent.inputs; журнал сети
+--     для отладки (экран и \SALTIC\agent.log) — agent.trace, поле trace
 -- wifi_keep(agent) -> текст — посылку из причала на диск
--- wifi_alive(agent) -> yes/no — прошивка отвечает на барьер WMI; после
---     программы (она могла сбросить карту) мёртвый Wi-Fi поднимается заново
 -- poll_wifi(agent) — до WIFI_FRAMES кадров из Wi-Fi в handle с via = wifi;
 --     точка выгнала (chip.lost) — подключиться заново
--- wifi_stage(agent, step, text) — ход подъёма Wi-Fi на панель системы
---     (handoff.set_stage, перерисовать панель)
 -- day_second(base) -> секунда суток / wake(agent) -> yes, если снят хранитель;
 --     отмечает активность / doze(agent) — хранитель после SAVER_AFTER секунд простоя
 -- dream(agent, seen) — круг хранителя: Wi-Fi, клавиша и кадр пластилина —
@@ -89,6 +82,7 @@ use os.target.uefi_x86_64.drivers.camera
 use os.target.uefi_x86_64.network.shot
 use os.target.uefi_x86_64.network.reply
 use os.target.uefi_x86_64.network.netlog
+use os.target.uefi_x86_64.network.netlog.journal
 use os.target.uefi_x86_64.screen.system_panel
 use os.target.uefi_x86_64.agent.programs
 use os.target.uefi_x86_64.agent.shelf
@@ -98,8 +92,10 @@ use os.target.uefi_x86_64.platform.keys
 use os.target.uefi_x86_64.network.mrpc
 use os.target.uefi_x86_64.network.mrpc.data
 use os.target.uefi_x86_64.platform.utf8
+use os.target.uefi_x86_64.agent.inputs
+use os.target.uefi_x86_64.agent.trace
 
-VERSION = 42
+VERSION = 43
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -116,7 +112,6 @@ WIFI_FOLDER = "FIRMWARE"
 WIFI_FILE = "QCA9377.BIN"
 WIFI_EVERY = 8
 WIFI_FRAMES = 4
-WIFI_ROOM = 1048576
 
 Agent = Box {
     card = rtl8111.Card {},
@@ -153,13 +148,15 @@ Agent = Box {
     dream = none,
     wifi_tried = 0,
     via = "cable",
-    meter = system_panel.Meter {}
+    meter = system_panel.Meter {},
+    trace = trace.Trace {}
 }
 
 COUNTDOWN = 5
 SECOND_WAIT = 50000000
 SHOT_PREFIX = "shot-part "
 CLOCK_EVERY = 20000
+TRACE_EVERY = 1000
 SAVER_AFTER = 60
 DAY_SECONDS = 86400
 ERASE_WORD = "ERASE-ACER-DISK"
@@ -240,11 +237,12 @@ skill launch(agent) {
     rtl8111.wait_link(agent.card) rescue |err| { none }
     agent.linked = has_link(agent.card)
     log(agent, "run: card configured again, listening")
+    trace.urgent(agent.trace, agent.card.base, "program returned code {code}, firmware failure {outcome.failed}; card configured again")
     (agent.wifi) |wifi| {
         handoff.take_back(wifi)
-        (wifi_alive(agent) == no) {
+        (inputs.wifi_alive(agent) == no) {
             log(agent, "run: Wi-Fi was reset by the program, bringing it up again")
-            wifi_up(agent, WIFI_NETWORK) rescue |err| { none }
+            inputs.wifi_up(agent, WIFI_NETWORK, VERSION) rescue |err| { none }
         }
     }
     agent.active_at = day_second(agent.card.base)
@@ -330,7 +328,7 @@ skill gather(agent) {
         rows = agent.rows,
         failures = agent.failures,
         last_error = agent.last_error,
-        wifi = wifi_line(agent)
+        wifi = inputs.wifi_line(agent)
     }
 }
 
@@ -571,7 +569,7 @@ skill execute(agent, text, payload) {
     (name == "wifi") {
         @network = WIFI_NETWORK
         (group.count(words) > 1) { network = str.slice(text, 5, str.bytes(text)) }
-        out wifi_up(agent, network)
+        out inputs.wifi_up(agent, network, VERSION)
     }
     (name == "wifi-keep") { out wifi_keep(agent) }
     (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
@@ -636,7 +634,7 @@ skill answer(agent, bytes) {
     (str.starts_with(packet.text, SHOT_PREFIX) == yes) {
         (agent.via == "wifi") {
             @piece = shot.chunk_frame(agent.wifi.mac, agent.wifi.ip, agent.card.base, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(SHOT_PREFIX), str.bytes(packet.text))))
-            (piece) |piece| { transmit(agent, piece) }
+            (piece) |piece| { inputs.transmit(agent, piece) }
             out agent
         }
         shot.send_chunk(agent.card, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(SHOT_PREFIX), str.bytes(packet.text))))
@@ -644,12 +642,14 @@ skill answer(agent, bytes) {
     }
     (mrpc.is_request(packet.payload) == no) {
         @first = group.get(str.split(packet.text, " "), 0)
-        (commands.known(first) == no) { out agent }
+        (commands.known(first) == no) { out trace.note(agent.trace, agent.card.base, "udp 5555: not mRPC, not a command - ignored") }
     }
     ((packet.text == "shot") == no) { wake(agent) }
     @who = net.ip_text(packet.from_ip)
     @command = packet.text
     log(agent, "command from {who}: {command}")
+    @asked = journal.cut(journal.first_line(packet.payload), 80)
+    trace.urgent(agent.trace, agent.card.base, "cmd from {who}: {asked}")
     feed.show_command(agent, who, packet.payload)
     netlog.ask(agent.card.base, packet.payload)
     @reply_bytes = []
@@ -663,9 +663,11 @@ skill answer(agent, bytes) {
     }
     feed.show_reply(agent, reply_bytes)
     netlog.say(agent.card.base, reply_bytes)
-    @frame = net.udp_frame_bytes(our_mac(agent), my_ip(agent), packet.from_mac, packet.from_ip, PORT, packet.from_port, reply_bytes)
-    @sent = transmit(agent, frame)
+    @frame = net.udp_frame_bytes(inputs.our_mac(agent), inputs.my_ip(agent), packet.from_mac, packet.from_ip, PORT, packet.from_port, reply_bytes)
+    @sent = inputs.transmit(agent, frame) rescue |err| { "NOT sent ({err})" }
+    @size = group.count(reply_bytes)
     log(agent, "  replied {sent} bytes")
+    trace.urgent(agent.trace, agent.card.base, "reply to {who}: {size} bytes payload, transmit {sent}")
     agent.commands = agent.commands + 1
     ((agent.opening == "") == no) {
         agent.opening = ""
@@ -709,12 +711,13 @@ skill store_chunk(agent, bytes) {
     @said = "ok {agent.received}"
     @to_mac = net.slice_bytes(bytes, 6, 6)
     @to_ip = net.slice_bytes(bytes, 26, 4)
-    transmit(agent, net.udp_frame(our_mac(agent), my_ip(agent), to_mac, to_ip, DATA_PORT, net.word(bytes, 34), said))
+    inputs.transmit(agent, net.udp_frame(inputs.our_mac(agent), inputs.my_ip(agent), to_mac, to_ip, DATA_PORT, net.word(bytes, 34), said))
     out agent
 }
 
 skill handle(agent, bytes) {
     agent.frames = agent.frames + 1
+    trace.frame(agent.trace, agent.card.base, bytes, agent.via)
     (agent.via == "wifi") {
         traffic.answer_arp(agent.wifi, agent.wifi.point, bytes)
         (net.is_udp_to(bytes, PORT) == yes) { out answer(agent, bytes) }
@@ -722,43 +725,18 @@ skill handle(agent, bytes) {
         out agent
     }
     (net.is_arp_request_for(bytes, MY_IP) == yes) {
-        transmit(agent, net.arp_reply(agent.card.mac, MY_IP, bytes))
-        agent.arp = agent.arp + 1
         @asker = net.ip_text(net.slice_bytes(bytes, 28, 4))
+        @told = inputs.transmit(agent, net.arp_reply(agent.card.mac, MY_IP, bytes)) rescue |err| {
+            out trace.urgent(agent.trace, agent.card.base, "arp: reply to {asker} NOT sent ({err})")
+        }
+        agent.arp = agent.arp + 1
         log(agent, "arp: told {asker} that 10.0.0.2 is us")
+        trace.note(agent.trace, agent.card.base, "arp: reply to {asker} sent, {told} bytes")
         out agent
     }
     (net.is_udp_to(bytes, PORT) == yes) { out answer(agent, bytes) }
     (net.is_udp_to(bytes, DATA_PORT) == yes) { out store_chunk(agent, bytes) }
     out agent
-}
-
-skill my_ip(agent) {
-    (agent.via == "wifi") { out agent.wifi.ip }
-    out MY_IP
-}
-
-skill our_mac(agent) {
-    (agent.via == "wifi") { out agent.wifi.mac }
-    out agent.card.mac
-}
-
-skill wifi_line(agent) {
-    (agent.wifi == none) { out agent.wifi_text }
-    @damaged = agent.wifi.frames_damaged
-    out "{agent.wifi_text}, испорченных кадров выброшено {damaged}"
-}
-
-skill wifi_address(agent) {
-    out net.ip_text(agent.wifi.ip)
-}
-
-skill transmit(agent, frame) {
-    (agent.via == "wifi") {
-        traffic.send(agent.wifi, agent.wifi.point, frame)
-        out group.count(frame)
-    }
-    out rtl8111.send(agent.card, frame)
 }
 
 skill wifi_keep(agent) {
@@ -768,74 +746,13 @@ skill wifi_keep(agent) {
     out "сохранил прошивку Wi-Fi: {written} байт в \\SALTIC\\{WIFI_FOLDER}\\{WIFI_FILE}"
 }
 
-skill wifi_up(agent, name) {
-    @base = agent.card.base
-    @pages = WIFI_ROOM / PAGE_BYTES
-    @place = uefi.pages_in_window(base, pages) rescue |err| {
-        agent.wifi_text = "нет памяти под прошивку"
-        out "Wi-Fi: нет памяти под прошивку ({err})"
-    }
-    @told = wifi_start(agent, name, place) rescue |err| { "Wi-Fi: ошибка {err}" }
-    uefi.free_pages(base, place, pages)
-    rtl8111.configure(agent.card)
-    out told
-}
-
-skill wifi_alive(agent) {
-    (agent.wifi == none) { out no }
-    out qca9377.alive(agent.wifi)
-}
-
-skill wifi_start(agent, name, place) {
-    @started = day_second(agent.card.base)
-    agent.wifi_tried = started
-    agent.wifi = none
-    handoff.forget(agent.card.base)
-    agent.wifi_text = "поднимаю"
-    @size = programs.load_file(agent.card.base, "{WIFI_FOLDER}\\{WIFI_FILE}", place, WIFI_ROOM) rescue |err| {
-        agent.wifi_text = "нет прошивки на диске"
-        wifi_stage(agent, 0, "нет прошивки на диске")
-        out "Wi-Fi: нет прошивки на диске ({err}); залей посылку и скажи wifi-keep"
-    }
-    @chip = qca9377.open()
-    chip.quiet = yes
-    @total = group.count(qca9377.STEPS)
-    drum (total) {
-        @step = beat
-        @title = group.get(qca9377.STEPS, step)
-        @number = step + 1
-        wifi_stage(agent, number, "шаг {number}/{total}: {title}")
-        qca9377.bring_step(chip, place, name, step) rescue |err| {
-            qca9377.quiet(chip)
-            agent.wifi_text = "не подключился: {title} — {err}"
-            wifi_stage(agent, 0, "не вышло: {title} — {err}")
-            out "Wi-Fi «{name}»: не вышло на шаге «{title}»: {err}"
-        }
-    }
-    @took = day_second(agent.card.base) - started
-    agent.wifi = chip
-    handoff.share(chip)
-    @address = net.ip_text(chip.ip)
-    agent.wifi_text = "{address} в «{name}»"
-    wifi_stage(agent, handoff.CONNECTED, "{address}  {name}")
-    agent.via = "wifi"
-    transmit(agent, net.udp_frame(chip.mac, chip.ip, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic {VERSION} слушает {address}:5555 по Wi-Fi"))
-    agent.via = "cable"
-    out "Wi-Fi: {address} в «{name}» за {took} с ({size} байт прошивки)"
-}
-
-skill wifi_stage(agent, step, text) {
-    handoff.set_stage(agent.card.base, step, text)
-    (agent.console == no) { system_panel.draw(agent.card.base, agent.card) rescue |err| { none } }
-    out none
-}
-
 skill poll_wifi(agent) {
     (agent.wifi == none) { out none }
     (agent.wifi.lost == yes) {
         log(agent, "wifi: the access point dropped us, joining again")
-        wifi_stage(agent, 0, "точка пропала, ищу заново")
-        wifi_up(agent, WIFI_NETWORK) rescue |err| { none }
+        trace.urgent(agent.trace, agent.card.base, "wifi: access point dropped us, joining again")
+        inputs.wifi_stage(agent, 0, "точка пропала, ищу заново")
+        inputs.wifi_up(agent, WIFI_NETWORK, VERSION) rescue |err| { none }
         out none
     }
     drum (WIFI_FRAMES) {
@@ -844,6 +761,7 @@ skill poll_wifi(agent) {
         agent.via = "wifi"
         handle(agent, bytes) rescue |err| {
             agent.via = "cable"
+            trace.urgent(agent.trace, agent.card.base, "wifi: frame handling failed ({err})")
             out none
         }
         agent.via = "cable"
@@ -885,6 +803,7 @@ skill tick(agent) {
     }
     (agent.saver == yes) { dream(agent, seen) }
     agent.rounds = agent.rounds + 1
+    (agent.rounds % TRACE_EVERY == 0) { trace.second(agent.trace, agent.card, TRACE_EVERY) }
     (agent.rounds % WIFI_EVERY == 0) { poll_wifi(agent) }
     (agent.rounds % KEY_EVERY == 0) { press(agent, uefi.poll_key(agent.card.base, 0)) }
     (agent.rounds == CLOCK_EVERY) {
@@ -913,6 +832,7 @@ skill survive(agent) {
         (agent.restart == yes) { uefi.restart(agent.card.base) }
         agent.failures = agent.failures + 1
         agent.last_error = "{err}"
+        trace.urgent(agent.trace, agent.card.base, "loop error: {err}")
         feed.banner(agent.card.base, "сбой в цикле: {err} (агент продолжает работу)")
         none
     }
@@ -928,11 +848,23 @@ skill run() {
     @screen = uefi.wide_console(firmware.guest_base())
     @columns = screen.columns
     @rows = screen.rows
-    @card = rtl8111.open()
-    rtl8111.configure(card)
+    @tracer = trace.open(firmware.guest_base())
+    trace.urgent(tracer, firmware.guest_base(), "agent {VERSION} starting")
+    @card = rtl8111.open() rescue |err| {
+        trace.urgent(tracer, firmware.guest_base(), "card: open failed ({err})")
+        out err
+    }
+    @mmio = firmware.phys_text(card.mmio)
+    @mac = net.mac_text(card.mac)
+    trace.note(tracer, card.base, "card: mmio {mmio}, mac {mac}")
+    rtl8111.configure(card) rescue |err| {
+        trace.urgent(tracer, card.base, "card: configure failed ({err})")
+        out err
+    }
+    trace.link(tracer, card)
     arena_map.check()
     @bay = firmware.region(card.base, "bay")
-    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = UPLOAD_LIMIT }
+    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = UPLOAD_LIMIT, trace = tracer }
     agent.active_at = day_second(card.base)
     system_panel.measure_disk(card.base) rescue |err| { none }
     clear_screen(agent)

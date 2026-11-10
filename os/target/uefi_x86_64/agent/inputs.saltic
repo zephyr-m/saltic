@@ -1,0 +1,146 @@
+-- inputs — входы агента: кабель (rtl8111) и Wi-Fi (qca9377). Ответ уходит тем
+-- же входом, откуда пришла команда (agent.via). Каждое действие Wi-Fi и его
+-- итог — строкой в журнал agent.trace. Вынесено из agent.saltic.
+--
+-- my_ip(agent) / our_mac(agent) -> адрес на входе via
+-- transmit(agent, frame) -> байт отправлено — кадр в via
+-- wifi_line(agent) -> текст о Wi-Fi для info
+-- wifi_up(agent, name, version) -> текст — прошивка с диска в свои страницы
+--     (причал с принятой программой не трогается), qca9377.bring_up; привет по
+--     Wi-Fi; затем кабельная карта настраивается заново: за ~10 с подъёма её
+--     кольцо приёма (4 места) переполняется, и приём глохнет насовсем
+-- wifi_alive(agent) -> yes/no — прошивка отвечает на барьер WMI
+-- wifi_stage(agent, step, text) — ход подъёма Wi-Fi на панель системы
+--     (handoff.set_stage, перерисовать панель)
+-- Внутри: wifi_start(agent, name, place, version) -> текст; seconds(base)
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.drivers.rtl8111
+use os.target.uefi_x86_64.drivers.qca9377
+use os.target.uefi_x86_64.drivers.qca9377.traffic
+use os.target.uefi_x86_64.drivers.qca9377.handoff
+use os.target.uefi_x86_64.network.net
+use os.target.uefi_x86_64.screen.system_panel
+use os.target.uefi_x86_64.agent.programs
+use os.target.uefi_x86_64.agent.trace
+
+PORT = 5555
+MY_IP = [10, 0, 0, 2]
+FOLDER = "FIRMWARE"
+FILE = "QCA9377.BIN"
+ROOM = 1048576
+PAGE_BYTES = 4096
+
+skill seconds(base) {
+    @moment = uefi.now(base)
+    out moment.hour * 3600 + moment.minute * 60 + moment.second
+}
+
+skill my_ip(agent) {
+    (agent.via == "wifi") { out agent.wifi.ip }
+    out MY_IP
+}
+
+skill our_mac(agent) {
+    (agent.via == "wifi") { out agent.wifi.mac }
+    out agent.card.mac
+}
+
+skill wifi_line(agent) {
+    (agent.wifi == none) { out agent.wifi_text }
+    @damaged = agent.wifi.frames_damaged
+    out "{agent.wifi_text}, испорченных кадров выброшено {damaged}"
+}
+
+skill transmit(agent, frame) {
+    (agent.via == "wifi") {
+        traffic.send(agent.wifi, agent.wifi.point, frame)
+        out group.count(frame)
+    }
+    out rtl8111.send(agent.card, frame)
+}
+
+skill wifi_up(agent, name, version) {
+    @base = agent.card.base
+    trace.urgent(agent.trace, base, "wifi: bringing up, network '{name}'")
+    @pages = ROOM / PAGE_BYTES
+    @place = uefi.pages_in_window(base, pages) rescue |err| {
+        agent.wifi_text = "нет памяти под прошивку"
+        trace.urgent(agent.trace, base, "wifi: no pages for firmware ({err})")
+        out "Wi-Fi: нет памяти под прошивку ({err})"
+    }
+    @told = wifi_start(agent, name, place, version) rescue |err| {
+        trace.note(agent.trace, base, "wifi: failed ({err})")
+        "Wi-Fi: ошибка {err}"
+    }
+    uefi.free_pages(base, place, pages)
+    rtl8111.configure(agent.card) rescue |err| {
+        trace.urgent(agent.trace, base, "wifi: cable card reconfigure failed ({err})")
+        out told
+    }
+    trace.urgent(agent.trace, base, "wifi: done, cable card configured again")
+    out told
+}
+
+skill wifi_alive(agent) {
+    (agent.wifi == none) { out no }
+    @alive = qca9377.alive(agent.wifi)
+    trace.note(agent.trace, agent.card.base, "wifi: barrier check alive={alive}")
+    out alive
+}
+
+skill wifi_start(agent, name, place, version) {
+    @base = agent.card.base
+    @started = seconds(base)
+    agent.wifi_tried = started
+    agent.wifi = none
+    handoff.forget(base)
+    agent.wifi_text = "поднимаю"
+    @size = programs.load_file(base, "{FOLDER}\\{FILE}", place, ROOM) rescue |err| {
+        agent.wifi_text = "нет прошивки на диске"
+        wifi_stage(agent, 0, "нет прошивки на диске")
+        trace.note(agent.trace, base, "wifi: firmware file missing ({err})")
+        out "Wi-Fi: нет прошивки на диске ({err}); залей посылку и скажи wifi-keep"
+    }
+    trace.note(agent.trace, base, "wifi: firmware loaded, {size} bytes")
+    @chip = qca9377.open()
+    chip.quiet = yes
+    @total = group.count(qca9377.STEPS)
+    drum (total) {
+        @step = beat
+        @title = group.get(qca9377.STEPS, step)
+        @number = step + 1
+        wifi_stage(agent, number, "шаг {number}/{total}: {title}")
+        trace.urgent(agent.trace, base, "wifi: step {number}/{total} started")
+        qca9377.bring_step(chip, place, name, step) rescue |err| {
+            qca9377.quiet(chip)
+            agent.wifi_text = "не подключился: {title} — {err}"
+            wifi_stage(agent, 0, "не вышло: {title} — {err}")
+            trace.urgent(agent.trace, base, "wifi: step {number}/{total} failed ({err})")
+            out "Wi-Fi «{name}»: не вышло на шаге «{title}»: {err}"
+        }
+        trace.note(agent.trace, base, "wifi: step {number}/{total} ok")
+    }
+    @took = seconds(base) - started
+    agent.wifi = chip
+    handoff.share(chip)
+    @address = net.ip_text(chip.ip)
+    agent.wifi_text = "{address} в «{name}»"
+    wifi_stage(agent, handoff.CONNECTED, "{address}  {name}")
+    trace.urgent(agent.trace, base, "wifi: connected as {address} in {took} s")
+    agent.via = "wifi"
+    transmit(agent, net.udp_frame(chip.mac, chip.ip, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic {version} слушает {address}:5555 по Wi-Fi")) rescue |err| {
+        trace.note(agent.trace, base, "wifi: hello not sent ({err})")
+        0
+    }
+    agent.via = "cable"
+    out "Wi-Fi: {address} в «{name}» за {took} с ({size} байт прошивки)"
+}
+
+skill wifi_stage(agent, step, text) {
+    handoff.set_stage(agent.card.base, step, text)
+    (agent.console == no) { system_panel.draw(agent.card.base, agent.card) rescue |err| { none } }
+    out none
+}

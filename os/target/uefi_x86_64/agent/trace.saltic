@@ -1,0 +1,240 @@
+-- trace — журнал сети агента для отладки на железе: каждое событие — строка
+-- «ЧЧ:ММ:СС #номер текст» по-английски (у прошивки нет кириллицы) на панель
+-- netlog и дописью в файл \SALTIC\agent.log. Файл — сначала на загрузочном
+-- носителе (DeviceHandle образа агента), иначе на томе SALTIC; не вышло —
+-- строка об этом на экран, журнал идёт только на экран. Строки копятся в
+-- pending и уходят в файл раз в секунду (second), сразу — у urgent.
+--
+-- Trace { file, place, count, pending, moment, second, phy, rounds } — состояние
+-- open(base) -> Trace — открыть файл (SetPosition в конец), первая строка
+-- note(trace, base, text) — строка в журнал / urgent(…) — со свежим временем и
+--     сразу в файл
+-- flush(trace, base) — pending в файл, перерисовать панель
+-- frame(trace, base, bytes, via) — строка о принятом кадре: ARP, IPv4-UDP, прочее
+-- second(trace, card, rounds) -> yes, если началась новая секунда: тогда линк
+--     (каждое изменение байта PHY), счётчики карты и flush; rounds — кругов
+--     цикла с прошлого вызова, в строке счётчиков — кругов за секунду
+-- link(trace, card) — строка, если байт PHY изменился (сырой байт, скорость, дуплекс)
+-- counters(trace, card) — tally rtl8111, ISR, владельцы колец
+-- Внутри: open_on(base, handle) -> File; write_file(base, file, bytes);
+--     boot_handle(base) -> DeviceHandle образа; phy_text(raw); ip(bytes, at)
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.platform.clock
+use os.target.uefi_x86_64.storage.files
+use os.target.uefi_x86_64.drivers.rtl8111
+use os.target.uefi_x86_64.network.net
+use os.target.uefi_x86_64.network.netlog
+use os.target.uefi_x86_64.network.netlog.journal
+
+LOADED_IMAGE_GUID = [161, 49, 27, 91, 98, 149, 210, 17, 142, 63, 0, 160, 201, 105, 114, 59]
+IMAGE_DEVICE = 24
+FILE_SET_POSITION = 56
+FOLDER = "SALTIC"
+NAME = "agent.log"
+CHUNK = 4096
+CHUNK_AT = 16384
+PENDING_LIMIT = 16384
+LOW = 4294967295
+
+Trace = Box {
+    file = 0,
+    place = "screen only",
+    count = 0,
+    pending = [],
+    moment = "--:--:--",
+    second = -1,
+    phy = -1,
+    rounds = 0
+}
+
+skill boot_handle(base) {
+    @image = files.protocol_of(base, firmware.image_handle(), LOADED_IMAGE_GUID)
+    out firmware.pointer(image, base, IMAGE_DEVICE)
+}
+
+skill open_on(base, handle) {
+    @root = files.open_root(base, handle)
+    @home = files.create(base, root, FOLDER, files.DIRECTORY)
+    @file = files.create(base, home, NAME, 0)
+    files.close_file(base, home)
+    files.close_file(base, root)
+    @moved = firmware.call_wide(base, firmware.pointer(file, base, FILE_SET_POSITION), [file, LOW], [0, LOW])
+    (moved.failed == yes) { out error.SeekFailed }
+    write_file(base, file, journal.bytes_of("\n"))
+    out file
+}
+
+skill write_file(base, file, bytes) {
+    @buffer = firmware.scratch(base, CHUNK_AT)
+    @size_at = firmware.scratch(base, files.SCRATCH_SIZE)
+    @done = 0
+    @total = group.count(bytes)
+    drum ((total + CHUNK - 1) / CHUNK) {
+        @size = total - done
+        (size > CHUNK) { size = CHUNK }
+        drum (size) { firmware.write8(buffer, base, beat, group.get(bytes, done + beat)) }
+        firmware.write64(size_at, base, 0, firmware.number(size))
+        @written = firmware.call(base, firmware.pointer(file, base, files.FILE_WRITE), [file, size_at, buffer])
+        (written.failed == yes) { out error.WriteFailed }
+        done = done + size
+    }
+    @flushed = firmware.call(base, firmware.pointer(file, base, files.FILE_FLUSH), [file])
+    (flushed.failed == yes) { out error.FlushFailed }
+    out done
+}
+
+skill open(base) {
+    @trace = Trace {}
+    trace.moment = clock.clock_text(clock.local_time(uefi.now(base))) rescue |err| { "--:--:--" }
+    @boot = boot_handle(base) rescue |err| {
+        note(trace, base, "log file: no boot device ({err})")
+        0
+    }
+    (boot > 0) {
+        trace.file = open_on(base, boot) rescue |err| {
+            note(trace, base, "log file: boot medium not writable ({err})")
+            0
+        }
+        (trace.file > 0) { trace.place = "boot medium" }
+    }
+    (trace.file == 0) {
+        @root = files.saltic_root(base) rescue |err| {
+            note(trace, base, "log file: no SALTIC volume ({err}), screen only")
+            out trace
+        }
+        files.close_file(base, root)
+        @found = 0
+        drum (files.file_systems(base)) {
+            (found == 0) {
+                (files.fixed_volume(base, beat) == yes) { found = beat }
+            }
+        }
+        trace.file = open_on(base, found) rescue |err| {
+            note(trace, base, "log file: SALTIC volume not writable ({err}), screen only")
+            out trace
+        }
+        trace.place = "SALTIC volume"
+    }
+    @place = trace.place
+    urgent(trace, base, "log file: \\SALTIC\\agent.log on {place}")
+    out trace
+}
+
+skill note(trace, base, text) {
+    trace.count = trace.count + 1
+    @moment = trace.moment
+    @count = trace.count
+    @line = journal.bytes_of("{moment} #{count} {text}")
+    netlog.note(base, line)
+    trace.pending = group.add(group.concat(trace.pending, line), 10)
+    (group.count(trace.pending) > PENDING_LIMIT) { flush(trace, base) }
+    out none
+}
+
+skill urgent(trace, base, text) {
+    trace.moment = clock.clock_text(clock.local_time(uefi.now(base))) rescue |err| { trace.moment }
+    note(trace, base, text)
+    out flush(trace, base)
+}
+
+skill flush(trace, base) {
+    @bytes = trace.pending
+    trace.pending = []
+    (trace.file > 0) {
+        (group.count(bytes) > 0) {
+            write_file(base, trace.file, bytes) rescue |err| {
+                trace.file = 0
+                trace.place = "screen only"
+                note(trace, base, "log file: write failed ({err}), file logging off")
+                none
+            }
+        }
+    }
+    netlog.draw(base) rescue |err| { none }
+    out none
+}
+
+skill ip(bytes, at) {
+    out net.ip_text(net.slice_bytes(bytes, at, 4))
+}
+
+skill frame(trace, base, bytes, via) {
+    @length = group.count(bytes)
+    (length < 14) { out note(trace, base, "rx {via}: runt frame, {length} bytes") }
+    @from = net.mac_text(net.slice_bytes(bytes, 6, 6))
+    @kind = net.word(bytes, 12)
+    (kind == net.TYPE_ARP) {
+        (length < 42) { out note(trace, base, "rx {via}: ARP short, {length} bytes from {from}") }
+        @op = net.word(bytes, 20)
+        @sender = ip(bytes, 28)
+        @wanted = ip(bytes, 38)
+        out note(trace, base, "rx {via}: ARP op {op} {sender} asks {wanted}, from {from}, {length} bytes")
+    }
+    (kind == net.TYPE_IPV4) {
+        (length < 38) { out note(trace, base, "rx {via}: IPv4 short, {length} bytes from {from}") }
+        @source = ip(bytes, 26)
+        @target = ip(bytes, 30)
+        @protocol = group.get(bytes, 23)
+        (protocol == net.PROTOCOL_UDP) {
+            @source_port = net.word(bytes, 34)
+            @port = net.word(bytes, 36)
+            out note(trace, base, "rx {via}: IPv4-UDP {source}:{source_port} -> {target}:{port}, {length} bytes")
+        }
+        out note(trace, base, "rx {via}: IPv4 proto {protocol} {source} -> {target}, {length} bytes")
+    }
+    @code = firmware.hex(kind, 4)
+    out note(trace, base, "rx {via}: other type 0x{code} from {from}, {length} bytes")
+}
+
+skill phy_text(raw) {
+    @hex = firmware.hex(raw, 2)
+    @state = rtl8111.link_text(raw)
+    out "{state} (PHY status 0x{hex})"
+}
+
+skill link(trace, card) {
+    @raw = rtl8111.status(card)
+    (raw == trace.phy) { out none }
+    @before = "unknown"
+    (trace.phy >= 0) { before = phy_text(trace.phy) }
+    trace.phy = raw
+    @now = phy_text(raw)
+    out urgent(trace, card.base, "link: {before} -> {now}")
+}
+
+skill counters(trace, card) {
+    @isr = firmware.hex(rtl8111.interrupts(card), 4)
+    @rings = rtl8111.rings(card)
+    @sent = card.sent_bytes
+    @got = card.received_bytes
+    @rounds = trace.rounds
+    @head = "card: isr 0x{isr} {rings}, driver tx {sent} rx {got} bytes, {rounds} rounds/s"
+    @count = rtl8111.tally(card) rescue |err| { out note(trace, card.base, "{head}, tally failed ({err})") }
+    @tx = count.tx_ok
+    @rx = count.rx_ok
+    @tx_err = count.tx_errors
+    @rx_err = count.rx_errors
+    @missed = count.missed
+    @align = count.align
+    @broad = count.broadcast
+    @abort = count.tx_aborted
+    @under = count.tx_underrun
+    out note(trace, card.base, "{head}; tally tx {tx} rx {rx} txerr {tx_err} rxerr {rx_err} missed {missed} align {align} bcast {broad} abort {abort} underrun {under}")
+}
+
+skill second(trace, card, rounds) {
+    trace.rounds = trace.rounds + rounds
+    @moment = uefi.now(card.base)
+    (moment.second == trace.second) { out no }
+    trace.second = moment.second
+    trace.moment = clock.clock_text(clock.local_time(moment))
+    link(trace, card) rescue |err| { note(trace, card.base, "link: read failed ({err})") }
+    counters(trace, card) rescue |err| { note(trace, card.base, "card: counters failed ({err})") }
+    trace.rounds = 0
+    flush(trace, card.base)
+    out yes
+}
