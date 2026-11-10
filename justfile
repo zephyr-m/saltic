@@ -70,6 +70,13 @@ bench: _dirs
     bootstrap/saltic workbench/bench.saltic .cache/build/workbench/bench-run 268435456 x86_64 >/dev/null && chmod +x .cache/build/workbench/bench-run
     .cache/build/workbench/bench-run
 
+# Реестр адаптеров (registry/adapters.txt): паспорт, код через lens, эффекты и
+# идентификаторы против кода; индекс — registry/index.json.
+registry: _dirs
+    bootstrap/saltic workbench/agent/lens.saltic .cache/build/workbench/lens.part 1073741824 x86_64 >/dev/null && chmod +x .cache/build/workbench/lens.part && mv .cache/build/workbench/lens.part .cache/build/workbench/lens
+    bootstrap/saltic workbench/registry.saltic .cache/build/workbench/registry 268435456 x86_64 >/dev/null && chmod +x .cache/build/workbench/registry
+    .cache/build/workbench/registry
+
 limits: _dirs
     bootstrap/saltic workbench/check/limits.saltic .cache/build/workbench/limits 536870912 x86_64 && chmod +x .cache/build/workbench/limits
     .cache/build/workbench/limits

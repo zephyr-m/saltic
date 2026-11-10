@@ -1,0 +1,268 @@
+-- registry — сверка реестра адаптеров, `just registry`: каждый адаптер из
+-- registry/adapters.txt проверяется по паспорту и коду, итог — registry/index.json.
+-- Проверки адаптера:
+--   паспорт — <путь>.passport.txt есть, все поля FIELDS на месте, роль «адаптер»
+--   архитектуры — каждая из паспорта известна (ARCHES) и путь лежит в её папке
+--   код — lens check чист у <путь>.saltic и у всех *.saltic в папке <путь>/:
+--     разбор, чекер, лимиты канона (драйвер — модуль, своей сборки у него нет)
+--   эффекты — заявленное в «эффекты:» совпадает с выведенным из кода: нашёл
+--     своё устройство (firmware.find_device) и пишет (firmware.write…) — «пишет
+--     в железо», иначе «только читает»; пишет файлы (files.write) — в паспорте
+--     должно быть слово «диск»
+--   идентификаторы — у «pci VVVV:DDDD» и «usb VVVV» числа стоят константами
+--     в коде; «uefi …» — протокол прошивки, сверять нечего
+-- Печатает ход по каждому адаптеру; есть провал — ошибка RegistryBroken.
+--
+-- program() — сверить всё, записать индекс
+-- Внутри: entries(text) -> [[имя, путь]]; field(passport, key) -> значение
+--     или ""; stripped(text) -> без пробелов слева; codes(folder) -> файлы
+--     *.saltic в папке и глубже; lensed(path) -> "ok" или замечания;
+--     inferred(code) -> эффекты; hex(text) -> число; id_problems(ids, code);
+--     checked(name, path) -> [замечания, json адаптера]; quoted(text) -> JSON-строка
+
+use io
+use io.file
+use core.str
+use core.group
+use core.process
+
+LIST = "registry/adapters.txt"
+INDEX = "registry/index.json"
+LENS = ".cache/build/workbench/lens"
+FIELDS = ["адаптер", "версия", "автор", "роль", "время жизни", "срок", "эффекты", "железо", "идентификаторы", "своя версия", "протоколы", "архитектуры", "примитивы", "зависит от", "среда", "состояние"]
+ARCHES = [["x86_64-uefi", "os/target/uefi_x86_64/"]]
+HARDWARE = "пишет в железо"
+READS = "только читает"
+
+skill entries(text) {
+    @found = []
+    drum (str.lines(text)) {
+        @words = str.split(beat, " ")
+        (group.count(words) >= 2) {
+            ((str.starts_with(group.get(words, 0), "#")) == no) {
+                found = group.add(found, [group.get(words, 0), group.get(words, 1)])
+            }
+        }
+    }
+    out found
+}
+
+skill stripped(text) {
+    @start = 0
+    @going = yes
+    drum (str.bytes(text)) {
+        (going == yes) {
+            (str.byte(text, beat) == 32) { start = beat + 1 }
+            ((str.byte(text, beat) == 32) == no) { going = no }
+        }
+    }
+    out str.slice(text, start, str.bytes(text))
+}
+
+skill field(passport, key) {
+    @head = "{key}:"
+    drum (str.lines(passport)) {
+        (str.starts_with(beat, head) == yes) { out stripped(str.slice(beat, str.bytes(head), str.bytes(beat))) }
+    }
+    out ""
+}
+
+skill codes(folder) {
+    @found = []
+    @names = file.list(folder) rescue |err| { out found }
+    drum (names) {
+        @inside = "{folder}/{beat}"
+        (str.ends_with(beat, ".saltic") == yes) { found = group.add(found, inside) }
+        ((str.ends_with(beat, ".saltic")) == no) { found = group.concat(found, codes(inside)) }
+    }
+    out found
+}
+
+skill lensed(path) {
+    @done = process.capture([LENS, "check", path], "", []) rescue |err| { out "нет lens: {err}" }
+    @text = done.output
+    (str.ends_with(text, "\n") == yes) { text = str.slice(text, 0, str.bytes(text) - 1) }
+    out text
+}
+
+skill inferred(code) {
+    (str.contains(code, "firmware.find_device") == yes) {
+        (str.contains(code, "firmware.write") == yes) { out HARDWARE }
+    }
+    out READS
+}
+
+skill hex(text) {
+    @value = 0
+    drum (str.bytes(text)) {
+        @byte = str.byte(text, beat)
+        @digit = 0
+        (byte >= 48) {
+            (byte <= 57) { digit = byte - 48 }
+        }
+        (byte >= 97) {
+            (byte <= 102) { digit = byte - 87 }
+        }
+        (byte >= 65) {
+            (byte <= 70) { digit = byte - 55 }
+        }
+        value = value * 16 + digit
+    }
+    out value
+}
+
+skill id_problems(ids, code) {
+    @problems = []
+    drum (str.split(ids, ", ")) {
+        @words = str.split(beat, " ")
+        @kind = group.get(words, 0)
+        (group.count(words) < 2) { problems = group.add(problems, "идентификатор «{beat}» без значения") }
+        (group.count(words) >= 2) {
+            @numbers = []
+            (kind == "pci") { numbers = str.split(group.get(words, 1), ":") }
+            (kind == "usb") { numbers = [group.get(words, 1)] }
+            ((kind == "uefi") == no) {
+                (group.count(numbers) == 0) { problems = group.add(problems, "неизвестный вид идентификатора «{kind}»") }
+            }
+            drum (numbers) {
+                @value = hex(beat)
+                (str.contains(code, "= {value}\n") == no) { problems = group.add(problems, "{kind} {beat} ({value}) нет константой в коде") }
+            }
+        }
+    }
+    out problems
+}
+
+skill quoted(text) {
+    @made = "\""
+    drum (str.bytes(text)) {
+        @byte = str.byte(text, beat)
+        (byte == 34) { made = str.concat(made, "\\") }
+        (byte == 92) { made = str.concat(made, "\\") }
+        made = str.concat(made, str.from_byte(byte))
+    }
+    out str.concat(made, "\"")
+}
+
+skill listed(items) {
+    @made = []
+    drum (items) { made = group.add(made, quoted(beat)) }
+    out str.concat(str.concat("[", str.join(made, ", ")), "]")
+}
+
+skill pair(key, value) {
+    out str.concat(str.concat(quoted(key), ": "), value)
+}
+
+skill object(pairs) {
+    out str.concat(str.concat("\{", str.join(pairs, ", ")), "\}")
+}
+
+skill arch_problems(archs, path) {
+    @problems = []
+    drum (str.split(archs, ", ")) {
+        @arch = beat
+        @known = no
+        drum (ARCHES) {
+            (group.get(beat, 0) == arch) {
+                known = yes
+                (str.starts_with(path, group.get(beat, 1)) == no) { problems = group.add(problems, "путь не в папке архитектуры {arch}") }
+            }
+        }
+        (known == no) { problems = group.add(problems, "архитектура «{arch}» неизвестна") }
+    }
+    out problems
+}
+
+skill code_problems(files) {
+    @problems = []
+    drum (files) {
+        @seen = lensed(beat)
+        ((seen == "ok") == no) { problems = group.concat(problems, str.lines(seen)) }
+    }
+    out problems
+}
+
+skill text_of(files) {
+    @code = ""
+    drum (files) {
+        @text = file.read(beat) rescue |err| { out "" }
+        code = str.concat(code, text)
+    }
+    out code
+}
+
+skill checked(name, path) {
+    @passport_path = "{path}.passport.txt"
+    @passport = file.read(passport_path) rescue |err| {
+        @missing = ["нет паспорта {passport_path}"]
+        out [missing, object([pair("name", quoted(name)), pair("ok", "false"), pair("problems", listed(missing))])]
+    }
+    @problems = []
+    drum (FIELDS) {
+        (str.bytes(field(passport, beat)) == 0) { problems = group.add(problems, "в паспорте нет поля «{beat}»") }
+    }
+    ((field(passport, "роль") == "адаптер") == no) { problems = group.add(problems, "роль в паспорте — не «адаптер»") }
+    problems = group.concat(problems, arch_problems(field(passport, "архитектуры"), path))
+    @files = group.concat(["{path}.saltic"], codes(path))
+    problems = group.concat(problems, code_problems(files))
+    @code = text_of(files)
+    @effects = field(passport, "эффекты")
+    @declared = effects
+    (str.contains(effects, ":") == yes) { declared = group.get(str.split(effects, ":"), 0) }
+    @effect = inferred(code)
+    ((declared == effect) == no) { problems = group.add(problems, "эффекты: в паспорте «{declared}», по коду «{effect}»") }
+    (str.contains(code, "files.write") == yes) {
+        (str.contains(effects, "диск") == no) { problems = group.add(problems, "код пишет файлы, а в эффектах нет диска") }
+    }
+    @ids = field(passport, "идентификаторы")
+    problems = group.concat(problems, id_problems(ids, code))
+    @good = "true"
+    (group.count(problems) > 0) { good = "false" }
+    @count = group.count(files)
+    @made = object([
+        pair("name", quoted(name)),
+        pair("title", quoted(field(passport, "адаптер"))),
+        pair("code", quoted("{path}.saltic")),
+        pair("passport", quoted(passport_path)),
+        pair("files", "{count}"),
+        pair("ids", listed(str.split(ids, ", "))),
+        pair("own_version", quoted(field(passport, "своя версия"))),
+        pair("arches", listed(str.split(field(passport, "архитектуры"), ", "))),
+        pair("effects", quoted(effect)),
+        pair("state", quoted(field(passport, "состояние"))),
+        pair("ok", good),
+        pair("problems", listed(problems))
+    ])
+    out [problems, made]
+}
+
+program() {
+    @text = file.read(LIST) rescue |err| {
+        io.show("нет списка {LIST}")
+        out error.RegistryBroken
+    }
+    @all = entries(text)
+    @objects = []
+    @broken = 0
+    @total = group.count(all)
+    io.show("реестр адаптеров: {total} в {LIST}")
+    drum (all) {
+        @name = group.get(beat, 0)
+        @path = group.get(beat, 1)
+        io.show("· {name} — {path}")
+        @result = checked(name, path)
+        @problems = group.get(result, 0)
+        objects = group.add(objects, group.get(result, 1))
+        (group.count(problems) == 0) { io.show("  зелёный") }
+        (group.count(problems) > 0) {
+            broken = broken + 1
+            drum (problems) { io.show("  ✗ {beat}") }
+        }
+    }
+    file.write(INDEX, str.concat(str.concat("[\n  ", str.join(objects, ",\n  ")), "\n]\n"))
+    @green = total - broken
+    io.show("итог: зелёных {green} из {total}; индекс — {INDEX}")
+    (broken > 0) { out error.RegistryBroken }
+    out none
+}
