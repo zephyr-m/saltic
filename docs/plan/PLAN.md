@@ -269,6 +269,11 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
 - [ ] Имена: `bits32.not` (единственный `not`), `OutOfRange`/`OutsideRange`,
   `Bad*`/`Invalid*`. → аудит 02.11, А15; → Q-022 (ответ 07.11.2026)
   В два шага (Q-048), шаг 2 ждёт выпуска полки.
+  11.11.2026, шаг 1 сделан: `bits32.invert` (тот же вид, что `not`; `not` —
+  прежнее имя); `BadAddress` / `BadSmbios` / `BadJtml` / `BadMeasure` →
+  `Invalid…` в ОС и каноне; словарик имён ошибок — в шапке канона (`measure`).
+  Шаг 2 ждёт выпуска полки: `PatchOutOfRange`, `OperandOutOfRange`,
+  `FractionOutOfRange` в компиляторе → `…OutsideRange`, `bits32.not` — убрать.
 - [x] Ядро без не-ядра: `crypto`, `graphics.rgb` (пустые `robot`,
   `sync`, `resource`, `io.net` — в архив 07.11.2026). → аудит 03.11, 2.3; → Q-023 (ответ 07.11.2026)
   11.11.2026 (global-check зелёная): `core.crypto` → `soul/craft/protocols/security/crypto.saltic`
