@@ -42,7 +42,7 @@ workbench/
 | Программа | Что делает |
 |---|---|
 | `bench.saltic` | `just bench`: таблица лидеров по скорости — задачи из `docs/numbers/benchmarks` на Saltic и на всех языках, что есть на машине; лучшее из 3 запусков, пик памяти, вывод сверен с Си -O2. Итог — `.cache/build/workbench/bench.md` |
-| `registry.saltic` | `just registry`: реестр адаптеров `registry/adapters.txt` — паспорт и его поля, `lens check` кода, эффекты и идентификаторы против кода; индекс — `registry/index.json`. Устройство — `registry/README.md` |
+| `registry.saltic` | `just registry`: реестр адаптеров `registry/adapters/adapters.txt` — паспорт и его поля, `lens check` кода, эффекты и идентификаторы против кода; индекс — `registry/adapters/index.json`. Устройство — `registry/adapters/README.md` |
 | `release-draft.saltic` | `just release-draft [F:B:C]`: черновик релиза по Football Versioning — коммиты с последнего тега по префиксам, счёт и раздел CHANGELOG в `.cache/build/release-draft.md` |
 | `stamp.saltic` | Время `[ЧЧ:ММ:СС]` у каждой строки вывода скриптов; провал команды — код 1 и «ошибка: StampedFailed» |
 | `kit.saltic` | Общее у проверок, `bootstrap/` и `tests/`: строка со временем, запуск, сравнение файлов по байтам, сортировка, хвост журнала. `use workbench.kit` |
