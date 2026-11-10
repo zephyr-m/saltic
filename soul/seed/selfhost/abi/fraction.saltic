@@ -1,0 +1,181 @@
+-- fraction — дробное в слове (Q-014, Q-041): урезанная плавающая — double, у
+-- которого три младших бита мантиссы — метка FRACTION (2). Значимых бит 50
+-- вместо 53; к ним округляется сразу, к ближайшему (ровно посередине — к чётному).
+-- Считает целыми до 9999 на разряд, поэтому работает и на RV32I (компилятор
+-- переводит литерал там, где сам запущен).
+--
+-- word(text) -> wide.Wide — 64 бита слова для литерала "123.45" (можно с «-»);
+--     FractionOutOfRange — порядок за пределами double
+-- Внутри: big_* — большие натуральные группами разрядов по 10000, младший первым;
+--     bits_bytes(bits) — 64 бита (старший первым) в 8 байт, младший байт первым
+
+use core.str
+use core.num
+use core.group
+use selfhost.abi.tags
+use selfhost.machine.wide
+
+BASE = 10000
+SIGNIFICANT = 50
+EXPONENT_BIAS = 1023
+EXPONENT_LIMIT = 2047
+
+skill big_trim(big) {
+    @size = group.count(big)
+    drum (group.count(big)) {
+        (size == 1) { leave }
+        (group.get(big, size - 1) > 0) { leave }
+        size = size - 1
+    }
+    out group.slice(big, 0, size)
+}
+
+skill big_times(big, factor) {
+    @result = []
+    @carry = 0
+    drum (big) {
+        @piece = beat * factor + carry
+        carry = piece / BASE
+        result = group.add(result, piece - carry * BASE)
+    }
+    drum (8) {
+        (carry == 0) { leave }
+        @rest = carry / BASE
+        result = group.add(result, carry - rest * BASE)
+        carry = rest
+    }
+    out big_trim(result)
+}
+
+skill big_compare(left, right) {
+    @left_size = group.count(left)
+    @right_size = group.count(right)
+    (left_size > right_size) { out 1 }
+    (left_size < right_size) { out -1 }
+    drum (left_size) {
+        @index = left_size - 1 - beat
+        @a = group.get(left, index)
+        @b = group.get(right, index)
+        (a > b) { out 1 }
+        (a < b) { out -1 }
+    }
+    out 0
+}
+
+skill big_minus(left, right) {
+    @result = []
+    @borrow = 0
+    drum (group.count(left)) {
+        @piece = group.get(left, beat) - borrow
+        (beat < group.count(right)) { piece = piece - group.get(right, beat) }
+        borrow = 0
+        (piece < 0) {
+            piece = piece + BASE
+            borrow = 1
+        }
+        result = group.add(result, piece)
+    }
+    out big_trim(result)
+}
+
+skill big_plus(big, amount) {
+    @result = []
+    @carry = amount
+    drum (big) {
+        @piece = beat + carry
+        carry = piece / BASE
+        result = group.add(result, piece - carry * BASE)
+    }
+    (carry > 0) { result = group.add(result, carry) }
+    out result
+}
+
+skill big_digits(digits) {
+    @big = [0]
+    drum (str.bytes(digits)) { big = big_plus(big_times(big, 10), str.byte(digits, beat) - 48) }
+    out big
+}
+
+skill bits_bytes(bits) {
+    @bytes = []
+    drum (8) {
+        @value = 0
+        @at = beat * 8
+        drum (8) { value = value * 2 + group.get(bits, 63 - at - 7 + beat) }
+        bytes = group.add(bytes, value)
+    }
+    out bytes
+}
+
+skill word(text) {
+    @negative = str.starts_with(text, "-")
+    @body = text
+    (negative == yes) { body = str.slice(text, 1, str.bytes(text)) }
+    @parts = str.split(body, ".")
+    @whole = group.get(parts, 0)
+    @tail = ""
+    (group.count(parts) > 1) { tail = group.get(parts, 1) }
+    @top = big_digits(str.concat(whole, tail))
+    @bottom = [1]
+    drum (str.bytes(tail)) { bottom = big_times(bottom, 10) }
+    @bits = []
+    drum (64) { bits = group.add(bits, 0) }
+    (big_compare(top, [0]) == 0) {
+        bits = group.tree_replaced(bits, 62, 1)
+        out wide.from_bytes(bits_bytes(bits))
+    }
+    @power = 0
+    drum (4000) {
+        (big_compare(top, bottom) >= 0) { leave }
+        top = big_times(top, 2)
+        power = power - 1
+    }
+    drum (4000) {
+        (big_compare(top, big_times(bottom, 2)) < 0) { leave }
+        bottom = big_times(bottom, 2)
+        power = power + 1
+    }
+    @significand = []
+    drum (SIGNIFICANT) {
+        @bit = 0
+        (big_compare(top, bottom) >= 0) {
+            top = big_minus(top, bottom)
+            bit = 1
+        }
+        significand = group.add(significand, bit)
+        top = big_times(top, 2)
+    }
+    @half = big_compare(top, bottom)
+    @round_up = half > 0
+    (half == 0) { round_up = group.get(significand, SIGNIFICANT - 1) == 1 }
+    (round_up == yes) {
+        @index = SIGNIFICANT - 1
+        drum (SIGNIFICANT) {
+            (group.get(significand, index) == 0) {
+                significand = group.tree_replaced(significand, index, 1)
+                leave
+            }
+            significand = group.tree_replaced(significand, index, 0)
+            (index == 0) {
+                significand = group.tree_replaced(significand, 0, 1)
+                power = power + 1
+                leave
+            }
+            index = index - 1
+        }
+    }
+    @biased = power + EXPONENT_BIAS
+    (biased < 1) { out error.FractionOutOfRange }
+    (biased >= EXPONENT_LIMIT) { out error.FractionOutOfRange }
+    @exponent = []
+    @rest = biased
+    drum (11) {
+        exponent = group.concat([rest % 2], exponent)
+        rest = rest / 2
+    }
+    @sign = [0]
+    (negative == yes) { sign = [1] }
+    @all = group.concat(group.concat(sign, exponent), group.slice(significand, 1, SIGNIFICANT))
+    all = group.concat(all, [0, 1, 0])
+    out wide.from_bytes(bits_bytes(all))
+}
