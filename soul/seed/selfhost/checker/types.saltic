@@ -8,12 +8,14 @@
 -- box_type(name) -> "box:имя"; is_box_type(type); box_name(type) -> имя или "";
 --     is_enum_type(type); enum_name(type) -> имя или "" — единственное место префиксов
 -- merge(left, right) -> общий тип или "unknown"
+-- stored(type) -> тип в поле Box и группе: фиксированный упакован в "number" (Q-035);
+--     fixed_marked(type, node) — пометка ast.typed только у фиксированного (кодоген упакует)
 -- compatible(left, right) -> answer; left "none" — поле «пока пусто», примет что угодно
 -- present_type(type) -> тип имени в (значение) |имя|: none — "unknown"
 -- type_text(type) -> текст для сообщений («Box Имя», «группа число»)
 -- integer_text(node) -> десятичный текст целого литерала (с «-») или ""
 -- type(node) -> тип литерала без области; type_in_module(node, module, globals) — с полным
---     именем Box; resolve_type(type, module, globals) — то же для готового типа, и в группах
+--     именем Box; field_type(…) — то же для умолчания поля: u32.from(…) — "number" (Q-035); resolve_type(type, module, globals) — то же для готового типа, и в группах
 -- box_field(globals, box_name, field_name) -> names.Name поля или пустой;
 --     box_member(box_node, field_name) -> узел поля или [] — общий с кодогеном обход
 -- path_type(node, scope, globals) -> тип пути (переменная, поле, enum, глобал)
@@ -78,6 +80,16 @@ skill merge(left, right) {
     out "unknown"
 }
 
+skill stored(type) {
+    (contract.is_fixed_type(type) == yes) { out "number" }
+    out type
+}
+
+skill fixed_marked(type, node) {
+    (contract.is_fixed_type(type) == yes) { out ast.typed(type, node) }
+    out node
+}
+
 skill compatible(left, right) {
     (left == "unknown") { out yes }
     (left == "none") { out yes }
@@ -120,6 +132,14 @@ skill integer_text(node) {
         }
     }
     out ""
+}
+
+skill field_type(node, module, globals) {
+    (ast.tag(node) == "call") {
+        @callee = names.call_name(ast.plain(ast.call_callee(node)), names.Scope { module = module }, globals)
+        (str.bytes(contract.conversion(contract.find(callee))) > 0) { out "number" }
+    }
+    out type_in_module(node, module, globals)
 }
 
 skill type_in_module(node, module, globals) {
@@ -174,7 +194,7 @@ skill box_field(globals, box_name, field_name) {
     @box = names.table_find(globals, box_name)
     @member = box_member(box.node, field_name)
     (group.count(member) == 0) { out names.Name {} }
-    out names.Name { name = field_name, kind = "field", type = type_in_module(ast.part(member, 2), ast.name_module(box_name), globals), node = member }
+    out names.Name { name = field_name, kind = "field", type = stored(field_type(ast.part(member, 2), ast.name_module(box_name), globals)), node = member }
 }
 
 skill path_type(node, scope, globals) {
@@ -244,7 +264,7 @@ skill call_type(node, scope, globals) {
         (result_type == "group-add") {
             @item_type = "unknown"
             (group.count(plain) > 3) { item_type = value_type(group.get(plain, 3), scope, globals) }
-            out group_type(merge(group_item_type(input_type), item_type))
+            out group_type(merge(group_item_type(input_type), stored(item_type)))
         }
         ((result_type == "unknown") == no) { out result_type }
     }
@@ -286,7 +306,7 @@ skill value_type(node, scope, globals) {
     (tag == "group") {
         @type = "unknown"
         drum (group.count(plain) - 1) {
-            type = merge(type, value_type(group.get(plain, beat + 1), scope, globals))
+            type = merge(type, stored(value_type(group.get(plain, beat + 1), scope, globals)))
         }
         out group_type(type)
     }

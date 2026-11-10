@@ -18,6 +18,8 @@
 -- compile_group(compiler, items) — новая группа
 -- compile_box(compiler, name, overrides) — новый Box, поля по умолчанию
 --     считаются в модуле самого Box
+-- pack_fixed(compiler, stored) — фиксированное в VALUE → обычное число (rt_fixed_pack,
+--     FixedTooBig): так оно ложится в поле Box и группу (Q-035); compile_stored — group.add
 -- compile_template(compiler, plain) — строка "{…}" склейкой через rt_value_text
 -- compile_rescue(compiler, node) — выражение rescue с перехватом ошибки
 --
@@ -193,6 +195,22 @@ skill compile_arguments(compiler, args) {
     out compiler
 }
 
+skill pack_fixed(compiler, stored) {
+    @type = lookup.infer_type(compiler, stored)
+    (contract.is_fixed_type(type) == no) { out compiler }
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.FIXED_SOURCE_KIND, contract.fixed_kind(type))
+    out failures.check(executor.call(compiler, "rt_fixed_pack"))
+}
+
+skill compile_stored(compiler, args) {
+    @executor = compiler.executor
+    compiler = executor.push(compile_expression(compiler, group.get(args, 0)), backend.VALUE)
+    compiler = pack_fixed(compile_expression(compiler, group.get(args, 1)), group.get(args, 1))
+    compiler = executor.move(compiler, backend.argument(1), backend.VALUE)
+    out executor.pop(compiler, backend.argument(0))
+}
+
 skill compile_show(compiler, args) {
     @executor = compiler.executor
     compiler = compile_expression(compiler, group.get(args, 0))
@@ -206,7 +224,7 @@ skill compile_group(compiler, items) {
     @words = compiler.words
     @count = group.count(items)
     drum (items) {
-        compiler = compile_expression(compiler, beat)
+        compiler = pack_fixed(compile_expression(compiler, beat), beat)
         compiler = executor.push(compiler, backend.VALUE)
     }
     compiler = executor.load_immediate(compiler, backend.VALUE, constants.group_storage_bytes(compiler.words, count))
@@ -240,7 +258,7 @@ skill compile_box(compiler, name, overrides) {
         (group.count(field_value) == 0) { field_value = ast.part(beat, 2) default_value = yes }
         @caller_module = compiler.current_function.module
         (default_value == yes) { compiler.current_function.module = model.text }
-        compiler = compile_expression(compiler, field_value)
+        compiler = pack_fixed(compile_expression(compiler, field_value), field_value)
         compiler.current_function.module = caller_module
         @executor = compiler.executor
         compiler = executor.push(compiler, backend.VALUE)
@@ -324,6 +342,7 @@ skill compile_call(compiler, node) {
         @problem = errors.unresolved_call(call_text, compiler.current_function.name)
         io.show(problem.message)
     }
+    (name == "core.group.add") { out failures.check(executor.call(compile_stored(compiler, args), target)) }
     compiler = compile_arguments(compiler, args)
     compiler = executor.call(compiler, target)
     out failures.check(compiler)
@@ -430,7 +449,7 @@ skill compile_statement(compiler, node, keep) {
         @base = group.slice(target, 0, part_count - 1)
         compiler = compile_expression(compiler, base)
         compiler = executor.push(compiler, backend.VALUE)
-        compiler = compile_expression(compiler, group.get(plain, 2))
+        compiler = pack_fixed(compile_expression(compiler, group.get(plain, 2)), group.get(plain, 2))
         compiler = executor.move(compiler, backend.ARG2, backend.VALUE)
         compiler = executor.pop(compiler, backend.VALUE)
         out emitters.emit_field_set(compiler, group.get(target, part_count - 1))
