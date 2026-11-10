@@ -14,7 +14,8 @@
 --     с типом type видно только в блоке
 -- check_params(owner, params, globals, subject, module, body, diagnostics) -> Walked;
 --     owner — узел объявления (место ошибок параметров), subject — полное
---     имя Box для метода, его поля попадают в область
+--     имя Box для метода, его поля попадают в область; у навыка параметры
+--     и signatures.OUT_MARKER — с выведенными типами (signatures)
 
 use core.str
 use core.group
@@ -82,6 +83,8 @@ skill check_expression(node, scope, globals, diagnostics) {
         @current = ast.with_part(ast.with_part(node, 2, ast.typed(left_type, left_walked.node)), 3, right_walked.node)
         @operator = group.get(plain, 1)
         @numeric = group.contains(NUMERIC_OPERATORS, operator)
+        @partner = rules.fixed_partner(operator, left_type, types.value_type(right_node, scope, globals))
+        (errors.is_ok(partner) == no) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, partner)) }
         (numeric == yes) {
             @right_type = types.value_type(right_node, scope, globals)
             @known_types = yes
@@ -175,20 +178,12 @@ skill check_expression(node, scope, globals, diagnostics) {
                 @argument_node = argument_walked.node
                 @mark_type = contract.is_known(full)
                 (fixed_call == yes) { mark_type = yes }
+                (contract.is_fixed_type(types.value_type(argument, scope, globals)) == yes) { mark_type = yes }
                 (mark_type == yes) { argument_node = ast.typed(types.value_type(argument, scope, globals), argument_node) }
                 current = ast.with_part(current, beat + 2, argument_node)
             }
         }
-        (fixed_call == no) {
-            @callee_global = names.table_find(globals, full)
-            @keeps_fixed = callee_global.kind == "native"
-            (str.starts_with(full, "core.group.") == yes) { keeps_fixed = no }
-            (keeps_fixed == no) {
-                drum (argument_count) {
-                    diagnostics = lookup.check_fixed_escape(node, ast.call_argument(node, beat), "передать в '{full}'", scope, globals, diagnostics)
-                }
-            }
-        }
+        (fixed_call == no) { diagnostics = signatures.check_call(node, full, scope, globals, diagnostics) }
         @receiver_type = "unknown"
         (group.count(callee) == 3) {
             @receiver_path = ["path", group.get(callee, 1)]
@@ -254,10 +249,9 @@ skill check_expression(node, scope, globals, diagnostics) {
     (tag == "group") {
         @current = node
         drum (group.count(plain) - 1) {
-            diagnostics = lookup.check_fixed_escape(node, group.get(plain, beat + 1), "положить в группу", scope, globals, diagnostics)
             @item_walked = check_expression(group.get(plain, beat + 1), scope, globals, diagnostics)
             diagnostics = item_walked.diagnostics
-            current = ast.with_part(current, beat + 1, item_walked.node)
+            current = ast.with_part(current, beat + 1, types.fixed_marked(types.value_type(group.get(plain, beat + 1), scope, globals), item_walked.node))
         }
         out lookup.walked(current, diagnostics)
     }
@@ -276,7 +270,7 @@ skill check_expression(node, scope, globals, diagnostics) {
                 @value = ast.part(override, 2)
                 @value_walked = check_expression(value, scope, globals, diagnostics)
                 diagnostics = value_walked.diagnostics
-                current = ast.with_part(current, beat + 2, ast.with_part(override, 2, value_walked.node))
+                current = ast.with_part(current, beat + 2, ast.with_part(override, 2, types.fixed_marked(types.value_type(value, scope, globals), value_walked.node)))
                 (names.has(seen, field_name) == yes) {
                     diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.duplicate_literal_field(field_name, name)))
                 }
@@ -287,7 +281,7 @@ skill check_expression(node, scope, globals, diagnostics) {
                         diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_field(name, field_name)))
                     }
                     {
-                        @value_type = types.value_type(value, scope, globals)
+                        @value_type = types.stored(types.value_type(value, scope, globals))
                         (types.compatible(field.type, value_type) == no) {
                             @value_name = types.type_text(value_type)
                             @field_type = types.type_text(field.type)
@@ -380,7 +374,7 @@ skill check_statement(node, scope, globals, diagnostics) {
         @value = group.get(plain, 2)
         @value_walked = check_expression(value, scope, globals, diagnostics)
         diagnostics = value_walked.diagnostics
-        @current = ast.with_part(node, 2, value_walked.node)
+        @current = ast.with_part(node, 2, types.fixed_marked(types.value_type(value, scope, globals), value_walked.node))
         @base_type = types.path_type(base_parts, scope, globals)
         (types.is_box_type(base_type) == yes) {
             @box_name = types.box_name(base_type)
@@ -390,7 +384,7 @@ skill check_statement(node, scope, globals, diagnostics) {
                 diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.unknown_field(box_name, field_name)))
             }
             (str.bytes(field.name) > 0) {
-                @value_type = types.value_type(value, scope, globals)
+                @value_type = types.stored(types.value_type(value, scope, globals))
                 (types.compatible(field.type, value_type) == no) {
                     @value_name = types.type_text(value_type)
                     diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.field_type_mismatch(value_name, field_name, box_name, types.type_text(field.type))))
@@ -400,7 +394,7 @@ skill check_statement(node, scope, globals, diagnostics) {
         out lookup.walked(current, diagnostics)
     }
     (tag == "out") {
-        diagnostics = lookup.check_fixed_escape(node, group.get(plain, 1), "вернуть из навыка", scope, globals, diagnostics)
+        diagnostics = signatures.check_out(node, group.get(plain, 1), scope, globals, diagnostics)
         @value_walked = check_expression(group.get(plain, 1), scope, globals, diagnostics)
         @out_type = types.value_type(group.get(plain, 1), scope, globals)
         out lookup.walked(ast.with_part(node, 1, ast.typed(out_type, value_walked.node)), value_walked.diagnostics)
@@ -514,11 +508,13 @@ skill check_block(block, scope, globals, diagnostics) {
 
 skill check_params(owner, params, globals, subject, module, body, diagnostics) {
     @scope = names.Scope { subject = subject, module = module }
+    @full = signatures.owner_name(owner, subject, module)
+    @result = names.table_find(globals, names.result_key(full))
     (str.bytes(subject) > 0) {
         @model = names.table_find(globals, subject)
         drum (group.count(ast.plain(model.node)) - 2) {
             @member = ast.part(model.node, beat + 2)
-            (ast.tag(member) == "field") { scope.names = names.put(scope.names, ast.part(member, 1), "field", types.type_in_module(ast.part(member, 2), module, globals)) }
+            (ast.tag(member) == "field") { scope.names = names.put(scope.names, ast.part(member, 1), "field", types.stored(types.field_type(ast.part(member, 2), module, globals))) }
         }
     }
     drum (params) {
@@ -526,9 +522,10 @@ skill check_params(owner, params, globals, subject, module, body, diagnostics) {
             (names.has(scope.names, beat) == yes) { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(owner, errors.duplicate_param(beat))) }
             {
                 diagnostics = lookup.check_module_name(owner, beat, module, globals, diagnostics)
-                scope.names = names.put(scope.names, beat, "parameter", "unknown")
+                scope.names = names.put(scope.names, beat, "parameter", signatures.param_type(globals, full, params, beat))
             }
         }
     }
+    (str.bytes(full) > 0) { scope.names = names.put(scope.names, signatures.OUT_MARKER, "variable", result.type) }
     out check_block(body, scope, globals, diagnostics)
 }

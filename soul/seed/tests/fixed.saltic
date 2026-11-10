@@ -1,11 +1,15 @@
 -- fixed test — фиксированные типы на деле: арифметика с переполнением,
 -- преобразования from, операции bits32, типизированная память по address.
 -- Проверки — craft/testing, как у остальных тестов; фиксированное значение
--- не покидает навык, поэтому сравнивается на месте (== даёт yes/no).
+-- сравнивается на месте (== даёт yes/no). Через параметр и out навыка оно
+-- проходит (тип выводится из вызовов) — fixed_skills; в поле Box и группу
+-- ложится обычным числом (Q-035) — fixed_stored.
 -- Гоняет tests/run.sh (fixed-types).
 --
 -- limits / checked_arithmetic / checked_conversions / bit_operations /
---     typed_memory(suite) -> Testing
+--     typed_memory / fixed_skills / fixed_stored(suite) -> Testing
+-- Packet = Box { port } — поле с фиксированным по умолчанию
+-- wider(value, step) -> u32; shifted(at, offset) -> address; signed_sum(depth, value) -> i32
 -- program() -> none; TestsFailed, если есть провалы
 
 use core.mem
@@ -16,6 +20,7 @@ use core.u16
 use core.u32
 use core.i32
 use core.usize
+use core.group
 use craft.testing
 
 skill limits(suite) {
@@ -111,6 +116,57 @@ skill typed_memory(suite) {
     out suite
 }
 
+skill wider(value, step) {
+    out value + step
+}
+
+skill shifted(at, offset) {
+    out address.add(at, offset)
+}
+
+skill signed_sum(depth, value) {
+    (depth == 0) { out value }
+    out signed_sum(depth - 1, value + i32.from(-1))
+}
+
+skill fixed_skills(suite) {
+    @wide = wider(u32.from(4000000000), u32.from(5))
+    suite = testing.test_yes(suite, "u32 через навык", wide == u32.from(4000000005))
+    @overflow = wider(u32.from(4294967295), u32.from(1)) rescue |err| {
+        suite = testing.test_yes(suite, "переполнение u32 в навыке", err == error.FixedIntegerOverflow)
+        u32.from(0)
+    }
+    suite = testing.test_yes(suite, "u32 после переполнения", overflow == u32.from(0))
+    @arena = mem.arena(1) * 65536 + mem.arena(0)
+    @memory = address.from(u32.from(arena))
+    mem.store8(shifted(memory, usize.from(3)), usize.from(0), u8.from(77))
+    suite = testing.test_yes(suite, "address через навык", mem.load8(memory, usize.from(3)) == u8.from(77))
+    suite = testing.test_yes(suite, "i32 рекурсией", signed_sum(3, i32.from(0)) == i32.from(-3))
+    out suite
+}
+
+Packet = Box {
+    port = u16.from(80)
+}
+
+skill fixed_stored(suite) {
+    @packet = Packet()
+    suite = testing.test_yes(suite, "умолчание поля — число", packet.port + 1 == 81)
+    packet.port = u16.from(65535)
+    suite = testing.test_yes(suite, "поле обратно в u16", u16.from(packet.port) == u16.from(65535))
+    @items = group.add([u8.from(7)], u32.from(9))
+    suite = testing.test_yes(suite, "группа — числа", group.get(items, 0) + group.get(items, 1) == 16)
+    @too_big = no
+    @packed = [u32.from(4000000000)] rescue |err| {
+        too_big = err == error.FixedTooBig
+        []
+    }
+    @kept = too_big
+    (group.count(packed) == 1) { kept = u32.from(group.get(packed, 0)) == u32.from(4000000000) }
+    suite = testing.test_yes(suite, "большое: число на 64 битах, FixedTooBig на 32", kept)
+    out suite
+}
+
 program() {
     @suite = testing.test_new()
     suite = limits(suite)
@@ -118,5 +174,7 @@ program() {
     suite = checked_conversions(suite)
     suite = bit_operations(suite)
     suite = typed_memory(suite)
+    suite = fixed_skills(suite)
+    suite = fixed_stored(suite)
     out testing.test_finish(suite)
 }

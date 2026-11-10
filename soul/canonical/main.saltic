@@ -6,17 +6,17 @@
 -- Cursor — Box с навыками at, has, peek, next; next отдаёт новый Cursor
 -- Link — Box с полем next = none; next_name(link) — (link.next) |next| { … }:
 --     блок, только если значение не none, имя видно лишь в нём
--- move(point, step) -> Point — новый Box из старого
--- spend(energy, cost) -> число; NotEnoughEnergy
+-- move(point, step) -> Point — новый Box из старого; spend(energy, cost) -> число; NotEnoughEnergy
 -- measure(left, right) -> [сумма, разность, произведение, частное, остаток]; BadMeasure
 -- laps(count) -> count — drum по числу; отрицательный — NegativeCount
 -- budget(total, price) -> сумма; переполнение — NumberOverflow (удвоение
 --     до переполнения — одинаково на 29-битном и 61-битном числе)
 -- cursor_ready(cursor) -> yes/no — метод у параметра; не Box — NoMethod
 -- lap_bonus(count) -> число — ошибка поднимается к вызвавшему; relay_laps(count) — rescue внутри
--- memory_probe() -> число — core.mem: store/load 8, 16, 32, cpu.fence, heap
---     (занято < квоты); адреса — в своей арене программы (mem.arena)
--- fixed_probe() -> none — u8…u32, i32, bits32, address, from
+-- memory_probe() -> число — core.arena: store/load 8, 16, 32 по смещению, за арену —
+--     ArenaBounds; cpu.fence, mem.heap (занято < квоты)
+-- fixed_probe() -> none — u8…u32, i32, bits32, address, from; fixed_step -> u32, next_byte -> address;
+--     в группе и поле Box фиксированное — обычное число
 -- module_probe() -> none — use, enum, Box и навыки из support, константа-группа
 --     его Box (ShelfBadges)
 -- core_probe() -> none — ядро: str (split, join, lines, count, from_byte),
@@ -25,7 +25,7 @@
 -- react(agent, signal) -> Agent — pick; show_state(state) — enum (state) { .X => … }
 -- line_count_probe() -> число — io.read_line до конца ввода; program не зовёт
 -- run(agent, signals) -> Agent — drum по группе, rescue со значением
--- report(agent, input_path, output_path) -> none — io.file, строка "{…}";
+-- report(agent, input_path, output_path) -> none — io.file, строка "{…}", текст #…#;
 --     process_probe() -> none — core.process: run и capture
 -- program(input_path, output_path) — всё вместе: leave, условия, константы,
 --     сравнения <= и >= (числа и фиксированные), always { … } с выходом leave
@@ -33,6 +33,7 @@
 use io.file
 use core.group
 use core.mem
+use core.arena
 use io
 use core.cpu
 use core.bits32
@@ -191,25 +192,32 @@ skill line_count_probe() {
 }
 
 skill memory_probe() {
-    @region = [mem.arena(1), mem.arena(0)]
-    mem.store8(region, 0, str.byte("Z", 0))
-    mem.store16(region, 2, 12345)
-    mem.store32(region, 4, 123456)
-    mem.store_address32(region, 8, region)
+    arena.store8(0, str.byte("Z", 0))
+    arena.store16(2, 12345)
+    arena.store32(4, 123456)
     cpu.fence()
+    @outside = arena.load8(arena.SIZE) rescue |err| { 0 - 1 }
 
     @used = mem.heap(0)
     (used >= mem.heap(2)) { out error.MemoryProbeFailed }
     (mem.heap(1) < 0) { out error.MemoryProbeFailed }
     (used > 0) {
-        (mem.load8(region, 0) == 90) {
-            (mem.load16(region, 2) == 12345) {
-                out mem.load32(region, 4)
+        (arena.load8(0) == 90) {
+            (arena.load16(2) == 12345) {
+                (outside < 0) { out arena.load32(4) }
             }
         }
     }
 
     out error.MemoryProbeFailed
+}
+
+skill fixed_step(value, step) {
+    out value + step
+}
+
+skill next_byte(at) {
+    out address.add(at, usize.from(1))
 }
 
 skill fixed_probe() {
@@ -219,15 +227,17 @@ skill fixed_probe() {
     @signed = i32.from(-42)
     @converted = u16.from(u8.from(250))
     @mask = bits32.shift_left(bits32.from(1), u8.from(8))
-    @arena = mem.arena(1) * 65536 + mem.arena(0) + 64
-    @memory = address.from(u32.from(arena))
-    @next = address.add(memory, usize.from(1))
+    @memory = address.add(arena.start(), usize.from(64))
+    @next = next_byte(memory)
+    @stepped = fixed_step(wide, u32.from(7))
 
     mem.store8(memory, usize.from(0), u8.from(171))
     mem.store8(next, usize.from(0), u8.from(172))
 
     io.show("fixed: {byte} {word} {wide} {signed}")
-    io.show("conversion: {converted}")
+    @stored = [byte, u8.from(5)]
+    @stored_sum = group.get(stored, 0) + group.get(stored, 1)
+    io.show("conversion: {converted} skill: {stepped} stored: {stored_sum}")
     io.show("bits: {mask}")
     @shown_1 = mem.load8(memory, usize.from(0))
     @shown_2 = mem.load8(next, usize.from(0))
@@ -359,6 +369,13 @@ skill report(agent, input_path, output_path) {
     io.show(AppName)
     io.show("input lines: {lines}")
     io.show("agent: {summary}")
+    @card = #
+        card: {agent.name}
+          energy \{{agent.energy}\}
+
+        end
+        #
+    io.show(card)
     file.write(output_path, summary)
 
     out none

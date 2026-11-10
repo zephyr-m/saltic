@@ -1,6 +1,7 @@
 -- virtio_mmio — virtio по MMIO (версия 2) в qemu-virt: поиск устройств в
 -- 8 слотах от 0x10001000, согласование возможностей, очереди по 16
--- дескрипторов. Адреса — пары [hi, lo] для core.mem. Память очередей —
+-- дескрипторов. Адреса хранятся парами [hi, lo] (в поле Box address на rv32i
+-- не влезает в обычное число, Q-035), к core.mem идут через virtio_place. Память очередей —
 -- слоты по 16 КБ от 0x81400000: дескрипторы +0, available +4096, used +8192,
 -- буферы +12288; memory_slot выбирает слот.
 --
@@ -21,10 +22,18 @@
 -- virtio_descriptor(queue, index, address, length, flags, next) — дескриптор
 -- virtio_offer(queue, id) / virtio_notify(queue) / virtio_recycle(queue, id)
 -- virtio_next_used(queue) -> yes и used_id/used_length, если есть ответ
+-- virtio_place(pair) -> address; virtio_word(pair) -> u32 — пара [hi, lo] целиком
+-- virtio_signed32(pair, offset) -> число — 32 бита со знаком (i32 события input)
 
 use core.mem
 use core.cpu
 use core.group
+use core.num
+use core.u8
+use core.u16
+use core.u32
+use core.usize
+use core.address
 
 VIRTIO_MMIO_HIGH = 4096
 VIRTIO_SLOT_SIZE = 4096
@@ -90,9 +99,9 @@ skill virtio_find_nth(device_id, occurrence) {
     @found = 0
     drum (VIRTIO_SLOT_COUNT) {
         @device = [VIRTIO_MMIO_HIGH, (slot + 1) * VIRTIO_SLOT_SIZE]
-        @found_id = mem.load32(device, VIRTIO_DEVICE_ID)
+        @found_id = num.from(mem.load32(virtio_place(device), usize.from(VIRTIO_DEVICE_ID)))
         (found_id == device_id) {
-            @version = mem.load32(device, VIRTIO_VERSION)
+            @version = num.from(mem.load32(virtio_place(device), usize.from(VIRTIO_VERSION)))
             (version == 2) {
                 (found == occurrence) { out device }
                 found = found + 1
@@ -103,23 +112,38 @@ skill virtio_find_nth(device_id, occurrence) {
     out []
 }
 
+skill virtio_word(pair) {
+    out u32.from(group.get(pair, 0)) * u32.from(65536) + u32.from(group.get(pair, 1))
+}
+
+skill virtio_place(pair) {
+    out address.from(virtio_word(pair))
+}
+
+skill virtio_signed32(pair, offset) {
+    @low = num.from(mem.load16(virtio_place(pair), usize.from(offset)))
+    @high = num.from(mem.load16(virtio_place(pair), usize.from(offset + 2)))
+    (high > 32767) { high = high - 65536 }
+    out high * 65536 + low
+}
+
 skill virtio_find(device_id) {
     out virtio_find_nth(device_id, 0)
 }
 
 skill virtio_input_has_absolute(device) {
-    mem.store8(device, VIRTIO_DEVICE_CONFIG + VIRTIO_INPUT_CFG_SELECT, VIRTIO_INPUT_CFG_EVENT_BITS)
-    mem.store8(device, VIRTIO_DEVICE_CONFIG + VIRTIO_INPUT_CFG_SUBSELECT, VIRTIO_INPUT_EVENT_ABSOLUTE)
+    mem.store8(virtio_place(device), usize.from(VIRTIO_DEVICE_CONFIG + VIRTIO_INPUT_CFG_SELECT), u8.from(VIRTIO_INPUT_CFG_EVENT_BITS))
+    mem.store8(virtio_place(device), usize.from(VIRTIO_DEVICE_CONFIG + VIRTIO_INPUT_CFG_SUBSELECT), u8.from(VIRTIO_INPUT_EVENT_ABSOLUTE))
     cpu.fence()
-    out mem.load8(device, VIRTIO_DEVICE_CONFIG + VIRTIO_INPUT_CFG_SIZE) > 0
+    out num.from(mem.load8(virtio_place(device), usize.from(VIRTIO_DEVICE_CONFIG + VIRTIO_INPUT_CFG_SIZE))) > 0
 }
 
 skill virtio_find_input(absolute) {
     drum (VIRTIO_SLOT_COUNT) {
         @device = [VIRTIO_MMIO_HIGH, (beat + 1) * VIRTIO_SLOT_SIZE]
-        @found_id = mem.load32(device, VIRTIO_DEVICE_ID)
+        @found_id = num.from(mem.load32(virtio_place(device), usize.from(VIRTIO_DEVICE_ID)))
         (found_id == VIRTIO_INPUT_DEVICE) {
-            @version = mem.load32(device, VIRTIO_VERSION)
+            @version = num.from(mem.load32(virtio_place(device), usize.from(VIRTIO_VERSION)))
             (version == 2) {
                 @has_absolute = virtio_input_has_absolute(device)
                 (has_absolute == absolute) { out device }
@@ -130,21 +154,21 @@ skill virtio_find_input(absolute) {
 }
 
 skill virtio_prepare(device) {
-    mem.store32(device, VIRTIO_STATUS, 0)
-    mem.store32(device, VIRTIO_STATUS, VIRTIO_STATUS_ACKNOWLEDGE)
-    mem.store32(device, VIRTIO_STATUS, VIRTIO_STATUS_DRIVER)
+    mem.store32(virtio_place(device), usize.from(VIRTIO_STATUS), u32.from(0))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_STATUS), u32.from(VIRTIO_STATUS_ACKNOWLEDGE))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_STATUS), u32.from(VIRTIO_STATUS_DRIVER))
 
-    mem.store32(device, VIRTIO_DEVICE_FEATURES_SELECT, 1)
-    @features = mem.load32(device, VIRTIO_DEVICE_FEATURES)
+    mem.store32(virtio_place(device), usize.from(VIRTIO_DEVICE_FEATURES_SELECT), u32.from(1))
+    @features = num.from(mem.load32(virtio_place(device), usize.from(VIRTIO_DEVICE_FEATURES)))
     (features < VIRTIO_VERSION_1) { out no }
 
-    mem.store32(device, VIRTIO_DRIVER_FEATURES_SELECT, 0)
-    mem.store32(device, VIRTIO_DRIVER_FEATURES, 0)
-    mem.store32(device, VIRTIO_DRIVER_FEATURES_SELECT, 1)
-    mem.store32(device, VIRTIO_DRIVER_FEATURES, VIRTIO_VERSION_1)
-    mem.store32(device, VIRTIO_STATUS, VIRTIO_STATUS_FEATURES_OK)
+    mem.store32(virtio_place(device), usize.from(VIRTIO_DRIVER_FEATURES_SELECT), u32.from(0))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_DRIVER_FEATURES), u32.from(0))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_DRIVER_FEATURES_SELECT), u32.from(1))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_DRIVER_FEATURES), u32.from(VIRTIO_VERSION_1))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_STATUS), u32.from(VIRTIO_STATUS_FEATURES_OK))
 
-    @status = mem.load32(device, VIRTIO_STATUS)
+    @status = num.from(mem.load32(virtio_place(device), usize.from(VIRTIO_STATUS)))
     (status < VIRTIO_STATUS_FEATURES_OK) { out no }
     out yes
 }
@@ -162,29 +186,29 @@ skill virtio_descriptor_address(buffers, index) {
 }
 
 skill virtio_initialize_empty_memory(descriptors, available, used) {
-    mem.store16(available, 0, 0)
-    mem.store16(available, 2, 0)
-    mem.store16(used, 0, 0)
-    mem.store16(used, 2, 0)
+    mem.store16(virtio_place(available), usize.from(0), u16.from(0))
+    mem.store16(virtio_place(available), usize.from(2), u16.from(0))
+    mem.store16(virtio_place(used), usize.from(0), u16.from(0))
+    mem.store16(virtio_place(used), usize.from(2), u16.from(0))
 
     drum (VIRTIO_QUEUE_COUNT) {
         @descriptor_offset = beat * 16
-        mem.store32(descriptors, descriptor_offset, 0)
-        mem.store32(descriptors, descriptor_offset + 4, 0)
-        mem.store32(descriptors, descriptor_offset + 8, 0)
-        mem.store16(descriptors, descriptor_offset + 12, 0)
-        mem.store16(descriptors, descriptor_offset + 14, 0)
-        mem.store16(available, 4 + beat * 2, 0)
-        mem.store32(used, 4 + beat * 8, 0)
-        mem.store32(used, 8 + beat * 8, 0)
+        mem.store32(virtio_place(descriptors), usize.from(descriptor_offset), u32.from(0))
+        mem.store32(virtio_place(descriptors), usize.from(descriptor_offset + 4), u32.from(0))
+        mem.store32(virtio_place(descriptors), usize.from(descriptor_offset + 8), u32.from(0))
+        mem.store16(virtio_place(descriptors), usize.from(descriptor_offset + 12), u16.from(0))
+        mem.store16(virtio_place(descriptors), usize.from(descriptor_offset + 14), u16.from(0))
+        mem.store16(virtio_place(available), usize.from(4 + beat * 2), u16.from(0))
+        mem.store32(virtio_place(used), usize.from(4 + beat * 8), u32.from(0))
+        mem.store32(virtio_place(used), usize.from(8 + beat * 8), u32.from(0))
     }
     cpu.fence()
     out none
 }
 
 skill virtio_open_empty_queue(device, queue_index, memory_slot) {
-    mem.store32(device, VIRTIO_QUEUE_SELECT, queue_index)
-    @maximum = mem.load32(device, VIRTIO_QUEUE_SIZE_MAX)
+    mem.store32(virtio_place(device), usize.from(VIRTIO_QUEUE_SELECT), u32.from(queue_index))
+    @maximum = num.from(mem.load32(virtio_place(device), usize.from(VIRTIO_QUEUE_SIZE_MAX)))
     (maximum < VIRTIO_QUEUE_COUNT) { out VirtioQueue { status = 3 } }
 
     @descriptors = virtio_queue_address(memory_slot, 0)
@@ -192,15 +216,15 @@ skill virtio_open_empty_queue(device, queue_index, memory_slot) {
     @used = virtio_queue_address(memory_slot, 8192)
     @buffers = virtio_queue_address(memory_slot, 12288)
     virtio_initialize_empty_memory(descriptors, available, used)
-    mem.store32(device, VIRTIO_QUEUE_SIZE, VIRTIO_QUEUE_COUNT)
-    mem.store_address32(device, VIRTIO_QUEUE_DESC_LOW, descriptors)
-    mem.store32(device, VIRTIO_QUEUE_DESC_HIGH, 0)
-    mem.store_address32(device, VIRTIO_QUEUE_DRIVER_LOW, available)
-    mem.store32(device, VIRTIO_QUEUE_DRIVER_HIGH, 0)
-    mem.store_address32(device, VIRTIO_QUEUE_DEVICE_LOW, used)
-    mem.store32(device, VIRTIO_QUEUE_DEVICE_HIGH, 0)
+    mem.store32(virtio_place(device), usize.from(VIRTIO_QUEUE_SIZE), u32.from(VIRTIO_QUEUE_COUNT))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_QUEUE_DESC_LOW), virtio_word(descriptors))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_QUEUE_DESC_HIGH), u32.from(0))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_QUEUE_DRIVER_LOW), virtio_word(available))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_QUEUE_DRIVER_HIGH), u32.from(0))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_QUEUE_DEVICE_LOW), virtio_word(used))
+    mem.store32(virtio_place(device), usize.from(VIRTIO_QUEUE_DEVICE_HIGH), u32.from(0))
     cpu.fence()
-    mem.store32(device, VIRTIO_QUEUE_READY, 1)
+    mem.store32(virtio_place(device), usize.from(VIRTIO_QUEUE_READY), u32.from(1))
 
     out VirtioQueue {
         ready = yes,
@@ -214,34 +238,34 @@ skill virtio_open_empty_queue(device, queue_index, memory_slot) {
     }
 }
 
-skill virtio_descriptor(queue, index, address, length, flags, next) {
+skill virtio_descriptor(queue, index, place, length, flags, next) {
     @offset = index * 16
-    mem.store_address32(queue.descriptors, offset, address)
-    mem.store32(queue.descriptors, offset + 4, 0)
-    mem.store32(queue.descriptors, offset + 8, length)
-    mem.store16(queue.descriptors, offset + 12, flags)
-    mem.store16(queue.descriptors, offset + 14, next)
+    mem.store32(virtio_place(queue.descriptors), usize.from(offset), virtio_word(place))
+    mem.store32(virtio_place(queue.descriptors), usize.from(offset + 4), u32.from(0))
+    mem.store32(virtio_place(queue.descriptors), usize.from(offset + 8), u32.from(length))
+    mem.store16(virtio_place(queue.descriptors), usize.from(offset + 12), u16.from(flags))
+    mem.store16(virtio_place(queue.descriptors), usize.from(offset + 14), u16.from(next))
     out none
 }
 
 skill virtio_offer(queue, id) {
     @slot = queue.available_index % queue.size
-    mem.store16(queue.available, 4 + slot * 2, id)
+    mem.store16(virtio_place(queue.available), usize.from(4 + slot * 2), u16.from(id))
     cpu.fence()
     queue.available_index = queue.available_index + 1
-    mem.store16(queue.available, 2, queue.available_index)
+    mem.store16(virtio_place(queue.available), usize.from(2), u16.from(queue.available_index))
     cpu.fence()
     out none
 }
 
 skill virtio_notify(queue) {
-    mem.store32(queue.device, VIRTIO_QUEUE_NOTIFY, queue.index)
+    mem.store32(virtio_place(queue.device), usize.from(VIRTIO_QUEUE_NOTIFY), u32.from(queue.index))
     out none
 }
 
 skill virtio_activate(device) {
     cpu.fence()
-    mem.store32(device, VIRTIO_STATUS, VIRTIO_STATUS_DRIVER_OK)
+    mem.store32(virtio_place(device), usize.from(VIRTIO_STATUS), u32.from(VIRTIO_STATUS_DRIVER_OK))
     out none
 }
 
@@ -254,8 +278,8 @@ skill virtio_open_queue_at(device, memory_slot) {
 
     drum (VIRTIO_QUEUE_COUNT) {
         @buffer = virtio_descriptor_address(queue.buffers, beat)
-        mem.store32(queue.buffers, beat * 8, 0)
-        mem.store32(queue.buffers, beat * 8 + 4, 0)
+        mem.store32(virtio_place(queue.buffers), usize.from(beat * 8), u32.from(0))
+        mem.store32(virtio_place(queue.buffers), usize.from(beat * 8 + 4), u32.from(0))
         virtio_descriptor(queue, beat, buffer, 8, VIRTIO_DESCRIPTOR_WRITE, 0)
         virtio_offer(queue, beat)
     }
@@ -270,13 +294,13 @@ skill virtio_open_queue(device) {
 
 skill virtio_next_used(queue) {
     cpu.fence()
-    @device_index = mem.load16(queue.used, 2)
+    @device_index = num.from(mem.load16(virtio_place(queue.used), usize.from(2)))
     (device_index == queue.used_index) { out no }
 
     @slot = queue.used_index % queue.size
     @offset = 4 + slot * 8
-    queue.used_id = mem.load32(queue.used, offset)
-    queue.used_length = mem.load32(queue.used, offset + 4)
+    queue.used_id = num.from(mem.load32(virtio_place(queue.used), usize.from(offset)))
+    queue.used_length = num.from(mem.load32(virtio_place(queue.used), usize.from(offset + 4)))
     queue.used_index = queue.used_index + 1
     out yes
 }

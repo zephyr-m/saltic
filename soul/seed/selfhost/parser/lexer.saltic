@@ -1,6 +1,9 @@
 -- lexer — текст исходника -> поток токенов с местом (строка, столбец).
 -- Токены лежат в TokenBuffer кусками по 256 (читать через token_buffer_at).
 -- Строка "{…}" становится TEMPLATE с parts = [текст, имя, текст, …].
+-- "…" — строго одна строка. Текст в несколько строк — блок #: открывающий #
+-- в конце строки, закрывающий # один на своей строке; его отступ снимается со
+-- всех строк, перенос перед ним в текст не входит; {…} и \-escape те же.
 -- Текст строки не склеивается посимвольно: run — начало нетронутого отрезка
 -- исходника, он берётся одним срезом; после экранирования срез и расшифровка
 -- копятся в piece и по TEXT_PIECE байт уходят в value (collected их сводит).
@@ -216,55 +219,111 @@ Lexer = Box {
         out str.concat(str.concat(value, piece), str.slice(source, run, stop))
     }
 
+    skill failed(line, col, diagnostics, problem) {
+        out Lexeme {
+            token = none,
+            line = line,
+            col = col,
+            diagnostics = group.add(diagnostics, diagnostic.place(problem, path, line, col))
+        }
+    }
+
+    skill blank_end(index) {
+        @next = index
+        drum (str.bytes(source) - index) {
+            @ch = str.get(source, next)
+            pick {
+                (ch == " ") { next = next + 1 }
+                (ch == TAB) { next = next + 1 }
+                { out next }
+            }
+        }
+        out next
+    }
+
+    skill newline_at(index) {
+        @next = index
+        drum (str.bytes(source) - index) {
+            (str.get(source, next) == NEWLINE) { out next }
+            next = next + 1
+        }
+        out next
+    }
+
+    skill line_end(index) {
+        out newline_at(index) == blank_end(index)
+    }
+
+    skill indented(begin, margin) {
+        (str.starts_at(source, margin, begin) == yes) { out begin + str.bytes(margin) }
+        (line_end(begin) == yes) { out blank_end(begin) }
+        out 0 - 1
+    }
+
+    skill closed(value, parts, line, col) {
+        (group.count(parts) > 0) {
+            out Token { kind = TokenKind.TEMPLATE, value = value, parts = group.add(parts, value), line = line, col = col }
+        }
+        out token(TokenKind.STRING, value, line, col)
+    }
+
     skill text(start, line, col) {
-        @index = start + 1
-        @next_line = line
-        @next_col = col + 1
+        (str.get(source, start) == "#") { out block(start, line, col) }
+        out literal(start + 1, str.bytes(source), "", yes, line, col, line, col + 1)
+    }
+
+    skill block(start, line, col) {
         @length = str.bytes(source)
-        @run = start + 1
+        @open_end = blank_end(start + 1)
+        (line_end(start + 1) == no) { out failed(line, col + open_end - start, [], errors.text_after_open()) }
+        @begin = open_end
+        @close_line = line
+        drum (length - open_end) {
+            (begin == length) { leave }
+            begin = begin + 1
+            close_line = close_line + 1
+            @mark = blank_end(begin)
+            (str.starts_at(source, "#", mark) == yes) {
+                (line_end(mark + 1) == yes) {
+                    @margin = str.slice(source, begin, mark)
+                    @first = open_end
+                    (begin > open_end + 1) { first = indented(open_end + 1, margin) }
+                    (first < 0) { out failed(line + 1, 1, [], errors.text_left_of_close()) }
+                    @lexeme = literal(first, begin - 1, margin, no, line, col, line + 1, first - open_end)
+                    out Lexeme { token = lexeme.token, next = mark + 1, line = close_line, col = mark - begin + 2, diagnostics = lexeme.diagnostics }
+                }
+            }
+            begin = newline_at(mark)
+        }
+        out failed(line, col, [], errors.unterminated_string())
+    }
+
+    skill literal(first, stop, margin, quoted, line, col, at_line, at_col) {
+        @index = first
+        @next_line = at_line
+        @next_col = at_col
+        @run = first
         @piece = ""
         @value = ""
         @parts = []
         @diagnostics = []
-        drum (length - start) {
-            (index == length) {
-                diagnostics = group.add(diagnostics, diagnostic.place(errors.unterminated_string(), path, line, col))
-                out Lexeme {
-                    token = none,
-                    next = index,
-                    line = next_line,
-                    col = next_col,
-                    diagnostics = diagnostics
-                }
+        drum (stop - first + 1) {
+            (index == stop) {
+                (quoted == yes) { out failed(line, col, diagnostics, errors.unterminated_string()) }
+                out Lexeme { token = closed(collected(value, piece, run, index), parts, line, col) }
             }
             @ch = str.get(source, index)
             (ch == QUOTE) {
-                @text = collected(value, piece, run, index)
-                @closed = token(TokenKind.STRING, text, line, col)
-                (group.count(parts) > 0) {
-                    closed = Token { kind = TokenKind.TEMPLATE, value = text, parts = group.add(parts, text), line = line, col = col }
-                }
-                out Lexeme {
-                    token = closed,
-                    next = index + 1,
-                    line = next_line,
-                    col = next_col + 1,
-                    diagnostics = diagnostics
+                (quoted == yes) {
+                    @done = closed(collected(value, piece, run, index), parts, line, col)
+                    out Lexeme { token = done, next = index + 1, line = next_line, col = next_col + 1, diagnostics = diagnostics }
                 }
             }
             pick {
                 (ch == ESCAPE) {
-                    (index + 1 >= length) {
-                        diagnostics = group.add(diagnostics, diagnostic.place(errors.unterminated_escape(), path, next_line, next_col))
-                        out Lexeme {
-                            token = none,
-                            next = index,
-                            line = next_line,
-                            col = next_col,
-                            diagnostics = diagnostics
-                        }
-                    }
-                    @escape = str.get(source, index + 1)
+                    @escape = NEWLINE
+                    (index + 1 < stop) { escape = str.get(source, index + 1) }
+                    (escape == NEWLINE) { out failed(next_line, next_col, diagnostics, errors.unterminated_escape()) }
                     @decoded = escape
                     (escape == ESCAPE_NEWLINE) { decoded = NEWLINE }
                     (escape == ESCAPE_TAB) { decoded = TAB }
@@ -280,22 +339,18 @@ Lexer = Box {
                     next_col = next_col + 2
                 }
                 (ch == NEWLINE) {
-                    index = index + 1
+                    (quoted == yes) { out failed(line, col, diagnostics, errors.unterminated_string()) }
+                    @skip = indented(index + 1, margin)
+                    (skip < 0) { out failed(next_line + 1, 1, diagnostics, errors.text_left_of_close()) }
+                    piece = str.concat(piece, str.slice(source, run, index + 1))
                     next_line = next_line + 1
-                    next_col = 1
+                    next_col = skip - index
+                    index = skip
+                    run = index
                 }
                 (ch == "\{") {
                     @found = placeholder(index)
-                    (found.found == no) {
-                        diagnostics = group.add(diagnostics, diagnostic.place(errors.template_expects_name(), path, next_line, next_col))
-                        out Lexeme {
-                            token = none,
-                            next = index,
-                            line = next_line,
-                            col = next_col,
-                            diagnostics = diagnostics
-                        }
-                    }
+                    (found.found == no) { out failed(next_line, next_col, diagnostics, errors.template_expects_name()) }
                     parts = group.add(group.add(parts, collected(value, piece, run, index)), found.name)
                     value = ""
                     piece = ""
@@ -303,32 +358,14 @@ Lexer = Box {
                     index = found.next
                     run = index
                 }
-                (ch == "\}") {
-                    @problem = diagnostic.place(errors.lone_closing_brace(), path, next_line, next_col)
-                    ((next_line == line) == no) { problem = diagnostic.place(errors.unterminated_string(), path, line, col) }
-                    diagnostics = group.add(diagnostics, problem)
-                    out Lexeme {
-                        token = none,
-                        next = index,
-                        line = next_line,
-                        col = next_col,
-                        diagnostics = diagnostics
-                    }
-                }
+                (ch == "\}") { out failed(next_line, next_col, diagnostics, errors.lone_closing_brace()) }
                 {
                     index = index + 1
                     next_col = next_col + 1
                 }
             }
         }
-        diagnostics = group.add(diagnostics, diagnostic.place(errors.unterminated_string(), path, line, col))
-        out Lexeme {
-            token = none,
-            next = index,
-            line = next_line,
-            col = next_col,
-            diagnostics = diagnostics
-        }
+        out failed(line, col, diagnostics, errors.unterminated_string())
     }
 
     skill placeholder(start) {
@@ -358,15 +395,6 @@ Lexer = Box {
     skill pair_at(index) {
         (index + 1 < str.bytes(source)) { out str.slice(source, index, index + 2) }
         out ""
-    }
-
-    skill comment_end(start) {
-        @index = start + 2
-        drum (str.bytes(source) - index) {
-            (str.get(source, index) == NEWLINE) { out index }
-            index = index + 1
-        }
-        out index
     }
 
     skill has_code(tokens) {
@@ -424,7 +452,7 @@ Lexer = Box {
                     line = lexeme.line
                     col = lexeme.col
                 }
-                (ch == QUOTE) {
+                (str.contains("#\"", ch) == yes) {
                     @lexeme = text(index, line, col)
                     index = lexeme.next
                     line = lexeme.line
@@ -438,7 +466,7 @@ Lexer = Box {
                         diagnostics = group.add(diagnostics, diagnostic.place(errors.comment_outside_header(), path, line, col))
                         leave
                     }
-                    @end = comment_end(index)
+                    @end = newline_at(index + 2)
                     col = col + (end - index)
                     index = end
                 }
