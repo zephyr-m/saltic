@@ -20,7 +20,12 @@
 --     _HIGH / _HIGH_UNSIGNED (imul / mul → rdx), WIDE_DIVIDE / REMAINDER (cqo +
 --     idiv), _UNSIGNED (div); rax, rdx, rcx сохраняются на стеке
 -- load_wide(compiler, to, wide) — movabs 64-битной константы
+-- fraction(compiler, kind, to, left, right) — дробные на SSE2 через xmm0/xmm1:
+--     backend.FRACTION_* (addsd / subsd / mulsd / divsd, comisd + setb / setbe),
+--     FRACTION_FROM (cvtsi2sd), FRACTION_TO + mode (cvtsd2si / cvttsd2si); rax,
+--     rdx, rcx сохраняются; sse(code, bytes) — байты команды как есть
 
+use core.group
 use selfhost.compiler.backend
 use selfhost.machine.word
 use selfhost.compiler.backend.rv32i.machine.buffer
@@ -34,6 +39,14 @@ WIDE_DIVIDE = 3
 WIDE_REMAINDER = 4
 WIDE_DIVIDE_UNSIGNED = 5
 WIDE_REMAINDER_UNSIGNED = 6
+FRACTION_FROM = 6
+FRACTION_TO = 7
+SSE_ARITHMETIC = [88, 92, 89, 94]
+SSE_TO_XMM0 = [102, 72, 15, 110, 192]
+SSE_TO_XMM1 = [102, 72, 15, 110, 201]
+SSE_FROM_XMM0 = [102, 72, 15, 126, 192]
+CONDITION_BELOW = 2
+CONDITION_BELOW_EQUAL = 6
 
 skill with_temp(code, avoid1, avoid2) {
     out roles.temp(avoid1, avoid2, encoder.NONE)
@@ -379,3 +392,45 @@ skill load_wide(compiler, to, value) {
     out roles.emit(compiler, encoder.move_quad(code, roles.register(to), value.low, value.high))
 }
 
+
+skill sse(code, bytes) {
+    drum (bytes) { code = buffer.append_byte(code, beat) }
+    out code
+}
+
+skill fraction(compiler, kind, to, left, right) {
+    @code = compiler.machine.code
+    code = encoder.register64(code, encoder.PUSH, encoder.ECX)
+    code = encoder.register64(code, encoder.PUSH, encoder.EDX)
+    code = encoder.register64(code, encoder.PUSH, encoder.EAX)
+    code = wide_operand(code, encoder.ECX, right)
+    code = wide_operand(code, encoder.EAX, left)
+    pick {
+        (kind == FRACTION_FROM) { code = sse(sse(code, [242, 72, 15, 42, 192]), SSE_FROM_XMM0) }
+        (kind >= FRACTION_TO) {
+            @convert = 45
+            (kind == FRACTION_TO + backend.FRACTION_TRUNC) { convert = 44 }
+            code = sse(sse(code, SSE_TO_XMM0), [242, 72, 15, convert, 192])
+        }
+        {
+            code = sse(sse(code, SSE_TO_XMM0), SSE_TO_XMM1)
+            pick {
+                (kind < backend.FRACTION_LESS) { code = sse(sse(code, [242, 15, group.get(SSE_ARITHMETIC, kind), 193]), SSE_FROM_XMM0) }
+                {
+                    @condition = CONDITION_BELOW
+                    (kind == backend.FRACTION_LESS_EQUAL) { condition = CONDITION_BELOW_EQUAL }
+                    code = encoder.set_condition(sse(code, [102, 15, 47, 193]), condition, encoder.EAX)
+                }
+            }
+        }
+    }
+    @target = roles.register(to)
+    @offset = saved_offset(target)
+    pick {
+        (offset >= 0) { code = encoder.memory(code, encoder.STORE64, encoder.EAX, encoder.RSP, encoder.NONE, offset) }
+        { code = roles.store_into(code, 8, to, encoder.EAX) }
+    }
+    code = encoder.register64(code, encoder.POP, encoder.EAX)
+    code = encoder.register64(code, encoder.POP, encoder.EDX)
+    out roles.emit(compiler, encoder.register64(code, encoder.POP, encoder.ECX))
+}

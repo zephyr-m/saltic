@@ -23,7 +23,7 @@
 -- param_type(globals, owner, params, name) -> тип параметра или "unknown"
 -- OUT_MARKER — имя в области: тип результата навыка
 -- check_call(node, full, scope, globals, diagnostics) -> diagnostics — в метод Box
---     и прочее не-навык фиксированный не уходит
+--     и прочее не-навык фиксированный не уходит; навыки дробных — только на 64 битах
 -- check_out(node, value, scope, globals, diagnostics) -> diagnostics
 -- check_ending(owner, full, body, globals, diagnostics) -> diagnostics — навык с
 --     фиксированным результатом кончается out
@@ -35,6 +35,7 @@ use selfhost.intrinsic.contract
 use selfhost.checker.names
 use selfhost.checker.types
 use selfhost.checker.lookup
+use selfhost.checker.rules
 use selfhost.errors
 
 Signature = Box {
@@ -129,7 +130,7 @@ skill param_type(globals, owner, params, name) {
     drum (group.count(params)) {
         (group.get(params, beat) == name) {
             @found = names.table_find(globals, names.param_key(owner, beat))
-            (contract.is_fixed_type(found.type) == yes) { out found.type }
+            (types.inferable(found.type) == yes) { out found.type }
         }
     }
     out "unknown"
@@ -152,7 +153,7 @@ skill argument_mark(node, index, full, fixed_call, scope, globals) {
 }
 
 skill noted(seen, key, type, node) {
-    (contract.is_fixed_type(type) == no) { out seen }
+    (types.inferable(type) == no) { out seen }
     (names.table_has(seen.globals, key) == yes) { out seen }
     seen.globals = names.table_put_node(seen.globals, key, "inferred", type, node)
     seen.changed = yes
@@ -172,7 +173,7 @@ skill passed(seen, key, argument) {
         (seen.strict == no) { out seen }
         type = OTHER
     }
-    (contract.is_fixed_type(type) == no) { type = OTHER }
+    (types.inferable(type) == no) { type = OTHER }
     @old = names.table_find(seen.calls, key)
     (str.bytes(old.name) > 0) {
         seen.calls = names.table_update(seen.calls, key, summary(old.type, type))
@@ -187,7 +188,7 @@ skill merged(seen, key, type) {
     @old = found.type
     @next = old
     pick {
-        (type == OTHER) { (contract.is_fixed_type(old) == yes) { next = MIXED } }
+        (type == OTHER) { (types.inferable(old) == yes) { next = MIXED } }
         (type == MIXED) { next = MIXED }
         (str.bytes(found.name) == 0) { next = type }
         ((old == type) == no) { next = MIXED }
@@ -244,7 +245,15 @@ skill observe(tree, globals, strict) {
 skill check_call(node, full, scope, globals, diagnostics) {
     @callee = names.table_find(globals, names.resolve_path(ast.call_callee(node), scope, globals))
     (callee.kind == "skill") { out diagnostics }
-    (callee.kind == "native") { out diagnostics }
+    (callee.kind == "native") {
+        @seed = contract.find(full)
+        @fraction = contract.result(seed, "unknown") == "fraction"
+        (contract.argument_type(seed, 0) == "fraction") { fraction = yes }
+        (fraction == yes) {
+            (names.table_has(globals, rules.WIDE_MARK) == no) { out lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.fraction_not_supported())) }
+        }
+        out diagnostics
+    }
     drum (ast.call_argument_count(node)) {
         diagnostics = lookup.check_fixed_escape(node, ast.call_argument(node, beat), "передать в '{full}'", scope, globals, diagnostics)
     }
@@ -254,7 +263,7 @@ skill check_call(node, full, scope, globals, diagnostics) {
 skill check_out(node, value, scope, globals, diagnostics) {
     @expected = names.find(scope.names, OUT_MARKER)
     (str.bytes(expected.name) == 0) { out lookup.check_fixed_escape(node, value, "вернуть из навыка", scope, globals, diagnostics) }
-    (contract.is_fixed_type(expected.type) == no) { out diagnostics }
+    (types.inferable(expected.type) == no) { out diagnostics }
     @actual = types.value_type(value, scope, globals)
     (actual == expected.type) { out diagnostics }
     (actual == "error") { out diagnostics }
@@ -263,7 +272,7 @@ skill check_out(node, value, scope, globals, diagnostics) {
 
 skill check_ending(owner, full, body, globals, diagnostics) {
     @result = names.table_find(globals, names.result_key(full))
-    (contract.is_fixed_type(result.type) == no) { out diagnostics }
+    (types.inferable(result.type) == no) { out diagnostics }
     @plain = ast.plain(body)
     @count = group.count(plain)
     (count > 1) {

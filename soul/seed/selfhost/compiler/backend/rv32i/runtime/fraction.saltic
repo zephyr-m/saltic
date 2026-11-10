@@ -1,0 +1,168 @@
+-- fraction — рантайм дробных (Q-014, Q-041, Q-044): урезанная плавающая — биты
+-- double, три младших — метка FRACTION. Только у 64-битных исполнителей
+-- (compiler.words.bytes = 8): команды backend.fraction / fraction_from / fraction_to.
+-- Результат округляется к 50 значимым битам (к ближайшему, посередине — к
+-- чётному); порядок за пределами double — FractionOverflow, делитель ноль —
+-- DivisionByZero. Сравнения отдают yes/no. Целое из дробного — по модулю меньше
+-- 2^59, иначе NumberOverflow.
+--
+-- append(compiler) — все метки ниже, если слово 8 байт; иначе ничего
+-- rt_fraction_add / sub / mul / div(VALUE, ERROR) -> дробное
+-- rt_fraction_less / greater(VALUE, ERROR) -> yes/no; rt_fraction_near — ~= с NEAR
+-- rt_fraction_from(VALUE число) -> дробное; rt_fraction_bits(VALUE) -> число — биты без метки
+-- rt_fraction_trunc / floor / ceil / round_bank / round_school(VALUE) -> число
+-- Внутри: round — округлить и пометить VALUE; whole(name) — начало перевода в целое
+
+use selfhost.abi
+use selfhost.machine.wide
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.runtime.tails
+
+EXPONENT_SHIFT = 53
+EXPONENT_FULL = 2047
+WHOLE_LIMIT = 1082
+NEAR_BITS = "4472406533629990549"
+HALF_BITS = "4602678819172646912"
+
+skill round(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_fraction_round")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, EXPONENT_FULL)
+    compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.VALUE, 1)
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.SCRATCH0, EXPONENT_SHIFT)
+    compiler = executor.branch_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, "rt_fraction_overflow")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 1)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 3)
+    compiler = executor.add(compiler, backend.VALUE, backend.VALUE, backend.SCRATCH0)
+    compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.VALUE, 1)
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.SCRATCH0, EXPONENT_SHIFT)
+    compiler = executor.branch_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, "rt_fraction_overflow")
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_FRACTION)
+    compiler = tails.ok(compiler)
+    out tails.fail(compiler, "rt_fraction_overflow", abi.ERROR_FRACTION_OVERFLOW)
+}
+
+skill clear(compiler) {
+    @executor = compiler.executor
+    compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
+    out executor.and_immediate(compiler, backend.ERROR, backend.ERROR, abi.PAYLOAD_MASK)
+}
+
+skill arithmetic(compiler, name, op) {
+    @executor = compiler.executor
+    compiler = clear(executor.label(compiler, name))
+    (op == backend.FRACTION_DIV) {
+        compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.ERROR, 1)
+        compiler = executor.jump_if_zero(compiler, backend.SCRATCH0, "rt_division_by_zero")
+    }
+    compiler = executor.fraction(compiler, op, backend.VALUE, backend.VALUE, backend.ERROR)
+    out executor.jump(compiler, "rt_fraction_round")
+}
+
+skill answer(compiler) {
+    @executor = compiler.executor
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.NO)
+    out tails.ok(compiler)
+}
+
+skill compare(compiler, name, left, right) {
+    @executor = compiler.executor
+    compiler = clear(executor.label(compiler, name))
+    out answer(executor.fraction(compiler, backend.FRACTION_LESS, backend.VALUE, left, right))
+}
+
+skill absolute(compiler, to, from) {
+    @executor = compiler.executor
+    compiler = executor.shift_left(compiler, to, from, 1)
+    out executor.shift_right_unsigned(compiler, to, to, 1)
+}
+
+skill near(compiler) {
+    @executor = compiler.executor
+    compiler = clear(executor.label(compiler, "rt_fraction_near"))
+    compiler = executor.fraction(compiler, backend.FRACTION_SUB, backend.SCRATCH2, backend.VALUE, backend.ERROR)
+    compiler = absolute(compiler, backend.SCRATCH2, backend.SCRATCH2)
+    compiler = absolute(compiler, backend.SCRATCH3, backend.VALUE)
+    compiler = absolute(compiler, backend.SCRATCH4, backend.ERROR)
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH3, backend.SCRATCH4, ".L_fraction_near_most")
+    compiler = executor.move(compiler, backend.SCRATCH3, backend.SCRATCH4)
+    compiler = executor.label(compiler, ".L_fraction_near_most")
+    compiler = executor.load_wide(compiler, backend.SCRATCH4, wide.from_decimal(NEAR_BITS))
+    compiler = executor.fraction(compiler, backend.FRACTION_MUL, backend.SCRATCH3, backend.SCRATCH3, backend.SCRATCH4)
+    out answer(executor.fraction(compiler, backend.FRACTION_LESS_EQUAL, backend.VALUE, backend.SCRATCH2, backend.SCRATCH3))
+}
+
+skill whole(compiler, name) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, name)
+    compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.VALUE, 1)
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.SCRATCH0, EXPONENT_SHIFT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, WHOLE_LIMIT)
+    compiler = executor.branch_less(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_{name}_fits")
+    compiler = executor.jump(compiler, "rt_number_overflow")
+    compiler = executor.label(compiler, ".L_{name}_fits")
+    out executor.fraction_to(compiler, backend.SCRATCH2, backend.VALUE, backend.FRACTION_TRUNC)
+}
+
+skill number(compiler, from) {
+    @executor = compiler.executor
+    compiler = executor.shift_left(compiler, backend.VALUE, from, abi.TAG_SHIFT)
+    out tails.ok(compiler)
+}
+
+skill nearest(compiler, name, mode, later) {
+    @executor = compiler.executor
+    compiler = whole(compiler, name)
+    compiler = executor.fraction_from(compiler, backend.SCRATCH3, backend.SCRATCH2)
+    (mode == 0) { compiler = executor.fraction(compiler, backend.FRACTION_LESS, backend.SCRATCH4, backend.VALUE, backend.SCRATCH3) }
+    (mode == 1) { compiler = executor.fraction(compiler, backend.FRACTION_LESS, backend.SCRATCH4, backend.SCRATCH3, backend.VALUE) }
+    (later == yes) { compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH4) }
+    (later == no) { compiler = executor.sub(compiler, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH4) }
+    out number(compiler, backend.SCRATCH2)
+}
+
+skill school(compiler) {
+    @executor = compiler.executor
+    compiler = whole(compiler, "rt_fraction_round_school")
+    compiler = executor.fraction_from(compiler, backend.SCRATCH3, backend.SCRATCH2)
+    compiler = executor.fraction(compiler, backend.FRACTION_SUB, backend.SCRATCH4, backend.VALUE, backend.SCRATCH3)
+    compiler = absolute(compiler, backend.SCRATCH4, backend.SCRATCH4)
+    compiler = executor.load_wide(compiler, backend.SCRATCH5, wide.from_decimal(HALF_BITS))
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH4, backend.SCRATCH5, ".L_fraction_school_done")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
+    compiler = executor.branch_not_negative(compiler, backend.VALUE, ".L_fraction_school_done")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, -2)
+    compiler = executor.label(compiler, ".L_fraction_school_done")
+    out number(compiler, backend.SCRATCH2)
+}
+
+skill append(compiler) {
+    @executor = compiler.executor
+    ((compiler.words.bytes == 8) == no) { out compiler }
+    compiler = round(compiler)
+    compiler = arithmetic(compiler, "rt_fraction_add", backend.FRACTION_ADD)
+    compiler = arithmetic(compiler, "rt_fraction_sub", backend.FRACTION_SUB)
+    compiler = arithmetic(compiler, "rt_fraction_mul", backend.FRACTION_MUL)
+    compiler = arithmetic(compiler, "rt_fraction_div", backend.FRACTION_DIV)
+    compiler = compare(compiler, "rt_fraction_less", backend.VALUE, backend.ERROR)
+    compiler = compare(compiler, "rt_fraction_greater", backend.ERROR, backend.VALUE)
+    compiler = near(compiler)
+    compiler = executor.label(compiler, "rt_fraction_from")
+    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.fraction_from(compiler, backend.VALUE, backend.VALUE)
+    compiler = executor.jump(compiler, "rt_fraction_round")
+    compiler = executor.label(compiler, "rt_fraction_bits")
+    compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = tails.ok(compiler)
+    compiler = number(whole(compiler, "rt_fraction_trunc"), backend.SCRATCH2)
+    compiler = nearest(compiler, "rt_fraction_floor", 0, no)
+    compiler = nearest(compiler, "rt_fraction_ceil", 1, yes)
+    compiler = whole(compiler, "rt_fraction_round_bank")
+    compiler = executor.fraction_to(compiler, backend.SCRATCH2, backend.VALUE, backend.FRACTION_NEAREST_EVEN)
+    compiler = number(compiler, backend.SCRATCH2)
+    out school(compiler)
+}

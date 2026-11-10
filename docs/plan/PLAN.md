@@ -185,6 +185,20 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
   (SSE2) и рантайм `rt_fraction_*` (+ − × ÷, сравнения, `~=` с NEAR, округление
   результата к 50 битам); 2г — `fraction.from`, `num.round/floor/ceil/trunc`;
   2д — показ кратчайшей обратимой записью. Ответы на особые случаи — Q-044 (11.11.2026).
+  11.11.2026, шаги 2б–2д: чекер — тип «дробное», `~=`, смешение с целым, `==` и
+  `%` — ошибки, на 32-битной цели — `fraction_not_supported`, тип дробного
+  параметра и `out` выводится (как у фиксированных); исполнители RV64 (D:
+  fadd.d…, flt/fle, fcvt) и x86-64 (SSE2: addsd…, comisd, cvt(t)sd2si) —
+  `fraction / fraction_from / fraction_to`; рантайм `rt_fraction_*` (округление
+  к 50 битам к чётному, `FractionOverflow` — системная 17, `DivisionByZero`);
+  `core.fraction` — `from`, `bits`, `near`, `text` (кратчайшая обратимая, из двух
+  равно близких — с чётной цифрой), `NEAR = 1e-9`; `core.num` — `floor`, `ceil`,
+  `trunc`, `round_school`, `round_bank` (на SSE2 — через усечение и сравнение, без
+  `roundsd`, → Q-046). Тест `soul/seed/tests/fraction.saltic` (случай `fraction` в
+  tests/run: x86-64 и rv64), канон ошибок `fractions` и `fractions-wide`
+  (чекер-обёртка проверяет «-wide.saltic» для 64-битной цели). Сверено с Python
+  (Fraction, двойное округление 53 → 50) на 177 случаях: 0 расхождений, x86-64 =
+  rv64. Канон `main.saltic` дробных не показывает — его гоняют на rv32i (→ Q-046).
 - [ ] Матрица: `words` (сплошные 32-битные числа) → дробные → `core.matrix` →
   векторы (SSE/AVX, RVV). → PLAN-1 «До заморозки»
 - [ ] **отложено** `machine` — машина состояний, 16-е ключевое слово. → PLAN-1 «До заморозки»

@@ -1,0 +1,240 @@
+-- fraction — дробные (Q-014, Q-041, Q-044): урезанная плавающая, 50 значимых
+-- бит, только на 64-битных целях. Дробное с целым не смешивается — явно
+-- from(n); обратно — num.floor / ceil / trunc / round_school / round_bank.
+-- == у дробных нет: a ~= b (относительная точность NEAR) или near(a, b, eps).
+--
+-- NEAR — точность ~=: |a - b| <= NEAR · max(|a|, |b|)
+-- from(n) -> дробное из целого; bits(x) -> биты без метки: знак, порядок (11), мантисса (49)
+-- near(a, b, eps) -> yes/no — как ~=, но с своей точностью eps
+-- text(x) -> кратчайшая запись, которая читается обратно точно ("2.5",
+--     "0.30000000000000004"); целое — с ".0"; из двух равно близких — с чётной
+--     последней цифрой (как в ECMAScript)
+-- Внутри: big_* — большие натуральные группами по 10000 (младший первым),
+--     shortest — цифры и десятичный порядок по Стилу — Уайту (Dragon4)
+
+use core.str
+use core.group
+
+NEAR = 0.000000001
+BASE = 10000
+MANTISSA = 562949953421312
+SIGN = 1152921504606846975
+
+skill from(value) native
+skill bits(value) native
+
+skill near(a, b, eps) {
+    @gap = a - b
+    (gap < 0.0) { gap = 0.0 - gap }
+    @most = a
+    (most < 0.0) { most = 0.0 - most }
+    @other = b
+    (other < 0.0) { other = 0.0 - other }
+    (other > most) { most = other }
+    out (gap > most * eps) == no
+}
+
+skill big_trim(big) {
+    @size = group.count(big)
+    drum (group.count(big)) {
+        (size == 1) { leave }
+        (group.get(big, size - 1) > 0) { leave }
+        size = size - 1
+    }
+    out group.slice(big, 0, size)
+}
+
+skill big_times(big, factor) {
+    @result = []
+    @carry = 0
+    drum (big) {
+        @piece = beat * factor + carry
+        carry = piece / BASE
+        result = group.add(result, piece - carry * BASE)
+    }
+    drum (8) {
+        (carry == 0) { leave }
+        @rest = carry / BASE
+        result = group.add(result, carry - rest * BASE)
+        carry = rest
+    }
+    out big_trim(result)
+}
+
+skill big_plus(left, right) {
+    @result = []
+    @carry = 0
+    @size = group.count(left)
+    (group.count(right) > size) { size = group.count(right) }
+    drum (size) {
+        @piece = carry
+        (beat < group.count(left)) { piece = piece + group.get(left, beat) }
+        (beat < group.count(right)) { piece = piece + group.get(right, beat) }
+        carry = piece / BASE
+        result = group.add(result, piece - carry * BASE)
+    }
+    (carry > 0) { result = group.add(result, carry) }
+    out result
+}
+
+skill big_minus(left, right) {
+    @result = []
+    @borrow = 0
+    drum (group.count(left)) {
+        @piece = group.get(left, beat) - borrow
+        (beat < group.count(right)) { piece = piece - group.get(right, beat) }
+        borrow = 0
+        (piece < 0) {
+            piece = piece + BASE
+            borrow = 1
+        }
+        result = group.add(result, piece)
+    }
+    out big_trim(result)
+}
+
+skill big_compare(left, right) {
+    @left_size = group.count(left)
+    @right_size = group.count(right)
+    (left_size > right_size) { out 1 }
+    (left_size < right_size) { out -1 }
+    drum (left_size) {
+        @index = left_size - 1 - beat
+        (group.get(left, index) > group.get(right, index)) { out 1 }
+        (group.get(left, index) < group.get(right, index)) { out -1 }
+    }
+    out 0
+}
+
+skill big_of(value) {
+    @result = []
+    @rest = value
+    drum (8) {
+        @high = rest / BASE
+        result = group.add(result, rest - high * BASE)
+        rest = high
+    }
+    out big_trim(result)
+}
+
+skill big_power2(base, count) {
+    @result = base
+    drum (count) { result = big_times(result, 2) }
+    out result
+}
+
+Scaled = Box {
+    digits = "",
+    point = 0
+}
+
+skill shortest(significand, power, even) {
+    @top = big_of(significand * 2)
+    @bottom = [2]
+    @upper = [1]
+    @lower = [1]
+    (power >= 0) {
+        top = big_power2(top, power)
+        upper = big_power2(upper, power)
+        lower = big_power2(lower, power)
+    }
+    (power < 0) { bottom = big_power2(bottom, 0 - power) }
+    (significand == MANTISSA) {
+        top = big_times(top, 2)
+        bottom = big_times(bottom, 2)
+        upper = big_times(upper, 2)
+    }
+    @point = 0
+    drum (400) {
+        @reach = big_compare(big_plus(top, upper), bottom)
+        @inside = reach < 0
+        (even == no) { inside = reach <= 0 }
+        (inside == yes) { leave }
+        bottom = big_times(bottom, 10)
+        point = point + 1
+    }
+    drum (400) {
+        @reach = big_compare(big_times(big_plus(top, upper), 10), bottom)
+        @beyond = reach >= 0
+        (even == no) { beyond = reach > 0 }
+        (beyond == yes) { leave }
+        top = big_times(top, 10)
+        upper = big_times(upper, 10)
+        lower = big_times(lower, 10)
+        point = point - 1
+    }
+    @digits = ""
+    drum (40) {
+        top = big_times(top, 10)
+        upper = big_times(upper, 10)
+        lower = big_times(lower, 10)
+        @digit = 0
+        drum (10) {
+            (big_compare(top, bottom) < 0) { leave }
+            top = big_minus(top, bottom)
+            digit = digit + 1
+        }
+        @low = big_compare(top, lower)
+        @high = big_compare(big_plus(top, upper), bottom)
+        @low_end = low < 0
+        @high_end = high > 0
+        (even == yes) {
+            low_end = low <= 0
+            high_end = high >= 0
+        }
+        pick {
+            (low_end == yes) {
+                (high_end == yes) {
+                    @middle = big_compare(big_times(top, 2), bottom)
+                    (middle > 0) { digit = digit + 1 }
+                    (middle == 0) { (digit % 2 == 1) { digit = digit + 1 } }
+                }
+                digits = str.concat(digits, "{digit}")
+                leave
+            }
+            (high_end == yes) {
+                digit = digit + 1
+                digits = str.concat(digits, "{digit}")
+                leave
+            }
+            { digits = str.concat(digits, "{digit}") }
+        }
+    }
+    out Scaled { digits = digits, point = point }
+}
+
+skill zeros(count) {
+    @text = ""
+    drum (count) { text = str.concat(text, "0") }
+    out text
+}
+
+skill text(value) {
+    @raw = bits(value)
+    @sign = ""
+    (raw < 0) {
+        sign = "-"
+        raw = raw + SIGN + 1
+    }
+    @exponent = raw / MANTISSA
+    @significand = raw - exponent * MANTISSA
+    (exponent == 0) { (significand == 0) { out "{sign}0.0" } }
+    @power = exponent - 1023 - 49
+    (exponent == 0) { power = 1 - 1023 - 49 }
+    (exponent > 0) { significand = significand + MANTISSA }
+    @scaled = shortest(significand, power, significand % 2 == 0)
+    @digits = scaled.digits
+    @point = scaled.point
+    @size = str.bytes(digits)
+    (point <= 0) {
+        @lead = zeros(0 - point)
+        out "{sign}0.{lead}{digits}"
+    }
+    (point >= size) {
+        @trail = zeros(point - size)
+        out "{sign}{digits}{trail}.0"
+    }
+    @whole = str.slice(digits, 0, point)
+    @tail = str.slice(digits, point, size)
+    out "{sign}{whole}.{tail}"
+}
