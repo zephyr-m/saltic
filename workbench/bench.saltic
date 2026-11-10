@@ -1,0 +1,225 @@
+-- bench — таблица лидеров по скорости, `just bench`: задачи из
+-- docs/numbers/benchmarks (fib(35), binary-trees 16, fannkuch 10) на Saltic
+-- (родной x86-64, компилятор с полки) и на всех языках, что есть на машине.
+-- Как в docs/numbers/BENCHMARKS.md: лучшее из RUNS запусков, время — GNU time
+-- %e, память — пик RSS %M; вывод каждого языка сверяется с выводом Си -O2.
+-- Языка нет на машине — строка «нет на машине» (Lua и Ruby можно добавить:
+-- `nix shell nixpkgs#lua5_4 nixpkgs#luajit nixpkgs#ruby -c just bench`).
+-- Печатает ход и таблицу по каждой задаче, итог — в REPORT.
+--
+-- Lang { name, ext, build, run } — язык: build — сборка (пусто — не нужна),
+--     run — запуск; в командах SOURCE и BINARY заменяются путями
+-- Result { lang, time, memory, note } — лучший запуск: время в сотых секунды,
+--     память в КБ, note — "" или причина, почему без цифр
+-- program() — замерить всё и напечатать таблицы
+-- Внутри: present(lang) -> yes/no; filled(words, source, binary) -> команда;
+--     measured(command) -> Result; hundredths(text); seconds(сотые) -> «0,88 с»;
+--     megabytes(КБ) -> «10 МБ»; ranked(results) -> по времени; table(task, results)
+
+use io
+use io.file
+use core.str
+use core.group
+use core.process
+
+FOLDER = "docs/numbers/benchmarks"
+WORK = ".cache/build/workbench/bench"
+REPORT = ".cache/build/workbench/bench.md"
+TIME = "/run/current-system/sw/bin/time"
+RUNS = 3
+TASKS = ["fib", "binary-trees", "fannkuch"]
+HEAP = "268435456"
+BIG = 999999999
+
+Lang = Box {
+    name = "",
+    ext = "",
+    build = [],
+    run = []
+}
+
+Result = Box {
+    lang = "",
+    time = 0,
+    memory = 0,
+    note = ""
+}
+
+skill langs() {
+    out [
+        Lang { name = "C -O2", ext = "c", build = ["gcc", "-O2", "-o", "BINARY", "SOURCE"], run = ["BINARY"] },
+        Lang { name = "C -O0", ext = "c", build = ["gcc", "-O0", "-o", "BINARY", "SOURCE"], run = ["BINARY"] },
+        Lang { name = "Saltic, x86-64 родной", ext = "saltic", build = ["bootstrap/saltic", "SOURCE", "BINARY", HEAP, "x86_64"], run = ["BINARY"] },
+        Lang { name = "LuaJIT", ext = "lua", run = ["luajit", "SOURCE"] },
+        Lang { name = "Node", ext = "js", run = ["node", "SOURCE"] },
+        Lang { name = "PHP + JIT", ext = "php", run = ["php", "-d", "opcache.enable_cli=1", "-d", "opcache.jit=tracing", "-d", "opcache.jit_buffer_size=64M", "SOURCE"] },
+        Lang { name = "PHP", ext = "php", run = ["php", "SOURCE"] },
+        Lang { name = "Ruby + YJIT", ext = "rb", run = ["ruby", "--yjit", "SOURCE"] },
+        Lang { name = "Ruby", ext = "rb", run = ["ruby", "SOURCE"] },
+        Lang { name = "Lua", ext = "lua", run = ["lua", "SOURCE"] },
+        Lang { name = "Python", ext = "py", run = ["python3", "SOURCE"] }
+    ]
+}
+
+skill present(lang) {
+    @tool = group.get(lang.run, 0)
+    (group.count(lang.build) > 0) { tool = group.get(lang.build, 0) }
+    process.locate(tool) rescue |err| { out no }
+    out yes
+}
+
+skill filled(words, source, binary) {
+    @made = []
+    drum (words) {
+        @word = beat
+        (word == "SOURCE") { word = source }
+        (word == "BINARY") { word = binary }
+        made = group.add(made, word)
+    }
+    out made
+}
+
+skill hundredths(text) {
+    @whole = 0
+    @part = 0
+    @digits = 0
+    @after = no
+    drum (str.bytes(text)) {
+        @byte = str.byte(text, beat)
+        (byte == 46) { after = yes }
+        (byte >= 48) {
+            (byte <= 57) {
+                (after == no) { whole = whole * 10 + byte - 48 }
+                (after == yes) {
+                    (digits < 2) {
+                        part = part * 10 + byte - 48
+                        digits = digits + 1
+                    }
+                }
+            }
+        }
+    }
+    (digits == 1) { part = part * 10 }
+    out whole * 100 + part
+}
+
+skill measured(command, expected) {
+    @best = Result { time = BIG }
+    @stamp = "{WORK}/time.txt"
+    drum (RUNS) {
+        @done = process.capture(group.concat([TIME, "-f", "%e %M", "-o", stamp], command), "", [])
+        ((done.code == 0) == no) { out Result { note = "упало, код {done.code}" } }
+        (str.bytes(expected) > 0) {
+            ((done.output == expected) == no) { out Result { note = "вывод не совпал с Си" } }
+        }
+        @line = group.get(str.lines(file.read(stamp)), 0)
+        @parts = str.split(line, " ")
+        @time = hundredths(group.get(parts, 0))
+        (time < best.time) {
+            best.time = time
+            best.memory = hundredths(group.get(parts, 1)) / 100
+        }
+    }
+    out best
+}
+
+skill seconds(value) {
+    @whole = value / 100
+    @part = value % 100
+    (part < 10) { out "{whole},0{part} с" }
+    out "{whole},{part} с"
+}
+
+skill megabytes(kb) {
+    (kb < 1024) { out "< 1 МБ" }
+    @mb = (kb + 512) / 1024
+    out "{mb} МБ"
+}
+
+skill ranked(results) {
+    @left = results
+    @sorted = []
+    drum (group.count(results)) {
+        @best_at = 0
+        drum (group.count(left)) {
+            @one = group.get(left, beat)
+            @chosen = group.get(left, best_at)
+            (one.time < chosen.time) { best_at = beat }
+        }
+        sorted = group.add(sorted, group.get(left, best_at))
+        left = group.concat(group.slice(left, 0, best_at), group.slice(left, best_at + 1, group.count(left)))
+    }
+    out sorted
+}
+
+skill table(task, results) {
+    @lines = ["", "## {task}", "", "| место | язык | время | память |", "|---|---|---|---|"]
+    @place = 0
+    drum (ranked(results)) {
+        @one = beat
+        (str.bytes(one.note) == 0) {
+            place = place + 1
+            @shown = seconds(one.time)
+            @memory = megabytes(one.memory)
+            @name = one.lang
+            (str.starts_with(name, "Saltic") == yes) { name = "**{name}**" }
+            lines = group.add(lines, "| {place} | {name} | {shown} | {memory} |")
+        }
+    }
+    drum (results) {
+        @one = beat
+        (str.bytes(one.note) > 0) { lines = group.add(lines, "| — | {one.lang} | {one.note} | |") }
+    }
+    out lines
+}
+
+program() {
+    process.run(["mkdir", "-p", WORK], "", [])
+    @report = ["# Таблица лидеров Saltic", "", "Лучшее из {RUNS} запусков; память — пик RSS; вывод сверен с Си -O2."]
+    drum (TASKS) {
+        @task = beat
+        io.show("bench: {task}")
+        @results = []
+        @expected = ""
+        drum (langs()) {
+            @lang = beat
+            @source = "{FOLDER}/{task}.{lang.ext}"
+            @binary = "{WORK}/{task}-{lang.ext}"
+            (lang.name == "C -O0") { binary = "{WORK}/{task}-c-o0" }
+            @result = Result { lang = lang.name, note = "нет на машине" }
+            (present(lang) == yes) {
+                @ready = yes
+                (group.count(lang.build) > 0) {
+                    @built = process.capture(filled(lang.build, source, binary), "", [])
+                    ((built.code == 0) == no) {
+                        result.note = "не собралось"
+                        ready = no
+                    }
+                    process.run(["chmod", "+x", binary], "", [])
+                }
+                (ready == yes) {
+                    (lang.name == "C -O2") {
+                        @first = process.capture(filled(lang.run, source, binary), "", [])
+                        expected = first.output
+                    }
+                    result = measured(filled(lang.run, source, binary), expected)
+                    result.lang = lang.name
+                }
+            }
+            @said = result.note
+            (str.bytes(said) == 0) {
+                @shown = seconds(result.time)
+                @memory = megabytes(result.memory)
+                said = "{shown}, {memory}"
+            }
+            io.show("  {lang.name}: {said}")
+            results = group.add(results, result)
+        }
+        @lines = table(task, results)
+        drum (lines) { io.show(beat) }
+        report = group.concat(report, lines)
+    }
+    file.write(REPORT, str.join(report, "\n"))
+    io.show("")
+    io.show("bench: таблица — {REPORT}")
+}
