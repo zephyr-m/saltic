@@ -22,6 +22,8 @@
 -- emit_equal_fast_path(compiler) — равные слова без вызова, иначе rt_value_equal
 -- jump_unless_yes(compiler, label) — переход, если VALUE — no, none или 0
 -- string_find(compiler, text) -> Symbol; string_label(compiler, text) -> метка
+-- static_group(items) -> yes: непустая, вся из constant_literal; load_static_group —
+--     её адрес в VALUE, сама группа — данными в rodata (group_label -> метка)
 -- emit_string_join(compiler) — rt_string_add для "{…}"
 -- load_number / load_number_into(compiler, [role,] number) — число с тегом
 -- load_simple(compiler, node, role) / load_fixed_literal(compiler, value)
@@ -238,6 +240,46 @@ skill string_label(compiler, text) {
     compiler = executor.align(compiler, backend.RODATA, constants.DATA_ALIGNMENT)
     compiler.strings = group.add(compiler.strings, state.Symbol { name = label, kind = "string", text = text })
     out label
+}
+
+skill static_group(items) {
+    (group.count(items) == 0) { out no }
+    drum (items) {
+        (constant_literal(beat) == no) { out no }
+    }
+    out yes
+}
+
+skill literal_word(node) {
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "answer") {
+        (group.get(plain, 1) == "yes") { out word.from_number(abi.YES) }
+        out word.from_number(abi.NO)
+    }
+    (tag == "none") { out word.from_number(abi.NONE) }
+    @number = group.get(plain, 1)
+    (tag == "binary") { number = -group.get(ast.plain(group.get(plain, 3)), 1) }
+    out word.add_number(word.shift_left(word.from_signed(number), abi.TAG_SHIFT), abi.TAG_NUMBER)
+}
+
+skill group_label(compiler, items) {
+    @label = state.label(compiler, "group")
+    @count = group.count(items)
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.align(compiler, backend.RODATA, constants.DATA_ALIGNMENT)
+    compiler = executor.data_label(compiler, backend.RODATA, label)
+    compiler = constants.emit_static_header(compiler, backend.RODATA, abi.OBJECT_KIND_GROUP, constants.group_storage_bytes(words, count))
+    compiler = executor.data_word(compiler, backend.RODATA, word.from_number(count))
+    drum (items) { compiler = executor.data_word(compiler, backend.RODATA, literal_word(beat)) }
+    out label
+}
+
+skill load_static_group(compiler, items) {
+    @executor = compiler.executor
+    compiler = executor.load_address(compiler, backend.VALUE, group_label(compiler, items), 0)
+    out executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_GROUP)
 }
 
 skill emit_string_join(compiler) {
