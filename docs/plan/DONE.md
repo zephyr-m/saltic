@@ -317,6 +317,12 @@
   `just hosts`; отпечаток в паспорте — только язык (у компилятора qemu-virt —
   плюс `os/target/qemu_virt`). 07.11.2026. → аудит 07.11
 
+- [x] Компилятор пишет выход с правом исполнения: `io.file.write_program(path,
+  buffer)` — запись с `fchmod` 0755 (Linux, остальные — NotSupported), тест в
+  `tests/platform`; ELF (rv32i, rv64, x86-64) — через `image.write_program`,
+  `.efi` — как был; `chmod +x` после компилятора ушли из `justfile` и скриптов
+  (остались ярлыки в `install` и чужие языки в `bench`). 11.11.2026. → аудит 03.11, 4.4; → Q-027
+
 ## 6. Память и размер
 
 - [x] `str.from_bytes` и `str.join` через `bytes`: строка в цикле растёт
