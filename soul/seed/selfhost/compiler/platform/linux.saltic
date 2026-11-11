@@ -1,6 +1,7 @@
 -- linux — платформа Linux на вызовах ядра (executor.syscall с номерами
 -- core.system): write, exit, key (сырой режим tty через ioctl termios, read),
--- file_read / file_write (openat, read / write, close; file_read: размер —
+-- file_read / file_write / file_write_program (openat, read / write, close; у программы —
+-- fchmod 0755: бит исполнения ставится и у файла, который уже был; file_read: размер —
 -- lseek в конец, на RV32I _llseek, — выделяет ровно его и читает в цикле; размер 0
 -- или lseek не смог (/proc) — читает кусками от READ_CHUNK, полный буфер — вдвое с копией);
 -- now — ребёнок clock; read_line (строка ввода) — ребёнок input; wait, firmware, call — NotSupported; процессы и список
@@ -17,7 +18,7 @@
 --     кадр на стеке — termios, буфер и ячейки-слова (key_slot / key_frame от words);
 --     emit_terminal_mode / emit_name_branches / emit_name_results / emit_key_bytes — части;
 --     key_label / text_label(name) -> метки; append_key_data(compiler) — тексты имён
--- emit_file_read / emit_file_write / emit_file_error / emit_seek(compiler, …) —
+-- emit_file_read / emit_file_write / emit_file_write_program / emit_file_error / emit_seek(compiler, …) —
 --     файлы; emit_seek(compiler, whence, fail) -> VALUE = новое смещение, ошибка — на fail;
 --     emit_read_grow — буфер вдвое (размер неизвестен);
 --     кадр чтения — слоты READ_*
@@ -53,6 +54,8 @@ READ_SIZE = 3
 READ_TOTAL = 4
 READ_OBJECT = 5
 READ_FD = 6
+FILE_MODE = 420
+PROGRAM_MODE = 493
 SEEK_SET = 0
 SEEK_END = 2
 MAP_PROTECTION = 3
@@ -101,6 +104,7 @@ Linux = Box {
         compiler = emit_exit(compiler)
         compiler = emit_file_read(compiler)
         compiler = emit_file_write(compiler)
+        compiler = emit_file_write_program(compiler)
         compiler = emit_file_error(compiler)
         compiler = emit_key(compiler)
         compiler = append_key_data(compiler)
@@ -279,9 +283,17 @@ skill emit_seek(compiler, whence, fail) {
 }
 
 skill emit_file_write(compiler) {
+    out emit_writer(compiler, platform.FILE_WRITE, FILE_MODE, no)
+}
+
+skill emit_file_write_program(compiler) {
+    out emit_writer(compiler, platform.FILE_WRITE_PROGRAM, PROGRAM_MODE, yes)
+}
+
+skill emit_writer(compiler, name, mode, executable) {
     @executor = compiler.executor
     @words = compiler.words
-    compiler = executor.label(compiler, platform.FILE_WRITE)
+    compiler = executor.label(compiler, name)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -words.bytes * 8)
     compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 7)
     compiler = executor.store(compiler, backend.ERROR, backend.STACK, words.bytes * 6)
@@ -289,10 +301,15 @@ skill emit_file_write(compiler) {
     compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
     compiler = executor.load_immediate(compiler, backend.VALUE, -100)
     compiler = executor.load_immediate(compiler, backend.ARG2, 577)
-    compiler = executor.load_immediate(compiler, backend.ARG3, 420)
+    compiler = executor.load_immediate(compiler, backend.ARG3, mode)
     compiler = executor.syscall(compiler, system.SYSCALL_OPENAT)
     compiler = executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
     compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * 5)
+    (executable == yes) {
+        compiler = executor.load_immediate(compiler, backend.ERROR, mode)
+        compiler = executor.syscall(compiler, system.SYSCALL_FCHMOD)
+        compiler = executor.branch_negative(compiler, backend.VALUE, FILE_ERROR)
+    }
     compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * 6)
     compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.PAYLOAD_MASK)
     compiler = executor.load(compiler, backend.ARG2, backend.SCRATCH0, words.payload)
