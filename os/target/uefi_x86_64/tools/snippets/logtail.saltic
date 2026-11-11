@@ -1,0 +1,55 @@
+-- logtail: хвост \SALTIC\agent.log с тома VTOYEFI (флешка) — последние ~6 КБ.
+
+use core.str
+use core.bytes
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.storage.files
+
+KEEP = 6000
+CHUNK = 512
+
+skill find_root(base) {
+    drum (files.file_systems(base)) {
+        @root = files.open_root(base, beat) rescue |err| { 0 }
+        (root > 0) {
+            (str.contains(files.volume_label(base, root), "VTOYEFI") == yes) { out root }
+            files.close_file(base, root)
+        }
+    }
+    out error.NoLogVolume
+}
+
+skill snippet() {
+    @base = firmware.guest_base()
+    @root = find_root(base)
+    @home = files.open_child(base, root, "SALTIC")
+    @file = files.open_child(base, home, "agent.log")
+    @ring = bytes.new(KEEP)
+    @size_at = firmware.scratch(base, files.SCRATCH_SIZE)
+    @buffer = firmware.scratch(base, files.SCRATCH_BUFFER)
+    @total = 0
+    @going = yes
+    always {
+        (going == no) { leave }
+        firmware.write64(size_at, base, 0, firmware.number(CHUNK))
+        @read = firmware.call(base, firmware.pointer(file, base, files.FILE_READ), [file, size_at, buffer])
+        @got = firmware.read32(size_at, base, 0)
+        (read.failed == yes) { going = no }
+        (got == 0) { going = no }
+        (going == yes) {
+            drum (got) { bytes.set(ring, (total + beat) % KEEP, firmware.read8(buffer, base, beat)) }
+            total = total + got
+        }
+    }
+    files.close_file(base, file)
+    @start = 0
+    @count = total
+    (total > KEEP) {
+        start = total % KEEP
+        count = KEEP
+    }
+    @text = ""
+    drum (count) { text = str.concat(text, str.from_byte(bytes.get(ring, (start + beat) % KEEP))) }
+    out "agent.log: {total} байт, хвост:\n{text}"
+}
