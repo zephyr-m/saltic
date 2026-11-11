@@ -1,0 +1,360 @@
+-- transformer — маленький трансформер Saltic на Acer: учится разворачивать
+-- последовательность из LENGTH токенов словаря VOCAB ([1, 2, 3, 0] → [0, 3, 2, 1]).
+-- Без внимания задачу не решить: ответ на месте i — токен с места LENGTH − 1 − i.
+-- Один слой: вложения токенов и позиций (D), одна голова self-attention (Q, K, V,
+-- softmax, масштаб SCALE = 1/√D), выходной линейный слой со сдвигом и softmax.
+-- Ошибка — перекрёстная энтропия; обратное распространение руками через softmax
+-- и внимание, SGD по одному примеру. Учится на всех VOCAB^LENGTH примерах.
+-- Возвращает ход обучения (каждые SHOW_EVERY эпох: средняя «1 − вероятность
+-- верного токена» и сколько последовательностей сеть разворачивает верно),
+-- ответы на несколько примеров и время по часам прошивки (секунды).
+--
+-- Model { embed, place, query, key, value, out_weight, out_shift } — веса
+-- Work — промежуточные матрицы одного примера (прямой и обратный ход); workspace()
+-- snippet() -> текст отчёта
+-- Внутри: exp(x) — своя экспонента (деление пополам и ряд Тейлора);
+--     product(l, r, into, keep): into = l·r; product_left: into = lᵀ·r;
+--     product_right: into = l·rᵀ (keep = yes — прибавить к into); step(w, input,
+--     grad): w −= RATE·inputᵀ·grad; forward, learn, guess
+
+use core.str
+use core.group
+use core.fraction
+use core.matrix
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+
+D = 8
+VOCAB = 4
+LENGTH = 4
+SCALE = 0.35355339059327373
+RATE = 0.05
+EPOCHS = 20
+SHOW_EVERY = 2
+SAMPLES = 256
+STRIDE = 37
+EXAMPLES = [27, 108, 177, 0, 255, 54]
+
+Model = Box {
+    embed = matrix.Matrix {},
+    place = matrix.Matrix {},
+    query = matrix.Matrix {},
+    key = matrix.Matrix {},
+    value = matrix.Matrix {},
+    out_weight = matrix.Matrix {},
+    out_shift = matrix.Matrix {}
+}
+
+Work = Box {
+    x = matrix.Matrix {},
+    q = matrix.Matrix {},
+    k = matrix.Matrix {},
+    v = matrix.Matrix {},
+    att = matrix.Matrix {},
+    h = matrix.Matrix {},
+    probs = matrix.Matrix {},
+    dz = matrix.Matrix {},
+    dh = matrix.Matrix {},
+    da = matrix.Matrix {},
+    ds = matrix.Matrix {},
+    dq = matrix.Matrix {},
+    dk = matrix.Matrix {},
+    dv = matrix.Matrix {},
+    dx = matrix.Matrix {}
+}
+
+skill exp(x) {
+    (x < -40.0) { out 0.0 }
+    @y = x
+    @halves = 0
+    always {
+        (y < 0.5) {
+            (y > -0.5) { leave }
+        }
+        y = y / 2.0
+        halves = halves + 1
+    }
+    @term = 1.0
+    @sum = 1.0
+    drum (10) {
+        term = term * y / fraction.from(beat + 1)
+        sum = sum + term
+    }
+    drum (halves) { sum = sum * sum }
+    out sum
+}
+
+skill noise(seed) {
+    out (seed * 75 + 74) % 65537
+}
+
+skill fill(m, seed) {
+    @walk = seed
+    drum (matrix.rows(m)) {
+        @row = beat
+        drum (matrix.columns(m)) {
+            walk = noise(walk)
+            matrix.set(m, row, beat, fraction.from(walk) / 65537.0 - 0.5)
+        }
+    }
+    out walk
+}
+
+skill fresh() {
+    @model = Model { embed = matrix.new(VOCAB, D), place = matrix.new(LENGTH, D), query = matrix.new(D, D), key = matrix.new(D, D), value = matrix.new(D, D), out_weight = matrix.new(D, VOCAB), out_shift = matrix.new(1, VOCAB) }
+    @seed = fill(model.embed, 7)
+    seed = fill(model.place, seed)
+    seed = fill(model.query, seed)
+    seed = fill(model.key, seed)
+    seed = fill(model.value, seed)
+    fill(model.out_weight, seed)
+    out model
+}
+
+skill workspace() {
+    out Work { x = matrix.new(LENGTH, D), q = matrix.new(LENGTH, D), k = matrix.new(LENGTH, D), v = matrix.new(LENGTH, D), att = matrix.new(LENGTH, LENGTH), h = matrix.new(LENGTH, D), probs = matrix.new(LENGTH, VOCAB), dz = matrix.new(LENGTH, VOCAB), dh = matrix.new(LENGTH, D), da = matrix.new(LENGTH, LENGTH), ds = matrix.new(LENGTH, LENGTH), dq = matrix.new(LENGTH, D), dk = matrix.new(LENGTH, D), dv = matrix.new(LENGTH, D), dx = matrix.new(LENGTH, D) }
+}
+
+skill product(left, right, into, keep) {
+    drum (matrix.rows(left)) {
+        @row = beat
+        drum (matrix.columns(right)) {
+            @column = beat
+            @sum = 0.0
+            (keep == yes) { sum = matrix.get(into, row, column) }
+            drum (matrix.columns(left)) { sum = sum + matrix.get(left, row, beat) * matrix.get(right, beat, column) }
+            matrix.set(into, row, column, sum)
+        }
+    }
+    out none
+}
+
+skill product_left(left, right, into) {
+    drum (matrix.columns(left)) {
+        @row = beat
+        drum (matrix.columns(right)) {
+            @column = beat
+            @sum = 0.0
+            drum (matrix.rows(left)) { sum = sum + matrix.get(left, beat, row) * matrix.get(right, beat, column) }
+            matrix.set(into, row, column, sum)
+        }
+    }
+    out none
+}
+
+skill product_right(left, right, into, keep) {
+    drum (matrix.rows(left)) {
+        @row = beat
+        drum (matrix.rows(right)) {
+            @column = beat
+            @sum = 0.0
+            (keep == yes) { sum = matrix.get(into, row, column) }
+            drum (matrix.columns(left)) { sum = sum + matrix.get(left, row, beat) * matrix.get(right, column, beat) }
+            matrix.set(into, row, column, sum)
+        }
+    }
+    out none
+}
+
+skill step(w, input, grad) {
+    drum (matrix.rows(w)) {
+        @row = beat
+        drum (matrix.columns(w)) {
+            @column = beat
+            @sum = 0.0
+            drum (LENGTH) { sum = sum + matrix.get(input, beat, row) * matrix.get(grad, beat, column) }
+            matrix.set(w, row, column, matrix.get(w, row, column) - RATE * sum)
+        }
+    }
+    out none
+}
+
+skill softmax_rows(m) {
+    drum (matrix.rows(m)) {
+        @row = beat
+        @top = matrix.get(m, row, 0)
+        drum (matrix.columns(m)) {
+            (matrix.get(m, row, beat) > top) { top = matrix.get(m, row, beat) }
+        }
+        @total = 0.0
+        drum (matrix.columns(m)) {
+            @e = exp(matrix.get(m, row, beat) - top)
+            matrix.set(m, row, beat, e)
+            total = total + e
+        }
+        drum (matrix.columns(m)) { matrix.set(m, row, beat, matrix.get(m, row, beat) / total) }
+    }
+    out none
+}
+
+skill tokens(number) {
+    @left = number
+    @result = []
+    drum (LENGTH) {
+        result = group.add(result, left % VOCAB)
+        left = left / VOCAB
+    }
+    out result
+}
+
+skill forward(model, work, seq) {
+    drum (LENGTH) {
+        @at = beat
+        @token = group.get(seq, at)
+        drum (D) { matrix.set(work.x, at, beat, matrix.get(model.embed, token, beat) + matrix.get(model.place, at, beat)) }
+    }
+    product(work.x, model.query, work.q, no)
+    product(work.x, model.key, work.k, no)
+    product(work.x, model.value, work.v, no)
+    product_right(work.q, work.k, work.att, no)
+    drum (LENGTH) {
+        @row = beat
+        drum (LENGTH) { matrix.set(work.att, row, beat, matrix.get(work.att, row, beat) * SCALE) }
+    }
+    softmax_rows(work.att)
+    product(work.att, work.v, work.h, no)
+    product(work.h, model.out_weight, work.probs, no)
+    drum (LENGTH) {
+        @row = beat
+        drum (VOCAB) { matrix.set(work.probs, row, beat, matrix.get(work.probs, row, beat) + matrix.get(model.out_shift, 0, beat)) }
+    }
+    softmax_rows(work.probs)
+    out none
+}
+
+skill learn(model, work, seq) {
+    forward(model, work, seq)
+    @miss = 0.0
+    drum (LENGTH) {
+        @row = beat
+        @want = group.get(seq, LENGTH - 1 - row)
+        drum (VOCAB) {
+            @p = matrix.get(work.probs, row, beat)
+            (beat == want) {
+                miss = miss + 1.0 - p
+                p = p - 1.0
+            }
+            matrix.set(work.dz, row, beat, p)
+        }
+    }
+    product_right(work.dz, model.out_weight, work.dh, no)
+    step(model.out_weight, work.h, work.dz)
+    drum (VOCAB) {
+        @column = beat
+        @sum = 0.0
+        drum (LENGTH) { sum = sum + matrix.get(work.dz, beat, column) }
+        matrix.set(model.out_shift, 0, column, matrix.get(model.out_shift, 0, column) - RATE * sum)
+    }
+    product_right(work.dh, work.v, work.da, no)
+    product_left(work.att, work.dh, work.dv)
+    drum (LENGTH) {
+        @row = beat
+        @dot = 0.0
+        drum (LENGTH) { dot = dot + matrix.get(work.att, row, beat) * matrix.get(work.da, row, beat) }
+        drum (LENGTH) { matrix.set(work.ds, row, beat, matrix.get(work.att, row, beat) * (matrix.get(work.da, row, beat) - dot) * SCALE) }
+    }
+    product(work.ds, work.k, work.dq, no)
+    product_left(work.ds, work.q, work.dk)
+    product_right(work.dq, model.query, work.dx, no)
+    product_right(work.dk, model.key, work.dx, yes)
+    product_right(work.dv, model.value, work.dx, yes)
+    step(model.query, work.x, work.dq)
+    step(model.key, work.x, work.dk)
+    step(model.value, work.x, work.dv)
+    drum (LENGTH) {
+        @at = beat
+        @token = group.get(seq, at)
+        drum (D) {
+            @grad = RATE * matrix.get(work.dx, at, beat)
+            matrix.set(model.embed, token, beat, matrix.get(model.embed, token, beat) - grad)
+            matrix.set(model.place, at, beat, matrix.get(model.place, at, beat) - grad)
+        }
+    }
+    out miss
+}
+
+skill guess(model, work, seq) {
+    forward(model, work, seq)
+    @result = []
+    drum (LENGTH) {
+        @row = beat
+        @best = 0
+        drum (VOCAB) {
+            (matrix.get(work.probs, row, beat) > matrix.get(work.probs, row, best)) { best = beat }
+        }
+        result = group.add(result, best)
+    }
+    out result
+}
+
+skill reversed(seq) {
+    @result = []
+    drum (LENGTH) { result = group.add(result, group.get(seq, LENGTH - 1 - beat)) }
+    out result
+}
+
+skill same(left, right) {
+    drum (LENGTH) {
+        ((group.get(left, beat) == group.get(right, beat)) == no) { out no }
+    }
+    out yes
+}
+
+skill solved(model, work) {
+    @right = 0
+    drum (SAMPLES) {
+        @seq = tokens(beat)
+        (same(guess(model, work, seq), reversed(seq)) == yes) { right = right + 1 }
+    }
+    out right
+}
+
+skill train(model, work, lines) {
+    @shown = lines
+    drum (EPOCHS) {
+        @epoch = beat
+        @loss = 0.0
+        drum (SAMPLES) { loss = loss + learn(model, work, tokens((beat * STRIDE + epoch * 11) % SAMPLES)) }
+        ((epoch + 1) % SHOW_EVERY == 0) {
+            @mean = fraction.text(loss / fraction.from(SAMPLES * LENGTH))
+            @right = solved(model, work)
+            @number = epoch + 1
+            shown = group.add(shown, "эпоха {number}: ошибка {mean}, верно {right} из {SAMPLES}")
+        }
+    }
+    out shown
+}
+
+skill seq_text(seq) {
+    @parts = []
+    drum (seq) { parts = group.add(parts, "{beat}") }
+    out str.join(parts, " ")
+}
+
+skill answers(model, work, lines) {
+    @shown = lines
+    drum (EXAMPLES) {
+        @seq = tokens(beat)
+        @input = seq_text(seq)
+        @got = seq_text(guess(model, work, seq))
+        @want = seq_text(reversed(seq))
+        shown = group.add(shown, "{input} → {got} (надо {want})")
+    }
+    out shown
+}
+
+skill seconds(moment) {
+    out moment.hour * 3600 + moment.minute * 60 + moment.second
+}
+
+skill snippet() {
+    @base = firmware.guest_base()
+    @model = fresh()
+    @scratch = workspace()
+    @lines = ["трансформер: разворот {LENGTH} токенов словаря {VOCAB}, D = {D}, одна голова, эпох {EPOCHS} по {SAMPLES} примеров"]
+    @started = seconds(uefi.now(base))
+    lines = train(model, scratch, lines)
+    @spent = seconds(uefi.now(base)) - started
+    lines = group.add(lines, "время обучения: {spent} с")
+    out str.join(answers(model, scratch, lines), "\n")
+}
