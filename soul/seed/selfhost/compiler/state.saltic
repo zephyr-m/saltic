@@ -23,8 +23,10 @@
 -- collect_box / collect_enum(compiler, item, module) / collect_top_level(compiler)
 -- header(compiler) — программа исполнителя с входом _start, heap_size
 -- start(compiler) — код _start: стек входа — в rt_environment_capture (envp),
---     аргументы через rt_cstring, вызов saltic_program, rt_platform_exit
--- finish_data(compiler) — выравнивание секций, saltic_arena и saltic_heap в bss
+--     куча — кусок heap_bytes у платформы (rt_platform_heap, Q-050; не дали —
+--     rt_out_of_memory), его начало — в слово HEAP_START; аргументы через
+--     rt_cstring, вызов saltic_program, rt_platform_exit
+-- finish_data(compiler) — выравнивание секций, saltic_arena и слово HEAP_START в bss
 -- box_number(compiler, name) -> номер Box (с 1); dispatch_label(method) -> метка
 
 use core.str
@@ -37,6 +39,8 @@ use selfhost.memory.model
 use selfhost.compiler.backend
 use selfhost.machine.word
 use selfhost.machine.wide
+
+HEAP_START = "saltic_heap_start"
 
 Symbol = Box {
     name = "",
@@ -305,14 +309,18 @@ skill start(compiler) {
     compiler = executor.label(compiler, "_start")
     compiler = executor.move(compiler, backend.VALUE, backend.STACK)
     compiler = executor.call(compiler, "rt_environment_capture")
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
-    compiler = executor.load_address(compiler, backend.HEAP_TOP, "saltic_heap", 0)
-    pick {
-        (words.bytes == 8) { compiler = executor.load_wide(compiler, backend.ESCAPE_BOTTOM, compiler.heap_bytes) }
-        { compiler = executor.load_word(compiler, backend.ESCAPE_BOTTOM, wide.to_word(compiler.heap_bytes)) }
-    }
-    compiler = executor.add(compiler, backend.ESCAPE_BOTTOM, backend.HEAP_TOP, backend.ESCAPE_BOTTOM)
     compiler = executor.load_immediate(compiler, backend.FRAME, 0)
+    compiler = load_heap_bytes(compiler, backend.VALUE)
+    compiler = executor.call(compiler, "rt_platform_heap")
+    compiler = executor.branch_zero(compiler, backend.ERROR, ".L_start_heap_ready")
+    compiler = executor.call(compiler, "rt_out_of_memory")
+    compiler = executor.label(compiler, ".L_start_heap_ready")
+    compiler = executor.move(compiler, backend.HEAP_TOP, backend.VALUE)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, HEAP_START, 0)
+    compiler = executor.store(compiler, backend.HEAP_TOP, backend.SCRATCH0, 0)
+    compiler = load_heap_bytes(compiler, backend.ESCAPE_BOTTOM)
+    compiler = executor.add(compiler, backend.ESCAPE_BOTTOM, backend.HEAP_TOP, backend.ESCAPE_BOTTOM)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
     compiler = executor.move(compiler, backend.REGION_MARK, backend.HEAP_TOP)
     compiler = executor.move(compiler, backend.ESCAPE_MARK, backend.ESCAPE_BOTTOM)
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, param_count + 1)
@@ -340,6 +348,12 @@ skill start(compiler) {
     out executor.call(compiler, "rt_platform_exit")
 }
 
+skill load_heap_bytes(compiler, role) {
+    @executor = compiler.executor
+    (compiler.words.bytes == 8) { out executor.load_wide(compiler, role, compiler.heap_bytes) }
+    out executor.load_word(compiler, role, wide.to_word(compiler.heap_bytes))
+}
+
 skill finish_data(compiler) {
     @executor = compiler.executor
     (wide.is_zero(compiler.heap_bytes) == yes) { compiler.heap_bytes = wide.from_number(model.DEFAULT_HEAP_BYTES) }
@@ -350,9 +364,8 @@ skill finish_data(compiler) {
     compiler = executor.data_label(compiler, backend.BSS, "saltic_arena")
     compiler = executor.reserve(compiler, wide.from_number(model.ARENA_BYTES))
     compiler = executor.align(compiler, backend.BSS, abi.OBJECT_ALIGNMENT)
-    compiler = executor.data_label(compiler, backend.BSS, "saltic_heap")
-    compiler = executor.reserve(compiler, compiler.heap_bytes)
-    out compiler
+    compiler = executor.data_label(compiler, backend.BSS, HEAP_START)
+    out executor.reserve(compiler, wide.from_number(compiler.words.bytes))
 }
 
 skill box_number(compiler, name) {

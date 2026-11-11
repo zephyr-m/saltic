@@ -7,6 +7,11 @@
 --
 -- Linux { name } — платформа: append(compiler) -> compiler, все метки договора
 -- emit_write / emit_exit(compiler) — rt_platform_write / rt_platform_exit
+-- emit_heap(compiler) — rt_platform_heap: mmap без файла, MAP_NORESERVE — страницы
+--     берутся при первом касании; подсказка — страница за концом bss (слово
+--     state.HEAP_START там последнее), как лежала куча в bss: рантайм пишет адрес
+--     переноса в 4 байта, так что на 64 битах начало кучи выше 4 ГБ — тоже отказ
+--     (Q-050); ответ ядра −4095…−1 — ERROR_MEMORY_EXHAUSTED
 -- emit_key(compiler) — rt_platform_key: до 8 байт, имена клавиш; Ctrl-C — выход 130;
 --     кадр на стеке — termios, буфер и ячейки-слова (key_slot / key_frame от words);
 --     emit_terminal_mode / emit_name_branches / emit_name_results / emit_key_bytes — части;
@@ -19,6 +24,7 @@ use core.system
 use selfhost.abi
 use selfhost.compiler.backend
 use selfhost.compiler.platform
+use selfhost.compiler.state
 use selfhost.compiler.backend.rv32i.runtime.terminal
 use selfhost.compiler.platform.linux.process
 use selfhost.compiler.platform.linux.clock
@@ -38,6 +44,12 @@ READ_TOTAL = 4
 READ_OBJECT = 5
 READ_FD = 6
 SEEK_SET = 0
+MAP_PROTECTION = 3
+MAP_FLAGS = 16418
+MAP_FAILED_FROM = -4096
+PAGE_MASK = -4096
+PAGE_ROUND = 4103
+LOW_BITS = 32
 SEEK_END = 2
 
 STDIN = 0
@@ -74,6 +86,7 @@ Linux = Box {
 
     skill append(compiler) {
         compiler = emit_write(compiler)
+        compiler = emit_heap(compiler)
         compiler = emit_log_open(compiler)
         compiler = emit_exit(compiler)
         compiler = emit_file_read(compiler)
@@ -109,6 +122,31 @@ skill emit_log_open(compiler) {
     compiler = tails.fail(compiler, ".L_log_open_failed", abi.ERROR_FILE)
     compiler = executor.data_label(compiler, backend.RODATA, LOG_PATH_LABEL)
     out executor.data_text(compiler, backend.RODATA, LOG_PATH)
+}
+
+skill emit_heap(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.HEAP)
+    compiler = executor.move(compiler, backend.ERROR, backend.VALUE)
+    compiler = executor.load_address(compiler, backend.VALUE, state.HEAP_START, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, PAGE_ROUND)
+    compiler = executor.add(compiler, backend.VALUE, backend.VALUE, backend.SCRATCH0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, PAGE_MASK)
+    compiler = executor.and(compiler, backend.VALUE, backend.VALUE, backend.SCRATCH0)
+    compiler = executor.load_immediate(compiler, backend.ARG2, MAP_PROTECTION)
+    compiler = executor.load_immediate(compiler, backend.ARG3, MAP_FLAGS)
+    compiler = executor.load_immediate(compiler, backend.ARG4, -1)
+    compiler = executor.load_immediate(compiler, backend.ARG5, 0)
+    compiler = executor.syscall(compiler, system.SYSCALL_MMAP)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, MAP_FAILED_FROM)
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.VALUE, backend.SCRATCH0, ".L_heap_refused")
+    (compiler.words.bytes == 8) {
+        compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.VALUE, LOW_BITS)
+        compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
+        compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_heap_refused")
+    }
+    compiler = tails.ok(compiler)
+    out tails.fail(compiler, ".L_heap_refused", abi.ERROR_MEMORY_EXHAUSTED)
 }
 
 skill emit_exit(compiler) {
