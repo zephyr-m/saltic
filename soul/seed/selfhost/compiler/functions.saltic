@@ -9,12 +9,16 @@
 -- compile_function(compiler, name, params, body, subject, module) — один навык
 --     или метод (subject — имя Box, $self первым параметром)
 -- compile_constant(compiler, constant) — геттер константы
--- compile_constants(compiler) — все константы
--- compile_functions(compiler) — все навыки, методы, program и диспетчеры
+-- compile_constants(compiler, seen) — константы, чьё имя есть в seen (reach)
+-- compile_functions(compiler, seen) — навыки и методы из seen, program и диспетчеры
+-- reach(compiler) -> dict коротких имён, достижимых от program, tree_add и text
+--     (их зовут рантайм и codegen); имя — хвост пути после последней точки, так что
+--     одноимённые навыки разных модулей остаются вместе — с запасом, но без промаха
 -- compile_dispatch(compiler, method) — выбор метода по Box; ERROR_NO_METHOD
 
 use core.str
 use core.group
+use core.dict
 use selfhost.abi
 use selfhost.ast
 use selfhost.compiler.state
@@ -136,20 +140,79 @@ skill compile_constant(compiler, constant) {
     out compiler
 }
 
-skill compile_constants(compiler) {
-    drum (compiler.constants) { compiler = compile_constant(compiler, beat) }
+skill short_name(name) {
+    @parts = str.split(name, ".")
+    (group.count(parts) == 0) { out name }
+    out group.get(parts, group.count(parts) - 1)
+}
+
+skill index_add(index, name, node) {
+    @key = short_name(name)
+    @nodes = []
+    (dict.has(index, key) == yes) { nodes = dict.get(index, key) }
+    dict.set(index, key, group.add(nodes, node))
+}
+
+skill mark(seen, index, name) {
+    @key = short_name(name)
+    (dict.has(seen, key) == yes) { out none }
+    dict.set(seen, key, yes)
+    (dict.has(index, key) == yes) {
+        drum (dict.get(index, key)) { walk(seen, index, beat) }
+    }
+    out none
+}
+
+skill walk(seen, index, node) {
+    @tag = ast.tag(node)
+    (tag == "path") {
+        @path = ast.plain(node)
+        drum (group.count(path) - 1) { mark(seen, index, group.get(path, beat + 1)) }
+    }
+    (tag == "box-new") { mark(seen, index, ast.part(node, 1)) }
+    drum (ast.children(node)) { walk(seen, index, beat) }
+    out none
+}
+
+skill reach(compiler) {
+    @index = dict.new()
+    drum (compiler.skills) { index_add(index, beat.name, ast.part(beat.node, 3)) }
+    drum (compiler.constants) { index_add(index, beat.name, beat.node) }
+    drum (compiler.boxes) {
+        @box = beat
+        drum (group.count(ast.plain(box.node)) - 2) {
+            @member = ast.part(box.node, beat + 2)
+            (ast.tag(member) == "field") { index_add(index, box.name, ast.part(member, 2)) }
+            (ast.tag(member) == "subject-skill") { index_add(index, ast.part(member, 1), ast.part(member, 3)) }
+        }
+    }
+    @seen = dict.new()
+    mark(seen, index, "tree_add")
+    mark(seen, index, "text")
+    walk(seen, index, ast.part(compiler.entry, 2))
+    out seen
+}
+
+skill compile_constants(compiler, seen) {
+    drum (compiler.constants) {
+        (dict.has(seen, short_name(beat.name)) == yes) { compiler = compile_constant(compiler, beat) }
+    }
     out compiler
 }
 
-skill compile_functions(compiler) {
+skill compile_functions(compiler, seen) {
     drum (compiler.skills) {
-        compiler = compile_function(compiler, beat.name, ast.part(beat.node, 2), ast.part(beat.node, 3), "", beat.text)
+        (dict.has(seen, short_name(beat.name)) == yes) {
+            compiler = compile_function(compiler, beat.name, ast.part(beat.node, 2), ast.part(beat.node, 3), "", beat.text)
+        }
     }
     drum (compiler.boxes) {
         @box = beat
         drum (group.count(ast.plain(box.node)) - 2) {
             @member = ast.part(box.node, beat + 2)
-            (ast.tag(member) == "subject-skill") {
+            @method = ast.tag(member) == "subject-skill"
+            (method == yes) { method = dict.has(seen, ast.part(member, 1)) }
+            (method == yes) {
                 @name = "{box.name}."
                 name = str.concat(name, ast.part(member, 1))
                 @params = group.concat(["$self"], ast.part(member, 2))
