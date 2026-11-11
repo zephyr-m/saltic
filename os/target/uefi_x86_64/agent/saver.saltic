@@ -2,26 +2,33 @@
 -- «Пластилина» (screen/clay/stage); боковые панели прячутся — их всё равно
 -- никто не обновляет, а при пробуждении агент рисует экран заново. Включает агент
 -- после простоя (agent.saltic, SAVER_AFTER), снимает — любая команда или
--- клавиша. Кадр рисуется в цикле агента, сеть между кадрами живёт. Раз в
+-- клавиша. Кадр рисуется в цикле агента не чаще раза в PACE тиков экрана (без
+-- видеокарты — раз в секунду): кадр стоит десятки мс, и рисовать его на каждом
+-- круге — значит крутить цикл (сеть, часы, журнал) в тысячи раз медленнее. Камера
+-- поворачивается на TURN за тик, сколько их ни прошло. Раз в
 -- RENEW секунд полянка новая (пока лепится — пара секунд — сеть ждёт).
 -- Прежний хранитель (градиент с паучком) — .archive/os/agent/saver-gradient.saltic.
 --
 -- Dream один на всю жизнь агента: агент держит его в долгом Box, а новый
 -- Dream на каждое засыпание оставался бы в куче (screen/clay/cast).
 --
--- Dream { set, angle, lift, made } — площадка, камера, секунда суток
---     последней полянки
+-- Dream { set, angle, lift, made, shown } — площадка, камера, секунда суток
+--     последней полянки, тик (или секунда) последнего кадра; -1 — кадра ещё не было
 -- start(base) -> Dream — буферы и сцена (страницы); MemoryExhausted
 -- again(dream, base) — снова заснули: на первом кадре новая полянка
--- frame(dream, base) — один кадр, камера сдвигается на SPEED; пора — новая
---     полянка
+-- frame(dream, base) — кадр, если пора (due); раз в RENEW — новая полянка
 -- stop(base, dream) — отдать буферы
+-- Внутри: due(dream, base) -> тиков с прошлого кадра (не больше CATCH), 0 — рано
 
 use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.screen.clay.forms
 use os.target.uefi_x86_64.screen.clay.stage
 
-SPEED = 300
+PACE = 4
+TURN = 150
+CATCH = 8
+TICKS = 4294967296
+SECOND_TICKS = 60
 LIFT = 380
 RENEW = 60
 DAY = 86400
@@ -30,7 +37,8 @@ Dream = Box {
     set = stage.Stage {},
     angle = 0,
     lift = LIFT,
-    made = 0
+    made = 0,
+    shown = -1
 }
 
 skill start(base) {
@@ -38,18 +46,41 @@ skill start(base) {
     out Dream { set = set, made = stage.moment(base) }
 }
 
+skill due(dream, base) {
+    @now = stage.ticks(dream.set)
+    @round_size = TICKS
+    @pace = PACE
+    @scale = 1
+    (now < 0) {
+        now = stage.moment(base)
+        round_size = DAY
+        pace = 1
+        scale = SECOND_TICKS
+    }
+    @passed = pace
+    (dream.shown >= 0) { passed = (now - dream.shown + round_size) % round_size }
+    (passed < pace) { out 0 }
+    dream.shown = now
+    passed = passed * scale
+    (passed > CATCH) { passed = CATCH }
+    out passed
+}
+
 skill frame(dream, base) {
+    @passed = due(dream, base)
+    (passed == 0) { out none }
     ((stage.moment(base) - dream.made + DAY) % DAY >= RENEW) {
         stage.remake(dream.set, base)
         dream.made = stage.moment(base)
     }
     stage.render(dream.set, dream.angle, dream.lift, base)
-    dream.angle = forms.wrap(dream.angle + SPEED)
+    dream.angle = forms.wrap(dream.angle + TURN * passed)
     out none
 }
 
 skill again(dream, base) {
     dream.made = (stage.moment(base) - RENEW + DAY) % DAY
+    dream.shown = -1
     out none
 }
 
