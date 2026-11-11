@@ -5,19 +5,26 @@
 -- строка об этом на экран, журнал идёт только на экран. Строки копятся в
 -- pending и уходят в файл раз в секунду (second), сразу — у urgent.
 --
--- Trace { file, place, count, pending, moment, second, phy, rounds } — состояние
--- open(base) -> Trace — открыть файл (SetPosition в конец), первая строка
--- note(trace, base, text) — строка в журнал / urgent(…) — со свежим временем и
---     сразу в файл
--- flush(trace, base) — pending в файл, перерисовать панель
--- frame(trace, base, bytes, via) — строка о принятом кадре: ARP, IPv4-UDP, прочее
--- second(trace, card, rounds) -> yes, если началась новая секунда: тогда линк
---     (каждое изменение байта PHY), счётчики карты и flush; rounds — кругов
---     цикла с прошлого вызова, в строке счётчиков — кругов за секунду
--- link(trace, card) — строка, если байт PHY изменился (сырой байт, скорость, дуплекс)
--- counters(trace, card) — tally rtl8111, ISR, владельцы колец
+-- В файл — всегда всё. На экран — по ручке screen (SCREEN_LEVEL по умолчанию):
+-- quiet — панель пустая; important — события (event/urgent: старт, карта,
+-- линк, команды и итог отправки, Wi-Fi, ошибки); all — ещё и подробности
+-- (note: каждый кадр, строки раз в секунду).
+--
+-- Trace { file, place, count, pending, moment, second, phy, rounds, screen,
+--     dirty } / open(base) -> Trace — открыть файл (SetPosition в конец)
+-- note(trace, base, text) — подробность / event(…) — событие / urgent(…) —
+--     событие со свежим временем и сразу в файл
+-- ask / say(trace, base, bytes) — команда и ответ в netlog, если не quiet
+-- level(trace, base, words) -> текст — команда log: без слова — уровень,
+--     log quiet|important|all — поставить
+-- flush(trace, base) — pending в файл, перерисовать панель, если в ней новое
+-- frame(trace, base, bytes, via) — подробность о кадре: ARP, IPv4-UDP, прочее
+-- second(trace, card, rounds) -> yes в новую секунду: линк, счётчики, flush;
+--     rounds — кругов цикла с прошлого вызова
+-- link(trace, card) — событие, если байт PHY изменился / counters(trace, card)
 -- Внутри: open_on(base, handle) -> File; write_file(base, file, bytes);
---     boot_handle(base) -> DeviceHandle образа; phy_text(raw); ip(bytes, at)
+--     boot_handle(base) -> DeviceHandle образа; phy_text(raw); ip(bytes, at);
+--     line(trace, base, text, shown) — строка в pending и, если shown, на экран
 
 use core.str
 use core.group
@@ -30,6 +37,8 @@ use os.target.uefi_x86_64.network.net
 use os.target.uefi_x86_64.network.netlog
 use os.target.uefi_x86_64.network.netlog.journal
 
+SCREEN_LEVEL = "important"
+LEVELS = ["quiet", "important", "all"]
 LOADED_IMAGE_GUID = [161, 49, 27, 91, 98, 149, 210, 17, 142, 63, 0, 160, 201, 105, 114, 59]
 IMAGE_DEVICE = 24
 FILE_SET_POSITION = 56
@@ -48,7 +57,9 @@ Trace = Box {
     moment = "--:--:--",
     second = -1,
     phy = -1,
-    rounds = 0
+    rounds = 0,
+    screen = SCREEN_LEVEL,
+    dirty = no
 }
 
 skill boot_handle(base) {
@@ -91,19 +102,19 @@ skill open(base) {
     @trace = Trace {}
     trace.moment = clock.clock_text(clock.local_time(uefi.now(base))) rescue |err| { "--:--:--" }
     @boot = boot_handle(base) rescue |err| {
-        note(trace, base, "log file: no boot device ({err})")
+        event(trace, base, "log file: no boot device ({err})")
         0
     }
     (boot > 0) {
         trace.file = open_on(base, boot) rescue |err| {
-            note(trace, base, "log file: boot medium not writable ({err})")
+            event(trace, base, "log file: boot medium not writable ({err})")
             0
         }
         (trace.file > 0) { trace.place = "boot medium" }
     }
     (trace.file == 0) {
         @root = files.saltic_root(base) rescue |err| {
-            note(trace, base, "log file: no SALTIC volume ({err}), screen only")
+            event(trace, base, "log file: no SALTIC volume ({err}), screen only")
             out trace
         }
         files.close_file(base, root)
@@ -114,7 +125,7 @@ skill open(base) {
             }
         }
         trace.file = open_on(base, found) rescue |err| {
-            note(trace, base, "log file: SALTIC volume not writable ({err}), screen only")
+            event(trace, base, "log file: SALTIC volume not writable ({err}), screen only")
             out trace
         }
         trace.place = "SALTIC volume"
@@ -125,19 +136,57 @@ skill open(base) {
 }
 
 skill note(trace, base, text) {
+    out line(trace, base, text, trace.screen == "all")
+}
+
+skill event(trace, base, text) {
+    out line(trace, base, text, (trace.screen == "quiet") == no)
+}
+
+skill ask(trace, base, bytes) {
+    (trace.screen == "quiet") { out none }
+    out netlog.ask(base, bytes)
+}
+
+skill say(trace, base, bytes) {
+    (trace.screen == "quiet") { out none }
+    out netlog.say(base, bytes)
+}
+
+skill level(trace, base, words) {
+    (group.count(words) < 2) {
+        @now = trace.screen
+        out "журнал на экране: {now} (quiet, important, all; в файл — всё)"
+    }
+    @wanted = group.get(words, 1)
+    @known = no
+    drum (LEVELS) {
+        (beat == wanted) { known = yes }
+    }
+    (known == no) { out "не знаю уровень '{wanted}': quiet, important, all" }
+    trace.screen = wanted
+    (wanted == "quiet") { netlog.clear(base) rescue |err| { none } }
+    urgent(trace, base, "log: screen level {wanted}")
+    out "журнал на экране: {wanted}"
+}
+
+skill line(trace, base, text, shown) {
     trace.count = trace.count + 1
     @moment = trace.moment
     @count = trace.count
-    @line = journal.bytes_of("{moment} #{count} {text}")
-    netlog.note(base, line)
-    trace.pending = group.add(group.concat(trace.pending, line), 10)
+    @bytes = journal.bytes_of("{moment} #{count} {text}")
+    (shown == yes) {
+        netlog.note(base, bytes)
+        trace.dirty = yes
+    }
+    trace.pending = group.add(group.concat(trace.pending, bytes), 10)
     (group.count(trace.pending) > PENDING_LIMIT) { flush(trace, base) }
     out none
 }
 
 skill urgent(trace, base, text) {
     trace.moment = clock.clock_text(clock.local_time(uefi.now(base))) rescue |err| { trace.moment }
-    note(trace, base, text)
+    event(trace, base, text)
     out flush(trace, base)
 }
 
@@ -149,12 +198,15 @@ skill flush(trace, base) {
             write_file(base, trace.file, bytes) rescue |err| {
                 trace.file = 0
                 trace.place = "screen only"
-                note(trace, base, "log file: write failed ({err}), file logging off")
+                event(trace, base, "log file: write failed ({err}), file logging off")
                 none
             }
         }
     }
-    netlog.draw(base) rescue |err| { none }
+    (trace.dirty == yes) {
+        trace.dirty = no
+        netlog.draw(base) rescue |err| { none }
+    }
     out none
 }
 
@@ -232,8 +284,8 @@ skill second(trace, card, rounds) {
     (moment.second == trace.second) { out no }
     trace.second = moment.second
     trace.moment = clock.clock_text(clock.local_time(moment))
-    link(trace, card) rescue |err| { note(trace, card.base, "link: read failed ({err})") }
-    counters(trace, card) rescue |err| { note(trace, card.base, "card: counters failed ({err})") }
+    link(trace, card) rescue |err| { event(trace, card.base, "link: read failed ({err})") }
+    counters(trace, card) rescue |err| { event(trace, card.base, "card: counters failed ({err})") }
     trace.rounds = 0
     flush(trace, card.base)
     out yes
