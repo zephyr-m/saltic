@@ -1,0 +1,116 @@
+-- xor — первая нейросеть Saltic на Acer: 2 входа → 4 скрытых (leaky ReLU) → 1
+-- выход, учится XOR обратным распространением ошибки на дробных и core.matrix.
+-- Возвращает ход обучения (ошибка каждые 500 эпох), ответы на четыре входа и
+-- время: часы прошивки идут секундами, поэтому обучение повторяется RUNS раз.
+
+use core.str
+use core.group
+use core.fraction
+use core.matrix
+use core.num
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+
+HIDDEN = 4
+EPOCHS = 3000
+RATE = 0.05
+LEAK = 0.01
+RUNS = 20
+
+skill seconds(moment) {
+    out moment.hour * 3600 + moment.minute * 60 + moment.second
+}
+
+skill fresh(net, top) {
+    @seed = 7
+    drum (HIDDEN) {
+        @row = beat
+        drum (3) {
+            seed = noise(seed)
+            matrix.set(net, row, beat, weight(seed))
+        }
+        seed = noise(seed)
+        matrix.set(top, 0, row, weight(seed))
+    }
+    matrix.set(top, 0, HIDDEN, 0.0)
+    out none
+}
+
+skill noise(seed) {
+    out (seed * 75 + 74) % 65537
+}
+
+skill weight(seed) {
+    out (fraction.from(seed) / 65537.0 - 0.5) * 2.0
+}
+
+skill relu(x) {
+    (x > 0.0) { out x }
+    out x * LEAK
+}
+
+skill slope(x) {
+    (x > 0.0) { out 1.0 }
+    out LEAK
+}
+
+skill hidden_sum(net, j, a, b) {
+    out matrix.get(net, j, 0) * a + matrix.get(net, j, 1) * b + matrix.get(net, j, 2)
+}
+
+skill predict(net, top, a, b) {
+    @sum = matrix.get(top, 0, HIDDEN)
+    drum (HIDDEN) { sum = sum + matrix.get(top, 0, beat) * relu(hidden_sum(net, beat, a, b)) }
+    out sum
+}
+
+skill learn(net, top, a, b, want) {
+    @error = predict(net, top, a, b) - want
+    drum (HIDDEN) {
+        @raw = hidden_sum(net, beat, a, b)
+        @back = error * matrix.get(top, 0, beat) * slope(raw)
+        matrix.set(top, 0, beat, matrix.get(top, 0, beat) - RATE * error * relu(raw))
+        matrix.set(net, beat, 0, matrix.get(net, beat, 0) - RATE * back * a)
+        matrix.set(net, beat, 1, matrix.get(net, beat, 1) - RATE * back * b)
+        matrix.set(net, beat, 2, matrix.get(net, beat, 2) - RATE * back)
+    }
+    matrix.set(top, 0, HIDDEN, matrix.get(top, 0, HIDDEN) - RATE * error)
+    out error * error
+}
+
+skill snippet() {
+    @net = matrix.new(HIDDEN, 3)
+    @top = matrix.new(1, HIDDEN + 1)
+    @base = firmware.guest_base()
+    fresh(net, top)
+    @inputs = [[0.0, 0.0, 0.0], [0.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 0.0]]
+    @lines = ["XOR: 2 → {HIDDEN} → 1, эпох {EPOCHS}"]
+    drum (EPOCHS) {
+        @epoch = beat
+        @loss = 0.0
+        drum (inputs) { loss = loss + learn(net, top, group.get(beat, 0), group.get(beat, 1), group.get(beat, 2)) }
+        (epoch % 500 == 0) {
+            @shown = fraction.text(loss)
+            lines = group.add(lines, "эпоха {epoch}: ошибка {shown}")
+        }
+    }
+    @started = seconds(uefi.now(base))
+    drum (RUNS) {
+        fresh(net, top)
+        drum (EPOCHS) {
+            drum (inputs) { learn(net, top, group.get(beat, 0), group.get(beat, 1), group.get(beat, 2)) }
+        }
+    }
+    @spent = seconds(uefi.now(base)) - started
+    @steps = RUNS * EPOCHS * 4
+    lines = group.add(lines, "время: {RUNS} обучений по {EPOCHS} эпох ({steps} шагов) — {spent} с")
+    drum (inputs) {
+        @a = group.get(beat, 0)
+        @b = group.get(beat, 1)
+        @got = fraction.text(predict(net, top, a, b))
+        @left = num.round_school(a)
+        @right = num.round_school(b)
+        lines = group.add(lines, "{left} xor {right} → {got}")
+    }
+    out str.join(lines, "\n")
+}
