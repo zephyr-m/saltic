@@ -8,7 +8,7 @@
 - иконку языка и файловую тему Saltic Icons;
 - цветовую тему «Saltic Тема 1» в двух видах — светлую (`themes/saltic-theme-1-light.json`,
   акцент бирюзовый) и тёмную (`themes/saltic-theme-1.json`, акцент коралловый) — как окно
-  SalticIDE (`docs/site/IDE.html`): цвет несёт смысл, определения — жирным; значок файла —
+  SalticIDE (`docs/site/public/IDE.html`): цвет несёт смысл, определения — жирным; значок файла —
   стрелки в кружке, кружок контрастен теме.
 
 Установка ссылкой: `ln -s "$PWD" ~/.vscode/extensions/saltic.saltic-language-0.5.0`,
