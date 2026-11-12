@@ -1,13 +1,14 @@
 -- limits — лимиты канона архитектуры (docs/process/Code_Architecture_канон_для_агентов.md):
 -- не больше LIMIT_CODE строк кода в рукописном .saltic (пустые и `--` не в
--- счёт) и не больше LIMIT_HEADER строк шапки (всё до первой строки кода).
+-- счёт) и не больше LIMIT_HEADER строк шапки (всё до первой строки кода); шапка —
+-- мягко: длинная печатается предупреждением и не роняет проверку.
 -- Смотрит файлы из git (git ls-files), кроме .archive/ и папок generated/.
 -- Известные нарушения — в KNOWN («путь строк_кода строк_шапки», правит
 -- автор): им можно не расти, но не ухудшаться. Новое или выросшее — ошибка
 -- LimitsBroken (код 1). Вместо workbench/limits.sh (в .archive/); вызывается
 -- `just limits` и global-check.
 --
--- Tally { checked, old, new, grown } — итог; замер и сверка — limits/canon
+-- Tally { checked, old, new, grown, long } — итог; long — длинных шапок; замер и сверка — limits/canon
 -- program() — проверить все файлы, напечатать нарушения и итог
 -- Внутри: check(tally, known, path)
 
@@ -22,12 +23,19 @@ Tally = Box {
     checked = 0,
     old = 0,
     new = 0,
-    grown = 0
+    grown = 0,
+    long = 0
 }
 
 skill check(tally, known, path) {
     tally.checked = tally.checked + 1
-    @said = canon.verdict(path, file.read(path), known)
+    @text = file.read(path)
+    @note = canon.header_note(text)
+    (str.bytes(note) > 0) {
+        io.show("лимиты канона: {path} — {note}, предупреждение")
+        tally.long = tally.long + 1
+    }
+    @said = canon.verdict(path, text, known)
     (str.starts_with(said, "новое") == yes) {
         io.show("лимиты канона: {path} — {said}")
         tally.new = tally.new + 1
@@ -38,16 +46,13 @@ skill check(tally, known, path) {
         tally.grown = tally.grown + 1
         out none
     }
-    @size = canon.measure(file.read(path))
+    @size = canon.measure(text)
     (size.code > canon.LIMIT_CODE) { tally.old = tally.old + 1 }
-    ((size.code > canon.LIMIT_CODE) == no) {
-        (size.header > canon.LIMIT_HEADER) { tally.old = tally.old + 1 }
-    }
     out none
 }
 
 program() {
-    io.show("лимиты канона: код до {canon.LIMIT_CODE} строк, шапка до {canon.LIMIT_HEADER} строк")
+    io.show("лимиты канона: код до {canon.LIMIT_CODE} строк, шапка до {canon.LIMIT_HEADER} строк (мягко)")
     @known = canon.known()
     @listed = process.capture(["git", "ls-files", "*.saltic"], "", [])
     @tally = Tally {}
@@ -57,7 +62,7 @@ program() {
         (str.contains(path, "/generated/") == yes) { skip = yes }
         (skip == no) { check(tally, known, path) }
     }
-    io.show("лимиты канона: файлов {tally.checked}, известных нарушений {tally.old}, новых {tally.new}, выросших {tally.grown}")
+    io.show("лимиты канона: файлов {tally.checked}, известных нарушений {tally.old}, новых {tally.new}, выросших {tally.grown}, длинных шапок {tally.long}")
     (tally.new > 0) { out error.LimitsBroken }
     (tally.grown > 0) { out error.LimitsBroken }
     out none

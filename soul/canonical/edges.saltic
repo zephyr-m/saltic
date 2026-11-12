@@ -1,25 +1,45 @@
--- edges — граничные случаи из аудита 03.11.2026 (.archive/docs/fable/2026-11-03-audit.md,
--- ось 9): ошибки рантайма ловятся rescue по имени, дерево Box из рекурсии
--- переживает выход из регионов, строки — upper/lower/split, байты и буквы,
--- сравнения <= и >= на равных, отрицательных и u32 у верхней границы,
--- == у групп по содержимому вглубь (строки, вложенные, большие деревья).
--- Гоняется под rv32i и x86_64, вывод обеих целей сверяется с одним эталоном.
+-- edges — канон граничных случаев (решение автора 03.11.2026, PLAN «Два уровня
+-- проверок»; перенесён из tests/ 12.11.2026): ошибки рантайма ловятся rescue по
+-- имени, дерево Box из рекурсии переживает выход из регионов, строки, байты и
+-- буквы, <= и >= на краях, == у групп вглубь. Злые значения каждого типа (0, -1,
+-- край 29 бит, пустое, вложенное, none, yes/no, enum, ошибка, u8, bytes) — через
+-- параметр, out, группу, поле Box, "{x}" и ==; не-число в + — TypeMismatch.
+-- Вывод сверяется с expected/edges.txt; гоняют tests/run (edges — rv32i и
+-- x86_64, rv64 — под qemu-riscv64). Комментарии -- только в шапке.
 --
--- Node — Box { name, kids } — узел дерева
+-- Node — Box { name, kids } — узел дерева; Holder — Box { value, items } — поле
+--     под злое значение; Light — enum { RED, GREEN }
 -- divide / item / byte_at / piece / from_byte_error(…) -> "ok …" или имя ошибки
 -- grow(depth) -> Node — полное двоичное дерево глубины depth
 -- size(node) -> число узлов
 -- numbers(count, shift) -> группа count чисел с shift
+-- echo(value) -> value — через параметр и out; shown(value) -> "{value}"
+-- held(value) -> Holder — значение в поле и в группе Box, из региона навыка
+-- plus(left, right) / touch(box) / byte_set(buffer, value) / widen(value) -> "ok …" или
+--     имя ошибки; evil(suite) — злые значения по типам и путям
 -- program() -> итог testing.test_finish
 
 use core.str
 use core.group
 use craft.testing
 use core.u32
+use core.u8
+use core.num
+use core.bytes
 
 Node = Box {
     name = "",
     kids = []
+}
+
+Holder = Box {
+    value = none,
+    items = []
+}
+
+Light = enum {
+    RED,
+    GREEN
 }
 
 skill divide(left, right) {
@@ -66,6 +86,79 @@ skill numbers(count, shift) {
     out items
 }
 
+skill echo(value) {
+    out value
+}
+
+skill shown(value) {
+    out "{value}"
+}
+
+skill held(value) {
+    out Holder { value = value, items = [value, [value]] }
+}
+
+skill plus(left, right) {
+    @value = left + right rescue |err| { out "{err}" }
+    out "ok {value}"
+}
+
+skill touch(box) {
+    @value = box.value rescue |err| { out "{err}" }
+    out "ok {value}"
+}
+
+skill byte_set(buffer, value) {
+    bytes.set(buffer, 0, value) rescue |err| { out "{err}" }
+    out "ok"
+}
+
+skill widen(value) {
+    @wide = u8.from(value) rescue |err| { out "{err}" }
+    out "ok {wide}"
+}
+
+skill evil(suite) {
+    @top = num.MAXIMUM
+    @values = [0, -1, top, -top, "", "кот", [], [[]], none, yes, no, Light.GREEN]
+    drum (values) {
+        @value = beat
+        @kept = held(value)
+        @inside = group.get(kept.items, 1)
+        suite = testing.test_yes(suite, "{beat}: параметр и out", echo(value) == value)
+        suite = testing.test_yes(suite, "{beat}: поле Box", kept.value == value)
+        suite = testing.test_yes(suite, "{beat}: группа в поле, вложенная", group.get(inside, 0) == value)
+        suite = testing.test_equal(suite, "{beat}: строка", shown(value), "{value}")
+    }
+    suite = testing.test_equal(suite, "край 29 бит: -край - 1 + край", -top - 1 + top, -1)
+    suite = testing.test_equal(suite, "0 и -1: сумма", plus(0, -1), "ok -1")
+    suite = testing.test_equal(suite, "+: строка", plus("abc", 1), "TypeMismatch")
+    suite = testing.test_equal(suite, "+: справа yes", plus(1, yes), "TypeMismatch")
+    suite = testing.test_equal(suite, "+: none", plus(none, 1), "TypeMismatch")
+    suite = testing.test_equal(suite, "+: группа", plus([1], 1), "TypeMismatch")
+    suite = testing.test_equal(suite, "+: enum", plus(Light.RED, 1), "TypeMismatch")
+    suite = testing.test_yes(suite, "== пустое и вложенное пустое — no", ([] == [[]]) == no)
+    suite = testing.test_yes(suite, "== none и no — no", (none == no) == no)
+    suite = testing.test_yes(suite, "== 0 и no — no", (0 == no) == no)
+    suite = testing.test_yes(suite, "== \"\" и none — no", ("" == none) == no)
+    suite = testing.test_yes(suite, "== enum разные — no", (Light.RED == Light.GREEN) == no)
+    suite = testing.test_equal(suite, "поле у none", touch(none), "EmptyTouched")
+    suite = testing.test_equal(suite, "поле none у Box", touch(Holder {}), "ok <value>")
+    @failure = plus("x", 1)
+    suite = testing.test_yes(suite, "ошибка в группе", group.get([failure], 0) == "TypeMismatch")
+    suite = testing.test_equal(suite, "u8: 255", widen(255), "ok 255")
+    suite = testing.test_equal(suite, "u8: 256", widen(256), "значение вышло за границы фиксированного целого")
+    suite = testing.test_equal(suite, "u8: -1", widen(-1), "значение вышло за границы фиксированного целого")
+    @byte = u8.from(255)
+    suite = testing.test_yes(suite, "u8 в группе — обычное число", group.get([byte], 0) == 255)
+    @buffer = bytes.new(1)
+    suite = testing.test_equal(suite, "bytes: 255", byte_set(buffer, 255), "ok")
+    suite = testing.test_equal(suite, "bytes: 256", byte_set(buffer, 256), "ByteOutsideRange")
+    suite = testing.test_equal(suite, "bytes: -1", byte_set(buffer, -1), "ByteOutsideRange")
+    suite = testing.test_equal(suite, "bytes: пустой", bytes.count(bytes.new(0)), 0)
+    out suite
+}
+
 program() {
     @suite = testing.test_new()
     suite = testing.test_equal(suite, "деление на ноль", divide(7, 0), "DivisionByZero")
@@ -107,5 +200,6 @@ program() {
     suite = testing.test_yes(suite, "== групп: группа и число — no", (three == 3) == no)
     suite = testing.test_yes(suite, "== групп: деревья по 5000", numbers(5000, 0) == numbers(5000, 0))
     suite = testing.test_yes(suite, "== групп: деревья разные — no", (numbers(5000, 0) == numbers(5000, 1)) == no)
+    suite = evil(suite)
     out testing.test_finish(suite)
 }

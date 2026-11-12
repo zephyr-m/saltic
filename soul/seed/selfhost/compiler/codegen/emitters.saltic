@@ -6,11 +6,13 @@
 --
 -- negative_literal / constant_literal / fixed_literal(node) -> yes/no — узел
 --     есть константа (число, -число, answer, none; fixed — и wide-number)
--- immediate_operand / simple_operand(compiler, node) -> yes/no
+-- immediate_operand / simple_operand / number_operand(compiler, node) -> yes/no;
+--     number_tags(compiler, left, right) — тег NUMBER у VALUE и ERROR, иначе TypeMismatch
 -- emit_field_get / emit_field_set(compiler, name) — rt_box_get / rt_box_set; после
 --     чтения ошибка (EmptyTouched, MissingField) уходит в failure навыка
--- emit_word_result(compiler) — ERROR = CALL_NO_ERROR
--- emit_answer_from_bit(compiler) — бит в VALUE → yes/no
+-- subject_field(compiler, name) -> yes: не локальная, а поле Box метода; load_subject_field /
+--     store_subject_field(compiler, name) — чтение и запись (значение в VALUE) через $self
+-- emit_word_result(compiler) — ERROR = CALL_NO_ERROR; emit_answer_from_bit — бит VALUE → yes/no
 -- emit_number_less(compiler, smaller, larger) / emit_word_equal(compiler) — роли
 -- emit_number_not_less(compiler, smaller, larger) — «не меньше» для >= и <=
 -- flip_answer(compiler) — yes ↔ no в VALUE (после rt_fixed_less / greater)
@@ -67,6 +69,42 @@ skill constant_literal(node) {
     out no
 }
 
+skill number_operand(compiler, node) {
+    (ast.tag(node) == "number") { out yes }
+    (negative_literal(node) == yes) { out yes }
+    (lookup.infer_type(compiler, node) == "number") { out yes }
+    @parts = ast.plain(node)
+    (group.get(parts, 0) == "path") {
+        (state.symbol_has(compiler.current_function.slots, group.get(parts, 1)) == yes) { out no }
+        @constant = state.symbol_find(compiler.constants, lookup.resolve_symbol(compiler, compiler.constants, ast.path_text(parts)))
+        (str.bytes(constant.name) == 0) { out no }
+        (ast.tag(constant.node) == "number") { out yes }
+        out negative_literal(constant.node)
+    }
+    out no
+}
+
+skill number_tags(compiler, left_number, right_number) {
+    (left_number == yes) {
+        (right_number == yes) { out compiler }
+    }
+    @executor = compiler.executor
+    @ok = state.label(compiler, "number_tags")
+    pick {
+        (left_number == yes) { compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.ERROR, abi.TAG_MASK) }
+        (right_number == yes) { compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.TAG_MASK) }
+        {
+            compiler = executor.or(compiler, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+            compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.TAG_MASK)
+        }
+    }
+    compiler = executor.jump_if_zero(compiler, backend.SCRATCH0, ok)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_TYPE_MISMATCH)
+    (str.bytes(compiler.current_function.failure) > 0) { compiler = executor.jump(compiler, compiler.current_function.failure) }
+    out executor.label(compiler, ok)
+}
+
 skill emit_field_get(compiler, name) {
     @executor = compiler.executor
     @field = state.symbol_find(compiler.fields, name)
@@ -75,6 +113,27 @@ skill emit_field_get(compiler, name) {
     compiler = executor.call(compiler, "rt_box_get")
     (str.bytes(compiler.current_function.failure) == 0) { out compiler }
     out executor.jump_if_nonzero(compiler, backend.ERROR, compiler.current_function.failure)
+}
+
+skill subject_field(compiler, name) {
+    (state.symbol_has(compiler.current_function.slots, name) == yes) { out no }
+    @field = lookup.box_field_symbol(compiler, compiler.current_function.subject, name)
+    out str.bytes(field.name) > 0
+}
+
+skill load_subject_field(compiler, name) {
+    @field = lookup.box_field_symbol(compiler, compiler.current_function.subject, name)
+    (str.bytes(field.name) == 0) { out compiler }
+    @executor = compiler.executor
+    compiler = executor.load(compiler, backend.VALUE, backend.FRAME, state.slot(compiler, "$self"))
+    out emit_field_get(compiler, name)
+}
+
+skill store_subject_field(compiler, name) {
+    @executor = compiler.executor
+    compiler = executor.move(compiler, backend.ARG2, backend.VALUE)
+    compiler = executor.load(compiler, backend.VALUE, backend.FRAME, state.slot(compiler, "$self"))
+    out emit_field_set(compiler, name)
 }
 
 skill emit_field_set(compiler, name) {
