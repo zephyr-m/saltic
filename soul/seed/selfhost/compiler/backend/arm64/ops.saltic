@@ -1,0 +1,225 @@
+-- ops — операции договора над ролями на AArch64: константы, пересылки,
+-- арифметика, логика, сдвиги, сравнения в 0/1, add_checked, умножение и
+-- деление, дробные (d0, d1). Константа — movz / movn и movk по 16-битным
+-- половинам; число вне команды — через временный регистр (roles.TEMP).
+-- Логическое с непосредственным — команда с маской, если число — 2^k − 1 или
+-- −2^k (TAG_MASK и его дополнение), иначе через TEMP.
+--
+-- emit(compiler, encoded) — слово команды в код
+-- constant(compiler, register, halves) — [h0, h1, h2, h3] младшая первой
+-- word_halves(word) / wide_halves(wide) -> половины (слово — со знаком)
+-- number(compiler, register, n) — число со знаком в пределах 32 бит
+-- load_immediate / load_word / load_wide(compiler, to, …); move / negate(compiler, to, from)
+-- add_immediate(compiler, to, from, n); binary(compiler, op, to, left, right)
+-- logical(compiler, op, to, from, n) — op encoder.AND / ORR / EOR; mask(n) -> [N, immr, imms]
+--     или [] (k до MASK_LIMIT: на RV32I больше 2^28 не посчитать)
+-- shift(compiler, op, to, from, count) — op SHIFT_LEFT / SHIFT_RIGHT / SHIFT_ARITHMETIC
+-- compare(compiler, condition, to, left, right) / compare_immediate(compiler, condition, to, from, n)
+-- checked(compiler, op) — VALUE = VALUE ± ERROR, ERROR = CALL_NO_ERROR или ERROR_NUMBER_OVERFLOW
+-- multiply(compiler, op, to, left, right); data2(compiler, op, to, left, right) — LSLV / LSRV /
+--     SDIV / UDIV; remainder(compiler, op, to, left, right) — op SDIV / UDIV и msub
+-- fraction(compiler, op, to, left, right) / fraction_from / fraction_to(compiler, to, from[, mode])
+
+use core.group
+use selfhost.abi
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.arm64.encoder
+use selfhost.compiler.backend.arm64.roles
+use selfhost.machine.word
+
+HALF = 65536
+TOP_HALF = 65535
+MASK_BITS = 63
+MASK_LIMIT = 24
+SHIFT_LEFT = 0
+SHIFT_RIGHT = 1
+SHIFT_ARITHMETIC = 2
+
+skill emit(compiler, encoded) {
+    compiler.machine = layout.emit_word(compiler.machine, encoded)
+    out compiler
+}
+
+skill word_halves(value) {
+    @fill = 0
+    (value.b3 > 127) { fill = TOP_HALF }
+    out [value.b0 + value.b1 * 256, value.b2 + value.b3 * 256, fill, fill]
+}
+
+skill wide_halves(value) {
+    @low = word_halves(value.low)
+    @high = word_halves(value.high)
+    out [group.get(low, 0), group.get(low, 1), group.get(high, 0), group.get(high, 1)]
+}
+
+skill constant(compiler, register, halves) {
+    @ones = 0
+    @zeros = 0
+    drum (halves) {
+        (beat == TOP_HALF) { ones = ones + 1 }
+        (beat == 0) { zeros = zeros + 1 }
+    }
+    @fill = 0
+    (ones > zeros) { fill = TOP_HALF }
+    @started = no
+    drum (4) {
+        @half = group.get(halves, beat)
+        ((half == fill) == no) {
+            pick {
+                (started == yes) { compiler = emit(compiler, encoder.move_wide(encoder.MOVK, register, half, beat)) }
+                (fill == 0) { compiler = emit(compiler, encoder.move_wide(encoder.MOVZ, register, half, beat)) }
+                { compiler = emit(compiler, encoder.move_wide(encoder.MOVN, register, TOP_HALF - half, beat)) }
+            }
+            started = yes
+        }
+    }
+    (started == yes) { out compiler }
+    (fill == 0) { out emit(compiler, encoder.move_wide(encoder.MOVZ, register, 0, 0)) }
+    out emit(compiler, encoder.move_wide(encoder.MOVN, register, 0, 0))
+}
+
+skill number(compiler, register, value) {
+    (value >= 0) {
+        (value < HALF) { out emit(compiler, encoder.move_wide(encoder.MOVZ, register, value, 0)) }
+    }
+    (value < 0) {
+        (value >= -HALF) { out emit(compiler, encoder.move_wide(encoder.MOVN, register, -value - 1, 0)) }
+    }
+    out constant(compiler, register, word_halves(word.from_signed(value)))
+}
+
+skill load_immediate(compiler, to, value) {
+    out number(compiler, roles.register(to), value)
+}
+
+skill load_word(compiler, to, value) {
+    out constant(compiler, roles.register(to), word_halves(value))
+}
+
+skill load_wide(compiler, to, value) {
+    out constant(compiler, roles.register(to), wide_halves(value))
+}
+
+skill move(compiler, to, from) {
+    out emit(compiler, encoder.register_op(encoder.ORR, roles.register(to), encoder.ZERO_REGISTER, roles.register(from)))
+}
+
+skill negate(compiler, to, from) {
+    out emit(compiler, encoder.register_op(encoder.SUB, roles.register(to), encoder.ZERO_REGISTER, roles.register(from)))
+}
+
+skill add_immediate(compiler, to, from, value) {
+    @rd = roles.register(to)
+    @rn = roles.register(from)
+    (value >= 0) {
+        (value < 4096) { out emit(compiler, encoder.add_immediate(rd, rn, value)) }
+    }
+    (value < 0) {
+        (value > -4096) { out emit(compiler, encoder.sub_immediate(rd, rn, -value)) }
+    }
+    compiler = number(compiler, roles.TEMP, value)
+    out emit(compiler, encoder.register_op(encoder.ADD, rd, rn, roles.TEMP))
+}
+
+skill binary(compiler, op, to, left, right) {
+    out emit(compiler, encoder.register_op(op, roles.register(to), roles.register(left), roles.register(right)))
+}
+
+skill mask(value) {
+    @ones = 1
+    drum (MASK_LIMIT) {
+        @power = ones + 1
+        (value == ones) { out [1, 0, beat] }
+        (value == -power) { out [1, MASK_BITS - beat, MASK_BITS - 1 - beat] }
+        ones = ones * 2 + 1
+    }
+    out []
+}
+
+skill logical(compiler, op, to, from, value) {
+    @rd = roles.register(to)
+    @rn = roles.register(from)
+    @fields = mask(value)
+    (group.count(fields) == 3) {
+        @immediate = encoder.AND_IMMEDIATE
+        (op == encoder.ORR) { immediate = encoder.ORR_IMMEDIATE }
+        (op == encoder.EOR) { immediate = encoder.EOR_IMMEDIATE }
+        out emit(compiler, encoder.logical_immediate(immediate, rd, rn, group.get(fields, 0), group.get(fields, 1), group.get(fields, 2)))
+    }
+    compiler = number(compiler, roles.TEMP, value)
+    out emit(compiler, encoder.register_op(op, rd, rn, roles.TEMP))
+}
+
+skill shift(compiler, op, to, from, count) {
+    @rd = roles.register(to)
+    @rn = roles.register(from)
+    (op == SHIFT_LEFT) { out emit(compiler, encoder.bitfield(encoder.UBFM, rd, rn, (64 - count) % 64, MASK_BITS - count)) }
+    (op == SHIFT_RIGHT) { out emit(compiler, encoder.bitfield(encoder.UBFM, rd, rn, count, MASK_BITS)) }
+    out emit(compiler, encoder.bitfield(encoder.SBFM, rd, rn, count, MASK_BITS))
+}
+
+skill compare(compiler, condition, to, left, right) {
+    compiler = emit(compiler, encoder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, roles.register(left), roles.register(right)))
+    out emit(compiler, encoder.set(roles.register(to), condition))
+}
+
+skill compare_immediate(compiler, condition, to, from, value) {
+    @fits = no
+    (value >= 0) { fits = value < 4096 }
+    pick {
+        (fits == yes) { compiler = emit(compiler, encoder.compare_immediate(roles.register(from), value)) }
+        {
+            compiler = number(compiler, roles.TEMP, value)
+            compiler = emit(compiler, encoder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, roles.register(from), roles.TEMP))
+        }
+    }
+    out emit(compiler, encoder.set(roles.register(to), condition))
+}
+
+skill checked(compiler, op) {
+    @value = roles.register(backend.VALUE)
+    @fault = roles.register(backend.ERROR)
+    compiler = emit(compiler, encoder.register_op(op, value, value, fault))
+    compiler = number(compiler, roles.TEMP, abi.CALL_NO_ERROR)
+    compiler = number(compiler, roles.TEMP2, abi.ERROR_NUMBER_OVERFLOW)
+    out emit(compiler, encoder.select(encoder.CSEL, fault, roles.TEMP2, roles.TEMP, encoder.VS))
+}
+
+skill multiply(compiler, op, to, left, right) {
+    out emit(compiler, encoder.multiply(op, roles.register(to), roles.register(left), roles.register(right), encoder.ZERO_REGISTER))
+}
+
+skill data2(compiler, op, to, left, right) {
+    out emit(compiler, encoder.data2(op, roles.register(to), roles.register(left), roles.register(right)))
+}
+
+skill remainder(compiler, op, to, left, right) {
+    compiler = emit(compiler, encoder.data2(op, roles.TEMP, roles.register(left), roles.register(right)))
+    out emit(compiler, encoder.multiply(encoder.MSUB, roles.register(to), roles.TEMP, roles.register(right), roles.register(left)))
+}
+
+skill fraction(compiler, op, to, left, right) {
+    compiler = emit(compiler, encoder.fmov_to(0, roles.register(left)))
+    compiler = emit(compiler, encoder.fmov_to(1, roles.register(right)))
+    (op == backend.FRACTION_LESS) {
+        compiler = emit(compiler, encoder.fcmp(0, 1))
+        out emit(compiler, encoder.set(roles.register(to), encoder.MI))
+    }
+    (op == backend.FRACTION_LESS_EQUAL) {
+        compiler = emit(compiler, encoder.fcmp(0, 1))
+        out emit(compiler, encoder.set(roles.register(to), encoder.LS))
+    }
+    compiler = emit(compiler, encoder.fp_op(op, 0, 0, 1))
+    out emit(compiler, encoder.fmov_from(roles.register(to), 0))
+}
+
+skill fraction_from(compiler, to, from) {
+    compiler = emit(compiler, encoder.scvtf(0, roles.register(from)))
+    out emit(compiler, encoder.fmov_from(roles.register(to), 0))
+}
+
+skill fraction_to(compiler, to, from, mode) {
+    compiler = emit(compiler, encoder.fmov_to(0, roles.register(from)))
+    out emit(compiler, encoder.fcvt(roles.register(to), 0, mode))
+}

@@ -46,6 +46,7 @@ mkdir -p "$dist"
 tar -czf "$archive" \
     --exclude='bootstrap/saltic-*-compiler-x86_64-*' \
     --exclude='bootstrap/saltic-*-compiler-rv32i-*' \
+    --exclude='bootstrap/saltic-*-compiler-arm64-*' \
     --exclude='bootstrap/saltic-*-for-qemu_virt*' \
     --transform "s,^,saltic-$version/," \
     "${files[@]}"

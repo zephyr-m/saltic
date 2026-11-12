@@ -1,8 +1,8 @@
 -- toolchain — компилятор Saltic как программа: исходник -> проверка -> машина
 -- на договоре backend -> образ для цели.
 -- Запуск: program(исходник, выход, куча_текстом, цель); цели rv32i (ELF),
--- x86_64 и x86_64-uefi (родной x86-64: ELF64 Linux, PE32+ UEFI) и rv64
--- (ELF64 RISC-V). Модули ищутся от текущей папки; не уложились ближние
+-- x86_64 и x86_64-uefi (родной x86-64: ELF64 Linux, PE32+ UEFI), rv64
+-- (ELF64 RISC-V) и arm64 (ELF64 AArch64). Модули ищутся от текущей папки; не уложились ближние
 -- вызовы — собирает заново с дальними.
 -- Исходник грузится с местами (parser.load_file_loc): дерево с обёртками
 -- ast.located идёт в чекер и кодоген как есть, кодоген читает узлы через
@@ -13,9 +13,9 @@
 --     ParseFailed, CheckFailed, ValueOutsideRange, UnknownTarget, WriteFailed
 -- build_machine(ast, heap_size, far_calls) -> машина RV32I: исполнитель
 --     rv32i.Executor и платформа linux.Linux
--- write_x86(ast, heap_size, output_path, firmware) / write_rv64(ast,
+-- write_x86(ast, heap_size, output_path, firmware) / write_rv64 / write_arm64(ast,
 --     heap_size, output_path) -> none — слово 8 байт, числа 61-битные: ELF64
---     Linux без окна или PE32+ UEFI в окне; ELF64 RISC-V (RVA23); WriteFailed
+--     Linux без окна или PE32+ UEFI в окне; ELF64 RISC-V (RVA23); ELF64 AArch64; WriteFailed
 -- show(problem) / toolchain_show_diagnostics(diagnostics) — печать
 
 use core.str
@@ -30,7 +30,8 @@ use selfhost.compiler.platform.uefi
 use selfhost.compiler.backend.rv32i.machine.image
 use selfhost.compiler.backend.x86_64_native
 use selfhost.compiler.backend.rv64
-use selfhost.compiler.backend.rv64.machine.elf64
+use selfhost.compiler.backend.arm64
+use selfhost.compiler.linker.elf64
 use selfhost.machine.wide
 use selfhost.errors
 
@@ -70,14 +71,25 @@ skill write_x86(ast, heap_size, output_path, firmware) {
 skill write_rv64(ast, heap_size, output_path) {
     @machine = compiler.compile_machine(ast, heap_size, rv64.Executor {}, linux.Linux {})
     io.show("toolchain: пишу RV64 {output_path}")
-    elf64.write(output_path, machine) rescue |failure| {
+    elf64.write(output_path, machine, elf64.RISCV, elf64.PAGE_BYTES) rescue |failure| {
         show(errors.near_calls_failed())
         @far = compiler.compile_machine(ast, heap_size, rv64.Executor { far_calls = yes }, linux.Linux {})
-        elf64.write(output_path, far) rescue |again| {
+        elf64.write(output_path, far, elf64.RISCV, elf64.PAGE_BYTES) rescue |again| {
             show(errors.far_calls_failed())
             out error.WriteFailed
         }
         out none
+    }
+    out none
+}
+
+skill write_arm64(ast, heap_size, output_path) {
+    @executor = arm64.fresh()
+    @machine = compiler.compile_machine(ast, heap_size, executor, linux.Linux {})
+    io.show("toolchain: пишу ARM64 {output_path}")
+    arm64.write(output_path, machine, executor.fixups) rescue |failure| {
+        io.show("toolchain: образ ARM64 не собрался: {failure}")
+        out error.WriteFailed
     }
     out none
 }
@@ -95,6 +107,7 @@ skill build(source_path, output_path, heap_text, target) {
     (target == "rv64") { wide_numbers = yes }
     (target == "x86_64") { wide_numbers = yes }
     (target == "x86_64-uefi") { wide_numbers = yes }
+    (target == "arm64") { wide_numbers = yes }
     @checked = checker.check_for(loaded.ast, source_path, wide_numbers)
     (group.count(checked.diagnostics) > 0) {
         toolchain_show_diagnostics(checked.diagnostics)
@@ -107,6 +120,7 @@ skill build(source_path, output_path, heap_text, target) {
     (target == "x86_64") { out write_x86(checked.tree, heap_size, output_path, no) }
     (target == "x86_64-uefi") { out write_x86(checked.tree, heap_size, output_path, yes) }
     (target == "rv64") { out write_rv64(checked.tree, heap_size, output_path) }
+    (target == "arm64") { out write_arm64(checked.tree, heap_size, output_path) }
     ((target == "rv32i") == no) { out error.UnknownTarget }
     @machine = build_machine(checked.tree, heap_size, no)
     io.show("toolchain: пишу {output_path}")

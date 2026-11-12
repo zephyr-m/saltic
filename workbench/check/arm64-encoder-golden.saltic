@@ -1,0 +1,140 @@
+-- arm64-encoder-golden — эталоны кодировщика AArch64: каждую команду из TEST
+-- (строка check(suite, "<команда>", …, "<байты>"); строки own — нет) собирает
+-- настоящий GNU as для AArch64, байты сверяются с эталоном в тесте. Режим
+-- "--print" — только напечатать байты as («команда | байты»). AS / OBJCOPY —
+-- из системы, иначе перезапуск себя (BINARY) в nix shell с binutils для
+-- aarch64 (CROSS). Промежуточные файлы — в WORK. Расхождение или непонятая
+-- команда — ошибка GoldenDiffers (код 1). Устроен как x86-encoder-golden;
+-- вызывается `just arm64-golden [--print]`.
+--
+-- program(mode) — mode: "" (сверка) или "--print"
+-- Внутри: parse(line) -> [команда, эталон] или [], assemble(command) -> байты
+--     текстом «e0 03 01 aa» или "" (as не понял — первая строка ошибки в WORK/one.err)
+
+use io
+use io.file
+use io.clock
+use core.num
+use core.str
+use core.group
+use core.bytes
+use core.process
+use workbench.kit
+
+TEST = "tests/arm64-encoder.saltic"
+WORK = ".cache/build/workbench/arm64-encoder"
+BINARY = ".cache/build/workbench/arm64-encoder-golden"
+AS = "aarch64-unknown-linux-gnu-as"
+OBJCOPY = "aarch64-unknown-linux-gnu-objcopy"
+CROSS = "nixpkgs#pkgsCross.aarch64-multiplatform.buildPackages.binutils"
+OPENING = "check(suite, \""
+
+Tally = Box {
+    zone = 0,
+    passed = 0,
+    failed = 0
+}
+
+skill parse(line) {
+    @size = str.bytes(OPENING)
+    (str.bytes(line) < size + 4) { out [] }
+    @at = -1
+    drum (str.bytes(line) - size + 1) {
+        (at < 0) {
+            (str.starts_at(line, OPENING, beat) == yes) { at = beat + size }
+        }
+    }
+    (at < 0) { out [] }
+    @close = -1
+    drum (str.bytes(line) - at) {
+        (close < 0) {
+            (str.get(line, at + beat) == "\"") { close = at + beat }
+        }
+    }
+    (close < 0) { out [] }
+    @tail_end = -1
+    drum (str.bytes(line) - 1) {
+        (str.starts_at(line, "\")", beat) == yes) { tail_end = beat }
+    }
+    (tail_end < close + 1) { out [] }
+    @tail_start = tail_end
+    drum (tail_end) {
+        @back = tail_end - 1 - beat
+        (tail_start == tail_end) {
+            (str.get(line, back) == "\"") { tail_start = back + 1 }
+        }
+    }
+    (tail_start == tail_end) { out [] }
+    out [str.slice(line, at, close), str.slice(line, tail_start, tail_end)]
+}
+
+skill first_line(path) {
+    @lines = str.lines(file.read(path))
+    (group.count(lines) == 0) { out "" }
+    out group.get(lines, 0)
+}
+
+skill hex(buffer) {
+    @text = ""
+    drum (bytes.count(buffer)) {
+        @value = bytes.get(buffer, beat)
+        @pair = str.concat(num.hex_char(value / 16), num.hex_char(value % 16))
+        (beat > 0) { text = str.concat(text, " ") }
+        text = str.concat(text, pair)
+    }
+    out text
+}
+
+skill assemble(command) {
+    file.write("{WORK}/one.s", "{command}\n")
+    @built = kit.shell("\"$1\" -o \"$0/one.o\" \"$0/one.s\" 2> \"$0/one.err\" && \"$2\" -O binary -j .text \"$0/one.o\" \"$0/one.bin\"", [WORK, AS, OBJCOPY], "")
+    ((built == 0) == no) { out "" }
+    out hex(file.read_bytes("{WORK}/one.bin"))
+}
+
+program(mode) {
+    @tally = Tally {}
+    tally.zone = clock.zone()
+    process.run(["mkdir", "-p", WORK], "", [])
+    @tools = kit.shell("command -v \"$0\" >/dev/null && command -v \"$1\" >/dev/null", [AS, OBJCOPY], "")
+    ((tools == 0) == no) {
+        kit.line(tally.zone, "{AS} нет в системе — перезапускаюсь в nix shell {CROSS}")
+        @again = process.run(["nix", "--extra-experimental-features", "nix-command flakes", "shell", CROSS, "--command", BINARY, mode], "", [])
+        (again == 0) { out none }
+        out error.GoldenDiffers
+    }
+    @version = process.capture([AS, "--version"], "", [])
+    @first = group.get(str.lines(version.output), 0)
+    kit.line(tally.zone, "шаг 1: GNU as — {first}")
+    @checks = []
+    drum (str.lines(file.read(TEST))) {
+        @found = parse(beat)
+        (group.count(found) == 2) { checks = group.add(checks, found) }
+    }
+    @total = group.count(checks)
+    kit.line(tally.zone, "шаг 2: команд в тесте — {total}, собираю по одной")
+    drum (checks) {
+        @command = group.get(beat, 0)
+        @expected = group.get(beat, 1)
+        @actual = assemble(command)
+        (str.bytes(actual) == 0) {
+            @why = first_line("{WORK}/one.err")
+            kit.line(tally.zone, "  as не понял «{command}»: {why}")
+            tally.failed = tally.failed + 1
+        }
+        (str.bytes(actual) > 0) {
+            (mode == "--print") { kit.line(tally.zone, "{command} | {actual}") }
+            ((mode == "--print") == no) {
+                (actual == expected) { tally.passed = tally.passed + 1 }
+                ((actual == expected) == no) {
+                    kit.line(tally.zone, "  расходится «{command}»: as даёт «{actual}», в тесте «{expected}»")
+                    tally.failed = tally.failed + 1
+                }
+            }
+        }
+    }
+    (mode == "--print") { kit.line(tally.zone, "шаг 3: байты напечатаны, ошибок as — {tally.failed}") }
+    ((mode == "--print") == no) { kit.line(tally.zone, "шаг 3: совпало {tally.passed} из {total}, расходится {tally.failed}") }
+    (tally.failed > 0) { out error.GoldenDiffers }
+    out none
+}

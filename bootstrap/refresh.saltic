@@ -1,7 +1,7 @@
 -- refresh — самосборка полки bootstrap/ на x86-64: каждое поколение собирается
--- родным x86-64 и под rv64 и rv32i; fixed point у всех трёх — stage-2 = stage-3
--- для rv64 (эталон в git), x86-64 (родной собирает сам себя) и rv32i (вторая
--- сверка, в git не лежит). Самосборка на самом RV64 — bootstrap/refresh-rv64.saltic.
+-- родным x86-64 и под rv64, arm64 и rv32i; fixed point у всех — stage-2 = stage-3
+-- для rv64 (эталон в git), x86-64 (родной собирает сам себя), arm64 и rv32i (вторая
+-- сверка, в git не лежит). Самосборка на самих RV64 и ARM64 — bootstrap/refresh-qemu.saltic.
 -- Новый компилятор заменяет прежнюю версию на полке, имена и паспорта —
 -- bootstrap.names. Окружение как у прежнего refresh.sh: SALTIC_BOOTSTRAP_COMPILER,
 -- SALTIC_BOOTSTRAP_REFRESH_DIR, SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES; нет
@@ -30,7 +30,7 @@ HEAP = "4026531840"
 BINARY = ".cache/build/workbench/refresh"
 IN_SHELL = "SALTIC_BOOTSTRAP_REFRESH_IN_DEV_SHELL"
 KEPT = ["SALTIC_BOOTSTRAP_COMPILER", "SALTIC_BOOTSTRAP_REFRESH_DIR", "SALTIC_BOOTSTRAP_REFRESH_HEAP_BYTES"]
-TARGETS = "rv32i, rv64, x86_64"
+TARGETS = "rv32i, rv64, x86_64, arm64"
 
 Refresh = Box {
     zone = 0,
@@ -167,8 +167,9 @@ program(source) {
     @stage1 = "{work}/stage-1/toolchain"
     say(run, "текущее поколение собирает stage-1 (x86-64)")
     stage(run, shelf_native, "x86_64", stage1)
-    say(run, "stage-1 собирает stage-2 (rv64, x86-64 и rv32i)")
+    say(run, "stage-1 собирает stage-2 (rv64, x86-64, arm64 и rv32i)")
     stage(run, stage1, "rv64", "{work}/stage-2/toolchain-rv64")
+    stage(run, stage1, "arm64", "{work}/stage-2/toolchain-arm64")
     stage(run, stage1, "x86_64", "{work}/stage-2/toolchain")
     stage(run, stage1, "rv32i", "{work}/stage-2/toolchain.elf")
     @stage2 = "{work}/stage-2/toolchain"
@@ -195,8 +196,13 @@ program(source) {
     @narrow_started = time.now()
     stage(run, stage2, "rv32i", "{work}/stage-3/toolchain.elf")
     @narrow_seconds = kit.seconds_since(narrow_started)
-    say(run, "проверяю fixed point (rv64, x86-64 и rv32i)")
+    say(run, "stage-2 собирает stage-3 (arm64)")
+    @arm_started = time.now()
+    stage(run, stage2, "arm64", "{work}/stage-3/toolchain-arm64")
+    @arm_seconds = kit.seconds_since(arm_started)
+    say(run, "проверяю fixed point (rv64, x86-64, arm64 и rv32i)")
     same_or_fail("{work}/stage-2/toolchain-rv64", "{work}/stage-3/toolchain-rv64")
+    same_or_fail("{work}/stage-2/toolchain-arm64", "{work}/stage-3/toolchain-arm64")
     same_or_fail("{work}/stage-2/toolchain", "{work}/stage-3/toolchain")
     same_or_fail("{work}/stage-2/toolchain.elf", "{work}/stage-3/toolchain.elf")
     @compiler = names.compiler_path("rv64", "linux", "")
@@ -238,6 +244,17 @@ program(source) {
         copy_in("{work}/stage-3/toolchain.elf", narrow_path)
         names.write_passport(names.Passport { binary = narrow_path, runs_on = "rv32i, linux (qemu-riscv32 -B 0x100000000)", emits = TARGETS, parent = native_path, heap = run.heap, how = "вторая сверка: сходится на x86-64 (stage-2 = stage-3)", seconds = narrow_seconds, times = "{work}/stage-3/toolchain.elf.time" })
         say(run, "{narrow_name} обновлён (вторая сверка)")
+    }
+    @arm_path = names.compiler_path("arm64", "linux", "")
+    @arm_kept = no
+    (kit.same_file("{work}/stage-3/toolchain-arm64", arm_path) == yes) { arm_kept = kit.exists("{arm_path}.txt") }
+    @arm_name = kit.base_name(arm_path)
+    (arm_kept == yes) { say(run, "{arm_name} не изменился") }
+    (arm_kept == no) {
+        replace("arm64-linux", arm_path)
+        copy_in("{work}/stage-3/toolchain-arm64", arm_path)
+        passport(arm_path, "arm64, linux (qemu-aarch64)", native_path, run, "сходится на x86-64 (stage-2 = stage-3); на ARM64 — just arm64", arm_seconds, "{work}/stage-3/toolchain-arm64.time")
+        say(run, "{arm_name} обновлён")
     }
     @ready_path = names.native_compiler()
     names.link(ready_path)

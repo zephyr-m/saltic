@@ -20,4 +20,4 @@
 | x86-64 перевод | `.archive/x86_64_translation/` | — | 🗄 на пенсии с 06.11.2026: переводил готовый RV32I, был оракулом родного |
 | Thumb-2 | `thumb2/` | STM32H7, Teensy 4.1, RP2350 на ARM | ⬜ заглушка |
 | Xtensa | `xtensa/` | ESP32, ESP32-S3 | ⬜ заглушка |
-| ARM64 | `arm64/` | Raspberry Pi, Orange Pi, телефоны, Linux и Android | ⬜ заглушка |
+| ARM64 | `arm64.saltic`, `arm64/` | Linux; Raspberry Pi, Orange Pi, телефоны, Android | ✅ Linux под qemu-aarch64 (12.11.2026): свой исполнитель, все роли в регистрах, ELF — общий `../linker/elf64`; канон, самосборка — неподвижная точка |

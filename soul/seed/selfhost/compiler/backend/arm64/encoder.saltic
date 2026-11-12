@@ -1,0 +1,276 @@
+-- encoder — слова команд AArch64 для исполнителя договора: команда → Word
+-- (32 бита), без меток и раскладки. Регистр — номер 0…31 (31 — xzr, у add с
+-- непосредственным и у адреса памяти — sp). Слово собирается в bits32 из
+-- двух половин кода команды и полей, на RV32I число больше 2^28 не нужно.
+-- Отрицательное смещение — дополнение до ширины поля. Эталоны —
+-- tests/arm64-encoder.saltic, сверка с GNU as — workbench/check/arm64-encoder-golden.
+--
+-- EQ…LE — условия; ZERO_REGISTER = 31; X, W, H, B — размеры доступа к памяти
+-- add_immediate / sub_immediate(rd, rn, n) — n 0…4095; compare_immediate(rn, n)
+-- move_wide(op, rd, half, part) — op MOVZ / MOVN / MOVK, part 0…3 (сдвиг 16·part)
+-- logical_immediate(op, rd, rn, n, rotate, ones) — op AND_IMMEDIATE / ORR_IMMEDIATE /
+--     EOR_IMMEDIATE, поля N, immr, imms; adrp(rd, pages) — страницы ±2^20
+-- register_op(op, rd, rn, rm) — ADD / SUB / AND / ORR / EOR / ADDS / SUBS, сдвиг 0
+-- data2(op, rd, rn, rm) — LSLV / LSRV / ASRV / SDIV / UDIV
+-- bitfield(op, rd, rn, rotate, ones) — UBFM / SBFM
+-- multiply(op, rd, rn, rm, ra) — MADD / MSUB / SMULH / UMULH (у двух последних ra = 31)
+-- select(op, rd, rn, rm, condition) — CSEL / CSINC; set(rd, condition) — cset
+-- memory_fits(size, offset) -> yes/no — смещение ложится в масштабное 12 бит или
+--     в 9 бит со знаком; memory(size, load, rt, rn, offset); memory_register(size,
+--     load, rt, rn, rm); push(rt, rn, bytes) / pop(rt, rn, bytes) — [rn, #-bytes]! / [rn], #bytes
+-- branch(link, words) — b / bl; branch_condition(condition, words) — b.cond;
+--     compare_branch(nonzero, rt, words) — cbz / cbnz; words — расстояние в командах
+-- ret() / svc() / wfi() / dmb()
+-- fmov_to(d, x) / fmov_from(x, d); fp_op(kind, d, n, m) — FADD…FDIV по backend.FRACTION_*;
+--     fcmp(n, m); scvtf(d, x); fcvt(x, d, mode) — mode backend.FRACTION_NEAREST_EVEN / TRUNC
+
+use core.group
+use core.u8
+use core.u32
+use core.bits32
+use selfhost.compiler.backend
+use selfhost.machine.word
+
+EQ = 0
+NE = 1
+HS = 2
+LO = 3
+MI = 4
+PL = 5
+VS = 6
+VC = 7
+HI = 8
+LS = 9
+GE = 10
+LT = 11
+GT = 12
+LE = 13
+ZERO_REGISTER = 31
+REGISTER_LIMIT = 32
+
+X = 248
+W = 184
+H = 120
+B = 56
+MOVZ = 53888
+MOVN = 37504
+MOVK = 62080
+AND_IMMEDIATE = 37376
+ORR_IMMEDIATE = 45568
+EOR_IMMEDIATE = 53760
+ADD = 35584
+SUB = 51968
+AND = 35328
+ORR = 43520
+EOR = 51712
+SUBS = 60160
+ADDS = 43776
+LSLV = 8192
+LSRV = 9216
+ASRV = 10240
+SDIV = 3072
+UDIV = 2048
+UBFM = 54080
+SBFM = 37696
+MADD = 0
+MSUB = 32768
+SMULH = 31744
+UMULH = 31745
+CSEL = 0
+CSINC = 1024
+FP_LOW = [10240, 14336, 2048, 6144]
+
+skill put(value, shift) {
+    out bits32.shift_left(bits32.from(value), u8.from(shift))
+}
+
+skill fits(value, limit) {
+    (value < 0) { out no }
+    out value < limit
+}
+
+skill wrap(value, modulus) {
+    (value < -modulus / 2) { out error.InvalidImmediate }
+    (value >= modulus / 2) { out error.InvalidImmediate }
+    (value < 0) { out value + modulus }
+    out value
+}
+
+skill encode(high, low, rd, rn, field, at) {
+    (fits(rd, REGISTER_LIMIT) == no) { out error.InvalidRegister }
+    (fits(rn, REGISTER_LIMIT) == no) { out error.InvalidRegister }
+    @raw = bits32.or(put(high, 16), put(low, 0))
+    raw = bits32.or(raw, bits32.or(put(rd, 0), put(rn, 5)))
+    out word.of_raw(u32.from(bits32.or(raw, put(field, at))))
+}
+
+skill registers(high, low, rd, rn, rm) {
+    (fits(rm, REGISTER_LIMIT) == no) { out error.InvalidRegister }
+    out encode(high, low, rd, rn, rm, 16)
+}
+
+skill add_immediate(rd, rn, value) {
+    (fits(value, 4096) == no) { out error.InvalidImmediate }
+    out encode(37120, 0, rd, rn, value, 10)
+}
+
+skill sub_immediate(rd, rn, value) {
+    (fits(value, 4096) == no) { out error.InvalidImmediate }
+    out encode(53504, 0, rd, rn, value, 10)
+}
+
+skill compare_immediate(rn, value) {
+    (fits(value, 4096) == no) { out error.InvalidImmediate }
+    out encode(61696, 0, ZERO_REGISTER, rn, value, 10)
+}
+
+skill move_wide(op, rd, half, part) {
+    (fits(half, 65536) == no) { out error.InvalidImmediate }
+    (fits(part, 4) == no) { out error.InvalidImmediate }
+    out encode(op + part * 32, 0, rd, 0, half, 5)
+}
+
+skill logical_immediate(op, rd, rn, n, rotate, ones) {
+    (fits(n, 2) == no) { out error.InvalidImmediate }
+    (fits(rotate, 64) == no) { out error.InvalidImmediate }
+    (fits(ones, 64) == no) { out error.InvalidImmediate }
+    out encode(op, 0, rd, rn, n * 4096 + rotate * 64 + ones, 10)
+}
+
+skill adrp(rd, pages) {
+    @value = wrap(pages, 2097152)
+    @high = value / 4
+    out encode(36864 + (value - high * 4) * 8192, 0, rd, 0, high, 5)
+}
+
+skill register_op(op, rd, rn, rm) {
+    out registers(op, 0, rd, rn, rm)
+}
+
+skill data2(op, rd, rn, rm) {
+    out registers(39616, op, rd, rn, rm)
+}
+
+skill bitfield(op, rd, rn, rotate, ones) {
+    (fits(rotate, 64) == no) { out error.InvalidImmediate }
+    (fits(ones, 64) == no) { out error.InvalidImmediate }
+    out encode(op, 0, rd, rn, rotate * 64 + ones, 10)
+}
+
+skill multiply(op, rd, rn, rm, ra) {
+    (fits(rm, REGISTER_LIMIT) == no) { out error.InvalidRegister }
+    (fits(ra, REGISTER_LIMIT) == no) { out error.InvalidRegister }
+    (op == SMULH) { out registers(39744, SMULH, rd, rn, rm) }
+    (op == UMULH) { out registers(39872, SMULH, rd, rn, rm) }
+    out encode(39680, op, rd, rn, rm * 64 + ra, 10)
+}
+
+skill select(op, rd, rn, rm, condition) {
+    (fits(rm, REGISTER_LIMIT) == no) { out error.InvalidRegister }
+    (fits(condition, 16) == no) { out error.InvalidImmediate }
+    out encode(39552, op, rd, rn, rm * 16 + condition, 12)
+}
+
+skill set(rd, condition) {
+    @inverted = condition + 1
+    (condition % 2 == 1) { inverted = condition - 1 }
+    out select(CSINC, rd, ZERO_REGISTER, ZERO_REGISTER, inverted)
+}
+
+skill scale(size) {
+    (size == X) { out 8 }
+    (size == W) { out 4 }
+    (size == H) { out 2 }
+    out 1
+}
+
+skill access(size, load) {
+    (load == yes) { out size * 256 + 64 }
+    out size * 256
+}
+
+skill scaled(size, offset) {
+    (offset < 0) { out no }
+    (offset % scale(size) == 0) { out offset / scale(size) < 4096 }
+    out no
+}
+
+skill memory_fits(size, offset) {
+    (scaled(size, offset) == yes) { out yes }
+    (offset < -256) { out no }
+    out offset < 256
+}
+
+skill memory(size, load, rt, rn, offset) {
+    (scaled(size, offset) == yes) { out encode(access(size, load) + 256, 0, rt, rn, offset / scale(size), 10) }
+    out encode(access(size, load), 0, rt, rn, wrap(offset, 512), 12)
+}
+
+skill memory_register(size, load, rt, rn, rm) {
+    out registers(access(size, load) + 32, 26624, rt, rn, rm)
+}
+
+skill push(rt, rn, bytes) {
+    out encode(access(X, no), 3072, rt, rn, wrap(-bytes, 512), 12)
+}
+
+skill pop(rt, rn, bytes) {
+    out encode(access(X, yes), 1024, rt, rn, wrap(bytes, 512), 12)
+}
+
+skill branch(link, words) {
+    @high = 5120
+    (link == yes) { high = 37888 }
+    out encode(high, 0, 0, 0, wrap(words, 67108864), 0)
+}
+
+skill branch_condition(condition, words) {
+    out encode(21504, 0, condition, 0, wrap(words, 524288), 5)
+}
+
+skill compare_branch(nonzero, rt, words) {
+    @high = 46080
+    (nonzero == yes) { high = 46336 }
+    out encode(high, 0, rt, 0, wrap(words, 524288), 5)
+}
+
+skill ret() {
+    out encode(54879, 960, 0, 0, 0, 0)
+}
+
+skill svc() {
+    out encode(54272, 1, 0, 0, 0, 0)
+}
+
+skill wfi() {
+    out encode(54531, 8319, 0, 0, 0, 0)
+}
+
+skill dmb() {
+    out encode(54531, 15295, 0, 0, 0, 0)
+}
+
+skill fmov_to(d, x) {
+    out encode(40551, 0, d, x, 0, 0)
+}
+
+skill fmov_from(x, d) {
+    out encode(40550, 0, x, d, 0, 0)
+}
+
+skill fp_op(kind, d, n, m) {
+    out registers(7776, group.get(FP_LOW, kind), d, n, m)
+}
+
+skill fcmp(n, m) {
+    out registers(7776, 8192, 0, n, m)
+}
+
+skill scvtf(d, x) {
+    out encode(40546, 0, d, x, 0, 0)
+}
+
+skill fcvt(x, d, mode) {
+    (mode == backend.FRACTION_TRUNC) { out encode(40568, 0, x, d, 0, 0) }
+    out encode(40544, 0, x, d, 0, 0)
+}

@@ -1,0 +1,389 @@
+-- arm64 — родной бэкенд AArch64: исполнитель договора машины (Executor) и
+-- запись образа. Слово 8 байт, числа 61-битные, как у x86_64 и rv64. Общих
+-- команд у ARM ни с кем нет — исполнитель целиком свой, раскладка — общая
+-- (rv32i.machine.layout, адрес 65536, без низкой памяти), ELF — общий
+-- (linker.elf64). Все роли в регистрах (roles), стек договора — x28.
+-- Переходы к меткам — правки control.Fixups исполнителя (не layout.Patch):
+-- toolchain создаёт исполнитель со своим списком и отдаёт его в write.
+--
+-- Executor { fixups } — все методы договора backend.saltic, плюс multiply… /
+--     divide… / load_wide / fraction… 8-байтного слова
+-- fresh() -> Executor с пустым списком правок
+-- write(path, machine, fixups) — ELF64 AArch64 для Linux: вход дописан, сегменты
+--     на страницах 64 КБ, правки и патчи разрешены, образ записан; UnresolvedPatch, WriteFailed
+--
+-- Дети: encoder (слова команд), roles (роль → регистр), ops (константы,
+-- арифметика, сравнения), access (память и стек), control (переходы, вызовы,
+-- адреса, вызов ядра, правки), platform (вход Linux).
+
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.arm64.encoder
+use selfhost.compiler.backend.arm64.roles
+use selfhost.compiler.backend.arm64.ops
+use selfhost.compiler.backend.arm64.access
+use selfhost.compiler.backend.arm64.control
+use selfhost.compiler.backend.arm64.platform
+use selfhost.compiler.linker.elf64
+use selfhost.abi.shape
+
+Executor = Box {
+    fixups = control.Fixups {}
+
+    skill section(value) {
+        (value == backend.CODE) { out layout.Section.CODE }
+        (value == backend.RODATA) { out layout.Section.RODATA }
+        (value == backend.DATA) { out layout.Section.DATA }
+        out layout.Section.BSS
+    }
+
+    skill new_program(compiler, entry) {
+        compiler.words = shape.of(8)
+        compiler.machine = layout.host(entry)
+        compiler.machine.low_memory_size = 0
+        out compiler
+    }
+
+    skill heap_size(compiler, bytes) {
+        compiler.machine.heap_size = bytes
+        out compiler
+    }
+
+    skill label(compiler, name) {
+        compiler.machine = layout.define_label(compiler.machine, layout.Section.CODE, name)
+        out compiler
+    }
+
+    skill data_label(compiler, where, name) {
+        compiler.machine = layout.define_label(compiler.machine, section(where), name)
+        out compiler
+    }
+
+    skill align(compiler, where, boundary) {
+        compiler.machine = layout.align_section(compiler.machine, section(where), boundary)
+        out compiler
+    }
+
+    skill data_byte(compiler, where, value) {
+        compiler.machine = layout.append_section_byte(compiler.machine, section(where), value)
+        out compiler
+    }
+
+    skill data32(compiler, where, value) {
+        compiler.machine = layout.append_section_word(compiler.machine, section(where), value)
+        out compiler
+    }
+
+    skill data_word(compiler, where, value) {
+        compiler.machine = layout.append_section_word(compiler.machine, section(where), value)
+        @fill = 0
+        (value.b3 > 127) { fill = 255 }
+        drum (4) { compiler.machine = layout.append_section_byte(compiler.machine, section(where), fill) }
+        out compiler
+    }
+
+    skill data_text(compiler, where, text) {
+        compiler.machine = layout.append_section_text(compiler.machine, section(where), text, yes)
+        out compiler
+    }
+
+    skill reserve(compiler, bytes) {
+        compiler.machine = layout.reserve_bss(compiler.machine, bytes)
+        out compiler
+    }
+
+    skill load_immediate(compiler, to, value) {
+        out ops.load_immediate(compiler, to, value)
+    }
+
+    skill load_word(compiler, to, value) {
+        out ops.load_word(compiler, to, value)
+    }
+
+    skill load_address(compiler, to, name, addend) {
+        out control.load_address(compiler, fixups, to, name, addend)
+    }
+
+    skill move(compiler, to, from) {
+        out ops.move(compiler, to, from)
+    }
+
+    skill negate(compiler, to, from) {
+        out ops.negate(compiler, to, from)
+    }
+
+    skill add_immediate(compiler, to, from, value) {
+        out ops.add_immediate(compiler, to, from, value)
+    }
+
+    skill add(compiler, to, left, right) {
+        out ops.binary(compiler, encoder.ADD, to, left, right)
+    }
+
+    skill sub(compiler, to, left, right) {
+        out ops.binary(compiler, encoder.SUB, to, left, right)
+    }
+
+    skill and(compiler, to, left, right) {
+        out ops.binary(compiler, encoder.AND, to, left, right)
+    }
+
+    skill or(compiler, to, left, right) {
+        out ops.binary(compiler, encoder.ORR, to, left, right)
+    }
+
+    skill xor(compiler, to, left, right) {
+        out ops.binary(compiler, encoder.EOR, to, left, right)
+    }
+
+    skill and_immediate(compiler, to, from, value) {
+        out ops.logical(compiler, encoder.AND, to, from, value)
+    }
+
+    skill or_immediate(compiler, to, from, value) {
+        out ops.logical(compiler, encoder.ORR, to, from, value)
+    }
+
+    skill xor_immediate(compiler, to, from, value) {
+        out ops.logical(compiler, encoder.EOR, to, from, value)
+    }
+
+    skill shift_left(compiler, to, from, count) {
+        out ops.shift(compiler, ops.SHIFT_LEFT, to, from, count)
+    }
+
+    skill shift_right_signed(compiler, to, from, count) {
+        out ops.shift(compiler, ops.SHIFT_ARITHMETIC, to, from, count)
+    }
+
+    skill shift_right_unsigned(compiler, to, from, count) {
+        out ops.shift(compiler, ops.SHIFT_RIGHT, to, from, count)
+    }
+
+    skill shift_left_by(compiler, to, from, count) {
+        out ops.data2(compiler, encoder.LSLV, to, from, count)
+    }
+
+    skill shift_right_unsigned_by(compiler, to, from, count) {
+        out ops.data2(compiler, encoder.LSRV, to, from, count)
+    }
+
+    skill set_less(compiler, to, left, right) {
+        out ops.compare(compiler, encoder.LT, to, left, right)
+    }
+
+    skill set_less_unsigned(compiler, to, left, right) {
+        out ops.compare(compiler, encoder.LO, to, left, right)
+    }
+
+    skill set_less_unsigned_immediate(compiler, to, from, value) {
+        out ops.compare_immediate(compiler, encoder.LO, to, from, value)
+    }
+
+    skill set_zero(compiler, to, from) {
+        out ops.compare_immediate(compiler, encoder.EQ, to, from, 0)
+    }
+
+    skill set_nonzero(compiler, to, from) {
+        out ops.compare_immediate(compiler, encoder.NE, to, from, 0)
+    }
+
+    skill add_checked(compiler) {
+        out ops.checked(compiler, encoder.ADDS)
+    }
+
+    skill sub_checked(compiler) {
+        out ops.checked(compiler, encoder.SUBS)
+    }
+
+    skill load(compiler, to, base, offset) {
+        out access.transfer(compiler, encoder.X, yes, roles.register(to), base, offset)
+    }
+
+    skill load32(compiler, to, base, offset) {
+        out access.transfer(compiler, encoder.W, yes, roles.register(to), base, offset)
+    }
+
+    skill store32(compiler, from, base, offset) {
+        out access.transfer(compiler, encoder.W, no, roles.register(from), base, offset)
+    }
+
+    skill load_byte(compiler, to, base, offset) {
+        out access.transfer(compiler, encoder.B, yes, roles.register(to), base, offset)
+    }
+
+    skill load_half(compiler, to, base, offset) {
+        out access.transfer(compiler, encoder.H, yes, roles.register(to), base, offset)
+    }
+
+    skill store(compiler, from, base, offset) {
+        out access.transfer(compiler, encoder.X, no, roles.register(from), base, offset)
+    }
+
+    skill store_byte(compiler, from, base, offset) {
+        out access.transfer(compiler, encoder.B, no, roles.register(from), base, offset)
+    }
+
+    skill store_half(compiler, from, base, offset) {
+        out access.transfer(compiler, encoder.H, no, roles.register(from), base, offset)
+    }
+
+    skill store_zero(compiler, base, offset) {
+        out access.transfer(compiler, encoder.X, no, encoder.ZERO_REGISTER, base, offset)
+    }
+
+    skill store_byte_zero(compiler, base, offset) {
+        out access.transfer(compiler, encoder.B, no, encoder.ZERO_REGISTER, base, offset)
+    }
+
+    skill push(compiler, from) {
+        out access.push(compiler, from)
+    }
+
+    skill pop(compiler, to) {
+        out access.pop(compiler, to)
+    }
+
+    skill branch_equal(compiler, left, right, name) {
+        out control.branch(compiler, fixups, encoder.EQ, left, right, name)
+    }
+
+    skill branch_not_equal(compiler, left, right, name) {
+        out control.branch(compiler, fixups, encoder.NE, left, right, name)
+    }
+
+    skill branch_less(compiler, left, right, name) {
+        out control.branch(compiler, fixups, encoder.LT, left, right, name)
+    }
+
+    skill branch_greater_equal(compiler, left, right, name) {
+        out control.branch(compiler, fixups, encoder.GE, left, right, name)
+    }
+
+    skill branch_less_unsigned(compiler, left, right, name) {
+        out control.branch(compiler, fixups, encoder.LO, left, right, name)
+    }
+
+    skill branch_greater_equal_unsigned(compiler, left, right, name) {
+        out control.branch(compiler, fixups, encoder.HS, left, right, name)
+    }
+
+    skill branch_zero(compiler, from, name) {
+        out control.branch_test(compiler, fixups, control.ZERO, from, name)
+    }
+
+    skill branch_nonzero(compiler, from, name) {
+        out control.branch_test(compiler, fixups, control.NONZERO, from, name)
+    }
+
+    skill branch_negative(compiler, from, name) {
+        out control.branch_test(compiler, fixups, encoder.MI, from, name)
+    }
+
+    skill branch_not_negative(compiler, from, name) {
+        out control.branch_test(compiler, fixups, encoder.PL, from, name)
+    }
+
+    skill branch_not_positive(compiler, from, name) {
+        out control.branch_test(compiler, fixups, encoder.LE, from, name)
+    }
+
+    skill jump(compiler, name) {
+        out control.jump(compiler, fixups, name)
+    }
+
+    skill jump_if_equal(compiler, left, right, name) {
+        out control.jump_if(compiler, fixups, encoder.EQ, left, right, name)
+    }
+
+    skill jump_if_not_equal(compiler, left, right, name) {
+        out control.jump_if(compiler, fixups, encoder.NE, left, right, name)
+    }
+
+    skill jump_if_zero(compiler, from, name) {
+        out control.jump_if_test(compiler, fixups, no, from, name)
+    }
+
+    skill jump_if_nonzero(compiler, from, name) {
+        out control.jump_if_test(compiler, fixups, yes, from, name)
+    }
+
+    skill jump_far(compiler, name) {
+        out control.jump(compiler, fixups, name)
+    }
+
+    skill call(compiler, name) {
+        out control.call(compiler, fixups, name)
+    }
+
+    skill ret(compiler) {
+        out ops.emit(compiler, encoder.ret())
+    }
+
+    skill syscall(compiler, number) {
+        out control.syscall(compiler, number)
+    }
+
+    skill wait(compiler) {
+        out ops.emit(compiler, encoder.wfi())
+    }
+
+    skill fence(compiler) {
+        out ops.emit(compiler, encoder.dmb())
+    }
+
+    skill multiply(compiler, to, left, right) {
+        out ops.multiply(compiler, encoder.MADD, to, left, right)
+    }
+
+    skill multiply_high(compiler, to, left, right) {
+        out ops.multiply(compiler, encoder.SMULH, to, left, right)
+    }
+
+    skill multiply_high_unsigned(compiler, to, left, right) {
+        out ops.multiply(compiler, encoder.UMULH, to, left, right)
+    }
+
+    skill divide(compiler, to, left, right) {
+        out ops.data2(compiler, encoder.SDIV, to, left, right)
+    }
+
+    skill remainder(compiler, to, left, right) {
+        out ops.remainder(compiler, encoder.SDIV, to, left, right)
+    }
+
+    skill divide_unsigned(compiler, to, left, right) {
+        out ops.data2(compiler, encoder.UDIV, to, left, right)
+    }
+
+    skill remainder_unsigned(compiler, to, left, right) {
+        out ops.remainder(compiler, encoder.UDIV, to, left, right)
+    }
+
+    skill load_wide(compiler, to, value) {
+        out ops.load_wide(compiler, to, value)
+    }
+
+    skill fraction(compiler, op, to, left, right) {
+        out ops.fraction(compiler, op, to, left, right)
+    }
+
+    skill fraction_from(compiler, to, from) {
+        out ops.fraction_from(compiler, to, from)
+    }
+
+    skill fraction_to(compiler, to, from, mode) {
+        out ops.fraction_to(compiler, to, from, mode)
+    }
+}
+
+skill fresh() {
+    out Executor { fixups = control.Fixups {} }
+}
+
+skill write(path, machine, fixups) {
+    machine = platform.pages(platform.append(machine))
+    machine = control.resolve(machine, fixups) rescue |failure| { out error.UnresolvedPatch }
+    machine = layout.resolve(machine) rescue |failure| { out error.UnresolvedPatch }
+    out elf64.write(path, machine, elf64.AARCH64, platform.PAGE)
+}

@@ -1,0 +1,101 @@
+-- refresh-qemu — самосборка на самом RV64 или ARM64 под qemu, доказательство для
+-- релиза (just rv64, just arm64) и ветки global-check. Родной x86-64 компилятор с
+-- полки собирает компилятор под цель (stage-2), тот под qemu собирает себя
+-- (stage-3); stage-2 = stage-3 = эталон на полке (saltic-<версия>-compiler-<цель>-linux,
+-- его пишет refresh.saltic). Паспорт эталона дополняется временем самосборки под
+-- QEMU. Куча — HEAP, та же, что у refresh.saltic: иначе байты с эталоном не
+-- сойдутся. Выбор компиляторов и паспорт — bootstrap.names. Нет qemu цели —
+-- перезапуск себя (BINARY) в проектном Nix shell. Вместо refresh-rv64.saltic
+-- (общий на обе цели, решение автора 12.11.2026).
+--
+-- program(target, source) — target: rv64 или arm64; source: исходник компилятора или "" (SOURCE)
+-- Внутри: qemu(target) -> [команда, имя], say(zone, target, text), stage(zone,
+--     log, script, args) — шаг с журналом
+
+use io
+use io.clock
+use core.str
+use core.time
+use core.group
+use core.process
+use workbench.kit
+use bootstrap.names
+
+WORK = ".cache/build/bootstrap"
+HEAP = "4026531840"
+SOURCE = "soul/seed/selfhost/toolchain.saltic"
+BINARY = ".cache/build/workbench/refresh-qemu"
+IN_SHELL = "SALTIC_REFRESH_QEMU_IN_DEV_SHELL=1"
+TARGETS = "rv32i, rv64, x86_64, arm64"
+
+skill qemu(target) {
+    (target == "arm64") { out ["qemu-aarch64", "qemu-aarch64"] }
+    out ["qemu-riscv64 -B 0x100000000", "qemu-riscv64"]
+}
+
+skill say(zone, target, text) {
+    out kit.line(zone, "bootstrap {target}: {text}")
+}
+
+skill stage(zone, log, script, args) {
+    (kit.shell(script, args, "") == 0) { out none }
+    drum (kit.tail(log, 5)) { kit.line(zone, beat) }
+    out error.StageFailed
+}
+
+skill same_or_fail(zone, left, right) {
+    (kit.same_file(left, right) == yes) { out none }
+    @at = kit.first_difference(left, right)
+    kit.line(zone, "{left} и {right} различаются: байт {at}")
+    out error.FixedPointBroken
+}
+
+skill tool(name) {
+    @path = process.locate(name) rescue |err| { "" }
+    out path
+}
+
+program(target, source) {
+    @zone = clock.zone()
+    (str.bytes(source) == 0) { source = SOURCE }
+    @runner = qemu(target)
+    @emulator = group.get(runner, 1)
+    @command = group.get(runner, 0)
+    (str.bytes(tool(emulator)) == 0) {
+        (group.contains(process.environment(), IN_SHELL) == yes) {
+            say(zone, target, "{emulator} отсутствует внутри проектного Nix shell")
+            out error.NoQemu
+        }
+        say(zone, target, "вхожу в проектный Nix shell")
+        @again = process.run(["nix", "--extra-experimental-features", "nix-command flakes", "develop", "--command", BINARY, target, source], "", [IN_SHELL])
+        (again == 0) { out none }
+        out error.StageFailed
+    }
+    @work = "{WORK}-{target}"
+    process.run(["mkdir", "-p", work], "", [])
+    kit.shell("rm -f \"$0\"/toolchain-*", [work], "")
+    @shelf_compiler = names.native_compiler()
+    @stage2 = "{work}/toolchain-stage2"
+    @stage3 = "{work}/toolchain-stage3"
+    @shelf = kit.base_name(shelf_compiler)
+    say(zone, target, "{shelf} собирает компилятор под {target}")
+    stage(zone, "{work}/stage2.log", "\"$0\" \"$1\" \"$2\" \"$3\" \"$5\" > \"$4\" 2>&1", [shelf_compiler, source, stage2, HEAP, "{work}/stage2.log", target])
+    say(zone, target, "компилятор {target} собирает себя под {emulator}")
+    @measure = ""
+    @timer = tool("time")
+    (str.bytes(timer) > 0) { measure = "\"$5\" -o \"$4/stage3.time\" -f \"%M %U %S\"" }
+    @start = time.now()
+    stage(zone, "{work}/stage3.log", "{measure} {command} \"$0\" \"$1\" \"$2\" \"$3\" \"$6\" > \"$4/stage3.log\" 2>&1", [stage2, source, stage3, HEAP, work, timer, target])
+    @spent = kit.seconds_since(start)
+    say(zone, target, "проверяю fixed point на {target} (stage-2 = stage-3)")
+    same_or_fail(zone, stage2, stage3)
+    say(zone, target, "самосборка под {emulator} за {spent} с")
+    @path = names.compiler_path(target, "linux", "")
+    @reference = kit.base_name(path)
+    say(zone, target, "сверяю с эталоном {reference}")
+    same_or_fail(zone, stage3, path)
+    @heap = HEAP
+    names.write_passport(names.Passport { binary = path, runs_on = "{target}, linux ({command})", emits = TARGETS, parent = shelf_compiler, heap = heap, how = "сходится на {target} (stage-2 = stage-3 под {emulator}) и на x86-64", seconds = spent, word = "самосборки", times = "{work}/stage3.time" })
+    say(zone, target, "{reference} собирает себя, паспорт обновлён")
+    out none
+}

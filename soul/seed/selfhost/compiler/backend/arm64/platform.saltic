@@ -1,0 +1,37 @@
+-- platform — Linux для AArch64: вход arm64_start. Вызовы ядра — прямо svc #0
+-- (control.syscall): номера общей таблицы Linux (asm-generic) у ARM64 те же,
+-- что у RISC-V, поэтому подпрограмм-переводчиков, как у x86-64, нет. Вход
+-- кладёт sp ядра ([argc, argv…] по 8 байт) в x28 — стек договора — и прыгает
+-- на _start; сам sp дальше не трогается (он для сигналов ядра).
+-- Страница у ядер ARM бывает 4, 16 (новые телефоны) и 64 КБ (часть серверов):
+-- сегменты выровнены на PAGE = 64 КБ — rodata дополнена нулями до границы, так
+-- что data (layout ставит её на 4096 после rodata) начинается с новой страницы.
+--
+-- ENTRY = "arm64_start"; PAGE = 65536
+-- append(machine) -> machine с входом, machine.entry = ENTRY
+-- pages(machine) -> machine, у которой data начинается на границе PAGE
+
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.rv32i.machine.buffer
+use selfhost.compiler.backend.arm64.encoder
+use selfhost.compiler.backend.arm64.roles
+
+ENTRY = "arm64_start"
+START = "_start"
+PAGE = 65536
+
+skill append(machine) {
+    machine = layout.define_label(machine, layout.Section.CODE, ENTRY)
+    machine = layout.emit_word(machine, encoder.add_immediate(roles.STACK_REGISTER, roles.SP, 0))
+    @start = layout.find_label(machine, START)
+    machine = layout.emit_word(machine, encoder.branch(no, (start.offset - machine.code.length) / 4))
+    machine.entry = ENTRY
+    out machine
+}
+
+skill pages(machine) {
+    @current = layout.layout(machine)
+    @end = current.rodata_offset + machine.rodata.length
+    @padded = buffer.append_zeroes(machine.rodata, layout.align(end, PAGE) - end)
+    out layout.assign_section(machine, layout.Section.RODATA, padded)
+}

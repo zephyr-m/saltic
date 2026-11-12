@@ -88,8 +88,12 @@ limits: _dirs
     .cache/build/workbench/limits
 
 rv64: _dirs
-    bootstrap/saltic bootstrap/refresh-rv64.saltic .cache/build/workbench/refresh-rv64 536870912 x86_64 >/dev/null
-    .cache/build/workbench/refresh-rv64 ""
+    bootstrap/saltic bootstrap/refresh-qemu.saltic .cache/build/workbench/refresh-qemu 536870912 x86_64 >/dev/null
+    .cache/build/workbench/refresh-qemu rv64 ""
+
+arm64: _dirs
+    bootstrap/saltic bootstrap/refresh-qemu.saltic .cache/build/workbench/refresh-qemu 536870912 x86_64 >/dev/null
+    .cache/build/workbench/refresh-qemu arm64 ""
 
 release-draft base="": _dirs
     bootstrap/saltic workbench/release-draft.saltic .cache/build/workbench/release-draft 536870912 x86_64 >/dev/null
@@ -102,6 +106,10 @@ same-source: _dirs
 x86-golden mode="": _dirs
     bootstrap/saltic workbench/check/x86-encoder-golden.saltic .cache/build/workbench/x86-encoder-golden 536870912 x86_64 >/dev/null
     .cache/build/workbench/x86-encoder-golden "$1"
+
+arm64-golden mode="": _dirs
+    bootstrap/saltic workbench/check/arm64-encoder-golden.saltic .cache/build/workbench/arm64-encoder-golden 536870912 x86_64 >/dev/null
+    .cache/build/workbench/arm64-encoder-golden "$1"
 
 same *sources: _dirs
     bootstrap/saltic workbench/check/same.saltic .cache/build/workbench/same-check 536870912 x86_64 >/dev/null

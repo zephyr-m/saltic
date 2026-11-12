@@ -1,12 +1,12 @@
 -- global-check — одна проверка всего (`just global-check`): сперва по очереди
 -- сборка проверок, лимиты канона и самосборка полки, затем разом ветки —
--- тесты на rv32i, x86-64 и rv64, тесты ОС, платформы, самосборка на RV64,
--- кодировщик x86. Каждая ветка пишет журнал WORK/<имя>.log, конец — код в
+-- тесты на rv32i, x86-64, rv64 и arm64, тесты ОС, платформы, самосборка на RV64
+-- и ARM64, кодировщики x86 и arm64. Каждая ветка пишет журнал WORK/<имя>.log, конец — код в
 -- <имя>.log.code. Вид — карточки: пиксельный логотип, рамки «подготовка»,
 -- «проверки разом», «итог»; под веткой её случаи, у случая отрезок на общей
 -- шкале времени (где начался, где кончился). Случаи тестов — из строк
--- «случаи:» / «случай:» в журнале tests/run.saltic, у RV64 и кодировщика — шаги по
--- их строкам (RV64_STEPS, GOLDEN_STEPS). В терминале блок веток перерисован раз
+-- «случаи:» / «случай:» в журнале tests/run.saltic, у самосборки и кодировщиков — шаги
+-- по их строкам (self_steps(target), GOLDEN_STEPS). В терминале блок веток перерисован раз
 -- в секунду; не влезает в экран — под веткой только идущий случай, целиком —
 -- в конце. В CI (CI или SALTIC_PLAIN) — без цвета и перерисовки, раз в
 -- HEARTBEAT строка «идут» (правило автора: программа не крутится молча).
@@ -40,9 +40,8 @@ WORK = ".cache/build/workbench"
 RECEIPTS = "чеки"
 HEARTBEAT = 10
 NIX = "nix --extra-experimental-features \"nix-command flakes\" develop --command"
-TOOLS = [["limits", "workbench/check/limits.saltic"], ["tests", "tests/run.saltic"], ["refresh", "bootstrap/refresh.saltic"], ["refresh-rv64", "bootstrap/refresh-rv64.saltic"], ["x86-encoder-golden", "workbench/check/x86-encoder-golden.saltic"]]
-TESTS = [["rv32i", "all", "все тесты"], ["x86_64", "all", "все тесты"], ["x86_64", "os", "ОС"], ["rv64", "all", "все тесты"], ["rv32i", "platforms", "платформы"]]
-RV64_STEPS = [["собирает компилятор под RV64", "stage1"], ["собирает себя под qemu-riscv64", "stage2 и stage3"], ["проверяю fixed point", "fixed point"], ["сверяю с эталоном", "сверка с полкой"]]
+TOOLS = [["limits", "workbench/check/limits.saltic"], ["tests", "tests/run.saltic"], ["refresh", "bootstrap/refresh.saltic"], ["refresh-qemu", "bootstrap/refresh-qemu.saltic"], ["x86-encoder-golden", "workbench/check/x86-encoder-golden.saltic"], ["arm64-encoder-golden", "workbench/check/arm64-encoder-golden.saltic"]]
+TESTS = [["rv32i", "all", "все тесты"], ["x86_64", "all", "все тесты"], ["x86_64", "os", "ОС"], ["rv64", "all", "все тесты"], ["arm64", "all", "все тесты"], ["rv32i", "platforms", "платформы"]]
 GOLDEN_STEPS = [["шаг 1:", "GNU as"], ["шаг 2:", "сборка команд"], ["шаг 3:", "сверка"]]
 CASES = "случаи: "
 CASE = "случай: "
@@ -456,6 +455,10 @@ skill steps_of(pairs) {
     out result
 }
 
+skill self_steps(target) {
+    out steps_of([["собирает компилятор под {target}", "stage1"], ["компилятор {target} собирает себя", "stage2 и stage3"], ["проверяю fixed point", "fixed point"], ["сверяю с эталоном", "сверка с полкой"]])
+}
+
 skill check_branches() {
     @result = []
     drum (TESTS) {
@@ -467,8 +470,11 @@ skill check_branches() {
         @env = ["SALTIC_TEST_HOST={host}", "SALTIC_STAMPED=1"]
         result = group.add(result, Branch { name = "{proc} {tests}", proc = proc, what = group.get(beat, 2), script = script, env = env, log = "{WORK}/check-{host}-{tests}.log", cases = yes })
     }
-    result = group.add(result, Branch { name = "rv64 самосборка", proc = "rv64", what = "самосборка", script = "{WORK}/refresh-rv64 \"\"", env = ["SALTIC_STAMPED=1"], log = "{WORK}/check-rv64-self.log", steps = steps_of(RV64_STEPS) })
+    drum (["rv64", "arm64"]) {
+        result = group.add(result, Branch { name = "{beat} самосборка", proc = beat, what = "самосборка", script = "{WORK}/refresh-qemu {beat} \"\"", env = ["SALTIC_STAMPED=1"], log = "{WORK}/check-{beat}-self.log", steps = self_steps(beat) })
+    }
     result = group.add(result, Branch { name = "x86-64 кодировщик", proc = "x86-64", what = "кодировщик", script = "{WORK}/x86-encoder-golden \"\"", env = ["SALTIC_STAMPED=1"], log = "{WORK}/check-x86-golden.log", steps = steps_of(GOLDEN_STEPS) })
+    result = group.add(result, Branch { name = "arm64 кодировщик", proc = "arm64", what = "кодировщик", script = "{WORK}/arm64-encoder-golden \"\"", env = ["SALTIC_STAMPED=1"], log = "{WORK}/check-arm64-golden.log", steps = steps_of(GOLDEN_STEPS) })
     out result
 }
 

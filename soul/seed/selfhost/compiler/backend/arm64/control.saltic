@@ -1,0 +1,169 @@
+-- control — переходы, вызовы, адреса меток и вызов ядра договора на AArch64.
+-- Переход к метке пишется заглушкой и запоминается правкой (Fixup) в списке
+-- исполнителя (Fixups); resolve доводит их по раскладке layout перед записью.
+-- Правки свои, не layout.Patch: у ARM поля адреса другой ширины, а layout —
+-- общий. Ближние переходы — b.cond / cbz / cbnz (±1 МБ), «на любое
+-- расстояние» и вызовы — b / bl (±128 МБ), адрес метки — adrp + add (±4 ГБ).
+--
+-- FixupKind = enum { BRANCH, CONDITION, COMPARE, ADDRESS }
+-- Fixup { kind, offset, label, addend, register, condition, flag, next } — condition —
+--     условие b.cond; flag: у BRANCH — bl (yes) или b, у COMPARE — cbnz (yes) или cbz
+-- Fixups { first, last } — список правок одной сборки
+-- branch(compiler, fixups, condition, left, right, label) — сравнение и b.cond
+-- branch_test(compiler, fixups, kind, from, label) — kind ZERO / NONZERO / encoder.MI / PL / LE
+-- jump_if(compiler, fixups, condition, left, right, label) / jump_if_test(…, nonzero, from, label)
+-- jump(compiler, fixups, label) / call(compiler, fixups, label) / load_address(compiler, fixups, to, label, addend)
+-- syscall(compiler, number) — x8 = номер (часы — номер RV64), svc #0; у openat
+--     бит O_DIRECTORY общей таблицы (65536) переводится в ARM-овый (16384)
+-- resolve(machine, fixups) -> machine; UnknownLabel, PatchOutsideRange
+
+use io
+use core.str
+use core.system
+use selfhost.errors
+use selfhost.compiler.backend.rv32i.machine.layout
+use selfhost.compiler.backend.arm64.encoder
+use selfhost.compiler.backend.arm64.roles
+use selfhost.compiler.backend.arm64.ops
+
+ZERO = -1
+NONZERO = -2
+SKIP_JUMP = 2
+FLAGS = 2
+DIRECTORY_ROTATE = 48
+DIRECTORY_SHIFT = 2
+
+FixupKind = enum {
+    BRANCH,
+    CONDITION,
+    COMPARE,
+    ADDRESS
+}
+
+Fixup = Box {
+    kind = FixupKind.BRANCH,
+    offset = 0,
+    label = "",
+    addend = 0,
+    register = 0,
+    condition = 0,
+    flag = no,
+    next = none
+}
+
+Fixups = Box {
+    first = none,
+    last = none
+}
+
+skill note(compiler, fixups, fixup, placeholder) {
+    fixup.offset = compiler.machine.code.length
+    (fixups.last) |last| { last.next = fixup }
+    (fixups.first == none) { fixups.first = fixup }
+    fixups.last = fixup
+    out ops.emit(compiler, placeholder)
+}
+
+skill branch(compiler, fixups, condition, left, right, label) {
+    compiler = ops.emit(compiler, encoder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, roles.register(left), roles.register(right)))
+    out note(compiler, fixups, Fixup { kind = FixupKind.CONDITION, label = label, condition = condition }, encoder.branch_condition(condition, 0))
+}
+
+skill branch_test(compiler, fixups, kind, from, label) {
+    @rt = roles.register(from)
+    (kind == ZERO) { out note(compiler, fixups, Fixup { kind = FixupKind.COMPARE, label = label, register = rt, flag = no }, encoder.compare_branch(no, rt, 0)) }
+    (kind == NONZERO) { out note(compiler, fixups, Fixup { kind = FixupKind.COMPARE, label = label, register = rt, flag = yes }, encoder.compare_branch(yes, rt, 0)) }
+    compiler = ops.emit(compiler, encoder.compare_immediate(rt, 0))
+    out note(compiler, fixups, Fixup { kind = FixupKind.CONDITION, label = label, condition = kind }, encoder.branch_condition(kind, 0))
+}
+
+skill inverse(condition) {
+    (condition % 2 == 1) { out condition - 1 }
+    out condition + 1
+}
+
+skill jump_if(compiler, fixups, condition, left, right, label) {
+    compiler = ops.emit(compiler, encoder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, roles.register(left), roles.register(right)))
+    compiler = ops.emit(compiler, encoder.branch_condition(inverse(condition), SKIP_JUMP))
+    out jump(compiler, fixups, label)
+}
+
+skill jump_if_test(compiler, fixups, nonzero, from, label) {
+    @skip = yes
+    (nonzero == yes) { skip = no }
+    compiler = ops.emit(compiler, encoder.compare_branch(skip, roles.register(from), SKIP_JUMP))
+    out jump(compiler, fixups, label)
+}
+
+skill jump(compiler, fixups, label) {
+    out note(compiler, fixups, Fixup { kind = FixupKind.BRANCH, label = label, flag = no }, encoder.branch(no, 0))
+}
+
+skill call(compiler, fixups, label) {
+    out note(compiler, fixups, Fixup { kind = FixupKind.BRANCH, label = label, flag = yes }, encoder.branch(yes, 0))
+}
+
+skill load_address(compiler, fixups, to, label, addend) {
+    @rd = roles.register(to)
+    compiler = note(compiler, fixups, Fixup { kind = FixupKind.ADDRESS, label = label, addend = addend, register = rd }, encoder.adrp(rd, 0))
+    out ops.emit(compiler, encoder.add_immediate(rd, rd, 0))
+}
+
+skill directory_flag(compiler) {
+    compiler = ops.emit(compiler, encoder.logical_immediate(encoder.AND_IMMEDIATE, roles.TEMP, FLAGS, 1, DIRECTORY_ROTATE, 0))
+    compiler = ops.emit(compiler, encoder.register_op(encoder.EOR, FLAGS, FLAGS, roles.TEMP))
+    compiler = ops.emit(compiler, encoder.bitfield(encoder.UBFM, roles.TEMP, roles.TEMP, DIRECTORY_SHIFT, 63))
+    out ops.emit(compiler, encoder.register_op(encoder.ORR, FLAGS, FLAGS, roles.TEMP))
+}
+
+skill syscall(compiler, number) {
+    (number == system.SYSCALL_CLOCK_GETTIME) { number = system.SYSCALL_CLOCK_GETTIME_RV64 }
+    (number == system.SYSCALL_OPENAT) { compiler = directory_flag(compiler) }
+    compiler = ops.number(compiler, roles.SYSCALL, number)
+    out ops.emit(compiler, encoder.svc())
+}
+
+skill page(address) {
+    out address.b1 / 16 + address.b2 * 16 + address.b3 * 4096
+}
+
+skill resolve_one(machine, current, fixup) {
+    @target = layout.label_offset(machine, current, fixup.label) rescue |failure| {
+        (str.bytes(fixup.label) > 0) {
+            @problem = errors.missing_label(fixup.label)
+            io.show(problem.message)
+        }
+        out error.UnknownLabel
+    }
+    @words = (target + fixup.addend - fixup.offset) / 4
+    (fixup.kind == FixupKind.BRANCH) {
+        @encoded = encoder.branch(fixup.flag, words) rescue |failure| { out error.PatchOutsideRange }
+        out layout.set_section_word(machine, layout.Section.CODE, fixup.offset, encoded)
+    }
+    (fixup.kind == FixupKind.CONDITION) {
+        @encoded = encoder.branch_condition(fixup.condition, words) rescue |failure| { out error.PatchOutsideRange }
+        out layout.set_section_word(machine, layout.Section.CODE, fixup.offset, encoded)
+    }
+    (fixup.kind == FixupKind.COMPARE) {
+        @encoded = encoder.compare_branch(fixup.flag, fixup.register, words) rescue |failure| { out error.PatchOutsideRange }
+        out layout.set_section_word(machine, layout.Section.CODE, fixup.offset, encoded)
+    }
+    @address = layout.label_address(machine, current, fixup.label, fixup.addend)
+    @here = layout.address_add(machine.load_address, fixup.offset)
+    @low = address.b0 + address.b1 % 16 * 256
+    machine = layout.set_section_word(machine, layout.Section.CODE, fixup.offset, encoder.adrp(fixup.register, page(address) - page(here)))
+    out layout.set_section_word(machine, layout.Section.CODE, fixup.offset + 4, encoder.add_immediate(fixup.register, fixup.register, low))
+}
+
+skill resolve(machine, fixups) {
+    @current = layout.layout(machine)
+    @fixup = fixups.first
+    drum (machine.code.length / 4) {
+        (fixup) |item| {
+            machine = resolve_one(machine, current, item)
+            fixup = item.next
+        }
+        (fixup == none) { out machine }
+    }
+    out machine
+}

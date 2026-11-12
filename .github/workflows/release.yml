@@ -69,9 +69,67 @@ jobs:
           git status --porcelain -- bootstrap/
           test -z "$(git status --porcelain -- bootstrap/ | grep -v '\.txt$' || true)"
 
+  arm64-compiler:
+    name: ARM64 compiler
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build the ARM64 compiler with the shelf compiler
+        run: >-
+          mkdir -p .cache/arm64
+          && bootstrap/saltic soul/seed/selfhost/toolchain.saltic .cache/arm64/saltic 536870912 arm64
+
+      - name: Hand the compiler to the ARM64 runner
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: saltic-arm64
+          path: .cache/arm64/saltic
+
+  arm64:
+    name: ARM64 native
+    needs: arm64-compiler
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Take the ARM64 compiler
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: saltic-arm64
+          path: .cache/arm64
+
+      - name: Canon, edges and self-build on a real ARM64
+        # без эмулятора: канон и граничные случаи — те же эталоны, что у всех целей;
+        # компилятор собирает сам себя под ARM64 — байты те же, что у собранного на x86-64
+        shell: bash
+        run: |
+          set -euo pipefail
+          work=.cache/arm64
+          saltic="${work}/saltic"
+          chmod +x "${saltic}"
+          "${saltic}" soul/canonical/main.saltic "${work}/canonical" 67108864 arm64
+          cp tests/fixtures/input.txt "${work}/input.txt"
+          "${work}/canonical" "${work}/input.txt" "${work}/output.txt" > "${work}/stdout.txt"
+          cmp soul/canonical/expected/output.txt "${work}/stdout.txt"
+          test "$(tr -d '[:space:]' < "${work}/output.txt")" = "pip:0"
+          "${saltic}" soul/canonical/edges.saltic "${work}/edges" 536870912 arm64
+          "${work}/edges" > "${work}/edges.txt"
+          cmp soul/canonical/expected/edges.txt "${work}/edges.txt"
+          "${saltic}" soul/seed/selfhost/toolchain.saltic "${work}/saltic-again" 536870912 arm64
+          cmp "${saltic}" "${work}/saltic-again"
+
   publish:
     name: Publish
-    needs: verify
+    needs: [verify, arm64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -145,7 +203,7 @@ jobs:
 
   notify-finish:
     name: Notify finish
-    needs: [verify, publish]
+    needs: [verify, arm64, publish]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -155,6 +213,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           VERIFY: ${{ needs.verify.result }}
+          ARM64: ${{ needs.arm64.result }}
           PUBLISH: ${{ needs.publish.result }}
         run: |
           token="$(tr -d '[:space:]' <<< "${TELEGRAM_BOT_TOKEN}")"
@@ -167,6 +226,8 @@ jobs:
             status="✅ опубликован"
           elif [[ "${VERIFY}" != "success" ]]; then
             status="❌ проверка: ${VERIFY}"
+          elif [[ "${ARM64}" != "success" ]]; then
+            status="❌ arm64: ${ARM64}"
           else
             status="❌ публикация: ${PUBLISH}"
           fi

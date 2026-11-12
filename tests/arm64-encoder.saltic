@@ -1,0 +1,152 @@
+-- arm64-encoder — кодировщик команд AArch64 (selfhost/compiler/backend/arm64/
+-- encoder) против эталонных байтов GNU as. Имя проверки — команда в синтаксисе
+-- GNU as; workbench/check/arm64-encoder-golden собирает каждую строку check и
+-- сверяет байты с тестом (адрес страницы adrp as без раскладки не знает — эти
+-- строки идут через own и в сверку не попадают). Гоняется под rv32i и
+-- x86_64, вывод обеих целей сверяется с одним эталоном.
+--
+-- hex(word) -> байты слова текстом "e0 03 01 aa" (младший первым, как в файле)
+-- check / own(suite, command, word, expected) -> suite — байты против эталона
+-- failure(command) -> имя ошибки или "ok"
+-- data / constants / memory / control / fractions(suite) -> suite
+-- program() -> итог testing.test_finish
+
+use core.num
+use core.str
+use craft.testing
+use selfhost.compiler.backend
+use selfhost.machine.word
+use selfhost.compiler.backend.arm64.encoder
+
+skill hex(value) {
+    @text = ""
+    drum ([value.b0, value.b1, value.b2, value.b3]) {
+        (str.bytes(text) > 0) { text = str.concat(text, " ") }
+        text = str.concat(text, num.hex_char(beat / 16))
+        text = str.concat(text, num.hex_char(beat % 16))
+    }
+    out text
+}
+
+skill check(suite, command, value, expected) {
+    out testing.test_equal(suite, command, hex(value), expected)
+}
+
+skill own(suite, command, value, expected) {
+    out check(suite, command, value, expected)
+}
+
+skill data(suite) {
+    suite = check(suite, "mov x0, x1", encoder.register_op(encoder.ORR, 0, 31, 1), "e0 03 01 aa")
+    suite = check(suite, "add x0, x1, #1", encoder.add_immediate(0, 1, 1), "20 04 00 91")
+    suite = check(suite, "add x28, sp, #0", encoder.add_immediate(28, 31, 0), "fc 03 00 91")
+    suite = check(suite, "sub x2, x3, #4095", encoder.sub_immediate(2, 3, 4095), "62 fc 3f d1")
+    suite = check(suite, "cmp x5, #0", encoder.compare_immediate(5, 0), "bf 00 00 f1")
+    suite = check(suite, "add x0, x1, x2", encoder.register_op(encoder.ADD, 0, 1, 2), "20 00 02 8b")
+    suite = check(suite, "sub x0, xzr, x1", encoder.register_op(encoder.SUB, 0, 31, 1), "e0 03 01 cb")
+    suite = check(suite, "subs xzr, x1, x2", encoder.register_op(encoder.SUBS, 31, 1, 2), "3f 00 02 eb")
+    suite = check(suite, "adds x0, x0, x1", encoder.register_op(encoder.ADDS, 0, 0, 1), "00 00 01 ab")
+    suite = check(suite, "eor x9, x10, x11", encoder.register_op(encoder.EOR, 9, 10, 11), "49 01 0b ca")
+    suite = check(suite, "and x12, x13, x14", encoder.register_op(encoder.AND, 12, 13, 14), "ac 01 0e 8a")
+    suite = check(suite, "lslv x0, x1, x2", encoder.data2(encoder.LSLV, 0, 1, 2), "20 20 c2 9a")
+    suite = check(suite, "lsrv x0, x1, x2", encoder.data2(encoder.LSRV, 0, 1, 2), "20 24 c2 9a")
+    suite = check(suite, "sdiv x0, x1, x2", encoder.data2(encoder.SDIV, 0, 1, 2), "20 0c c2 9a")
+    suite = check(suite, "udiv x3, x4, x5", encoder.data2(encoder.UDIV, 3, 4, 5), "83 08 c5 9a")
+    suite = check(suite, "mul x0, x1, x2", encoder.multiply(encoder.MADD, 0, 1, 2, 31), "20 7c 02 9b")
+    suite = check(suite, "smulh x0, x1, x2", encoder.multiply(encoder.SMULH, 0, 1, 2, 31), "20 7c 42 9b")
+    suite = check(suite, "umulh x0, x1, x2", encoder.multiply(encoder.UMULH, 0, 1, 2, 31), "20 7c c2 9b")
+    suite = check(suite, "msub x0, x16, x2, x1", encoder.multiply(encoder.MSUB, 0, 16, 2, 1), "00 86 02 9b")
+    suite = check(suite, "csel x1, x17, x16, vs", encoder.select(encoder.CSEL, 1, 17, 16, encoder.VS), "21 62 90 9a")
+    suite = check(suite, "cset x0, eq", encoder.set(0, encoder.EQ), "e0 17 9f 9a")
+    suite = check(suite, "cset x3, lo", encoder.set(3, encoder.LO), "e3 27 9f 9a")
+    suite = check(suite, "cset x0, mi", encoder.set(0, encoder.MI), "e0 57 9f 9a")
+    suite = check(suite, "cset x0, ls", encoder.set(0, encoder.LS), "e0 87 9f 9a")
+    out suite
+}
+
+skill constants(suite) {
+    suite = check(suite, "movz x0, #1", encoder.move_wide(encoder.MOVZ, 0, 1, 0), "20 00 80 d2")
+    suite = check(suite, "movk x0, #1, lsl #16", encoder.move_wide(encoder.MOVK, 0, 1, 1), "20 00 a0 f2")
+    suite = check(suite, "movn x3, #0", encoder.move_wide(encoder.MOVN, 3, 0, 0), "03 00 80 92")
+    suite = check(suite, "movk x9, #0xffff, lsl #48", encoder.move_wide(encoder.MOVK, 9, 65535, 3), "e9 ff ff f2")
+    suite = check(suite, "and x0, x0, #7", encoder.logical_immediate(encoder.AND_IMMEDIATE, 0, 0, 1, 0, 2), "00 08 40 92")
+    suite = check(suite, "and x1, x2, #0xfffffffffffffff8", encoder.logical_immediate(encoder.AND_IMMEDIATE, 1, 2, 1, 61, 60), "41 f0 7d 92")
+    suite = check(suite, "orr x3, x3, #0x7", encoder.logical_immediate(encoder.ORR_IMMEDIATE, 3, 3, 1, 0, 2), "63 08 40 b2")
+    suite = check(suite, "eor x4, x5, #0xff", encoder.logical_immediate(encoder.EOR_IMMEDIATE, 4, 5, 1, 0, 7), "a4 1c 40 d2")
+    suite = check(suite, "and x16, x2, #0x10000", encoder.logical_immediate(encoder.AND_IMMEDIATE, 16, 2, 1, 48, 0), "50 00 70 92")
+    suite = check(suite, "lsl x0, x1, #3", encoder.bitfield(encoder.UBFM, 0, 1, 61, 60), "20 f0 7d d3")
+    suite = check(suite, "lsr x0, x1, #3", encoder.bitfield(encoder.UBFM, 0, 1, 3, 63), "20 fc 43 d3")
+    suite = check(suite, "asr x0, x1, #63", encoder.bitfield(encoder.SBFM, 0, 1, 63, 63), "20 fc 7f 93")
+    suite = check(suite, "lsl x2, x2, #0", encoder.bitfield(encoder.UBFM, 2, 2, 0, 63), "42 fc 40 d3")
+    out suite
+}
+
+skill memory(suite) {
+    suite = check(suite, "ldr x0, [x1, #8]", encoder.memory(encoder.X, yes, 0, 1, 8), "20 04 40 f9")
+    suite = check(suite, "str x0, [x1]", encoder.memory(encoder.X, no, 0, 1, 0), "20 00 00 f9")
+    suite = check(suite, "ldur x0, [x28, #-8]", encoder.memory(encoder.X, yes, 0, 28, -8), "80 83 5f f8")
+    suite = check(suite, "str x3, [x29, #32760]", encoder.memory(encoder.X, no, 3, 29, 32760), "a3 ff 3f f9")
+    suite = check(suite, "ldr w0, [x1, #4]", encoder.memory(encoder.W, yes, 0, 1, 4), "20 04 40 b9")
+    suite = check(suite, "str w2, [x3]", encoder.memory(encoder.W, no, 2, 3, 0), "62 00 00 b9")
+    suite = check(suite, "ldrb w0, [x1, #4095]", encoder.memory(encoder.B, yes, 0, 1, 4095), "20 fc 7f 39")
+    suite = check(suite, "strb wzr, [x1, #1]", encoder.memory(encoder.B, no, 31, 1, 1), "3f 04 00 39")
+    suite = check(suite, "ldrh w0, [x1, #2]", encoder.memory(encoder.H, yes, 0, 1, 2), "20 04 40 79")
+    suite = check(suite, "sturh w4, [x5, #-2]", encoder.memory(encoder.H, no, 4, 5, -2), "a4 e0 1f 78")
+    suite = check(suite, "str xzr, [x1, #16]", encoder.memory(encoder.X, no, 31, 1, 16), "3f 08 00 f9")
+    suite = check(suite, "ldr x0, [x1, x16]", encoder.memory_register(encoder.X, yes, 0, 1, 16), "20 68 70 f8")
+    suite = check(suite, "strb w2, [x3, x16]", encoder.memory_register(encoder.B, no, 2, 3, 16), "62 68 30 38")
+    suite = check(suite, "str x0, [x28, #-8]!", encoder.push(0, 28, 8), "80 8f 1f f8")
+    suite = check(suite, "ldr x0, [x28], #8", encoder.pop(0, 28, 8), "80 87 40 f8")
+    out suite
+}
+
+skill control(suite) {
+    suite = check(suite, "b .+8", encoder.branch(no, 2), "02 00 00 14")
+    suite = check(suite, "bl .+8", encoder.branch(yes, 2), "02 00 00 94")
+    suite = check(suite, "b .-4", encoder.branch(no, -1), "ff ff ff 17")
+    suite = check(suite, "b.ne .+8", encoder.branch_condition(encoder.NE, 2), "41 00 00 54")
+    suite = check(suite, "b.lt .-4", encoder.branch_condition(encoder.LT, -1), "eb ff ff 54")
+    suite = check(suite, "cbz x3, .+8", encoder.compare_branch(no, 3, 2), "43 00 00 b4")
+    suite = check(suite, "cbnz x0, .+12", encoder.compare_branch(yes, 0, 3), "60 00 00 b5")
+    suite = check(suite, "ret", encoder.ret(), "c0 03 5f d6")
+    suite = check(suite, "svc #0", encoder.svc(), "01 00 00 d4")
+    suite = check(suite, "wfi", encoder.wfi(), "7f 20 03 d5")
+    suite = check(suite, "dmb ish", encoder.dmb(), "bf 3b 03 d5")
+    suite = own(suite, "adrp x0, страница +1", encoder.adrp(0, 1), "00 00 00 b0")
+    suite = own(suite, "adrp x1, страница -1", encoder.adrp(1, -1), "e1 ff ff f0")
+    out suite
+}
+
+skill fractions(suite) {
+    suite = check(suite, "fmov d0, x1", encoder.fmov_to(0, 1), "20 00 67 9e")
+    suite = check(suite, "fmov x0, d1", encoder.fmov_from(0, 1), "20 00 66 9e")
+    suite = check(suite, "fadd d0, d0, d1", encoder.fp_op(backend.FRACTION_ADD, 0, 0, 1), "00 28 61 1e")
+    suite = check(suite, "fsub d0, d0, d1", encoder.fp_op(backend.FRACTION_SUB, 0, 0, 1), "00 38 61 1e")
+    suite = check(suite, "fmul d0, d0, d1", encoder.fp_op(backend.FRACTION_MUL, 0, 0, 1), "00 08 61 1e")
+    suite = check(suite, "fdiv d0, d0, d1", encoder.fp_op(backend.FRACTION_DIV, 0, 0, 1), "00 18 61 1e")
+    suite = check(suite, "fcmp d0, d1", encoder.fcmp(0, 1), "00 20 61 1e")
+    suite = check(suite, "scvtf d0, x1", encoder.scvtf(0, 1), "20 00 62 9e")
+    suite = check(suite, "fcvtzs x0, d1", encoder.fcvt(0, 1, backend.FRACTION_TRUNC), "20 00 78 9e")
+    suite = check(suite, "fcvtns x0, d1", encoder.fcvt(0, 1, backend.FRACTION_NEAREST_EVEN), "20 00 60 9e")
+    out suite
+}
+
+skill failure(command) {
+    (command == "register") { encoder.register_op(encoder.ADD, 32, 0, 0) rescue |err| { out "{err}" } }
+    (command == "immediate") { encoder.add_immediate(0, 0, 4096) rescue |err| { out "{err}" } }
+    (command == "branch") { encoder.branch_condition(encoder.EQ, 262144) rescue |err| { out "{err}" } }
+    out "ok"
+}
+
+program() {
+    @suite = testing.test_new()
+    suite = data(suite)
+    suite = constants(suite)
+    suite = memory(suite)
+    suite = control(suite)
+    suite = fractions(suite)
+    suite = testing.test_equal(suite, "ошибка: регистр 32", failure("register"), "InvalidRegister")
+    suite = testing.test_equal(suite, "ошибка: add с 4096", failure("immediate"), "InvalidImmediate")
+    suite = testing.test_equal(suite, "ошибка: b.cond дальше 1 МБ", failure("branch"), "InvalidImmediate")
+    out testing.test_finish(suite)
+}
