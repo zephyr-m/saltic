@@ -8,17 +8,24 @@
 -- регистры C и уходит обратно в Android. write — журнал Android
 -- (__android_log_print «%.*s», тег saltic). firmware(piece) — окно: 0 — адрес
 -- пикселей, 1 — ширина, 2 — высота, 3 — шаг строки в пикселях. Куча — mmap
--- с подсказкой HEAP_HINT (256 МБ): библиотеку Android грузит высоко, а рантайм
--- пишет адрес переноса в 4 байта — куча обязана лежать ниже 4 ГБ, иначе
--- отказ ERROR_MEMORY_EXHAUSTED (как у Linux, Q-050). Остальное —
+-- строго по адресу (MAP_FIXED_NOREPLACE) с шагом HEAP_HINT (256 МБ) до
+-- HEAP_LAST: библиотеку Android грузит высоко, просто подсказку ядро уносит
+-- выше 4 ГБ, а рантайм пишет адрес переноса в 4 байта — куча обязана лежать
+-- ниже 4 ГБ, иначе отказ ERROR_MEMORY_EXHAUSTED (как у Linux, Q-050).
+-- Касания: onInputQueueCreated вешает очередь ввода на петлю главного потока,
+-- android_drain забирает каждое событие и отвечает «не обработано» — без этого
+-- Android через 5 с считает приложение зависшим; «назад» закрывает окно сам.
+-- Ответы C int — 32 бита, знак расширяется (int_result). Остальное —
 -- от платформы Linux: у Android то же ядро и те же вызовы.
 -- Функция C зовётся через свой слот GOT (c_call): x2…x17 и x30 — на стек
 -- договора, аргументы — в x0…x7, это и есть роли VALUE, ERROR, ARG2…ARG7.
 --
 -- Platform { name, arena_bytes, default_heap_bytes } — append(compiler)
 -- library() -> shared.Library: libmain.so, нужны libandroid.so и liblog.so
--- Внутри: c_call(compiler, name), window(compiler, to), emit_create,
---     emit_window, emit_write, emit_exit, emit_heap, emit_firmware, emit_data
+-- Внутри: c_call(compiler, name), direct(compiler, name) — вызов C со стека C,
+--     frame(compiler, enter), int_result, window(compiler, to), emit_create,
+--     emit_window, emit_queue, emit_write, emit_exit, emit_heap, emit_firmware,
+--     emit_data
 
 use core.group
 use core.system
@@ -43,6 +50,15 @@ GEOMETRY = "ANativeWindow_setBuffersGeometry"
 LOCK = "ANativeWindow_lock"
 POST = "ANativeWindow_unlockAndPost"
 LOG = "__android_log_print"
+LOOPER = "ALooper_forThread"
+ATTACH = "AInputQueue_attachLooper"
+DETACH = "AInputQueue_detachLooper"
+NEXT_EVENT = "AInputQueue_getEvent"
+PRE_DISPATCH = "AInputQueue_preDispatchEvent"
+FINISH = "AInputQueue_finishEvent"
+QUEUE_CREATED = "android_queue_created"
+QUEUE_DESTROYED = "android_queue_destroyed"
+DRAIN = "android_drain"
 WINDOW = "android_window"
 BUFFER = "android_buffer"
 SAVED = "android_saved_sp"
@@ -51,6 +67,8 @@ ARG0 = "android_arg0"
 TAG = "android_tag"
 FORMAT = "android_format"
 WINDOW_SLOT = 56
+QUEUE_CREATED_SLOT = 88
+QUEUE_DESTROYED_SLOT = 96
 STACK_BYTES = 1048576
 BUFFER_BYTES = 64
 RGBA_8888 = 1
@@ -60,13 +78,18 @@ IP0 = 16
 C_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
 CALLER_SAVED = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 30]
 SAVE_BYTES = 96
+QUEUE_KEEP = 19
+FRAME_BYTES = 32
+EVENT_AT = 16
 HEAP_HINT = 268435456
+FIXED_NOREPLACE = 1048576
+HEAP_LAST = 4026531840
 
 skill library() {
     out shared.Library {
         name = "libmain.so",
         needed = ["libandroid.so", "liblog.so"],
-        imports = [GEOMETRY, LOCK, POST, LOG],
+        imports = [GEOMETRY, LOCK, POST, LOG, LOOPER, ATTACH, DETACH, NEXT_EVENT, PRE_DISPATCH, FINISH],
         exports = [CREATE]
     }
 }
@@ -82,6 +105,74 @@ skill c_call(compiler, name) {
     out compiler
 }
 
+skill direct(compiler, name) {
+    @executor = compiler.executor
+    compiler = executor.load_address(compiler, backend.SCRATCH0, shared.slot(name), 0)
+    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, IP0, 9, 0))
+    out ops.emit(compiler, encoder.blr(IP0))
+}
+
+skill int_result(compiler) {
+    @executor = compiler.executor
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, 32)
+    out executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, 32)
+}
+
+skill frame(compiler, enter) {
+    (enter == yes) {
+        compiler = ops.emit(compiler, encoder.sub_immediate(SP, SP, FRAME_BYTES))
+        compiler = ops.emit(compiler, encoder.memory(encoder.X, no, QUEUE_KEEP, SP, 0))
+        out ops.emit(compiler, encoder.memory(encoder.X, no, 30, SP, 8))
+    }
+    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, QUEUE_KEEP, SP, 0))
+    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 30, SP, 8))
+    compiler = ops.emit(compiler, encoder.add_immediate(SP, SP, FRAME_BYTES))
+    @executor = compiler.executor
+    out executor.ret(compiler)
+}
+
+skill emit_queue(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, QUEUE_CREATED)
+    compiler = frame(compiler, yes)
+    compiler = ops.emit(compiler, encoder.add_immediate(QUEUE_KEEP, 1, 0))
+    compiler = direct(compiler, LOOPER)
+    compiler = executor.move(compiler, backend.ERROR, backend.VALUE)
+    compiler = ops.emit(compiler, encoder.add_immediate(0, QUEUE_KEEP, 0))
+    compiler = executor.load_immediate(compiler, backend.ARG2, 1)
+    compiler = executor.load_address(compiler, backend.ARG3, DRAIN, 0)
+    compiler = ops.emit(compiler, encoder.add_immediate(4, QUEUE_KEEP, 0))
+    compiler = direct(compiler, ATTACH)
+    compiler = frame(compiler, no)
+    compiler = executor.label(compiler, QUEUE_DESTROYED)
+    compiler = frame(compiler, yes)
+    compiler = executor.move(compiler, backend.VALUE, backend.ERROR)
+    compiler = direct(compiler, DETACH)
+    compiler = frame(compiler, no)
+    compiler = executor.label(compiler, DRAIN)
+    compiler = frame(compiler, yes)
+    compiler = ops.emit(compiler, encoder.add_immediate(QUEUE_KEEP, 2, 0))
+    compiler = executor.label(compiler, ".L_android_drain_next")
+    compiler = ops.emit(compiler, encoder.add_immediate(0, QUEUE_KEEP, 0))
+    compiler = ops.emit(compiler, encoder.add_immediate(1, SP, EVENT_AT))
+    compiler = direct(compiler, NEXT_EVENT)
+    compiler = int_result(compiler)
+    compiler = executor.branch_negative(compiler, backend.VALUE, ".L_android_drain_done")
+    compiler = ops.emit(compiler, encoder.add_immediate(0, QUEUE_KEEP, 0))
+    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 1, SP, EVENT_AT))
+    compiler = direct(compiler, PRE_DISPATCH)
+    compiler = int_result(compiler)
+    compiler = executor.branch_nonzero(compiler, backend.VALUE, ".L_android_drain_next")
+    compiler = ops.emit(compiler, encoder.add_immediate(0, QUEUE_KEEP, 0))
+    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 1, SP, EVENT_AT))
+    compiler = executor.load_immediate(compiler, backend.ARG2, 0)
+    compiler = direct(compiler, FINISH)
+    compiler = executor.jump(compiler, ".L_android_drain_next")
+    compiler = executor.label(compiler, ".L_android_drain_done")
+    compiler = executor.load_immediate(compiler, backend.VALUE, 1)
+    out frame(compiler, no)
+}
+
 skill window(compiler, to) {
     @executor = compiler.executor
     compiler = executor.load_address(compiler, to, WINDOW, 0)
@@ -94,6 +185,10 @@ skill emit_create(compiler) {
     compiler = executor.load(compiler, backend.SCRATCH0, backend.VALUE, 0)
     compiler = executor.load_address(compiler, backend.SCRATCH1, WINDOW_CREATED, 0)
     compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, WINDOW_SLOT)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, QUEUE_CREATED, 0)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, QUEUE_CREATED_SLOT)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, QUEUE_DESTROYED, 0)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, QUEUE_DESTROYED_SLOT)
     out executor.ret(compiler)
 }
 
@@ -161,18 +256,26 @@ skill emit_heap(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, platform.HEAP)
     compiler = executor.move(compiler, backend.ERROR, backend.VALUE)
-    compiler = executor.load_immediate(compiler, backend.VALUE, HEAP_HINT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, HEAP_HINT)
+    compiler = executor.label(compiler, ".L_android_heap_try")
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH2)
     compiler = executor.load_immediate(compiler, backend.ARG2, linux.MAP_PROTECTION)
-    compiler = executor.load_immediate(compiler, backend.ARG3, linux.MAP_FLAGS)
+    compiler = executor.load_immediate(compiler, backend.ARG3, linux.MAP_FLAGS + FIXED_NOREPLACE)
     compiler = executor.load_immediate(compiler, backend.ARG4, -1)
     compiler = executor.load_immediate(compiler, backend.ARG5, 0)
     compiler = executor.syscall(compiler, system.SYSCALL_MMAP)
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, linux.MAP_FAILED_FROM)
-    compiler = executor.branch_greater_equal_unsigned(compiler, backend.VALUE, backend.SCRATCH0, ".L_android_heap_refused")
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.VALUE, backend.SCRATCH0, ".L_android_heap_next")
     compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.VALUE, linux.LOW_BITS)
     compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
     compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_android_heap_refused")
     compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_android_heap_next")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, HEAP_HINT)
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, HEAP_LAST)
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH2, backend.SCRATCH0, ".L_android_heap_refused")
+    compiler = executor.jump(compiler, ".L_android_heap_try")
     out tails.fail(compiler, ".L_android_heap_refused", abi.ERROR_MEMORY_EXHAUSTED)
 }
 
@@ -227,6 +330,7 @@ Platform = Box {
     skill append(compiler) {
         compiler = emit_create(compiler)
         compiler = emit_window(compiler)
+        compiler = emit_queue(compiler)
         compiler = emit_write(compiler)
         compiler = emit_exit(compiler)
         compiler = emit_firmware(compiler)
