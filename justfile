@@ -119,6 +119,17 @@ esp32-flash name="cube": _dirs
     .cache/build/workbench/esp32-toolchain os/target/esp32/{{name}}.saltic .cache/build/workbench/esp32-{{name}}.bin 65536
     nix-shell -p esptool --run "esptool --chip esp32 --port /dev/ttyUSB0 --no-stub write-flash 0x1000 .cache/build/workbench/esp32-{{name}}.bin"
 
+# APK для телефона: `just android` — os/target/android/hello.saltic, `just android
+# имя` — другая программа оттуда. Ключ подписи — один раз в .cache/build/android
+# (openssl, EC P-256), подпись и проверка — apksigner. Готовый APK —
+# .cache/build/android/<имя>.apk: скинуть на телефон и поставить.
+android name="hello": _dirs
+    mkdir -p .cache/build/android
+    bootstrap/saltic os/target/android/toolchain.saltic .cache/build/workbench/android-toolchain 1073741824 x86_64 >/dev/null
+    .cache/build/workbench/android-toolchain os/target/android/{{name}}.saltic .cache/build/android/{{name}}-unsigned.apk 67108864
+    test -f .cache/build/android/key.pk8 || (openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out .cache/build/android/key.pem && openssl pkcs8 -topk8 -nocrypt -outform DER -in .cache/build/android/key.pem -out .cache/build/android/key.pk8 && openssl req -new -x509 -key .cache/build/android/key.pem -days 10000 -subj "/CN=Saltic" -out .cache/build/android/cert.pem)
+    nix-shell -p apksigner --run "apksigner sign --key .cache/build/android/key.pk8 --cert .cache/build/android/cert.pem --min-sdk-version 24 --out .cache/build/android/{{name}}.apk .cache/build/android/{{name}}-unsigned.apk && apksigner verify --verbose .cache/build/android/{{name}}.apk"
+
 arm64-golden mode="": _dirs
     bootstrap/saltic workbench/check/arm64-encoder-golden.saltic .cache/build/workbench/arm64-encoder-golden 536870912 x86_64 >/dev/null
     .cache/build/workbench/arm64-encoder-golden "$1"

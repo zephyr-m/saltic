@@ -1,0 +1,63 @@
+-- toolchain — программа Saltic в APK для Android (AArch64, NativeActivity):
+-- компилятор с исполнителем arm64 и платформой android, библиотека libmain.so
+-- (compiler/linker/shared), двоичный манифест (formats/apk/manifest) и zip
+-- (formats/apk/zip) — неподписанный APK. Подпись — apksigner (just android).
+-- Запуск: toolchain <исходник> <выход.apk> <куча байт>; рядом пишет <выход>.so.
+--
+-- program(source_path, output_path, heap_text) -> none; ParseFailed, CheckFailed
+
+use core.str
+use core.group
+use io
+use io.file
+use selfhost.parser
+use selfhost.checker
+use selfhost.compiler
+use selfhost.compiler.backend.arm64
+use selfhost.compiler.linker.shared
+use selfhost.machine.wide
+use formats.apk.zip
+use formats.apk.manifest
+use os.target.android.platform
+
+PACKAGE = "dev.saltic.hello"
+LABEL = "Saltic"
+LIBRARY = "main"
+
+skill show_diagnostics(diagnostics) {
+    drum (group.count(diagnostics)) {
+        @item = group.get(diagnostics, beat)
+        io.show("{item.code}|{item.line}|{item.col}|{item.message}")
+    }
+    out none
+}
+
+program(source_path, output_path, heap_text) {
+    io.show("android: читаю {source_path}")
+    @loaded = parser.load_modules(source_path, ".")
+    (group.count(loaded.diagnostics) > 0) {
+        show_diagnostics(loaded.diagnostics)
+        out error.ParseFailed
+    }
+    io.show("android: проверяю")
+    @checked = checker.check_file(loaded.ast, source_path)
+    (group.count(checked.diagnostics) > 0) {
+        show_diagnostics(checked.diagnostics)
+        out error.CheckFailed
+    }
+    (str.starts_with(heap_text, "-") == yes) { out error.ValueOutsideRange }
+    @heap_size = wide.from_decimal(heap_text)
+    io.show("android: собираю libmain.so")
+    @executor = arm64.fresh()
+    @machine = compiler.compile_machine(checked.tree, heap_size, executor, platform.Platform {})
+    @library_path = "{output_path}.so"
+    shared.write(library_path, machine, executor.fixups, platform.library())
+    io.show("android: пакую {output_path}")
+    @manifest_bytes = manifest.encode(manifest.native_activity(PACKAGE, LABEL, LIBRARY, 1))
+    @entries = [
+        zip.Entry { name = "AndroidManifest.xml", data = manifest_bytes, align = 4 },
+        zip.Entry { name = "lib/arm64-v8a/lib{LIBRARY}.so", data = file.read_bytes(library_path), align = 16384 }
+    ]
+    file.write_bytes(output_path, zip.archive(entries))
+    out none
+}

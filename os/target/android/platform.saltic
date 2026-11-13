@@ -1,0 +1,249 @@
+-- platform — Android на AArch64 через NativeActivity: программа — библиотека
+-- libmain.so (compiler/linker/shared). ANativeActivity_onCreate ставит свой
+-- обработчик готового окна (callbacks + WINDOW_SLOT). Когда окно готово,
+-- android_window_created кладёт регистры C x19…x30 на sp, заводит стек
+-- договора в своей памяти (STACK_BYTES в bss: sp — стек C, его пишут вызовы
+-- Android), задаёт окну RGBA_8888, блокирует буфер и прыгает на _start с
+-- [argc = 1, argv, 0, 0]. Выход показывает кадр (unlockAndPost), возвращает
+-- регистры C и уходит обратно в Android. write — журнал Android
+-- (__android_log_print «%.*s», тег saltic). firmware(piece) — окно: 0 — адрес
+-- пикселей, 1 — ширина, 2 — высота, 3 — шаг строки в пикселях. Куча — mmap
+-- с подсказкой HEAP_HINT (256 МБ): библиотеку Android грузит высоко, а рантайм
+-- пишет адрес переноса в 4 байта — куча обязана лежать ниже 4 ГБ, иначе
+-- отказ ERROR_MEMORY_EXHAUSTED (как у Linux, Q-050). Остальное —
+-- от платформы Linux: у Android то же ядро и те же вызовы.
+-- Функция C зовётся через свой слот GOT (c_call): x2…x17 и x30 — на стек
+-- договора, аргументы — в x0…x7, это и есть роли VALUE, ERROR, ARG2…ARG7.
+--
+-- Platform { name, arena_bytes, default_heap_bytes } — append(compiler)
+-- library() -> shared.Library: libmain.so, нужны libandroid.so и liblog.so
+-- Внутри: c_call(compiler, name), window(compiler, to), emit_create,
+--     emit_window, emit_write, emit_exit, emit_heap, emit_firmware, emit_data
+
+use core.group
+use core.system
+use selfhost.abi
+use selfhost.memory.model
+use selfhost.machine.wide
+use selfhost.compiler.backend
+use selfhost.compiler.platform
+use selfhost.compiler.platform.linux
+use selfhost.compiler.platform.linux.process
+use selfhost.compiler.platform.linux.clock
+use selfhost.compiler.platform.linux.input
+use selfhost.compiler.platform.linux.socket
+use selfhost.compiler.backend.rv32i.runtime.tails
+use selfhost.compiler.backend.arm64.ops
+use selfhost.compiler.backend.arm64.encoder
+use selfhost.compiler.linker.shared
+
+CREATE = "ANativeActivity_onCreate"
+WINDOW_CREATED = "android_window_created"
+GEOMETRY = "ANativeWindow_setBuffersGeometry"
+LOCK = "ANativeWindow_lock"
+POST = "ANativeWindow_unlockAndPost"
+LOG = "__android_log_print"
+WINDOW = "android_window"
+BUFFER = "android_buffer"
+SAVED = "android_saved_sp"
+STACK = "android_stack"
+ARG0 = "android_arg0"
+TAG = "android_tag"
+FORMAT = "android_format"
+WINDOW_SLOT = 56
+STACK_BYTES = 1048576
+BUFFER_BYTES = 64
+RGBA_8888 = 1
+LOG_INFO = 4
+SP = 31
+IP0 = 16
+C_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+CALLER_SAVED = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 30]
+SAVE_BYTES = 96
+HEAP_HINT = 268435456
+
+skill library() {
+    out shared.Library {
+        name = "libmain.so",
+        needed = ["libandroid.so", "liblog.so"],
+        imports = [GEOMETRY, LOCK, POST, LOG],
+        exports = [CREATE]
+    }
+}
+
+skill c_call(compiler, name) {
+    @executor = compiler.executor
+    drum (CALLER_SAVED) { compiler = ops.emit(compiler, encoder.push(beat, 28, 8)) }
+    compiler = executor.load_address(compiler, backend.SCRATCH0, shared.slot(name), 0)
+    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, IP0, 9, 0))
+    compiler = ops.emit(compiler, encoder.blr(IP0))
+    @count = group.count(CALLER_SAVED)
+    drum (count) { compiler = ops.emit(compiler, encoder.pop(group.get(CALLER_SAVED, count - 1 - beat), 28, 8)) }
+    out compiler
+}
+
+skill window(compiler, to) {
+    @executor = compiler.executor
+    compiler = executor.load_address(compiler, to, WINDOW, 0)
+    out executor.load(compiler, to, to, 0)
+}
+
+skill emit_create(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, CREATE)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.VALUE, 0)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, WINDOW_CREATED, 0)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, WINDOW_SLOT)
+    out executor.ret(compiler)
+}
+
+skill emit_window(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, WINDOW_CREATED)
+    compiler = ops.emit(compiler, encoder.sub_immediate(SP, SP, SAVE_BYTES))
+    drum (group.count(C_SAVED)) { compiler = ops.emit(compiler, encoder.memory(encoder.X, no, group.get(C_SAVED, beat), SP, beat * 8)) }
+    compiler = ops.emit(compiler, encoder.add_immediate(9, SP, 0))
+    compiler = executor.load_address(compiler, backend.SCRATCH1, SAVED, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
+    compiler = executor.load_address(compiler, backend.STACK, STACK, STACK_BYTES)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, WINDOW, 0)
+    compiler = executor.store(compiler, backend.ERROR, backend.SCRATCH0, 0)
+    compiler = executor.move(compiler, backend.VALUE, backend.ERROR)
+    compiler = executor.load_immediate(compiler, backend.ERROR, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG3, RGBA_8888)
+    compiler = c_call(compiler, GEOMETRY)
+    compiler = window(compiler, backend.VALUE)
+    compiler = executor.load_address(compiler, backend.ERROR, BUFFER, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 0)
+    compiler = c_call(compiler, LOCK)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, 0)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, ARG0, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, 8)
+    compiler = executor.store_zero(compiler, backend.STACK, 16)
+    compiler = executor.store_zero(compiler, backend.STACK, 24)
+    out executor.jump(compiler, "_start")
+}
+
+skill emit_write(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.WRITE)
+    compiler = executor.push(compiler, backend.ARG3)
+    compiler = executor.push(compiler, backend.ARG4)
+    compiler = executor.move(compiler, backend.ARG3, backend.ARG2)
+    compiler = executor.move(compiler, backend.ARG4, backend.ERROR)
+    compiler = executor.load_immediate(compiler, backend.VALUE, LOG_INFO)
+    compiler = executor.load_address(compiler, backend.ERROR, TAG, 0)
+    compiler = executor.load_address(compiler, backend.ARG2, FORMAT, 0)
+    compiler = c_call(compiler, LOG)
+    compiler = executor.move(compiler, backend.VALUE, backend.ARG3)
+    compiler = executor.pop(compiler, backend.ARG4)
+    compiler = executor.pop(compiler, backend.ARG3)
+    out tails.ok(compiler)
+}
+
+skill emit_exit(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.EXIT)
+    compiler = window(compiler, backend.VALUE)
+    compiler = c_call(compiler, POST)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, SAVED, 0)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.SCRATCH0, 0)
+    compiler = ops.emit(compiler, encoder.add_immediate(SP, 9, 0))
+    drum (group.count(C_SAVED)) { compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, group.get(C_SAVED, beat), SP, beat * 8)) }
+    compiler = ops.emit(compiler, encoder.add_immediate(SP, SP, SAVE_BYTES))
+    out executor.ret(compiler)
+}
+
+skill emit_heap(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.HEAP)
+    compiler = executor.move(compiler, backend.ERROR, backend.VALUE)
+    compiler = executor.load_immediate(compiler, backend.VALUE, HEAP_HINT)
+    compiler = executor.load_immediate(compiler, backend.ARG2, linux.MAP_PROTECTION)
+    compiler = executor.load_immediate(compiler, backend.ARG3, linux.MAP_FLAGS)
+    compiler = executor.load_immediate(compiler, backend.ARG4, -1)
+    compiler = executor.load_immediate(compiler, backend.ARG5, 0)
+    compiler = executor.syscall(compiler, system.SYSCALL_MMAP)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, linux.MAP_FAILED_FROM)
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.VALUE, backend.SCRATCH0, ".L_android_heap_refused")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.VALUE, linux.LOW_BITS)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_android_heap_refused")
+    compiler = tails.ok(compiler)
+    out tails.fail(compiler, ".L_android_heap_refused", abi.ERROR_MEMORY_EXHAUSTED)
+}
+
+skill emit_firmware(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.FIRMWARE)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, BUFFER, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 1)
+    compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_width")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 2)
+    compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_height")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 3)
+    compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_stride")
+    compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH0, 16)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_android_width")
+    compiler = executor.load32(compiler, backend.VALUE, backend.SCRATCH0, 0)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_android_height")
+    compiler = executor.load32(compiler, backend.VALUE, backend.SCRATCH0, 4)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_android_stride")
+    compiler = executor.load32(compiler, backend.VALUE, backend.SCRATCH0, 8)
+    out tails.ok(compiler)
+}
+
+skill emit_data(compiler) {
+    @executor = compiler.executor
+    compiler = executor.data_label(compiler, backend.RODATA, ARG0)
+    compiler = executor.data_text(compiler, backend.RODATA, "saltic")
+    compiler = executor.data_label(compiler, backend.RODATA, TAG)
+    compiler = executor.data_text(compiler, backend.RODATA, "saltic")
+    compiler = executor.data_label(compiler, backend.RODATA, FORMAT)
+    compiler = executor.data_text(compiler, backend.RODATA, "%.*s")
+    compiler = executor.align(compiler, backend.DATA, 16)
+    compiler = executor.data_label(compiler, backend.DATA, WINDOW)
+    compiler = shared.zeroes(compiler, backend.DATA, 8)
+    compiler = executor.data_label(compiler, backend.DATA, SAVED)
+    compiler = shared.zeroes(compiler, backend.DATA, 8)
+    compiler = executor.data_label(compiler, backend.DATA, BUFFER)
+    compiler = shared.zeroes(compiler, backend.DATA, BUFFER_BYTES)
+    compiler = executor.align(compiler, backend.BSS, 16)
+    compiler = executor.data_label(compiler, backend.BSS, STACK)
+    out executor.reserve(compiler, wide.from_number(STACK_BYTES))
+}
+
+Platform = Box {
+    name = "android",
+    arena_bytes = model.ARENA_BYTES,
+    default_heap_bytes = model.DEFAULT_HEAP_BYTES
+
+    skill append(compiler) {
+        compiler = emit_create(compiler)
+        compiler = emit_window(compiler)
+        compiler = emit_write(compiler)
+        compiler = emit_exit(compiler)
+        compiler = emit_firmware(compiler)
+        compiler = emit_heap(compiler)
+        compiler = linux.emit_log_open(compiler)
+        compiler = linux.emit_file_read(compiler)
+        compiler = linux.emit_file_write(compiler)
+        compiler = linux.emit_file_write_program(compiler)
+        compiler = linux.emit_file_error(compiler)
+        compiler = linux.emit_key(compiler)
+        compiler = linux.append_key_data(compiler)
+        compiler = process.append(compiler)
+        compiler = clock.emit_now(compiler)
+        compiler = input.emit_read_line(compiler)
+        compiler = socket.append(compiler)
+        compiler = emit_data(compiler)
+        compiler = shared.reserve(compiler, library())
+        out platform.append_unsupported(compiler, ["wait", "call"])
+    }
+}

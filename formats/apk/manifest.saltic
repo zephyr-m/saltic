@@ -1,0 +1,282 @@
+-- manifest — AndroidManifest.xml в двоичном XML Android (AXML): дерево
+-- Element кодируется в куски RES_XML (пул строк UTF-8, карта ресурсов,
+-- пространство имён android, начала и концы элементов). Имена атрибутов
+-- android: стоят первыми в пуле, в порядке номеров ресурсов — так их ищет
+-- Android; атрибуты элемента тоже по номерам. Строки — только ASCII до 127
+-- знаков (длина в UTF-8-пуле — один байт). native_activity — манифест
+-- приложения без Java: NativeActivity грузит lib<library>.so.
+--
+-- Attribute { name, id, kind, text, number } — id — номер android.R.attr, 0 —
+--     атрибут без пространства имён (package); kind — TEXT, NUMBER, FLAG
+-- Element { name, attributes, children }
+-- text / number / flag(name, id, value) -> Attribute; plain(name, value) — без android:
+-- encode(root) -> буфер AXML
+-- native_activity(package, label, library, version) -> Element
+-- Внутри: strings(root) -> пул, index(pool, text), u16 / u32 / minus_one(items, …),
+--     pool_chunk, map_chunk, element_chunks, sorted(attributes)
+
+use core.str
+use core.group
+use core.bytes
+
+TEXT = 3
+NUMBER = 16
+FLAG = 18
+ANDROID = "android"
+URI = "http://schemas.android.com/apk/res/android"
+XML = 3
+POOL = 1
+MAP = 384
+NAMESPACE_START = 256
+NAMESPACE_END = 257
+ELEMENT_START = 258
+ELEMENT_END = 259
+UTF8 = 256
+LABEL = 16842753
+NAME = 16842755
+HAS_CODE = 16842764
+EXPORTED = 16842768
+VALUE = 16842788
+MIN_SDK = 16843276
+VERSION_CODE = 16843291
+VERSION_NAME = 16843292
+TARGET_SDK = 16843376
+
+Attribute = Box {
+    name = "",
+    id = 0,
+    kind = 3,
+    text = "",
+    number = 0
+}
+
+Element = Box {
+    name = "",
+    attributes = [],
+    children = []
+}
+
+skill text(name, id, value) {
+    out Attribute { name = name, id = id, kind = TEXT, text = value }
+}
+
+skill number(name, id, value) {
+    out Attribute { name = name, id = id, kind = NUMBER, number = value }
+}
+
+skill flag(name, id, value) {
+    @bit = 0
+    (value == yes) { bit = 1 }
+    out Attribute { name = name, id = id, kind = FLAG, number = bit }
+}
+
+skill plain(name, value) {
+    out Attribute { name = name, kind = TEXT, text = value }
+}
+
+skill u16(items, value) {
+    items = group.add(items, value % 256)
+    out group.add(items, value / 256 % 256)
+}
+
+skill u32(items, value) {
+    @rest = value
+    drum (4) {
+        items = group.add(items, rest % 256)
+        rest = rest / 256
+    }
+    out items
+}
+
+skill minus_one(items) {
+    drum (4) { items = group.add(items, 255) }
+    out items
+}
+
+skill index(pool, text) {
+    drum (group.count(pool)) {
+        (group.get(pool, beat) == text) { out beat }
+    }
+    out 0 - 1
+}
+
+skill with(pool, text) {
+    (index(pool, text) >= 0) { out pool }
+    out group.add(pool, text)
+}
+
+skill sorted(attributes) {
+    @rest = attributes
+    @result = []
+    drum (group.count(attributes)) {
+        @best = 0
+        drum (group.count(rest)) {
+            @item = group.get(rest, beat)
+            @top = group.get(rest, best)
+            (item.id < top.id) { best = beat }
+        }
+        result = group.add(result, group.get(rest, best))
+        @left = []
+        drum (group.count(rest)) {
+            ((beat == best) == no) { left = group.add(left, group.get(rest, beat)) }
+        }
+        rest = left
+    }
+    out result
+}
+
+skill ids(element, found) {
+    drum (element.attributes) {
+        (beat.id > 0) {
+            (index(group.get(found, 0), beat.name) < 0) {
+                found = [group.add(group.get(found, 0), beat.name), group.add(group.get(found, 1), beat)]
+            }
+        }
+    }
+    drum (element.children) { found = ids(beat, found) }
+    out found
+}
+
+skill other(element, pool) {
+    pool = with(pool, element.name)
+    drum (element.attributes) {
+        pool = with(pool, beat.name)
+        (beat.kind == TEXT) { pool = with(pool, beat.text) }
+    }
+    drum (element.children) { pool = other(beat, pool) }
+    out pool
+}
+
+skill strings(root) {
+    @found = ids(root, [[], []])
+    @named = sorted(group.get(found, 1))
+    @pool = []
+    drum (named) { pool = group.add(pool, beat.name) }
+    @count = group.count(pool)
+    pool = with(pool, ANDROID)
+    pool = with(pool, URI)
+    out [other(root, pool), count, named]
+}
+
+skill pool_chunk(pool) {
+    @data = []
+    @offsets = []
+    drum (pool) {
+        @word = beat
+        offsets = u32(offsets, group.count(data))
+        data = group.add(data, str.bytes(word))
+        data = group.add(data, str.bytes(word))
+        drum (str.bytes(word)) { data = group.add(data, str.byte(word, beat)) }
+        data = group.add(data, 0)
+    }
+    drum ((4 - group.count(data) % 4) % 4) { data = group.add(data, 0) }
+    @header = 28
+    @starts = header + group.count(pool) * 4
+    @items = u16([], POOL)
+    items = u16(items, header)
+    items = u32(items, starts + group.count(data))
+    items = u32(items, group.count(pool))
+    items = u32(items, 0)
+    items = u32(items, UTF8)
+    items = u32(items, starts)
+    items = u32(items, 0)
+    out group.concat(group.concat(items, offsets), data)
+}
+
+skill map_chunk(named) {
+    @items = u16([], MAP)
+    items = u16(items, 8)
+    items = u32(items, 8 + group.count(named) * 4)
+    drum (named) { items = u32(items, beat.id) }
+    out items
+}
+
+skill reference(items, pool, text) {
+    (str.bytes(text) == 0) { out minus_one(items) }
+    out u32(items, index(pool, text))
+}
+
+skill element_chunks(element, pool, items) {
+    @attributes = sorted(element.attributes)
+    items = u16(items, ELEMENT_START)
+    items = u16(items, 16)
+    items = u32(items, 36 + group.count(attributes) * 20)
+    items = u32(items, 1)
+    items = minus_one(items)
+    items = minus_one(items)
+    items = u32(items, index(pool, element.name))
+    items = u16(items, 20)
+    items = u16(items, 20)
+    items = u16(items, group.count(attributes))
+    items = u16(items, 0)
+    items = u16(items, 0)
+    items = u16(items, 0)
+    drum (attributes) {
+        @space = ""
+        (beat.id > 0) { space = URI }
+        items = reference(items, pool, space)
+        items = u32(items, index(pool, beat.name))
+        @raw = ""
+        (beat.kind == TEXT) { raw = beat.text }
+        items = reference(items, pool, raw)
+        items = u16(items, 8)
+        items = group.add(items, 0)
+        items = group.add(items, beat.kind)
+        (beat.kind == TEXT) { items = u32(items, index(pool, beat.text)) }
+        (beat.kind == NUMBER) { items = u32(items, beat.number) }
+        (beat.kind == FLAG) {
+            (beat.number == 1) { items = minus_one(items) }
+            (beat.number == 0) { items = u32(items, 0) }
+        }
+    }
+    drum (element.children) { items = element_chunks(beat, pool, items) }
+    items = u16(items, ELEMENT_END)
+    items = u16(items, 16)
+    items = u32(items, 24)
+    items = u32(items, 1)
+    items = minus_one(items)
+    items = minus_one(items)
+    out u32(items, index(pool, element.name))
+}
+
+skill namespace(items, pool, kind) {
+    items = u16(items, kind)
+    items = u16(items, 16)
+    items = u32(items, 24)
+    items = u32(items, 1)
+    items = minus_one(items)
+    items = u32(items, index(pool, ANDROID))
+    out u32(items, index(pool, URI))
+}
+
+skill encode(root) {
+    @found = strings(root)
+    @pool = group.get(found, 0)
+    @body = group.concat(pool_chunk(pool), map_chunk(group.get(found, 2)))
+    body = namespace(body, pool, NAMESPACE_START)
+    body = element_chunks(root, pool, body)
+    body = namespace(body, pool, NAMESPACE_END)
+    @items = u16([], XML)
+    items = u16(items, 8)
+    items = u32(items, 8 + group.count(body))
+    out bytes.from_group(group.concat(items, body))
+}
+
+skill native_activity(package, label, library, version) {
+    @main = Element { name = "action", attributes = [text("name", NAME, "android.intent.action.MAIN")] }
+    @launcher = Element { name = "category", attributes = [text("name", NAME, "android.intent.category.LAUNCHER")] }
+    @filter = Element { name = "intent-filter", children = [main, launcher] }
+    @library_name = Element { name = "meta-data", attributes = [text("name", NAME, "android.app.lib_name"), text("value", VALUE, library)] }
+    @activity = Element {
+        name = "activity",
+        attributes = [text("name", NAME, "android.app.NativeActivity"), text("label", LABEL, label), flag("exported", EXPORTED, yes)],
+        children = [library_name, filter]
+    }
+    @application = Element { name = "application", attributes = [text("label", LABEL, label), flag("hasCode", HAS_CODE, no)], children = [activity] }
+    @sdk = Element { name = "uses-sdk", attributes = [number("minSdkVersion", MIN_SDK, 24), number("targetSdkVersion", TARGET_SDK, 34)] }
+    out Element {
+        name = "manifest",
+        attributes = [number("versionCode", VERSION_CODE, version), text("versionName", VERSION_NAME, "{version}"), plain("package", package)],
+        children = [sdk, application]
+    }
+}
