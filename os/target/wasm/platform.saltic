@@ -1,0 +1,74 @@
+-- platform — WASI для wasm32. write, exit, now и куча в bss.
+-- Остальные rt_platform_* отвечают NotSupported. Вход platform_start ставит
+-- стек на метку asm.STACK_TOP (вершину подставляет lower после раскладки),
+-- кладёт на него [argc, argv…, 0, 0] из args_get WASI и прыгает на _start.
+
+use selfhost.abi
+use selfhost.memory.model
+use selfhost.compiler.backend
+use selfhost.compiler.platform
+use selfhost.compiler.backend.wasm
+use selfhost.compiler.backend.wasm.asm
+use selfhost.compiler.backend.rv32i.runtime.tails
+use os.target.wasm.platform.files
+use os.target.wasm.platform.line
+
+FRAME = 16
+
+UNSUPPORTED = ["key", "file_write_program", "wait", "firmware", "call", "process_pipe", "process_wait", "process_read", "process_close", "process_executable", "environment", "file_list", "process_open", "process_input", "process_write", "log_open"]
+
+Platform = Box {
+    name = "wasm",
+    arena_bytes = model.ARENA_BYTES,
+    default_heap_bytes = model.DEFAULT_HEAP_BYTES
+
+    skill append(compiler) {
+        compiler = emit_start(compiler)
+        compiler = emit_write(compiler)
+        compiler = emit_exit(compiler)
+        compiler = emit_now(compiler)
+        compiler = files.emit(compiler)
+        compiler = line.emit(compiler)
+        compiler = platform.append_heap_reserve(compiler)
+        drum (UNSUPPORTED) { compiler = platform.emit_unsupported(compiler, beat) }
+        out compiler
+    }
+}
+
+skill emit_start(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "platform_start")
+    compiler = executor.load_address(compiler, backend.STACK, asm.STACK_TOP, 0)
+    compiler = executor.wasi(compiler, asm.WASI_ARGS)
+    out executor.jump(compiler, "_start")
+}
+
+skill emit_write(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.WRITE)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -FRAME)
+    compiler = executor.store(compiler, backend.ERROR, backend.STACK, 0)
+    compiler = executor.store(compiler, backend.ARG2, backend.STACK, 4)
+    compiler = executor.store_zero(compiler, backend.STACK, 8)
+    compiler = executor.move(compiler, backend.ERROR, backend.STACK)
+    compiler = executor.add_immediate(compiler, backend.ARG3, backend.STACK, 8)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 1)
+    compiler = executor.wasi(compiler, asm.WASI_WRITE)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, FRAME)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    out executor.ret(compiler)
+}
+
+skill emit_exit(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.EXIT)
+    out executor.wasi(compiler, asm.WASI_EXIT)
+}
+
+skill emit_now(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.NOW)
+    compiler = executor.wasi(compiler, asm.WASI_NOW)
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    out tails.ok(compiler)
+}

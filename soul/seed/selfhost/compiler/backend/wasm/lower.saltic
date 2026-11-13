@@ -1,0 +1,509 @@
+-- lower — блоки договора в один модуль WASM. Каждый блок — тело
+-- вложенного block, диспетчер — br_table. Падение вниз входит в следующий блок.
+-- Импорты WASI — IMPORTS (имя и номер типа), типы — TYPES строками: i — i32,
+-- I — i64, до «:» — параметры, после — результат. SCRATCH_AT — служебные байты
+-- под ответы WASI ниже данных (asm.BASE). LOCALS — локали: роли, TEMP, NEXT.
+
+use core.str
+use core.group
+use io
+use selfhost.abi
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.machine.buffer
+use selfhost.compiler.backend.wasm.asm
+use formats.wasm.encode
+
+NEXT = 22
+SCRATCH_AT = 1024
+UNREACHABLE = 0
+IMPORT_WRITE = 0
+IMPORT_EXIT = 1
+IMPORT_CLOCK = 2
+IMPORT_OPEN = 3
+IMPORT_READ = 4
+IMPORT_CLOSE = 5
+IMPORT_SIZES = 6
+IMPORT_ARGS = 7
+IMPORTS = [["fd_write", 0], ["proc_exit", 1], ["clock_time_get", 2], ["path_open", 4], ["fd_read", 0], ["fd_close", 5], ["args_sizes_get", 6], ["args_get", 6]]
+TYPES = ["iiii:i", "i:", "iIi:i", ":", "iiiiiIIii:i", "i:i", "ii:i"]
+MAIN_TYPE = 3
+LOCALS = 23
+SECTION_TYPE = 1
+SECTION_IMPORT = 2
+SECTION_FUNCTION = 3
+SECTION_MEMORY = 5
+SECTION_EXPORT = 7
+SECTION_CODE = 10
+SECTION_DATA = 11
+EXPORT_FUNCTION = 0
+EXPORT_MEMORY = 2
+MAGIC = [0, 97, 115, 109, 1, 0, 0, 0]
+
+skill value_of(prog, name, addend) {
+    (name == asm.STACK_TOP) { out prog.wa_stack + addend }
+    @block = asm.find_block(prog, name)
+    (block == none) {
+        @ref = asm.find_ref(prog, name)
+        (ref == none) {
+            io.show("метка {name}")
+            out error.WasmLink
+        }
+        (ref.wa_sec == backend.RODATA) { out prog.wa_ro_at + ref.wa_at + addend }
+        (ref.wa_sec == backend.DATA) { out prog.wa_da_at + ref.wa_at + addend }
+        out prog.wa_bs_at + ref.wa_at + addend
+    }
+    out block.wa_id + addend
+}
+
+skill alu_byte(kind) {
+    (kind == 1) { out encode.SUB }
+    (kind == 2) { out encode.AND }
+    (kind == 3) { out encode.OR }
+    (kind == 4) { out encode.XOR }
+    (kind == 5) { out encode.SHL }
+    (kind == 6) { out encode.SHR_U }
+    (kind == 7) { out encode.SHR_S }
+    out encode.ADD
+}
+
+skill mem_load(width) {
+    (width == 1) { out encode.LOAD8_U }
+    (width == 2) { out encode.LOAD16_U }
+    out encode.LOAD
+}
+
+skill mem_store(width) {
+    (width == 1) { out encode.STORE8 }
+    (width == 2) { out encode.STORE16 }
+    out encode.STORE
+}
+
+skill cmp(buf, item) {
+    @cond = item.wa_a
+    buf = encode.get(buf, item.wa_b)
+    (cond == 7) { out encode.op(buf, encode.EQZ) }
+    (cond == 8) {
+        buf = encode.iconst(buf, 0)
+        out encode.op(buf, encode.NE)
+    }
+    (cond == 9) {
+        buf = encode.iconst(buf, 0)
+        out encode.op(buf, encode.LT_S)
+    }
+    (cond == 10) {
+        buf = encode.iconst(buf, 0)
+        out encode.op(buf, encode.GE_S)
+    }
+    (cond == 11) {
+        buf = encode.iconst(buf, 0)
+        out encode.op(buf, encode.LE_S)
+    }
+    @imm = no
+    (item.wa_n == "i") { imm = yes }
+    (imm == yes) { buf = encode.iconst(buf, item.wa_d) }
+    (imm == no) { buf = encode.get(buf, item.wa_c) }
+    @opcode = encode.EQ
+    (cond == 2) { opcode = encode.NE }
+    (cond == 3) { opcode = encode.LT_S }
+    (cond == 4) { opcode = encode.GE_S }
+    (cond == 5) { opcode = encode.LT_U }
+    (cond == 6) { opcode = encode.GE_U }
+    out encode.op(buf, opcode)
+}
+
+skill address(buf, base, offset) {
+    buf = encode.get(buf, base)
+    (offset == 0) { out buf }
+    buf = encode.iconst(buf, offset)
+    out encode.op(buf, encode.ADD)
+}
+
+skill check(buf, kind) {
+    buf = encode.get(buf, backend.VALUE)
+    buf = encode.get(buf, backend.ERROR)
+    (kind == 0) { buf = encode.op(buf, encode.ADD) }
+    (kind == 1) { buf = encode.op(buf, encode.SUB) }
+    buf = encode.setl(buf, backend.SCRATCH0)
+    buf = encode.get(buf, backend.VALUE)
+    buf = encode.get(buf, backend.ERROR)
+    buf = encode.op(buf, encode.XOR)
+    buf = encode.iconst(buf, 0)
+    (kind == 0) { buf = encode.op(buf, encode.LT_S) }
+    (kind == 1) { buf = encode.op(buf, encode.GE_S) }
+    buf = encode.op(buf, encode.IF)
+    buf = encode.op(buf, encode.VOID)
+    buf = encode.get(buf, backend.SCRATCH0)
+    buf = encode.setl(buf, backend.VALUE)
+    buf = encode.iconst(buf, abi.CALL_NO_ERROR)
+    buf = encode.setl(buf, backend.ERROR)
+    buf = encode.op(buf, encode.ELSE)
+    buf = encode.get(buf, backend.VALUE)
+    buf = encode.get(buf, backend.SCRATCH0)
+    buf = encode.op(buf, encode.XOR)
+    buf = encode.iconst(buf, 0)
+    buf = encode.op(buf, encode.LT_S)
+    buf = encode.op(buf, encode.IF)
+    buf = encode.op(buf, encode.VOID)
+    buf = encode.get(buf, backend.SCRATCH0)
+    buf = encode.setl(buf, backend.VALUE)
+    buf = encode.iconst(buf, abi.ERROR_NUMBER_OVERFLOW)
+    buf = encode.setl(buf, backend.ERROR)
+    buf = encode.op(buf, encode.ELSE)
+    buf = encode.get(buf, backend.SCRATCH0)
+    buf = encode.setl(buf, backend.VALUE)
+    buf = encode.iconst(buf, abi.CALL_NO_ERROR)
+    buf = encode.setl(buf, backend.ERROR)
+    buf = encode.op(buf, encode.END)
+    out encode.op(buf, encode.END)
+}
+
+skill wasi_open(buf) {
+    buf = encode.iconst(buf, 3)
+    buf = encode.iconst(buf, 0)
+    buf = encode.get(buf, backend.VALUE)
+    buf = encode.get(buf, backend.ERROR)
+    buf = encode.get(buf, backend.ARG2)
+    buf = encode.op(buf, encode.CONST64)
+    buf = encode.sleb(buf, 70)
+    buf = encode.op(buf, encode.CONST64)
+    buf = encode.sleb(buf, 0)
+    buf = encode.iconst(buf, 0)
+    buf = encode.get(buf, backend.ARG3)
+    buf = encode.call(buf, IMPORT_OPEN)
+    buf = encode.setl(buf, backend.ERROR)
+    buf = encode.get(buf, backend.ARG3)
+    buf = encode.mem(buf, encode.LOAD)
+    out encode.setl(buf, backend.VALUE)
+}
+
+skill argc(buf) {
+    buf = encode.iconst(buf, SCRATCH_AT)
+    out encode.mem(buf, encode.LOAD)
+}
+
+skill wasi_args(buf) {
+    buf = encode.iconst(buf, SCRATCH_AT)
+    buf = encode.iconst(buf, SCRATCH_AT + 4)
+    buf = encode.call(buf, IMPORT_SIZES)
+    buf = encode.op(buf, encode.DROP)
+    buf = encode.get(buf, backend.STACK)
+    buf = encode.iconst(buf, SCRATCH_AT + 4)
+    buf = encode.mem(buf, encode.LOAD)
+    buf = rounded(buf)
+    buf = encode.op(buf, encode.SUB)
+    buf = encode.setl(buf, backend.STACK)
+    buf = encode.get(buf, backend.STACK)
+    buf = encode.setl(buf, backend.SCRATCH0)
+    buf = encode.get(buf, backend.STACK)
+    buf = argc(buf)
+    buf = encode.iconst(buf, 3)
+    buf = encode.op(buf, encode.ADD)
+    buf = encode.iconst(buf, 2)
+    buf = encode.op(buf, encode.SHL)
+    buf = rounded(buf)
+    buf = encode.op(buf, encode.SUB)
+    buf = encode.setl(buf, backend.STACK)
+    buf = encode.get(buf, backend.STACK)
+    buf = argc(buf)
+    buf = encode.mem(buf, encode.STORE)
+    buf = encode.get(buf, backend.STACK)
+    buf = encode.iconst(buf, 4)
+    buf = encode.op(buf, encode.ADD)
+    buf = encode.get(buf, backend.SCRATCH0)
+    buf = encode.call(buf, IMPORT_ARGS)
+    buf = encode.op(buf, encode.DROP)
+    buf = after_argv(buf, 4)
+    buf = encode.iconst(buf, 0)
+    buf = encode.mem(buf, encode.STORE)
+    buf = after_argv(buf, 8)
+    buf = encode.iconst(buf, 0)
+    out encode.mem(buf, encode.STORE)
+}
+
+skill rounded(buf) {
+    buf = encode.iconst(buf, 15)
+    buf = encode.op(buf, encode.ADD)
+    buf = encode.iconst(buf, -16)
+    out encode.op(buf, encode.AND)
+}
+
+skill after_argv(buf, extra) {
+    buf = encode.get(buf, backend.STACK)
+    buf = argc(buf)
+    buf = encode.iconst(buf, 2)
+    buf = encode.op(buf, encode.SHL)
+    buf = encode.op(buf, encode.ADD)
+    buf = encode.iconst(buf, extra)
+    out encode.op(buf, encode.ADD)
+}
+
+skill wasi_close(buf) {
+    buf = encode.get(buf, backend.VALUE)
+    buf = encode.call(buf, IMPORT_CLOSE)
+    out encode.op(buf, encode.DROP)
+}
+
+skill wasi_now(buf) {
+    buf = encode.iconst(buf, 0)
+    buf = encode.op(buf, encode.CONST64)
+    buf = encode.sleb(buf, 0)
+    buf = encode.iconst(buf, SCRATCH_AT)
+    buf = encode.call(buf, IMPORT_CLOCK)
+    buf = encode.op(buf, encode.DROP)
+    buf = encode.iconst(buf, SCRATCH_AT)
+    buf = encode.op(buf, encode.LOAD64)
+    buf = encode.uleb(buf, 3)
+    buf = encode.uleb(buf, 0)
+    buf = encode.op(buf, encode.CONST64)
+    buf = encode.sleb(buf, 1000000)
+    buf = encode.op(buf, encode.DIV64_U)
+    buf = encode.op(buf, encode.CONST64)
+    buf = encode.sleb(buf, 86400000)
+    buf = encode.op(buf, encode.REM64_U)
+    buf = encode.op(buf, encode.WRAP64)
+    buf = encode.setl(buf, 0)
+    out encode.iconst(buf, 0)
+}
+
+skill one(buf, item, depth, prog) {
+    @k = item.wa_k
+    (k == asm.K_CONST) {
+        buf = encode.iconst(buf, item.wa_d)
+        out encode.setl(buf, item.wa_a)
+    }
+    (k == asm.K_MOVE) {
+        (item.wa_a == item.wa_b) { out buf }
+        buf = encode.get(buf, item.wa_b)
+        out encode.setl(buf, item.wa_a)
+    }
+    (k == asm.K_ALU) {
+        (item.wa_a == 8) {
+            buf = encode.iconst(buf, 0)
+            buf = encode.get(buf, item.wa_c)
+            buf = encode.op(buf, encode.SUB)
+            out encode.setl(buf, item.wa_d)
+        }
+        buf = encode.bin(buf, alu_byte(item.wa_a), item.wa_b, item.wa_c)
+        out encode.setl(buf, item.wa_d)
+    }
+    (k == asm.K_IMM) {
+        buf = encode.get(buf, item.wa_b)
+        buf = encode.iconst(buf, item.wa_d)
+        buf = encode.op(buf, alu_byte(item.wa_a))
+        out encode.setl(buf, item.wa_c)
+    }
+    (k == asm.K_LOAD) {
+        buf = address(buf, item.wa_b, item.wa_d)
+        buf = encode.mem(buf, mem_load(item.wa_a))
+        out encode.setl(buf, item.wa_c)
+    }
+    (k == asm.K_STORE) {
+        buf = address(buf, item.wa_b, item.wa_d)
+        buf = encode.get(buf, item.wa_c)
+        out encode.mem(buf, mem_store(item.wa_a))
+    }
+    (k == asm.K_CMP) {
+        buf = cmp(buf, item)
+        (item.wa_n == "i") { out encode.setl(buf, item.wa_c) }
+        out encode.setl(buf, item.wa_d)
+    }
+    (k == asm.K_BR) {
+        @id = value_of(prog, item.wa_n, 0)
+        buf = cmp(buf, item)
+        buf = encode.op(buf, encode.IF)
+        buf = encode.op(buf, encode.VOID)
+        buf = encode.iconst(buf, id)
+        buf = encode.setl(buf, NEXT)
+        buf = encode.br(buf, depth + 1)
+        out encode.op(buf, encode.END)
+    }
+    (k == asm.K_JUMP) {
+        @id = value_of(prog, item.wa_n, 0)
+        buf = encode.iconst(buf, id)
+        buf = encode.setl(buf, NEXT)
+        out encode.br(buf, depth)
+    }
+    (k == asm.K_CALL) {
+        @id = value_of(prog, item.wa_n, 0)
+        buf = encode.iconst(buf, item.wa_a)
+        buf = encode.setl(buf, backend.RETURN)
+        buf = encode.iconst(buf, id)
+        buf = encode.setl(buf, NEXT)
+        out encode.br(buf, depth)
+    }
+    (k == asm.K_RET) {
+        buf = encode.get(buf, backend.RETURN)
+        buf = encode.setl(buf, NEXT)
+        out encode.br(buf, depth)
+    }
+    (k == asm.K_WASI) {
+        (item.wa_a == asm.WASI_EXIT) {
+            buf = encode.get(buf, backend.VALUE)
+            buf = encode.call(buf, IMPORT_EXIT)
+            out encode.op(buf, UNREACHABLE)
+        }
+        (item.wa_a == asm.WASI_NOW) {
+            buf = wasi_now(buf)
+            out encode.setl(buf, backend.ERROR)
+        }
+        (item.wa_a == asm.WASI_OPEN) { out wasi_open(buf) }
+        (item.wa_a == asm.WASI_CLOSE) { out wasi_close(buf) }
+        (item.wa_a == asm.WASI_ARGS) { out wasi_args(buf) }
+        @fn = IMPORT_WRITE
+        (item.wa_a == asm.WASI_READ) { fn = IMPORT_READ }
+        buf = encode.get(buf, backend.VALUE)
+        buf = encode.get(buf, backend.ERROR)
+        buf = encode.get(buf, backend.ARG2)
+        buf = encode.get(buf, backend.ARG3)
+        buf = encode.call(buf, fn)
+        buf = encode.setl(buf, backend.ERROR)
+        buf = encode.get(buf, backend.ARG3)
+        buf = encode.mem(buf, encode.LOAD)
+        out encode.setl(buf, backend.VALUE)
+    }
+    (k == asm.K_ADDR) {
+        @n = value_of(prog, item.wa_n, item.wa_b)
+        buf = encode.iconst(buf, n)
+        out encode.setl(buf, item.wa_a)
+    }
+    (k == asm.K_CHECK) { out check(buf, item.wa_a) }
+    out buf
+}
+
+skill body(prog, block, index, count) {
+    @buf = buffer.empty()
+    @depth = count - 1 - index
+    drum (group.count(block.wa_ops)) {
+        buf = one(buf, group.get(block.wa_ops, beat), depth, prog)
+    }
+    out buf
+}
+
+skill cat(buf, extra) {
+    drum (extra.length) { buf = buffer.append_byte(buf, buffer.byte_at(extra, beat)) }
+    out buf
+}
+
+skill wname(buf, text) {
+    buf = encode.uleb(buf, str.bytes(text))
+    drum (str.bytes(text)) { buf = buffer.append_byte(buf, str.byte(text, beat)) }
+    out buf
+}
+
+skill types(buf) {
+    buf = encode.uleb(buf, group.count(TYPES))
+    drum (TYPES) {
+        @text = beat
+        @split = 0
+        drum (str.bytes(text)) {
+            (str.get(text, beat) == ":") { split = beat }
+        }
+        buf = encode.op(buf, encode.FUNC)
+        buf = value_types(buf, str.slice(text, 0, split))
+        buf = value_types(buf, str.slice(text, split + 1, str.bytes(text)))
+    }
+    out buf
+}
+
+skill value_types(buf, letters) {
+    buf = encode.uleb(buf, str.bytes(letters))
+    drum (str.bytes(letters)) {
+        @kind = encode.I32
+        (str.get(letters, beat) == "I") { kind = encode.I64 }
+        buf = encode.op(buf, kind)
+    }
+    out buf
+}
+
+skill section(mod, id, payload) {
+    mod = encode.op(mod, id)
+    mod = encode.uleb(mod, payload.length)
+    out cat(mod, payload)
+}
+
+skill dispatch(expr, bodies) {
+    @n = group.count(bodies)
+    expr = encode.op(expr, encode.LOOP)
+    expr = encode.op(expr, encode.VOID)
+    drum (n) {
+        expr = encode.op(expr, encode.BLOCK)
+        expr = encode.op(expr, encode.VOID)
+    }
+    expr = encode.get(expr, NEXT)
+    expr = encode.op(expr, encode.BR_TABLE)
+    expr = encode.uleb(expr, n)
+    drum (n) { expr = encode.uleb(expr, beat) }
+    expr = encode.uleb(expr, n - 1)
+    drum (n) {
+        expr = encode.op(expr, encode.END)
+        expr = cat(expr, group.get(bodies, beat))
+    }
+    out encode.op(expr, encode.END)
+}
+
+skill image_of(prog) {
+    prog = asm.seal(prog)
+    prog = asm.place(prog)
+    @start = asm.find_block(prog, "platform_start")
+    (start == none) {
+        io.show("нет входа")
+        out error.WasmLink
+    }
+    @n = group.count(prog.wa_blocks)
+    @bodies = []
+    drum (n) { bodies = group.add(bodies, body(prog, group.get(prog.wa_blocks, beat), beat, n)) }
+    @expr = buffer.empty()
+    expr = encode.iconst(expr, start.wa_id)
+    expr = encode.setl(expr, NEXT)
+    expr = dispatch(expr, bodies)
+    @locals = buffer.empty()
+    locals = encode.uleb(locals, 1)
+    locals = encode.uleb(locals, LOCALS)
+    locals = encode.op(locals, encode.I32)
+    @code = cat(buffer.empty(), locals)
+    code = cat(code, expr)
+    code = encode.op(code, encode.END)
+    @wrapped = buffer.empty()
+    wrapped = encode.uleb(wrapped, 1)
+    wrapped = encode.uleb(wrapped, code.length)
+    wrapped = cat(wrapped, code)
+    @pages = (prog.wa_stack + 65535) / 65536
+    (pages < 1) { pages = 1 }
+    @mod = buffer.empty()
+    drum (MAGIC) { mod = encode.op(mod, beat) }
+    mod = section(mod, SECTION_TYPE, types(buffer.empty()))
+    @imp = encode.uleb(buffer.empty(), group.count(IMPORTS))
+    drum (IMPORTS) {
+        imp = wname(imp, "wasi_snapshot_preview1")
+        imp = wname(imp, group.get(beat, 0))
+        imp = encode.op(imp, EXPORT_FUNCTION)
+        imp = encode.uleb(imp, group.get(beat, 1))
+    }
+    mod = section(mod, SECTION_IMPORT, imp)
+    @fn = encode.uleb(buffer.empty(), 1)
+    mod = section(mod, SECTION_FUNCTION, encode.uleb(fn, MAIN_TYPE))
+    @memory = encode.uleb(buffer.empty(), 1)
+    memory = encode.op(memory, 0)
+    mod = section(mod, SECTION_MEMORY, encode.uleb(memory, pages))
+    @exp = encode.uleb(buffer.empty(), 2)
+    exp = wname(exp, "memory")
+    exp = encode.op(exp, EXPORT_MEMORY)
+    exp = encode.uleb(exp, 0)
+    exp = wname(exp, "_start")
+    exp = encode.op(exp, EXPORT_FUNCTION)
+    exp = encode.uleb(exp, group.count(IMPORTS))
+    mod = section(mod, SECTION_EXPORT, exp)
+    mod = section(mod, SECTION_CODE, wrapped)
+    @blob = buffer.empty()
+    drum (prog.wa_ro.length) { blob = buffer.append_byte(blob, buffer.byte_at(prog.wa_ro, beat)) }
+    drum (prog.wa_da.length) { blob = buffer.append_byte(blob, buffer.byte_at(prog.wa_da, beat)) }
+    (blob.length == 0) { out buffer.whole(mod) }
+    @data = encode.uleb(buffer.empty(), 1)
+    data = encode.op(data, 0)
+    data = encode.iconst(data, prog.wa_ro_at)
+    data = encode.op(data, encode.END)
+    data = encode.uleb(data, blob.length)
+    data = cat(data, blob)
+    mod = section(mod, SECTION_DATA, data)
+    out buffer.whole(mod)
+}

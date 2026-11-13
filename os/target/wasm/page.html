@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>saltic wasm</title>
+<pre id="out"></pre>
+<input id="pick" type="file" accept=".wasm">
+<script>
+const out = document.getElementById("out");
+let memory = null;
+
+function textOf(ptr, len) {
+  return new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+}
+
+const imports = {
+  wasi_snapshot_preview1: {
+    fd_write(fd, iovs, count, nwritten) {
+      const view = new DataView(memory.buffer);
+      let written = 0;
+      for (let i = 0; i < count; i++) {
+        const at = iovs + i * 8;
+        const ptr = view.getUint32(at, true);
+        const len = view.getUint32(at + 4, true);
+        out.textContent += textOf(ptr, len);
+        written += len;
+      }
+      view.setUint32(nwritten, written, true);
+      return 0;
+    },
+    proc_exit(code) {
+      out.textContent += "\n[exit " + code + "]";
+      throw new Error("exit " + code);
+    },
+    clock_time_get(id, precision, ptr) {
+      const view = new DataView(memory.buffer);
+      view.setBigUint64(ptr, BigInt(Date.now()) * 1000000n, true);
+      return 0;
+    },
+    args_sizes_get(count, size) {
+      const view = new DataView(memory.buffer);
+      view.setUint32(count, 1, true);
+      view.setUint32(size, 7, true);
+      return 0;
+    },
+    args_get(argv, buf) {
+      const view = new DataView(memory.buffer);
+      new Uint8Array(memory.buffer, buf, 7).set(new TextEncoder().encode("saltic\0"));
+      view.setUint32(argv, buf, true);
+      return 0;
+    },
+    path_open() { return 52; },
+    fd_read() { return 52; },
+    fd_close() { return 0; }
+  }
+};
+
+async function run(buf) {
+  out.textContent = "";
+  const inst = await WebAssembly.instantiate(buf, imports);
+  memory = inst.instance.exports.memory;
+  try { inst.instance.exports._start(); }
+  catch (err) { if (!String(err).includes("exit")) out.textContent += "\n" + err; }
+}
+
+document.getElementById("pick").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  if (file) run(await file.arrayBuffer());
+});
+</script>

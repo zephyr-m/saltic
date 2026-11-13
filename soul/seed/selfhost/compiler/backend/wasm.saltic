@@ -1,0 +1,382 @@
+-- wasm — исполнитель договора машины для wasm32. Код пишется в IR
+-- (backend.wasm.asm), модуль собирает lower. Слово 4 байта, числа 29 бит.
+-- Роль — номер локальной переменной. Стек договора — локаль STACK.
+-- Вызов запоминает номер блока возврата в RETURN и прыгает на цель.
+
+use selfhost.abi.shape
+use selfhost.compiler.backend
+use selfhost.compiler.backend.wasm.asm
+use selfhost.machine.wide
+
+TEMP = 21
+C_EQ = 1
+C_NE = 2
+C_LT = 3
+C_GE = 4
+C_LTU = 5
+C_GEU = 6
+C_EQZ = 7
+C_NEZ = 8
+C_LTZ = 9
+C_GEZ = 10
+C_LEZ = 11
+A_ADD = 0
+A_SUB = 1
+A_AND = 2
+A_OR = 3
+A_XOR = 4
+A_SHL = 5
+A_SHRU = 6
+A_SHRS = 7
+A_NEG = 8
+W_WORD = 0
+W_BYTE = 1
+W_HALF = 2
+
+skill put(compiler, item) {
+    compiler.machine = asm.push(compiler.machine, item)
+    out compiler
+}
+
+skill signed_word(data) {
+    @n = data.b0 + data.b1 * 256 + data.b2 * 65536 + data.b3 * 16777216
+    (data.b3 > 127) { out n - 4294967296 }
+    out n
+}
+
+skill wide_count(value) {
+    @low = wide.to_word(value)
+    out low.b0 + low.b1 * 256 + low.b2 * 65536 + low.b3 * 16777216
+}
+
+skill alu(compiler, kind, to, left, right) {
+    out put(compiler, asm.make(asm.K_ALU, kind, left, right, to, ""))
+}
+
+skill imm(compiler, kind, to, from, value) {
+    out put(compiler, asm.make(asm.K_IMM, kind, from, to, value, ""))
+}
+
+skill cmp(compiler, cond, to, left, right) {
+    out put(compiler, asm.make(asm.K_CMP, cond, left, right, to, ""))
+}
+
+skill cmp_imm(compiler, cond, to, from, value) {
+    out put(compiler, asm.make(asm.K_CMP, cond, from, to, value, "i"))
+}
+
+skill branch(compiler, cond, left, right, name) {
+    out put(compiler, asm.make(asm.K_BR, cond, left, right, 0, name))
+}
+
+skill branch_one(compiler, cond, from, name) {
+    out put(compiler, asm.make(asm.K_BR, cond, from, 0, 0, name))
+}
+
+skill mem_load(compiler, width, to, base, offset) {
+    out put(compiler, asm.make(asm.K_LOAD, width, base, to, offset, ""))
+}
+
+skill mem_store(compiler, width, from, base, offset) {
+    out put(compiler, asm.make(asm.K_STORE, width, base, from, offset, ""))
+}
+
+Executor = Box {
+    skill new_program(compiler, entry) {
+        compiler.words = shape.of(4)
+        compiler.machine = asm.fresh()
+        out compiler
+    }
+
+    skill heap_size(compiler, bytes) {
+        out compiler
+    }
+
+    skill label(compiler, name) {
+        compiler.machine = asm.define(compiler.machine, backend.CODE, name)
+        out compiler
+    }
+
+    skill data_label(compiler, where, name) {
+        compiler.machine = asm.define(compiler.machine, where, name)
+        out compiler
+    }
+
+    skill align(compiler, where, boundary) {
+        compiler.machine = asm.align_sec(compiler.machine, where, boundary)
+        out compiler
+    }
+
+    skill data_byte(compiler, where, value) {
+        compiler.machine = asm.add_byte(compiler.machine, where, value)
+        out compiler
+    }
+
+    skill data32(compiler, where, value) {
+        out data_word(compiler, where, value)
+    }
+
+    skill data_word(compiler, where, value) {
+        compiler.machine = asm.add_word(compiler.machine, where, value)
+        out compiler
+    }
+
+    skill data_text(compiler, where, text) {
+        compiler.machine = asm.add_text(compiler.machine, where, text)
+        out compiler
+    }
+
+    skill reserve(compiler, bytes) {
+        compiler.machine = asm.reserve(compiler.machine, wide_count(bytes))
+        out compiler
+    }
+
+    skill load_immediate(compiler, to, value) {
+        out put(compiler, asm.make(asm.K_CONST, to, 0, 0, value, ""))
+    }
+
+    skill load_word(compiler, to, value) {
+        out put(compiler, asm.make(asm.K_CONST, to, 0, 0, signed_word(value), ""))
+    }
+
+    skill load_address(compiler, to, name, addend) {
+        out put(compiler, asm.make(asm.K_ADDR, to, addend, 0, 0, name))
+    }
+
+    skill move(compiler, to, from) {
+        out put(compiler, asm.make(asm.K_MOVE, to, from, 0, 0, ""))
+    }
+
+    skill negate(compiler, to, from) {
+        out alu(compiler, A_NEG, to, 0, from)
+    }
+
+    skill add_immediate(compiler, to, from, value) {
+        out imm(compiler, A_ADD, to, from, value)
+    }
+
+    skill add(compiler, to, left, right) {
+        out alu(compiler, A_ADD, to, left, right)
+    }
+
+    skill sub(compiler, to, left, right) {
+        out alu(compiler, A_SUB, to, left, right)
+    }
+
+    skill and(compiler, to, left, right) {
+        out alu(compiler, A_AND, to, left, right)
+    }
+
+    skill or(compiler, to, left, right) {
+        out alu(compiler, A_OR, to, left, right)
+    }
+
+    skill xor(compiler, to, left, right) {
+        out alu(compiler, A_XOR, to, left, right)
+    }
+
+    skill and_immediate(compiler, to, from, value) {
+        out imm(compiler, A_AND, to, from, value)
+    }
+
+    skill or_immediate(compiler, to, from, value) {
+        out imm(compiler, A_OR, to, from, value)
+    }
+
+    skill xor_immediate(compiler, to, from, value) {
+        out imm(compiler, A_XOR, to, from, value)
+    }
+
+    skill shift_left(compiler, to, from, count) {
+        out imm(compiler, A_SHL, to, from, count)
+    }
+
+    skill shift_right_signed(compiler, to, from, count) {
+        out imm(compiler, A_SHRS, to, from, count)
+    }
+
+    skill shift_right_unsigned(compiler, to, from, count) {
+        out imm(compiler, A_SHRU, to, from, count)
+    }
+
+    skill shift_left_by(compiler, to, from, count) {
+        out alu(compiler, A_SHL, to, from, count)
+    }
+
+    skill shift_right_unsigned_by(compiler, to, from, count) {
+        out alu(compiler, A_SHRU, to, from, count)
+    }
+
+    skill set_less(compiler, to, left, right) {
+        out cmp(compiler, C_LT, to, left, right)
+    }
+
+    skill set_less_unsigned(compiler, to, left, right) {
+        out cmp(compiler, C_LTU, to, left, right)
+    }
+
+    skill set_less_unsigned_immediate(compiler, to, from, value) {
+        out cmp_imm(compiler, C_LTU, to, from, value)
+    }
+
+    skill set_zero(compiler, to, from) {
+        out cmp(compiler, C_EQZ, to, from, 0)
+    }
+
+    skill set_nonzero(compiler, to, from) {
+        out cmp(compiler, C_NEZ, to, from, 0)
+    }
+
+    skill add_checked(compiler) {
+        out put(compiler, asm.make(asm.K_CHECK, 0, 0, 0, 0, ""))
+    }
+
+    skill sub_checked(compiler) {
+        out put(compiler, asm.make(asm.K_CHECK, 1, 0, 0, 0, ""))
+    }
+
+    skill load(compiler, to, base, offset) {
+        out mem_load(compiler, W_WORD, to, base, offset)
+    }
+
+    skill load32(compiler, to, base, offset) {
+        out load(compiler, to, base, offset)
+    }
+
+    skill store32(compiler, from, base, offset) {
+        out store(compiler, from, base, offset)
+    }
+
+    skill load_byte(compiler, to, base, offset) {
+        out mem_load(compiler, W_BYTE, to, base, offset)
+    }
+
+    skill load_half(compiler, to, base, offset) {
+        out mem_load(compiler, W_HALF, to, base, offset)
+    }
+
+    skill store(compiler, from, base, offset) {
+        out mem_store(compiler, W_WORD, from, base, offset)
+    }
+
+    skill store_byte(compiler, from, base, offset) {
+        out mem_store(compiler, W_BYTE, from, base, offset)
+    }
+
+    skill store_half(compiler, from, base, offset) {
+        out mem_store(compiler, W_HALF, from, base, offset)
+    }
+
+    skill store_zero(compiler, base, offset) {
+        compiler = put(compiler, asm.make(asm.K_CONST, TEMP, 0, 0, 0, ""))
+        out mem_store(compiler, W_WORD, TEMP, base, offset)
+    }
+
+    skill store_byte_zero(compiler, base, offset) {
+        compiler = put(compiler, asm.make(asm.K_CONST, TEMP, 0, 0, 0, ""))
+        out mem_store(compiler, W_BYTE, TEMP, base, offset)
+    }
+
+    skill push(compiler, from) {
+        compiler = imm(compiler, A_ADD, backend.STACK, backend.STACK, -compiler.words.bytes)
+        out mem_store(compiler, W_WORD, from, backend.STACK, 0)
+    }
+
+    skill pop(compiler, to) {
+        compiler = mem_load(compiler, W_WORD, to, backend.STACK, 0)
+        out imm(compiler, A_ADD, backend.STACK, backend.STACK, compiler.words.bytes)
+    }
+
+    skill branch_equal(compiler, left, right, name) {
+        out branch(compiler, C_EQ, left, right, name)
+    }
+
+    skill branch_not_equal(compiler, left, right, name) {
+        out branch(compiler, C_NE, left, right, name)
+    }
+
+    skill branch_less(compiler, left, right, name) {
+        out branch(compiler, C_LT, left, right, name)
+    }
+
+    skill branch_greater_equal(compiler, left, right, name) {
+        out branch(compiler, C_GE, left, right, name)
+    }
+
+    skill branch_less_unsigned(compiler, left, right, name) {
+        out branch(compiler, C_LTU, left, right, name)
+    }
+
+    skill branch_greater_equal_unsigned(compiler, left, right, name) {
+        out branch(compiler, C_GEU, left, right, name)
+    }
+
+    skill branch_zero(compiler, from, name) {
+        out branch_one(compiler, C_EQZ, from, name)
+    }
+
+    skill branch_nonzero(compiler, from, name) {
+        out branch_one(compiler, C_NEZ, from, name)
+    }
+
+    skill branch_negative(compiler, from, name) {
+        out branch_one(compiler, C_LTZ, from, name)
+    }
+
+    skill branch_not_negative(compiler, from, name) {
+        out branch_one(compiler, C_GEZ, from, name)
+    }
+
+    skill branch_not_positive(compiler, from, name) {
+        out branch_one(compiler, C_LEZ, from, name)
+    }
+
+    skill jump(compiler, name) {
+        out put(compiler, asm.make(asm.K_JUMP, 0, 0, 0, 0, name))
+    }
+
+    skill jump_if_equal(compiler, left, right, name) {
+        out branch_equal(compiler, left, right, name)
+    }
+
+    skill jump_if_not_equal(compiler, left, right, name) {
+        out branch_not_equal(compiler, left, right, name)
+    }
+
+    skill jump_if_zero(compiler, from, name) {
+        out branch_zero(compiler, from, name)
+    }
+
+    skill jump_if_nonzero(compiler, from, name) {
+        out branch_nonzero(compiler, from, name)
+    }
+
+    skill jump_far(compiler, name) {
+        out jump(compiler, name)
+    }
+
+    skill call(compiler, name) {
+        compiler.machine = asm.call_to(compiler.machine, name)
+        out compiler
+    }
+
+    skill ret(compiler) {
+        out put(compiler, asm.make(asm.K_RET, 0, 0, 0, 0, ""))
+    }
+
+    skill wasi(compiler, kind) {
+        out put(compiler, asm.make(asm.K_WASI, kind, 0, 0, 0, ""))
+    }
+
+    skill syscall(compiler, number) {
+        out load_immediate(compiler, backend.VALUE, -1)
+    }
+
+    skill wait(compiler) {
+        out compiler
+    }
+
+    skill fence(compiler) {
+        out compiler
+    }
+}

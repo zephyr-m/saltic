@@ -20,6 +20,6 @@ PE пока живут внутри бэкендов и переедут сюд�
 | `hex/` | Intel HEX | `.hex` | Teensy Loader, старые прошивальщики | ⬜ заглушка |
 | `bin/` | Голый образ | `.bin`, `.img` | STM32, Raspberry Pi (`kernel8.img`) | ⬜ заглушка |
 | `esp/` | Образ ESP | `.bin` | ESP32, ESP32-S3 через esptool | пишется: заголовок ESP32, без SHA-256 |
-| `wasm/` | WebAssembly | `.wasm` | браузер — Saltic прямо на сайте; WASI | ⬜ на подумать |
+| `wasm/` | WebAssembly | `.wasm` | WASI; страница с теми же импортами | ✅ аргументы, печать, файлы, ввод, часы. Процессов нет |
 
 Не берём: iOS (`.ipa`) — без Apple-аккаунта, подписи и App Store туда не попасть.

@@ -1,0 +1,217 @@
+-- asm — программа как блоки WebAssembly. Метки кода — номера блоков,
+-- данные лежат в линейной памяти с 65536. Память модуля изначально нулевая,
+-- поэтому BSS отдельно обнулять не надо. STACK_TOP — служебная метка: её
+-- адрес — вершина стека после раскладки (lower.value_of). WASI_* — виды
+-- K_WASI: запись, выход, часы, чтение, открытие, закрытие, аргументы.
+
+use core.group
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.machine.buffer
+
+K_CONST = 1
+K_MOVE = 2
+K_ALU = 3
+K_IMM = 4
+K_LOAD = 5
+K_STORE = 6
+K_CMP = 7
+K_BR = 8
+K_JUMP = 9
+K_CALL = 10
+K_RET = 11
+K_WASI = 12
+K_ADDR = 13
+K_CHECK = 14
+
+BASE = 65536
+STACK_GAP = 1048576
+STACK_TOP = "wa_stack_top"
+WASI_WRITE = 0
+WASI_EXIT = 1
+WASI_NOW = 2
+WASI_READ = 3
+WASI_OPEN = 4
+WASI_CLOSE = 5
+WASI_ARGS = 6
+
+WasmOp = Box {
+    wa_k = 0,
+    wa_a = 0,
+    wa_b = 0,
+    wa_c = 0,
+    wa_d = 0,
+    wa_n = ""
+}
+
+WasmBlock = Box {
+    wa_name = "",
+    wa_id = 0,
+    wa_ops = []
+}
+
+WasmRef = Box {
+    wa_name = "",
+    wa_sec = 0,
+    wa_at = 0,
+    wa_id = 0
+}
+
+WasmProg = Box {
+    wa_blocks = [],
+    wa_cur = none,
+    wa_n = 0,
+    wa_ro = none,
+    wa_da = none,
+    wa_bss = 0,
+    wa_refs = [],
+    wa_ro_at = 65536,
+    wa_da_at = 65536,
+    wa_bs_at = 65536,
+    wa_stack = 1048576
+}
+
+skill fresh() {
+    out WasmProg {
+        wa_blocks = [],
+        wa_cur = none,
+        wa_n = 0,
+        wa_ro = buffer.empty(),
+        wa_da = buffer.empty(),
+        wa_bss = 0,
+        wa_refs = [],
+        wa_ro_at = BASE,
+        wa_da_at = BASE,
+        wa_bs_at = BASE,
+        wa_stack = BASE
+    }
+}
+
+skill make(k, a, b, c, d, text) {
+    out WasmOp { wa_k = k, wa_a = a, wa_b = b, wa_c = c, wa_d = d, wa_n = text }
+}
+
+skill start_block(prog, name) {
+    @block = WasmBlock { wa_name = name, wa_id = prog.wa_n, wa_ops = [] }
+    prog.wa_n = prog.wa_n + 1
+    prog.wa_cur = block
+    out prog
+}
+
+skill seal(prog) {
+    (prog.wa_cur == none) { out prog }
+    prog.wa_blocks = group.add(prog.wa_blocks, prog.wa_cur)
+    prog.wa_cur = none
+    out prog
+}
+
+skill push(prog, item) {
+    (prog.wa_cur == none) { prog = start_block(prog, "") }
+    @cur = prog.wa_cur
+    cur.wa_ops = group.add(cur.wa_ops, item)
+    out prog
+}
+
+skill mark(prog, name) {
+    prog = seal(prog)
+    out start_block(prog, name)
+}
+
+skill call_to(prog, name) {
+    (prog.wa_cur == none) { prog = start_block(prog, "") }
+    @ret = prog.wa_n
+    prog = push(prog, make(K_CALL, ret, 0, 0, 0, name))
+    prog = seal(prog)
+    out start_block(prog, "")
+}
+
+skill find_ref(prog, name) {
+    drum (group.count(prog.wa_refs)) {
+        @item = group.get(prog.wa_refs, beat)
+        (item.wa_name == name) { out item }
+    }
+    out none
+}
+
+skill find_block(prog, name) {
+    drum (group.count(prog.wa_blocks)) {
+        @item = group.get(prog.wa_blocks, beat)
+        (item.wa_name == name) { out item }
+    }
+    (prog.wa_cur == none) { out none }
+    (prog.wa_cur.wa_name == name) { out prog.wa_cur }
+    out none
+}
+
+skill sec_buf(prog, section) {
+    (section == backend.RODATA) { out prog.wa_ro }
+    (section == backend.DATA) { out prog.wa_da }
+    out prog.wa_ro
+}
+
+skill put_buf(prog, section, buf) {
+    (section == backend.RODATA) { prog.wa_ro = buf }
+    (section == backend.DATA) { prog.wa_da = buf }
+    out prog
+}
+
+skill pad(buf, boundary) {
+    (boundary < 2) { out buf }
+    @n = buf.length % boundary
+    (n == 0) { out buf }
+    out buffer.append_zeroes(buf, boundary - n)
+}
+
+skill align_n(n, boundary) {
+    (boundary < 2) { out n }
+    @r = n % boundary
+    (r == 0) { out n }
+    out n + boundary - r
+}
+
+skill align_sec(prog, section, boundary) {
+    (section == backend.BSS) {
+        prog.wa_bss = align_n(prog.wa_bss, boundary)
+        out prog
+    }
+    out put_buf(prog, section, pad(sec_buf(prog, section), boundary))
+}
+
+skill add_byte(prog, section, value) {
+    out put_buf(prog, section, buffer.append_byte(sec_buf(prog, section), value))
+}
+
+skill add_word(prog, section, value) {
+    prog = add_byte(prog, section, value.b0)
+    prog = add_byte(prog, section, value.b1)
+    prog = add_byte(prog, section, value.b2)
+    out add_byte(prog, section, value.b3)
+}
+
+skill add_text(prog, section, text) {
+    prog = put_buf(prog, section, buffer.append_text(sec_buf(prog, section), text))
+    out add_byte(prog, section, 0)
+}
+
+skill reserve(prog, count) {
+    prog.wa_bss = prog.wa_bss + count
+    out prog
+}
+
+skill define(prog, section, name) {
+    (section == backend.CODE) { out mark(prog, name) }
+    @at = 0
+    (section == backend.RODATA) { at = prog.wa_ro.length }
+    (section == backend.DATA) { at = prog.wa_da.length }
+    (section == backend.BSS) { at = prog.wa_bss }
+    @ref = WasmRef { wa_name = name, wa_sec = section, wa_at = at, wa_id = 0 }
+    prog.wa_refs = group.add(prog.wa_refs, ref)
+    out prog
+}
+
+skill place(prog) {
+    prog.wa_ro_at = BASE
+    prog.wa_da_at = BASE + prog.wa_ro.length
+    prog.wa_bs_at = prog.wa_da_at + prog.wa_da.length
+    prog.wa_stack = align_n(prog.wa_bs_at + prog.wa_bss + STACK_GAP, 16)
+    out prog
+}

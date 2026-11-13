@@ -1,0 +1,173 @@
+-- files — чтение и запись файла через WASI path_open. Каталог — fd 3,
+-- его даёт хост (preopen). Путь относительно этого каталога.
+-- file_read -> строка; file_write -> none; ошибка — File.
+
+use selfhost.abi
+use selfhost.compiler.backend
+use selfhost.compiler.platform
+use selfhost.compiler.backend.wasm.asm
+use selfhost.compiler.backend.rv32i.runtime.tails
+
+FRAME = 32
+RET = 28
+FD = 24
+TEXT = 20
+OBJ = 20
+TOTAL = 16
+CAP = 12
+CHUNK = 4096
+IOV = 2048
+OPENED = 2064
+CREAT = 9
+
+skill emit_iov(compiler, kind) {
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.SCRATCH5, IOV)
+    compiler = executor.store(compiler, backend.ERROR, backend.SCRATCH5, 0)
+    compiler = executor.store(compiler, backend.ARG2, backend.SCRATCH5, 4)
+    compiler = executor.store_zero(compiler, backend.SCRATCH5, 8)
+    compiler = executor.move(compiler, backend.ERROR, backend.SCRATCH5)
+    compiler = executor.add_immediate(compiler, backend.ARG3, backend.SCRATCH5, 8)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 1)
+    out executor.wasi(compiler, kind)
+}
+
+skill emit_open(compiler, oflags) {
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.ARG2, oflags)
+    compiler = executor.load_immediate(compiler, backend.ARG3, OPENED)
+    out executor.wasi(compiler, asm.WASI_OPEN)
+}
+
+skill take_path(compiler) {
+    @executor = compiler.executor
+    @at = compiler.words.payload + compiler.words.string_data
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.ERROR, backend.SCRATCH0, compiler.words.payload)
+    out executor.add_immediate(compiler, backend.VALUE, backend.SCRATCH0, at)
+}
+
+skill emit_fail(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, ".L_wa_file_fail")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, FD)
+    compiler = executor.branch_negative(compiler, backend.VALUE, ".L_wa_file_closed")
+    compiler = executor.wasi(compiler, asm.WASI_CLOSE)
+    compiler = executor.label(compiler, ".L_wa_file_closed")
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_FILE)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, RET)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, FRAME)
+    out executor.ret(compiler)
+}
+
+skill emit_read(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    @at = words.payload + words.string_data
+    compiler = executor.label(compiler, platform.FILE_READ)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -FRAME)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, RET)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, -1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, FD)
+    compiler = take_path(compiler)
+    compiler = emit_open(compiler, 0)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_wa_file_fail")
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, FD)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, CHUNK)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, CAP)
+    compiler = executor.label(compiler, ".L_wa_read_alloc")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, CAP)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.string_data + 1)
+    compiler = executor.call(compiler, "rt_alloc")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
+    compiler = executor.store32(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, OBJ)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, TOTAL)
+    compiler = executor.label(compiler, ".L_wa_read_loop")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, TOTAL)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, CAP)
+    compiler = executor.branch_greater_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_wa_read_grow")
+    compiler = executor.load(compiler, backend.ERROR, backend.STACK, OBJ)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.ERROR, at)
+    compiler = executor.add(compiler, backend.ERROR, backend.ERROR, backend.SCRATCH0)
+    compiler = executor.sub(compiler, backend.ARG2, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, FD)
+    compiler = emit_iov(compiler, asm.WASI_READ)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_wa_file_fail")
+    compiler = executor.branch_zero(compiler, backend.VALUE, ".L_wa_read_done")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, TOTAL)
+    compiler = executor.add(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.VALUE)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, TOTAL)
+    compiler = executor.jump(compiler, ".L_wa_read_loop")
+    compiler = executor.label(compiler, ".L_wa_read_grow")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, CAP)
+    compiler = executor.shift_left(compiler, backend.VALUE, backend.VALUE, 1)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, CAP)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.string_data + 1)
+    compiler = executor.call(compiler, "rt_alloc")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
+    compiler = executor.store32(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, OBJ)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, OBJ)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, at)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.VALUE, at)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.STACK, TOTAL)
+    compiler = executor.label(compiler, ".L_wa_read_copy")
+    compiler = executor.jump_if_zero(compiler, backend.SCRATCH2, ".L_wa_read_loop")
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH0, 0)
+    compiler = executor.store_byte(compiler, backend.SCRATCH3, backend.SCRATCH1, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 1)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, 1)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, -1)
+    compiler = executor.jump(compiler, ".L_wa_read_copy")
+    compiler = executor.label(compiler, ".L_wa_read_done")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, OBJ)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.STACK, TOTAL)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.SCRATCH0, words.payload)
+    compiler = executor.add(compiler, backend.SCRATCH1, backend.SCRATCH0, backend.SCRATCH2)
+    compiler = executor.store_byte_zero(compiler, backend.SCRATCH1, at)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, FD)
+    compiler = executor.wasi(compiler, asm.WASI_CLOSE)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, OBJ)
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, RET)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, FRAME)
+    out tails.ok(compiler)
+}
+
+skill emit_write(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    @at = words.payload + words.string_data
+    compiler = executor.label(compiler, platform.FILE_WRITE)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -FRAME)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, RET)
+    compiler = executor.store(compiler, backend.ERROR, backend.STACK, TEXT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, -1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, FD)
+    compiler = take_path(compiler)
+    compiler = emit_open(compiler, CREAT)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_wa_file_fail")
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, FD)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, TEXT)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.ARG2, backend.SCRATCH0, words.payload)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.SCRATCH0, at)
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, FD)
+    compiler = emit_iov(compiler, asm.WASI_WRITE)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_wa_file_fail")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, FD)
+    compiler = executor.wasi(compiler, asm.WASI_CLOSE)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, RET)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, FRAME)
+    out tails.ok(compiler)
+}
+
+skill emit(compiler) {
+    compiler = emit_read(compiler)
+    compiler = emit_write(compiler)
+    out emit_fail(compiler)
+}

@@ -1,0 +1,87 @@
+-- line — rt_platform_read_line: одна строка stdin без перевода строки.
+-- Конец ввода и сбой чтения — File. Длиннее 65536 байт — остаток следующим вызовом.
+
+use selfhost.abi
+use selfhost.compiler.backend
+use selfhost.compiler.platform
+use selfhost.compiler.backend.wasm.asm
+use selfhost.compiler.backend.rv32i.runtime.tails
+
+LIMIT = 65536
+NEWLINE = 10
+CARRIAGE = 13
+IOV = 2048
+
+skill frame(words) {
+    out LIMIT + words.bytes * 3
+}
+
+skill pull(compiler) {
+    @executor = compiler.executor
+    compiler = executor.load_immediate(compiler, backend.SCRATCH5, IOV)
+    compiler = executor.store(compiler, backend.ERROR, backend.SCRATCH5, 0)
+    compiler = executor.store(compiler, backend.ARG2, backend.SCRATCH5, 4)
+    compiler = executor.store_zero(compiler, backend.SCRATCH5, 8)
+    compiler = executor.move(compiler, backend.ERROR, backend.SCRATCH5)
+    compiler = executor.add_immediate(compiler, backend.ARG3, backend.SCRATCH5, 8)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 1)
+    out executor.wasi(compiler, asm.WASI_READ)
+}
+
+skill emit(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    @size = frame(words)
+    compiler = executor.label(compiler, platform.READ_LINE)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -size)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.label(compiler, ".L_wa_line_next")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, LIMIT)
+    compiler = executor.branch_greater_equal(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_wa_line_done")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.STACK, words.bytes * 2)
+    compiler = executor.add(compiler, backend.ERROR, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG2, 1)
+    compiler = pull(compiler)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_wa_line_fail")
+    compiler = executor.branch_zero(compiler, backend.VALUE, ".L_wa_line_end")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.STACK, words.bytes * 2)
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH2, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, NEWLINE)
+    compiler = executor.branch_equal(compiler, backend.SCRATCH3, backend.SCRATCH4, ".L_wa_line_done")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.jump(compiler, ".L_wa_line_next")
+    compiler = executor.label(compiler, ".L_wa_line_end")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_wa_line_fail")
+    compiler = executor.label(compiler, ".L_wa_line_done")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.STACK, words.bytes * 2)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_wa_line_cut")
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, -1)
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH2, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, CARRIAGE)
+    compiler = executor.branch_not_equal(compiler, backend.SCRATCH3, backend.SCRATCH4, ".L_wa_line_cut")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, -1)
+    compiler = executor.label(compiler, ".L_wa_line_cut")
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH1, backend.SCRATCH0)
+    compiler = executor.store_byte_zero(compiler, backend.SCRATCH2, 0)
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH1)
+    compiler = executor.call(compiler, "rt_cstring")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 0)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, size)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_wa_line_fail")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, 0)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, size)
+    compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_FILE)
+    out executor.ret(compiler)
+}
