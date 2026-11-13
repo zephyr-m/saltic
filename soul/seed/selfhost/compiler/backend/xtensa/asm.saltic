@@ -1,6 +1,7 @@
 -- asm — поток команд Xtensa: байты, метки, правки L32R/J/CALL0.
 -- Пул литералов встаёт перед кодом в IRAM. Адрес кода зависит от длины пула,
--- поэтому L32R дописывается в конце. Сторожа нуля в BSS — два служебных числа.
+-- поэтому L32R дописывается в конце. Начало и размер BSS — служебные метки
+-- BSS_START и BSS_SIZE для load_address. Куча больше HEAP_LIMIT — ошибка.
 
 use core.group
 use core.bytes
@@ -17,6 +18,9 @@ FIX_J = 0
 FIX_CALL = 1
 FIX_LIT = 2
 FIX_LABEL = 3
+BSS_START = "xt_bss_start"
+BSS_SIZE = "xt_bss_size"
+HEAP_LIMIT = 65536
 
 XtLabel = Box {
     xt_name = "",
@@ -54,14 +58,6 @@ skill iram() {
 
 skill dram() {
     out pack(0, 0, 251, 63)
-}
-
-skill bss_base() {
-    out pack(1, 0, 87, 14)
-}
-
-skill bss_size() {
-    out pack(2, 0, 87, 14)
 }
 
 skill fresh(entry) {
@@ -198,9 +194,11 @@ skill add_text(prog, section, text) {
 }
 
 skill reserve(prog, count) {
-    @add = count
-    (count > 65536) { add = 256 }
-    prog.xt_bss = prog.xt_bss + add
+    (count > HEAP_LIMIT) {
+        io.show("куча {count} байт больше {HEAP_LIMIT}")
+        out error.ValueOutsideRange
+    }
+    prog.xt_bss = prog.xt_bss + count
     out prog
 }
 
@@ -214,11 +212,9 @@ skill here(prog, name, add, code_base, data_base) {
 }
 
 skill pool_value(prog, fix, code_base, data_base, base, size) {
-    (fix.xt_kind == FIX_LIT) {
-        (fix.xt_value == bss_base()) { out base }
-        (fix.xt_value == bss_size()) { out size }
-        out fix.xt_value
-    }
+    (fix.xt_kind == FIX_LIT) { out fix.xt_value }
+    (fix.xt_name == BSS_START) { out base }
+    (fix.xt_name == BSS_SIZE) { out size }
     out here(prog, fix.xt_name, fix.xt_add, code_base, data_base)
 }
 
@@ -297,12 +293,5 @@ skill image_of(prog) {
         out error.XtensaLink
     }
     @entry_at = here(prog, "platform_start", 0, code_base, data_base)
-    (bytes.count(buffer.whole(data)) == 0) {
-        out image.app(entry_at, iram(), buffer.whole(blob), data_base, buffer.whole(data))
-    }
     out image.app(entry_at, iram(), buffer.whole(blob), data_base, buffer.whole(data))
-}
-
-program() {
-    out none
 }

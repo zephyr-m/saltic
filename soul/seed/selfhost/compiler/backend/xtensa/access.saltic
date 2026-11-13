@@ -1,5 +1,7 @@
 -- access — чтение и запись. Короткое смещение остаётся в команде.
--- Длинное и слот DRAM идут через a14/a15, их прежние значения лежат на стеке.
+-- Длинное и слот DRAM идут через a14/a15, их прежние значения лежат на стеке
+-- (spill сдвигает a1 на 8). После spill роли a14, a15 и a1 читаются только
+-- через fetch: он берёт прежние a14/a15 со стека и a1 с поправкой на 8.
 
 use selfhost.compiler.backend.xtensa.asm
 use selfhost.compiler.backend.xtensa.encode
@@ -34,9 +36,10 @@ skill fetch(prog, role, into) {
         prog = asm.lit(prog, 15, roles.addr(role))
         out asm.emit3(prog, encode.l32i(into, 15, 0))
     }
-    (r == into) { out prog }
     (r == 14) { out asm.emit3(prog, encode.l32i(into, 1, 0)) }
     (r == 15) { out asm.emit3(prog, encode.l32i(into, 1, 4)) }
+    (r == 1) { out asm.emit3(prog, encode.addi(into, 1, 8)) }
+    (r == into) { out prog }
     out asm.emit3(prog, encode.or(into, r, r))
 }
 
@@ -60,6 +63,13 @@ skill finish(prog, role) {
         prog = asm.emit3(prog, encode.or(15, 14, 14))
         prog = asm.emit3(prog, encode.l32i(14, 1, 0))
         out drop(prog)
+    }
+    (r == 1) {
+        prog = asm.emit3(prog, encode.l32i(15, 1, 0))
+        prog = asm.emit3(prog, encode.s32i(14, 1, 0))
+        prog = asm.emit3(prog, encode.or(14, 15, 15))
+        prog = asm.emit3(prog, encode.l32i(15, 1, 4))
+        out asm.emit3(prog, encode.l32i(1, 1, 0))
     }
     (r >= 0) { prog = asm.emit3(prog, encode.or(r, 14, 14)) }
     (r < 0) { prog = deliver(prog, role, 14) }
@@ -118,22 +128,11 @@ skill store(prog, src_role, base_role, offset, width) {
     }
     prog = spill(prog)
     prog = fetch(prog, src_role, 14)
-    (fits(offset, width, limit_of(width)) == yes) {
-        (base >= 0) {
-            prog = op_store(prog, 14, base, offset, width)
-            out unspill(prog)
-        }
-    }
     prog = fetch(prog, base_role, 15)
-    (offset == 0) {
-        prog = op_store(prog, 14, 15, 0, width)
-        out unspill(prog)
-    }
     (fits(offset, width, limit_of(width)) == yes) {
         prog = op_store(prog, 14, 15, offset, width)
         out unspill(prog)
     }
-    @hold = 14
     prog = asm.emit3(prog, encode.addi(1, 1, 0 - 4))
     prog = asm.emit3(prog, encode.s32i(14, 1, 0))
     prog = asm.lit(prog, 14, offset)
@@ -142,34 +141,19 @@ skill store(prog, src_role, base_role, offset, width) {
     prog = asm.emit3(prog, encode.addi(1, 1, 4))
     prog = op_store(prog, 14, 15, 0, width)
     out unspill(prog)
-}
-
-skill shifted(base_role, offset) {
-    (roles.reg(base_role) == 1) { out offset + 8 }
-    out offset
 }
 
 skill zero(prog, base_role, offset, width) {
     prog = spill(prog)
-    prog = asm.emit3(prog, encode.movi(14, 0))
-    @off = shifted(base_role, offset)
-    (roles.reg(base_role) >= 0) {
-        (fits(off, width, limit_of(width)) == yes) {
-            prog = op_store(prog, 14, roles.reg(base_role), off, width)
-            out unspill(prog)
-        }
-    }
-    prog = asm.emit3(prog, encode.addi(1, 1, 0 - 4))
-    prog = asm.emit3(prog, encode.s32i(14, 1, 0))
     prog = fetch(prog, base_role, 15)
+    (fits(offset, width, limit_of(width)) == yes) {
+        prog = asm.emit3(prog, encode.movi(14, 0))
+        prog = op_store(prog, 14, 15, offset, width)
+        out unspill(prog)
+    }
     prog = asm.lit(prog, 14, offset)
     prog = asm.emit3(prog, encode.add(15, 15, 14))
-    prog = asm.emit3(prog, encode.l32i(14, 1, 0))
-    prog = asm.emit3(prog, encode.addi(1, 1, 4))
+    prog = asm.emit3(prog, encode.movi(14, 0))
     prog = op_store(prog, 14, 15, 0, width)
     out unspill(prog)
-}
-
-program() {
-    out none
 }

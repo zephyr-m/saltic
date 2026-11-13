@@ -1,0 +1,117 @@
+-- xtensa-encoder — кодировщик команд Xtensa LX6 (selfhost/compiler/backend/
+-- xtensa/encode) против эталонных байтов GNU as Espressif с настройкой ядра
+-- ESP32. Имя проверки — команда в синтаксисе GNU as; смещение перехода —
+-- «.+N» от начала команды. Узкие команды (.n) — два байта, прочие — три.
+--
+-- hex(word, size) -> байты текстом "f0 20 00" (младший первым, как в файле)
+-- check / narrow(suite, command, word, expected) -> suite — 3 / 2 байта
+-- data / memory / shifts / control / system(suite) -> suite
+-- program() -> итог testing.test_finish
+
+use core.num
+use core.str
+use craft.testing
+use selfhost.compiler.backend.xtensa.encode
+
+skill hex(word, size) {
+    @text = ""
+    @rest = word
+    drum (size) {
+        @value = rest % 256
+        rest = rest / 256
+        (str.bytes(text) > 0) { text = str.concat(text, " ") }
+        text = str.concat(text, num.hex_char(value / 16))
+        text = str.concat(text, num.hex_char(value % 16))
+    }
+    out text
+}
+
+skill check(suite, command, word, expected) {
+    out testing.test_equal(suite, command, hex(word, 3), expected)
+}
+
+skill narrow(suite, command, word, expected) {
+    out testing.test_equal(suite, command, hex(word, 2), expected)
+}
+
+skill data(suite) {
+    suite = check(suite, "nop", encode.nop(), "f0 20 00")
+    suite = check(suite, "add a2, a3, a4", encode.add(2, 3, 4), "40 23 80")
+    suite = check(suite, "sub a2, a3, a4", encode.sub(2, 3, 4), "40 23 c0")
+    suite = check(suite, "and a2, a3, a4", encode.and(2, 3, 4), "40 23 10")
+    suite = check(suite, "or a2, a3, a3", encode.or(2, 3, 3), "30 23 20")
+    suite = check(suite, "xor a7, a2, a6", encode.xor(7, 2, 6), "60 72 30")
+    suite = check(suite, "neg a2, a3", encode.neg(2, 3), "30 20 60")
+    suite = check(suite, "addi a1, a1, -8", encode.addi(1, 1, 0 - 8), "12 c1 f8")
+    suite = check(suite, "addi a2, a3, 127", encode.addi(2, 3, 127), "22 c3 7f")
+    suite = check(suite, "movi a3, -1", encode.movi(3, 0 - 1), "32 af ff")
+    suite = check(suite, "movi a3, 2047", encode.movi(3, 2047), "32 a7 ff")
+    suite = check(suite, "movi a14, -2048", encode.movi(14, 0 - 2048), "e2 a8 00")
+    suite = narrow(suite, "mov.n a0, a0", encode.mov_n(0, 0), "0d 00")
+    out narrow(suite, "mov.n a2, a3", encode.mov_n(2, 3), "2d 03")
+}
+
+skill memory(suite) {
+    suite = check(suite, "l8ui a2, a3, 255", encode.l8ui(2, 3, 255), "22 03 ff")
+    suite = check(suite, "l16ui a2, a3, 510", encode.l16ui(2, 3, 510), "22 13 ff")
+    suite = check(suite, "l32i a2, a1, 8", encode.l32i(2, 1, 8), "22 21 02")
+    suite = check(suite, "l32i a15, a1, 1020", encode.l32i(15, 1, 1020), "f2 21 ff")
+    suite = check(suite, "s8i a2, a3, 1", encode.s8i(2, 3, 1), "22 43 01")
+    suite = check(suite, "s16i a2, a3, 510", encode.s16i(2, 3, 510), "22 53 ff")
+    out check(suite, "s32i a14, a1, 4", encode.s32i(14, 1, 4), "e2 61 01")
+}
+
+skill shifts(suite) {
+    suite = check(suite, "slli a2, a3, 3", encode.slli(2, 3, 3), "d0 23 11")
+    suite = check(suite, "slli a14, a14, 20", encode.slli(14, 14, 20), "c0 ee 01")
+    suite = check(suite, "slli a2, a2, 1", encode.slli(2, 2, 1), "f0 22 11")
+    suite = check(suite, "slli a2, a2, 31", encode.slli(2, 2, 31), "10 22 01")
+    suite = check(suite, "srli a2, a3, 8", encode.srli(2, 3, 8), "30 28 41")
+    suite = check(suite, "srli a2, a3, 15", encode.srli(2, 3, 15), "30 2f 41")
+    suite = check(suite, "srai a2, a3, 20", encode.srai(2, 3, 20), "30 24 31")
+    suite = check(suite, "srai a2, a3, 1", encode.srai(2, 3, 1), "30 21 21")
+    suite = check(suite, "ssl a15", encode.ssl(15), "00 1f 40")
+    suite = check(suite, "ssr a15", encode.ssr(15), "00 0f 40")
+    suite = check(suite, "sll a14, a14", encode.sll_reg(14, 14), "00 ee a1")
+    suite = check(suite, "srl a14, a14", encode.srl_reg(14, 14), "e0 e0 91")
+    out check(suite, "sra a14, a14", encode.sra_reg(14, 14), "e0 e0 b1")
+}
+
+skill control(suite) {
+    suite = check(suite, "j .", encode.jump(0), "06 ff ff")
+    suite = check(suite, "j .+6", encode.jump(6), "86 00 00")
+    suite = check(suite, "j .-300", encode.jump(0 - 300), "06 b4 ff")
+    suite = check(suite, "call0 .+4", encode.call0(4), "05 00 00")
+    suite = check(suite, "call0 .+1024", encode.call0(1024), "c5 3f 00")
+    suite = check(suite, "call0 .-64", encode.call0(0 - 64), "c5 fb ff")
+    suite = check(suite, "callx0 a4", encode.callx0(4), "c0 04 00")
+    suite = check(suite, "ret", encode.ret(), "80 00 00")
+    suite = narrow(suite, "ret.n", encode.ret_n(), "0d f0")
+    suite = check(suite, "beq a2, a3, .+9", encode.beq(2, 3, 9), "37 12 05")
+    suite = check(suite, "bne a2, a3, .+6", encode.bne(2, 3, 6), "37 92 02")
+    suite = check(suite, "blt a14, a15, .+15", encode.blt(14, 15, 15), "f7 2e 0b")
+    suite = check(suite, "bge a2, a3, .-20", encode.bge(2, 3, 0 - 20), "37 a2 e8")
+    suite = check(suite, "bltu a14, a15, .+9", encode.bltu(14, 15, 9), "f7 3e 05")
+    suite = check(suite, "bgeu a2, a3, .+6", encode.bgeu(2, 3, 6), "37 b2 02")
+    suite = check(suite, "beqz a2, .+6", encode.beqz(2, 6), "16 22 00")
+    suite = check(suite, "bnez a14, .+9", encode.bnez(14, 9), "56 5e 00")
+    suite = check(suite, "bltz a7, .+12", encode.bltz(7, 12), "96 87 00")
+    suite = check(suite, "bgez a7, .+9", encode.bgez(7, 9), "d6 57 00")
+    out check(suite, "bnez a2, .-100", encode.bnez(2, 0 - 100), "56 82 f9")
+}
+
+skill system(suite) {
+    suite = check(suite, "memw", encode.memw(), "c0 20 00")
+    suite = check(suite, "waiti 0", encode.waiti(0), "00 70 00")
+    out check(suite, "rsr a2, ccount", encode.rsr(2, 234), "20 ea 03")
+}
+
+program() {
+    @suite = testing.test_new()
+    suite = data(suite)
+    suite = memory(suite)
+    suite = shifts(suite)
+    suite = control(suite)
+    suite = system(suite)
+    out testing.test_finish(suite)
+}

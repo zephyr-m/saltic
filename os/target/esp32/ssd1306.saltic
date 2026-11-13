@@ -1,0 +1,82 @@
+-- ssd1306 — экран SSD1306 128×64 на I2C (адрес 0x3C, i2c). Текст шрифтом
+-- Spleen 5×8: глиф ровно в страницу экрана (8 пикселей высотой), строка
+-- текста — одна страница, 21 знак по 6 пикселей; кадр в памяти не держим.
+-- UTF-8: ASCII и кириллица, прочее — «?» (os.drivers.font).
+--
+-- start() -> yes, если экран ответил; включает его и чистит
+-- lines(texts) — до 8 строк сверху вниз, остаток страниц чистится
+-- Внутри: command(bytes), page(index, text), column(glyph, x) -> байт столбца
+
+use core.str
+use core.group
+use os.drivers.font
+use os.fonts.spleen
+use os.target.esp32.i2c
+
+ADDRESS = 120
+COMMANDS = 0
+DATA = 64
+WIDTH = 128
+PAGES = 8
+GLYPH = 5
+STEP = 6
+INIT = [174, 213, 128, 168, 63, 211, 0, 64, 141, 20, 32, 0, 161, 200, 218, 18, 129, 207, 217, 241, 219, 64, 164, 166, 175]
+
+skill command(bytes) {
+    i2c.start()
+    @ack = i2c.write(ADDRESS)
+    i2c.write(COMMANDS)
+    drum (bytes) { i2c.write(beat) }
+    i2c.stop()
+    out ack
+}
+
+skill column(glyph, x) {
+    @byte = 0
+    @weight = 1
+    @mask = 16
+    drum (x) { mask = mask / 2 }
+    drum (8) {
+        (group.get(glyph, beat) / mask % 2 == 1) { byte = byte + weight }
+        weight = weight * 2
+    }
+    out byte
+}
+
+skill page(index, text) {
+    command([34, index, index, 33, 0, WIDTH - 1])
+    i2c.start()
+    i2c.write(ADDRESS)
+    i2c.write(DATA)
+    @sent = 0
+    @at = 0
+    drum (str.bytes(text)) {
+        (at < str.bytes(text)) {
+            (sent + STEP <= WIDTH) {
+                @code = font.font_decode(text, at)
+                @glyph = group.get(spleen.GLYPHS_5X8, font.font_glyph_index(code.value))
+                drum (GLYPH) { i2c.write(column(glyph, beat)) }
+                i2c.write(0)
+                sent = sent + STEP
+                at = at + code.width
+            }
+            (sent + STEP > WIDTH) { at = str.bytes(text) }
+        }
+    }
+    drum (WIDTH - sent) { i2c.write(0) }
+    out i2c.stop()
+}
+
+skill start() {
+    i2c.setup()
+    out command(INIT)
+}
+
+skill lines(texts) {
+    drum (PAGES) {
+        @text = ""
+        (beat < group.count(texts)) { text = group.get(texts, beat) }
+        page(beat, text)
+    }
+    out none
+}

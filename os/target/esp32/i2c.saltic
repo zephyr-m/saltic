@@ -1,0 +1,106 @@
+-- i2c — шина I2C ногодрыгом на двух GPIO ESP32: SDA — 23, SCL — 22. Линии
+-- открытый сток: на выходе всегда 0, «отпустить» — выключить выход, тогда
+-- линию поднимает подтяжка (на плате экрана и своя в IO_MUX). Скорость —
+-- сколько успевает цикл, ниже 100 кГц. Регистры GPIO и IO_MUX — по адресам
+-- шины AHB (0x6000_4000, 0x6000_9000): по 0x3FF4_4000 блок GPIO на нашей
+-- загрузке читается нулями и записи не держит (проверено на DevKit).
+--
+-- setup() — IO_MUX: обе ножки — GPIO, вход и подтяжка; выход — простой GPIO
+-- start() / stop() — условия старт и стоп
+-- write(byte) -> yes, если ведомый ответил ACK
+-- Внутри: gpio(), pin_low / pin_release(mask), sda_high(), pause()
+
+use core.address
+use core.usize
+use core.u32
+use core.mem
+use core.bits32
+
+SDA = 8388608
+SCL = 4194304
+ENABLE_SET = 36
+ENABLE_CLEAR = 40
+OUT_CLEAR = 12
+INPUT = 60
+OUT_SELECT_SDA = 1420
+OUT_SELECT_SCL = 1416
+MUX_SDA = 140
+MUX_SCL = 128
+MUX_GPIO = 8960
+SIMPLE_OUTPUT = 256
+PAUSE = 4
+
+skill gpio() {
+    out address.from(1610629120)
+}
+
+skill io_mux() {
+    out address.from(1610649600)
+}
+
+skill pause() {
+    drum (PAUSE) {}
+    out none
+}
+
+skill pin_low(mask) {
+    mem.store32(gpio(), usize.from(ENABLE_SET), u32.from(mask))
+    out pause()
+}
+
+skill pin_release(mask) {
+    mem.store32(gpio(), usize.from(ENABLE_CLEAR), u32.from(mask))
+    out pause()
+}
+
+skill sda_high() {
+    @value = mem.load32(gpio(), usize.from(INPUT))
+    (bits32.and(bits32.from(value), bits32.from(SDA)) == bits32.from(0)) { out no }
+    out yes
+}
+
+skill setup() {
+    mem.store32(io_mux(), usize.from(MUX_SDA), u32.from(MUX_GPIO))
+    mem.store32(io_mux(), usize.from(MUX_SCL), u32.from(MUX_GPIO))
+    mem.store32(gpio(), usize.from(OUT_SELECT_SDA), u32.from(SIMPLE_OUTPUT))
+    mem.store32(gpio(), usize.from(OUT_SELECT_SCL), u32.from(SIMPLE_OUTPUT))
+    mem.store32(gpio(), usize.from(OUT_CLEAR), u32.from(SDA + SCL))
+    pin_release(SDA)
+    out pin_release(SCL)
+}
+
+skill start() {
+    pin_release(SDA)
+    pin_release(SCL)
+    pin_low(SDA)
+    out pin_low(SCL)
+}
+
+skill stop() {
+    pin_low(SDA)
+    pin_release(SCL)
+    out pin_release(SDA)
+}
+
+skill write(byte) {
+    @rest = byte
+    @weight = 128
+    drum (8) {
+        @one = no
+        (rest >= weight) {
+            one = yes
+            rest = rest - weight
+        }
+        (one == yes) { pin_release(SDA) }
+        (one == no) { pin_low(SDA) }
+        pin_release(SCL)
+        pin_low(SCL)
+        weight = weight / 2
+    }
+    pin_release(SDA)
+    pin_release(SCL)
+    @ack = no
+    (sda_high() == no) { ack = yes }
+    pin_low(SCL)
+    out ack
+}

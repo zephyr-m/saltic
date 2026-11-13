@@ -107,6 +107,11 @@ x86-golden mode="": _dirs
     bootstrap/saltic workbench/check/x86-encoder-golden.saltic .cache/build/workbench/x86-encoder-golden 536870912 x86_64 >/dev/null
     .cache/build/workbench/x86-encoder-golden "$1"
 
+esp32: _dirs
+    bootstrap/saltic os/target/esp32/toolchain.saltic .cache/build/workbench/esp32-toolchain 536870912 x86_64 >/dev/null
+    bootstrap/saltic workbench/check/esp32.saltic .cache/build/workbench/esp32 536870912 x86_64 >/dev/null
+    .cache/build/workbench/esp32
+
 arm64-golden mode="": _dirs
     bootstrap/saltic workbench/check/arm64-encoder-golden.saltic .cache/build/workbench/arm64-encoder-golden 536870912 x86_64 >/dev/null
     .cache/build/workbench/arm64-encoder-golden "$1"

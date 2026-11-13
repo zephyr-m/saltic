@@ -1,0 +1,175 @@
+-- esp32 — проверка бэкенда Xtensa. Плата на PORT — гоняем на железе: каждую
+-- программу из PROGRAMS собирает TOOLCHAIN, esptool прошивает, tools/uart.py
+-- сбрасывает плату и читает UART; после строки ПЗУ «entry …» платформа
+-- печатает «S», дальше вывод программы сверяется с эталоном. Платы нет —
+-- сверяем кодировщик: каждую строку check / narrow из TEST собирает GNU as
+-- Espressif (~/XTENSA, настройка ядра ESP32, запуск через загрузчик glibc из
+-- nix). Шаги — «шаг N:» (global-check, ESP32_STEPS). Расхождение — ошибка
+-- GoldenDiffers. Плату ищем через test -c: чтение порта (kit.exists) висит.
+-- Вызов: `just esp32`.
+--
+-- program() -> none; GoldenDiffers
+-- Внутри: board / encoder(zone) -> провалов; parse(line) -> [команда, байты]
+--     или []; assemble(command, loader) -> байты текстом или "" (loader — ld glibc);
+--     after_entry(text) -> строки;
+--     joined(lines) -> текст строк без пустых; find(text, needle) -> байт или -1
+
+use io
+use io.file
+use io.clock
+use core.num
+use core.str
+use core.group
+use core.bytes
+use core.process
+use workbench.kit
+
+PORT = "/dev/ttyUSB0"
+WORK = ".cache/build/workbench/esp32-run"
+TOOLCHAIN = ".cache/build/workbench/esp32-toolchain"
+TEST = "tests/xtensa-encoder.saltic"
+XTENSA = "tools/xtensa/xtensa-esp-elf"
+PROGRAMS = [["smoke", "os/target/esp32/smoke.saltic"], ["probe", "os/target/esp32/probe.saltic"]]
+HEAP = "65536"
+
+skill joined(lines) {
+    @text = ""
+    drum (lines) {
+        drum (str.lines(beat)) { text = "{text}{beat}\n" }
+    }
+    out text
+}
+
+skill find(text, needle) {
+    @at = -1
+    drum (str.bytes(text)) {
+        (at < 0) {
+            (str.starts_at(text, needle, beat) == yes) { at = beat }
+        }
+    }
+    out at
+}
+
+skill after_entry(text) {
+    @lines = []
+    @seen = no
+    drum (str.lines(text)) {
+        (seen == yes) { lines = group.add(lines, beat) }
+        (str.starts_with(beat, "entry ") == yes) { seen = yes }
+    }
+    out lines
+}
+
+skill board(zone) {
+    @failed = 0
+    @count = group.count(PROGRAMS)
+    kit.line(zone, "шаг 2: собираю и прошиваю программы: {count}")
+    drum (PROGRAMS) {
+        @name = group.get(beat, 0)
+        @image = "{WORK}/{name}.bin"
+        @built = kit.shell("\"$0\" \"$1\" \"$2\" $3 > \"$4/{name}-build.log\" 2>&1", [TOOLCHAIN, group.get(beat, 1), image, HEAP, WORK], "")
+        @flashed = 1
+        (built == 0) { flashed = kit.shell("nix-shell -p esptool --run \"esptool --chip esp32 --port $0 --no-stub --after no-reset write-flash 0x1000 $1\" > \"$2/{name}-flash.log\" 2>&1", [PORT, image, WORK], "") }
+        (flashed == 0) { kit.shell("nix-shell -p esptool --run \"python3 os/target/esp32/tools/uart.py $0 4\" > \"$1/{name}.uart\" 2>&1", [PORT, WORK], "") }
+        ((flashed == 0) == no) {
+            kit.line(zone, "  {name}: не собрался или не прошился — {WORK}/{name}-*.log")
+            failed = failed + 1
+        }
+        (flashed == 0) {
+            @got = joined(after_entry(file.read("{WORK}/{name}.uart")))
+            @expected = joined(group.add(["S"], file.read("tests/expected/esp32-{name}.txt")))
+            (got == expected) { kit.line(zone, "  {name}: вывод совпал") }
+            ((got == expected) == no) {
+                kit.line(zone, "  {name}: вывод платы не совпал с tests/expected/esp32-{name}.txt — {WORK}/{name}.uart")
+                failed = failed + 1
+            }
+        }
+    }
+    out failed
+}
+
+skill parse(line) {
+    @at = -1
+    drum (["check(suite, \"", "narrow(suite, \""]) {
+        @found = find(line, beat)
+        (found >= 0) { at = found + str.bytes(beat) }
+    }
+    (at < 0) { out [] }
+    @close = find(str.slice(line, at, str.bytes(line)), "\"")
+    @end = str.bytes(line) - 2
+    (str.ends_with(line, "\")") == no) { out [] }
+    @open = end - 1
+    drum (end) {
+        @back = end - 1 - beat
+        (open == end - 1) {
+            (str.get(line, back) == "\"") { open = back }
+        }
+    }
+    out [str.slice(line, at, at + close), str.slice(line, open + 1, end)]
+}
+
+skill hex(buffer) {
+    @text = ""
+    drum (bytes.count(buffer)) {
+        @value = bytes.get(buffer, beat)
+        (beat > 0) { text = str.concat(text, " ") }
+        text = str.concat(text, str.concat(num.hex_char(value / 16), num.hex_char(value % 16)))
+    }
+    out text
+}
+
+skill assemble(command, loader) {
+    file.write("{WORK}/one.s", ".text\n.begin no-transform\n{command}\n.end no-transform\n")
+    @script = "ld=$2 && x=\"$HOME/$1\" && \"$ld\" --library-path \"$(dirname \"$ld\")\" \"$x/bin/xtensa-esp-elf-as\" --dynconfig=\"$x/lib/xtensa_esp32.so\" -o \"$0/one.o\" \"$0/one.s\" 2> \"$0/one.err\" && \"$ld\" --library-path \"$(dirname \"$ld\")\" \"$x/bin/xtensa-esp-elf-objcopy\" -O binary -j .text \"$0/one.o\" \"$0/one.bin\""
+    @built = kit.shell(script, [WORK, XTENSA, loader], "")
+    ((built == 0) == no) { out "" }
+    out hex(file.read_bytes("{WORK}/one.bin"))
+}
+
+skill encoder(zone) {
+    @ready = kit.shell("test -x \"$HOME/$0/bin/xtensa-esp-elf-as\"", [XTENSA], "")
+    ((ready == 0) == no) {
+        kit.line(zone, "  нет тулчейна Espressif в ~/{XTENSA} — скачать: crosstool-NG xtensa-esp-elf с github.com/espressif")
+        out 1
+    }
+    @found_loader = process.capture(["nix-shell", "-p", "esptool", "--run", "cat $NIX_CC/nix-support/dynamic-linker"], "", [])
+    @lines = str.lines(found_loader.output)
+    @loader = group.get(lines, group.count(lines) - 1)
+    @checks = []
+    drum (str.lines(file.read(TEST))) {
+        @found = parse(beat)
+        (group.count(found) == 2) { checks = group.add(checks, found) }
+    }
+    @total = group.count(checks)
+    kit.line(zone, "шаг 2: команд в тесте — {total}, собираю по одной")
+    @failed = 0
+    drum (checks) {
+        @command = group.get(beat, 0)
+        @wanted = group.get(beat, 1)
+        @actual = assemble(command, loader)
+        ((actual == wanted) == no) {
+            kit.line(zone, "  расходится «{command}»: as даёт «{actual}», в тесте «{wanted}»")
+            failed = failed + 1
+        }
+    }
+    out failed
+}
+
+program() {
+    @zone = clock.zone()
+    process.run(["mkdir", "-p", WORK], "", [])
+    @failed = 0
+    @plugged = no
+    (kit.shell("test -c \"$0\"", [PORT], "") == 0) { plugged = yes }
+    (plugged == yes) {
+        kit.line(zone, "шаг 1: плата на {PORT} — проверяю на железе")
+        failed = board(zone)
+    }
+    (plugged == no) {
+        kit.line(zone, "шаг 1: платы нет — сверяю кодировщик с GNU as Espressif")
+        failed = encoder(zone)
+    }
+    kit.line(zone, "шаг 3: сверка закончена, расходится {failed}")
+    (failed > 0) { out error.GoldenDiffers }
+    out none
+}

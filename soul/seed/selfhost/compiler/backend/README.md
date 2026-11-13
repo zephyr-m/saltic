@@ -19,5 +19,5 @@
 | x86-64 родной | `x86_64_native.saltic`, `x86_64_native/` | Linux, UEFI на Acer | ✅ `Executor` на договоре, кодировщик, ELF64 и PE32+, слово 8 байт; цели `x86_64` и `x86_64-uefi`; агент на Acer — родной |
 | x86-64 перевод | `.archive/x86_64_translation/` | — | 🗄 на пенсии с 06.11.2026: переводил готовый RV32I, был оракулом родного |
 | Thumb-2 | `thumb2/` | STM32H7, Teensy 4.1, RP2350 на ARM | ⬜ заглушка |
-| Xtensa | `xtensa/` | ESP32, ESP32-S3 | ⬜ заглушка |
+| Xtensa (LX6) | `xtensa.saltic`, `xtensa/` | ESP32, ESP32-S3 | 🟡 голое железо ESP32 (13.11.2026): CALL0 без окон, слово 4 байта, образ `formats/esp`; на DevKit работают группы, рекурсия, Box, деление, текст. Кодировщик сверен с GNU as Espressif (`tests/xtensa-encoder`). Нет: окон регистров, Wi-Fi, канона на плате |
 | ARM64 | `arm64.saltic`, `arm64/` | Linux; Raspberry Pi, Orange Pi, телефоны, Android | ✅ Linux под qemu-aarch64 (12.11.2026): свой исполнитель, все роли в регистрах, ELF — общий `../linker/elf64`; канон, самосборка — неподвижная точка |
