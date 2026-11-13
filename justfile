@@ -112,6 +112,13 @@ esp32: _dirs
     bootstrap/saltic workbench/check/esp32.saltic .cache/build/workbench/esp32 536870912 x86_64 >/dev/null
     .cache/build/workbench/esp32
 
+# Залить программу из os/target/esp32 на плату: `just esp32-flash` — куб,
+# `just esp32-flash oled` — любая другая по имени файла
+esp32-flash name="cube": _dirs
+    bootstrap/saltic os/target/esp32/toolchain.saltic .cache/build/workbench/esp32-toolchain 536870912 x86_64 >/dev/null
+    .cache/build/workbench/esp32-toolchain os/target/esp32/{{name}}.saltic .cache/build/workbench/esp32-{{name}}.bin 65536
+    nix-shell -p esptool --run "esptool --chip esp32 --port /dev/ttyUSB0 --no-stub write-flash 0x1000 .cache/build/workbench/esp32-{{name}}.bin"
+
 arm64-golden mode="": _dirs
     bootstrap/saltic workbench/check/arm64-encoder-golden.saltic .cache/build/workbench/arm64-encoder-golden 536870912 x86_64 >/dev/null
     .cache/build/workbench/arm64-encoder-golden "$1"

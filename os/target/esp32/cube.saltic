@@ -1,0 +1,135 @@
+-- cube — вращающийся каркасный куб на SSD1306, надпись сверху, кадров в
+-- секунду снизу. Поворот целыми числами по таблице синуса, перспектива, линии
+-- в кадре 1 КБ (арена). Куб живёт в страницах TOP…BOTTOM; на экран уходят
+-- только столбцы, где он есть или был (ssd1306.region), счётчик — раз в
+-- секунду. Крутится вечно.
+
+use io
+use core.str
+use core.group
+use core.time
+use core.arena
+use os.fonts.spleen
+use os.drivers.font
+use os.target.esp32.ssd1306
+
+SINE = [0, 12, 25, 37, 49, 60, 71, 81, 90, 98, 106, 112, 117, 122, 125, 126, 127, 126, 125, 122, 117, 112, 106, 98, 90, 81, 71, 60, 49, 37, 25, 12, 0, -12, -25, -37, -49, -60, -71, -81, -90, -98, -106, -112, -117, -122, -125, -126, -127, -126, -125, -122, -117, -112, -106, -98, -90, -81, -71, -60, -49, -37, -25, -12]
+CORNERS = [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1], [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]]
+EDGES = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]
+SIZE = 16
+TOP = 1
+BOTTOM = 6
+BITS = [1, 2, 4, 8, 16, 32, 64, 128]
+DEPTH = 60
+SECOND = 160000000
+
+skill dot(x, y) {
+    (x < 0) { out none }
+    (y < TOP * 8) { out none }
+    (x > 127) { out none }
+    (y >= (BOTTOM + 1) * 8) { out none }
+    @at = y / 8 * 128 + x
+    @bit = group.get(BITS, y % 8)
+    @byte = arena.load8(at)
+    (byte / bit % 2 == 0) { arena.store8(at, byte + bit) }
+    out none
+}
+
+skill line(x0, y0, x1, y1) {
+    @dx = x1 - x0
+    @dy = y1 - y0
+    @steps = dx
+    (steps < 0) { steps = 0 - steps }
+    @other = dy
+    (other < 0) { other = 0 - other }
+    (other > steps) { steps = other }
+    (steps == 0) { out dot(x0, y0) }
+    drum (steps + 1) { dot(x0 + dx * beat / steps, y0 + dy * beat / steps) }
+    out none
+}
+
+skill text(page, words) {
+    @at = 0
+    @column = page * 128
+    drum (str.bytes(words)) {
+        (at < str.bytes(words)) {
+            @code = font.font_decode(words, at)
+            @glyph = group.get(spleen.GLYPHS_5X8, font.font_glyph_index(code.value))
+            drum (5) { arena.store8(column + beat, ssd1306.column(glyph, beat)) }
+            column = column + 6
+            at = at + code.width
+        }
+    }
+    out none
+}
+
+skill corner(point, turn) {
+    @sine = group.get(SINE, turn % 64)
+    @cosine = group.get(SINE, (turn + 16) % 64)
+    @x = group.get(point, 0) * SIZE
+    @y = group.get(point, 1) * SIZE
+    @z = group.get(point, 2) * SIZE
+    @x1 = (x * cosine - z * sine) / 127
+    @z1 = (x * sine + z * cosine) / 127
+    @tilt = turn / 2
+    @y2 = (y * group.get(SINE, (tilt + 16) % 64) - z1 * group.get(SINE, tilt % 64)) / 127
+    @z2 = (y * group.get(SINE, tilt % 64) + z1 * group.get(SINE, (tilt + 16) % 64)) / 127
+    out [64 + x1 * DEPTH / (z2 + DEPTH + SIZE * 2), 32 + y2 * DEPTH / (z2 + DEPTH + SIZE * 2)]
+}
+
+program() {
+    (ssd1306.start() == no) {
+        io.show("экран не ответил")
+        out none
+    }
+    io.show("куб крутится")
+    drum (256) { arena.store32(beat * 4, 0) }
+    text(0, "Saltic ESP32")
+    ssd1306.picture()
+    @turn = 0
+    @frames = 0
+    @rate = -1
+    @since = time.now()
+    @left = 0
+    @right = 127
+    always {
+        drum (BOTTOM - TOP + 1) {
+            @row = (TOP + beat) * 128 + left
+            drum (right - left + 1) { arena.store8(row + beat, 0) }
+        }
+        @points = []
+        @low = 127
+        @high = 0
+        drum (CORNERS) {
+            @point = corner(beat, turn)
+            points = group.add(points, point)
+            (group.get(point, 0) < low) { low = group.get(point, 0) }
+            (group.get(point, 0) > high) { high = group.get(point, 0) }
+        }
+        (low < 0) { low = 0 }
+        (high > 127) { high = 127 }
+        drum (EDGES) {
+            @a = group.get(points, group.get(beat, 0))
+            @b = group.get(points, group.get(beat, 1))
+            line(group.get(a, 0), group.get(a, 1), group.get(b, 0), group.get(b, 1))
+        }
+        @from = left
+        (low < from) { from = low }
+        @to = right
+        (high > to) { to = high }
+        ssd1306.region(TOP, BOTTOM, from, to)
+        left = low
+        right = high
+        turn = turn + 1
+        frames = frames + 1
+        (time.elapsed(since, time.now()) >= SECOND) {
+            rate = frames
+            frames = 0
+            since = time.now()
+            drum (32) { arena.store32(BOTTOM * 128 + 128 + beat * 4, 0) }
+            text(7, "кадр/с {rate}")
+            ssd1306.region(7, 7, 0, 127)
+        }
+    }
+    out none
+}

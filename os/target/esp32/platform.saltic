@@ -1,8 +1,10 @@
 -- platform — голое железо ESP32-D0WD. Вход ставит стек, гасит сторожей
--- TIMG0 и RTC, делитель UART0 на 115200 от кварца 40 МГц, печатает «S» —
+-- TIMG0 и RTC, переводит ядро с кварца 40 МГц на PLL 160 МГц (CPU_PER_CONF = 1,
+-- CLK_CONF: источник PLL; RTC — по адресу AHB), шина APB — 80 МГц, делитель
+-- UART0 на 115200 от неё, печатает «S» —
 -- платформа жива, обнуляет BSS. write пишет FIFO UART0. Свободной DRAM около
 -- 180 КБ на всё: ARENA_BYTES и HEAP_BYTES — арена и куча по умолчанию.
--- exit крутится на месте. now — счётчик тактов.
+-- exit крутится на месте. now — 28-битный счётчик тактов ядра числом Saltic.
 
 use selfhost.abi
 use selfhost.compiler.backend
@@ -25,7 +27,10 @@ skill wdt_key() { out pack(161, 58, 216, 80) }
 skill uart_status() { out pack(28, 0, 244, 63) }
 skill uart_fifo() { out pack(0, 0, 244, 63) }
 skill uart_clk() { out pack(20, 0, 244, 63) }
-skill uart_div() { out pack(91, 1, 48, 0) }
+skill uart_div() { out pack(182, 2, 112, 0) }
+skill cpu_per_conf() { out pack(60, 0, 240, 63) }
+skill clk_conf() { out pack(112, 128, 0, 96) }
+skill clk_pll() { out pack(16, 50, 0, 8) }
 
 skill putc(compiler, mark, byte) {
     @e = compiler.executor
@@ -88,6 +93,12 @@ Platform = Box {
         compiler = e.load_immediate(compiler, backend.STACK, stack_top())
         compiler = unlock(compiler, timg_prot(), timg_cfg())
         compiler = unlock(compiler, rtc_prot(), rtc_cfg())
+        compiler = e.load_immediate(compiler, backend.SCRATCH0, cpu_per_conf())
+        compiler = e.load_immediate(compiler, backend.SCRATCH1, 1)
+        compiler = e.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+        compiler = e.load_immediate(compiler, backend.SCRATCH0, clk_conf())
+        compiler = e.load_immediate(compiler, backend.SCRATCH1, clk_pll())
+        compiler = e.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
         compiler = e.load_immediate(compiler, backend.SCRATCH0, uart_clk())
         compiler = e.load_immediate(compiler, backend.SCRATCH1, uart_div())
         compiler = e.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
@@ -123,6 +134,7 @@ Platform = Box {
         compiler = e.ret(compiler)
         compiler = e.label(compiler, platform.NOW)
         compiler = e.read_cycles(compiler)
+        compiler = e.shift_left(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
         compiler = e.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
         compiler = e.ret(compiler)
         compiler = platform.append_heap_reserve(compiler)

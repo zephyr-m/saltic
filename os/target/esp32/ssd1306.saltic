@@ -1,14 +1,23 @@
 -- ssd1306 — экран SSD1306 128×64 на I2C (адрес 0x3C, i2c). Текст шрифтом
 -- Spleen 5×8: глиф ровно в страницу экрана (8 пикселей высотой), строка
--- текста — одна страница, 21 знак по 6 пикселей; кадр в памяти не держим.
+-- текста — одна страница, 21 знак по 6 пикселей.
 -- UTF-8: ASCII и кириллица, прочее — «?» (os.drivers.font).
 --
 -- start() -> yes, если экран ответил; включает его и чистит
 -- lines(texts) — до 8 строк сверху вниз, остаток страниц чистится
--- Внутри: command(bytes), page(index, text), column(glyph, x) -> байт столбца
+-- picture() — весь экран из кадра в арене: байты 0…1023, страница за
+--     страницей, бит 0 — верхний пиксель столбца
+-- region(first_page, last_page, left, right) — только этот прямоугольник кадра
+-- Внутри: command(bytes), stream(bytes) — данные пачками по PIECE (FIFO I2C —
+--     32 байта вместе с адресом и признаком), page(index, text),
+--     column(glyph, x) -> байт столбца
 
 use core.str
 use core.group
+use core.arena
+use core.mem
+use core.u32
+use core.usize
 use os.drivers.font
 use os.fonts.spleen
 use os.target.esp32.i2c
@@ -20,15 +29,25 @@ WIDTH = 128
 PAGES = 8
 GLYPH = 5
 STEP = 6
+PIECE = 30
 INIT = [174, 213, 128, 168, 63, 211, 0, 64, 141, 20, 32, 0, 161, 200, 218, 18, 129, 207, 217, 241, 219, 64, 164, 166, 175]
 
 skill command(bytes) {
-    i2c.start()
-    @ack = i2c.write(ADDRESS)
-    i2c.write(COMMANDS)
-    drum (bytes) { i2c.write(beat) }
-    i2c.stop()
-    out ack
+    out i2c.send(group.concat([ADDRESS, COMMANDS], bytes))
+}
+
+skill stream(bytes) {
+    @at = 0
+    @count = group.count(bytes)
+    drum (count / PIECE + 1) {
+        (at < count) {
+            @end = at + PIECE
+            (end > count) { end = count }
+            i2c.send(group.concat([ADDRESS, DATA], group.slice(bytes, at, end)))
+            at = end
+        }
+    }
+    out none
 }
 
 skill column(glyph, x) {
@@ -45,26 +64,22 @@ skill column(glyph, x) {
 
 skill page(index, text) {
     command([34, index, index, 33, 0, WIDTH - 1])
-    i2c.start()
-    i2c.write(ADDRESS)
-    i2c.write(DATA)
-    @sent = 0
+    @bytes = []
     @at = 0
     drum (str.bytes(text)) {
         (at < str.bytes(text)) {
-            (sent + STEP <= WIDTH) {
+            (group.count(bytes) + STEP <= WIDTH) {
                 @code = font.font_decode(text, at)
                 @glyph = group.get(spleen.GLYPHS_5X8, font.font_glyph_index(code.value))
-                drum (GLYPH) { i2c.write(column(glyph, beat)) }
-                i2c.write(0)
-                sent = sent + STEP
+                drum (GLYPH) { bytes = group.add(bytes, column(glyph, beat)) }
+                bytes = group.add(bytes, 0)
                 at = at + code.width
             }
-            (sent + STEP > WIDTH) { at = str.bytes(text) }
+            (group.count(bytes) + STEP > WIDTH) { at = str.bytes(text) }
         }
     }
-    drum (WIDTH - sent) { i2c.write(0) }
-    out i2c.stop()
+    drum (WIDTH - group.count(bytes)) { bytes = group.add(bytes, 0) }
+    out stream(bytes)
 }
 
 skill start() {
@@ -77,6 +92,36 @@ skill lines(texts) {
         @text = ""
         (beat < group.count(texts)) { text = group.get(texts, beat) }
         page(beat, text)
+    }
+    out none
+}
+
+skill picture() {
+    out region(0, PAGES - 1, 0, WIDTH - 1)
+}
+
+skill region(first_page, last_page, left, right) {
+    command([33, left, right, 34, first_page, last_page])
+    @width = right - left + 1
+    @total = width * (last_page - first_page + 1)
+    @fifo = i2c.fifo()
+    @zero = usize.from(0)
+    @sent = 0
+    drum (total / PIECE + 1) {
+        @end = sent + PIECE
+        (end > total) { end = total }
+        (end > sent) {
+            i2c.begin()
+            i2c.push(ADDRESS)
+            i2c.push(DATA)
+            drum (end - sent) {
+                @index = sent + beat
+                @at = (first_page + index / width) * WIDTH + left + index % width
+                mem.store32(fifo, zero, u32.from(arena.load8(at)))
+            }
+            i2c.finish(end - sent + 2)
+        }
+        sent = end
     }
     out none
 }
