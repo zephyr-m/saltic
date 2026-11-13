@@ -1,0 +1,125 @@
+-- events — ядро событий интерфейса. Событие одно: «у имени id стало
+-- значение» — число number и текст text; такт — то же изменение с именем
+-- TICK. Каждое изменение несёт номер order (строгий порядок: повтор, вторая
+-- машина) и время time. Ядро помнит последнее значение каждого имени (values)
+-- и очередь непрочитанных изменений (queue); то же значение ещё раз — не
+-- изменение. Разовое действие (нажатие, Enter) — счётчик, ни одно не теряется.
+-- Ядро неизменяемое, как jtml.Runtime. Устройство — docs/os/EVENTS.md.
+--
+-- Change { order, time, id, number, text }; Core { values, queue, next }
+-- Lookup { found, change }; Taken { found, change, core }
+-- TICK — имя такта
+-- change(core, id, number, text, time) -> Core
+-- pair(core, first, first_number, second, second_number, time) -> Core — два
+--     числа одним номером (указатель: pointer.x и pointer.y)
+-- bump(core, id, time) -> Core — счётчик имени +1
+-- tick(core, time) -> Core — такт: число и время — time
+-- current(core, id) -> Lookup — последнее значение имени
+-- take(core) -> Taken — первое из очереди и ядро без него
+-- Внутри: remembered, same
+
+use core.group
+
+TICK = "tick"
+
+Change = Box {
+    order = 0,
+    time = 0,
+    id = "",
+    number = 0,
+    text = ""
+}
+
+Core = Box {
+    values = [],
+    queue = [],
+    next = 0
+}
+
+Lookup = Box {
+    found = no,
+    change = Change {}
+}
+
+Taken = Box {
+    found = no,
+    change = Change {},
+    core = Core {}
+}
+
+skill current(core, id) {
+    drum (group.count(core.values)) {
+        @known = group.get(core.values, beat)
+        (known.id == id) { out Lookup { found = yes, change = known } }
+    }
+    out Lookup {}
+}
+
+skill same(core, id, number, text) {
+    @lookup = current(core, id)
+    (lookup.found == no) { out no }
+    (lookup.change.number == number) {
+        (lookup.change.text == text) { out yes }
+    }
+    out no
+}
+
+skill remembered(values, fresh) {
+    @result = []
+    @placed = no
+    drum (group.count(values)) {
+        @known = group.get(values, beat)
+        (known.id == fresh.id) {
+            known = fresh
+            placed = yes
+        }
+        result = group.add(result, known)
+    }
+    (placed == no) { result = group.add(result, fresh) }
+    out result
+}
+
+skill change(core, id, number, text, time) {
+    (same(core, id, number, text) == yes) { out core }
+    @fresh = Change { order = core.next, time = time, id = id, number = number, text = text }
+    out Core { values = remembered(core.values, fresh), queue = group.add(core.queue, fresh), next = core.next + 1 }
+}
+
+skill pair(core, first, first_number, second, second_number, time) {
+    @values = core.values
+    @queue = core.queue
+    @moved = no
+    (same(core, first, first_number, "") == no) {
+        @fresh = Change { order = core.next, time = time, id = first, number = first_number }
+        values = remembered(values, fresh)
+        queue = group.add(queue, fresh)
+        moved = yes
+    }
+    (same(core, second, second_number, "") == no) {
+        @fresh = Change { order = core.next, time = time, id = second, number = second_number }
+        values = remembered(values, fresh)
+        queue = group.add(queue, fresh)
+        moved = yes
+    }
+    (moved == no) { out core }
+    out Core { values = values, queue = queue, next = core.next + 1 }
+}
+
+skill bump(core, id, time) {
+    @lookup = current(core, id)
+    out change(core, id, lookup.change.number + 1, "", time)
+}
+
+skill tick(core, time) {
+    out change(core, TICK, time, "", time)
+}
+
+skill take(core) {
+    @count = group.count(core.queue)
+    (count == 0) { out Taken { core = core } }
+    out Taken {
+        found = yes,
+        change = group.get(core.queue, 0),
+        core = Core { values = core.values, queue = group.slice(core.queue, 1, count), next = core.next }
+    }
+}
