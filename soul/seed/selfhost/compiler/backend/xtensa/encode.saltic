@@ -1,0 +1,247 @@
+-- encode — команды Xtensa LX6 в CALL0, без окон регистров.
+-- Слово команды — число, младший байт первый в памяти. Узкие (16 бит) —
+-- те, у которых младшие 4 бита от 8 до 13.
+-- CALL0: (цель − pc − 4) / 4, 18 бит, в слове сдвиг на 2.
+-- J: (цель − pc − 4) байтами, без сдвига. Самопетля — jump(0).
+-- L32R: (литерал − ((pc + 3) без младших 2 бит)) / 4, 16 бит со знаком.
+-- Поля сверены с LLVM Xtensa (espressif xtensa_release_19.1.2).
+
+use core.group
+
+skill rrr(op2, op1, r, s, t) {
+    out op2 * 1048576 + op1 * 65536 + r * 4096 + s * 256 + t * 16
+}
+
+skill rri8(imm8, r, s, t) {
+    @imm = imm8
+    (imm < 0) { imm = imm + 256 }
+    out imm * 65536 + r * 4096 + s * 256 + t * 16 + 2
+}
+
+skill mask18(value) {
+    @field = value
+    (field < 0) { field = field + 262144 }
+    out field % 262144
+}
+
+skill mask16(value) {
+    @field = value
+    (field < 0) { field = field + 65536 }
+    out field % 65536
+}
+
+skill nop() {
+    out rrr(0, 0, 2, 0, 15)
+}
+
+skill add(r, s, t) {
+    out rrr(8, 0, r, s, t)
+}
+
+skill sub(r, s, t) {
+    out rrr(12, 0, r, s, t)
+}
+
+skill and(r, s, t) {
+    out rrr(1, 0, r, s, t)
+}
+
+skill or(r, s, t) {
+    out rrr(2, 0, r, s, t)
+}
+
+skill xor(r, s, t) {
+    out rrr(3, 0, r, s, t)
+}
+
+skill neg(r, t) {
+    out rrr(6, 0, r, 0, t)
+}
+
+skill addi(t, s, imm8) {
+    out rri8(imm8, 12, s, t)
+}
+
+skill movi(t, imm12) {
+    @imm = imm12
+    (imm < 0) { imm = imm + 4096 }
+    out (imm % 256) * 65536 + 10 * 4096 + (imm / 256) * 256 + t * 16 + 2
+}
+
+skill l32r(t, imm16) {
+    out mask16(imm16) * 256 + t * 16 + 1
+}
+
+skill l32r_at(t, pc, literal) {
+    @base = pc + 3
+    @aligned = base - base % 4
+    out l32r(t, (literal - aligned) / 4)
+}
+
+skill mem_op(op_r, t, base, offset, shift) {
+    out (offset / shift) * 65536 + op_r * 4096 + base * 256 + t * 16 + 2
+}
+
+skill l8ui(t, base, offset) {
+    out mem_op(0, t, base, offset, 1)
+}
+
+skill l16ui(t, base, offset) {
+    out mem_op(1, t, base, offset, 2)
+}
+
+skill l32i(t, base, offset) {
+    out mem_op(2, t, base, offset, 4)
+}
+
+skill s8i(t, base, offset) {
+    out mem_op(4, t, base, offset, 1)
+}
+
+skill s16i(t, base, offset) {
+    out mem_op(5, t, base, offset, 2)
+}
+
+skill s32i(t, base, offset) {
+    out mem_op(6, t, base, offset, 4)
+}
+
+skill slli(r, s, count) {
+    out (count / 16) * 1048576 + 1 * 65536 + r * 4096 + s * 256 + (count % 16) * 16
+}
+
+skill srli(r, t, count) {
+    out 1 * 65536 + 4 * 1048576 + r * 4096 + count * 256 + t * 16
+}
+
+skill call_field(op0, byte_offset) {
+    out mask18((byte_offset - 4) / 4) * 64 + op0
+}
+
+skill call0(byte_offset) {
+    out call_field(5, byte_offset)
+}
+
+skill jump(byte_offset) {
+    @field = byte_offset - 4
+    (field < 0) { field = field + 262144 }
+    out (field % 262144) * 64 + 6
+}
+
+skill callx0(s) {
+    out s * 256 + 192
+}
+
+skill ret() {
+    out 128
+}
+
+skill branch8(op_r, s, t, byte_offset) {
+    @imm = byte_offset - 4
+    (imm < 0) { imm = imm + 256 }
+    out imm * 65536 + op_r * 4096 + s * 256 + t * 16 + 7
+}
+
+skill beq(s, t, byte_offset) {
+    out branch8(1, s, t, byte_offset)
+}
+
+skill bne(s, t, byte_offset) {
+    out branch8(9, s, t, byte_offset)
+}
+
+skill blt(s, t, byte_offset) {
+    out branch8(2, s, t, byte_offset)
+}
+
+skill bge(s, t, byte_offset) {
+    out branch8(10, s, t, byte_offset)
+}
+
+skill bltu(s, t, byte_offset) {
+    out branch8(3, s, t, byte_offset)
+}
+
+skill bgeu(s, t, byte_offset) {
+    out branch8(11, s, t, byte_offset)
+}
+
+skill bri12(low, s, byte_offset) {
+    @imm = byte_offset - 4
+    (imm < 0) { imm = imm + 4096 }
+    out (imm % 4096) * 4096 + s * 256 + low
+}
+
+skill bnez(s, byte_offset) {
+    out bri12(86, s, byte_offset)
+}
+
+skill bltz(s, byte_offset) {
+    out bri12(150, s, byte_offset)
+}
+
+skill bgez(s, byte_offset) {
+    out bri12(214, s, byte_offset)
+}
+
+skill memw() {
+    out 2 * 4096 + 12 * 16
+}
+
+skill waiti(level) {
+    out 7 * 4096 + level * 256
+}
+
+skill rsr(t, sr) {
+    out 3 * 65536 + sr * 256 + t * 16
+}
+
+skill ssl(s) {
+    out 4 * 1048576 + 1 * 4096 + s * 256
+}
+
+skill ssr(s) {
+    out 4 * 1048576 + s * 256
+}
+
+skill sll_reg(r, s) {
+    out 10 * 1048576 + 1 * 65536 + r * 4096 + s * 256
+}
+
+skill srl_reg(r, t) {
+    out 9 * 1048576 + 1 * 65536 + r * 4096 + t * 16
+}
+
+skill sra_reg(r, t) {
+    out 11 * 1048576 + 1 * 65536 + r * 4096 + t * 16
+}
+
+skill srai(r, t, count) {
+    out (2 + count / 16) * 1048576 + 1 * 65536 + r * 4096 + (count % 16) * 256 + t * 16
+}
+
+skill beqz(s, byte_offset) {
+    @imm = byte_offset - 4
+    (imm < 0) { imm = imm + 4096 }
+    out (imm % 4096) * 4096 + s * 256 + 22
+}
+
+skill mov_n(t, s) {
+    out s * 256 + t * 16 + 13
+}
+
+skill ret_n() {
+    out 15 * 4096 + 13
+}
+
+skill bytes3(word) {
+    out [word % 256, word / 256 % 256, word / 65536 % 256]
+}
+
+skill bytes2(word) {
+    out [word % 256, word / 256 % 256]
+}
+
+program() {
+    out none
+}

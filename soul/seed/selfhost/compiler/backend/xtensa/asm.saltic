@@ -1,0 +1,308 @@
+-- asm — поток команд Xtensa: байты, метки, правки L32R/J/CALL0.
+-- Пул литералов встаёт перед кодом в IRAM. Адрес кода зависит от длины пула,
+-- поэтому L32R дописывается в конце. Сторожа нуля в BSS — два служебных числа.
+
+use core.group
+use core.bytes
+use io
+use selfhost.compiler.backend.rv32i.machine.buffer
+use selfhost.compiler.backend.xtensa.encode
+use formats.esp.image
+
+SEC_CODE = 0
+SEC_RODATA = 1
+SEC_DATA = 2
+SEC_BSS = 3
+FIX_J = 0
+FIX_CALL = 1
+FIX_LIT = 2
+FIX_LABEL = 3
+
+XtLabel = Box {
+    xt_name = "",
+    xt_section = 0,
+    xt_at = 0
+}
+
+XtFix = Box {
+    xt_kind = 0,
+    xt_at = 0,
+    xt_reg = 0,
+    xt_name = "",
+    xt_add = 0,
+    xt_value = 0,
+    xt_slot = 0
+}
+
+XtProg = Box {
+    xt_code = none,
+    xt_rodata = none,
+    xt_data = none,
+    xt_bss = 0,
+    xt_labels = [],
+    xt_fixes = [],
+    xt_entry = "_start"
+}
+
+skill pack(b0, b1, b2, b3) {
+    out b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+}
+
+skill iram() {
+    out pack(0, 4, 8, 64)
+}
+
+skill dram() {
+    out pack(0, 0, 251, 63)
+}
+
+skill bss_base() {
+    out pack(1, 0, 87, 14)
+}
+
+skill bss_size() {
+    out pack(2, 0, 87, 14)
+}
+
+skill fresh(entry) {
+    out XtProg {
+        xt_code = buffer.empty(),
+        xt_rodata = buffer.empty(),
+        xt_data = buffer.empty(),
+        xt_bss = 0,
+        xt_labels = [],
+        xt_fixes = [],
+        xt_entry = entry
+    }
+}
+
+skill emit3(prog, word) {
+    prog.xt_code = buffer.append_byte(prog.xt_code, word % 256)
+    prog.xt_code = buffer.append_byte(prog.xt_code, word / 256 % 256)
+    prog.xt_code = buffer.append_byte(prog.xt_code, word / 65536 % 256)
+    out prog
+}
+
+skill emit2(prog, word) {
+    prog.xt_code = buffer.append_byte(prog.xt_code, word % 256)
+    prog.xt_code = buffer.append_byte(prog.xt_code, word / 256 % 256)
+    out prog
+}
+
+skill poke3(prog, at, word) {
+    prog.xt_code = buffer.set_byte(prog.xt_code, at, word % 256)
+    prog.xt_code = buffer.set_byte(prog.xt_code, at + 1, word / 256 % 256)
+    prog.xt_code = buffer.set_byte(prog.xt_code, at + 2, word / 65536 % 256)
+    out prog
+}
+
+skill align4(prog) {
+    @n = prog.xt_code.length % 4
+    (n == 0) { out prog }
+    (n == 1) { out emit3(prog, encode.nop()) }
+    (n == 2) { out emit2(prog, encode.mov_n(0, 0)) }
+    prog = emit3(prog, encode.nop())
+    out emit2(prog, encode.mov_n(0, 0))
+}
+
+skill note(prog, kind, reg, name, add, value) {
+    @fix = XtFix { xt_kind = kind, xt_at = prog.xt_code.length - 3, xt_reg = reg, xt_name = name, xt_add = add, xt_value = value, xt_slot = 0 }
+    prog.xt_fixes = group.add(prog.xt_fixes, fix)
+    out prog
+}
+
+skill lit(prog, reg, value) {
+    prog = emit3(prog, encode.l32r(reg, 0))
+    out note(prog, FIX_LIT, reg, "", 0, value)
+}
+
+skill jump_to(prog, name) {
+    prog = emit3(prog, encode.jump(0))
+    out note(prog, FIX_J, 0, name, 0, 0)
+}
+
+skill call_to(prog, name) {
+    prog = align4(prog)
+    prog = emit3(prog, encode.call0(0))
+    out note(prog, FIX_CALL, 0, name, 0, 0)
+}
+
+skill label_addr_fix(prog, reg, name, add) {
+    prog = emit3(prog, encode.l32r(reg, 0))
+    out note(prog, FIX_LABEL, reg, name, add, 0)
+}
+
+skill find(prog, name) {
+    drum (group.count(prog.xt_labels)) {
+        @item = group.get(prog.xt_labels, beat)
+        (item.xt_name == name) { out item }
+    }
+    out none
+}
+
+skill define(prog, section, name) {
+    (section == SEC_CODE) { prog = align4(prog) }
+    @at = prog.xt_code.length
+    (section == SEC_RODATA) { at = prog.xt_rodata.length }
+    (section == SEC_DATA) { at = prog.xt_data.length }
+    (section == SEC_BSS) { at = prog.xt_bss }
+    @label = XtLabel { xt_name = name, xt_section = section, xt_at = at }
+    prog.xt_labels = group.add(prog.xt_labels, label)
+    out prog
+}
+
+skill section_buf(prog, section) {
+    (section == SEC_RODATA) { out prog.xt_rodata }
+    (section == SEC_DATA) { out prog.xt_data }
+    out prog.xt_code
+}
+
+skill put_buf(prog, section, buf) {
+    (section == SEC_RODATA) { prog.xt_rodata = buf }
+    (section == SEC_DATA) { prog.xt_data = buf }
+    (section == SEC_CODE) { prog.xt_code = buf }
+    out prog
+}
+
+skill pad_buf(buf, boundary) {
+    (boundary < 2) { out buf }
+    @n = buf.length % boundary
+    (n == 0) { out buf }
+    out buffer.append_zeroes(buf, boundary - n)
+}
+
+skill align_to(prog, section, boundary) {
+    (section == SEC_BSS) {
+        (boundary < 2) { out prog }
+        @n = prog.xt_bss % boundary
+        (n == 0) { out prog }
+        prog.xt_bss = prog.xt_bss + boundary - n
+        out prog
+    }
+    out put_buf(prog, section, pad_buf(section_buf(prog, section), boundary))
+}
+
+skill add_byte(prog, section, value) {
+    out put_buf(prog, section, buffer.append_byte(section_buf(prog, section), value))
+}
+
+skill add_word(prog, section, value) {
+    prog = add_byte(prog, section, value.b0)
+    prog = add_byte(prog, section, value.b1)
+    prog = add_byte(prog, section, value.b2)
+    out add_byte(prog, section, value.b3)
+}
+
+skill add_text(prog, section, text) {
+    out put_buf(prog, section, buffer.append_text(section_buf(prog, section), text))
+}
+
+skill reserve(prog, count) {
+    @add = count
+    (count > 65536) { add = 256 }
+    prog.xt_bss = prog.xt_bss + add
+    out prog
+}
+
+skill here(prog, name, add, code_base, data_base) {
+    @item = find(prog, name)
+    (item == none) { out 0 - 1 }
+    (item.xt_section == SEC_CODE) { out code_base + item.xt_at + add }
+    (item.xt_section == SEC_RODATA) { out data_base + item.xt_at + add }
+    (item.xt_section == SEC_DATA) { out data_base + prog.xt_rodata.length + item.xt_at + add }
+    out data_base + prog.xt_rodata.length + prog.xt_data.length + item.xt_at + add
+}
+
+skill pool_value(prog, fix, code_base, data_base, base, size) {
+    (fix.xt_kind == FIX_LIT) {
+        (fix.xt_value == bss_base()) { out base }
+        (fix.xt_value == bss_size()) { out size }
+        out fix.xt_value
+    }
+    out here(prog, fix.xt_name, fix.xt_add, code_base, data_base)
+}
+
+skill fill_pool(prog, pool, code_base, data_base, base, size) {
+    drum (group.count(prog.xt_fixes)) {
+        @fix = group.get(prog.xt_fixes, beat)
+        (fix.xt_kind > FIX_CALL) {
+            @value = pool_value(prog, fix, code_base, data_base, base, size)
+            (fix.xt_kind == FIX_LABEL) {
+                (value < 0) {
+                    io.show("метка {fix.xt_name}")
+                    out error.XtensaLink
+                }
+            }
+            @pc = code_base + fix.xt_at
+            @literal = iram() + fix.xt_slot * 4
+            prog = poke3(prog, fix.xt_at, encode.l32r_at(fix.xt_reg, pc, literal))
+            pool = group.add(pool, value)
+        }
+    }
+    out pool
+}
+
+skill fill_jump(prog, code_base) {
+    drum (group.count(prog.xt_fixes)) {
+        @fix = group.get(prog.xt_fixes, beat)
+        (fix.xt_kind < FIX_LIT) {
+            @target = here(prog, fix.xt_name, 0, code_base, 0)
+            (target < 0) {
+                io.show("метка {fix.xt_name}")
+                out error.XtensaLink
+            }
+            @pc = code_base + fix.xt_at
+            @distance = target - pc
+            (fix.xt_kind == FIX_CALL) { prog = poke3(prog, fix.xt_at, encode.call0(distance)) }
+            (fix.xt_kind == FIX_J) { prog = poke3(prog, fix.xt_at, encode.jump(distance)) }
+        }
+    }
+    out prog
+}
+
+skill image_of(prog) {
+    @slot = 0
+    drum (group.count(prog.xt_fixes)) {
+        @fix = group.get(prog.xt_fixes, beat)
+        (fix.xt_kind > FIX_CALL) {
+            fix.xt_slot = slot
+            slot = slot + 1
+        }
+    }
+    @code_base = iram() + slot * 4
+    @data_base = dram()
+    @base = data_base + prog.xt_rodata.length + prog.xt_data.length
+    @size = prog.xt_bss
+    @rest = size % 4
+    (rest > 0) { size = size + 4 - rest }
+    @pool = fill_pool(prog, [], code_base, data_base, base, size)
+    prog = fill_jump(prog, code_base)
+    @blob = buffer.empty()
+    drum (group.count(pool)) {
+        @value = group.get(pool, beat)
+        (value < 0) { value = value + 4294967296 }
+        blob = buffer.append_byte(blob, value % 256)
+        blob = buffer.append_byte(blob, value / 256 % 256)
+        blob = buffer.append_byte(blob, value / 65536 % 256)
+        blob = buffer.append_byte(blob, value / 16777216 % 256)
+    }
+    drum (prog.xt_code.length) { blob = buffer.append_byte(blob, buffer.byte_at(prog.xt_code, beat)) }
+    blob = pad_buf(blob, 4)
+    @data = buffer.empty()
+    drum (prog.xt_rodata.length) { data = buffer.append_byte(data, buffer.byte_at(prog.xt_rodata, beat)) }
+    drum (prog.xt_data.length) { data = buffer.append_byte(data, buffer.byte_at(prog.xt_data, beat)) }
+    data = pad_buf(data, 4)
+    (find(prog, "platform_start") == none) {
+        io.show("нет входа")
+        out error.XtensaLink
+    }
+    @entry_at = here(prog, "platform_start", 0, code_base, data_base)
+    (bytes.count(buffer.whole(data)) == 0) {
+        out image.app(entry_at, iram(), buffer.whole(blob), data_base, buffer.whole(data))
+    }
+    out image.app(entry_at, iram(), buffer.whole(blob), data_base, buffer.whole(data))
+}
+
+program() {
+    out none
+}

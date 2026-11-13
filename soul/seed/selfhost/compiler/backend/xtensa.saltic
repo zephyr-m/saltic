@@ -1,0 +1,396 @@
+-- xtensa — исполнитель договора машины для LX6, CALL0, без окон.
+-- Слово 4 байта. Образ собирает asm.image_of.
+
+use selfhost.abi.shape
+use selfhost.compiler.backend
+use selfhost.compiler.backend.xtensa.asm
+use selfhost.compiler.backend.xtensa.encode
+use selfhost.compiler.backend.xtensa.roles
+use selfhost.compiler.backend.xtensa.ops
+use selfhost.compiler.backend.xtensa.access
+use selfhost.compiler.backend.xtensa.control
+use selfhost.machine.word
+
+Executor = Box {
+    skill new_program(compiler, entry) {
+        compiler.words = shape.of(4)
+        compiler.machine = asm.fresh(entry)
+        out compiler
+    }
+
+    skill heap_size(compiler, bytes) {
+        bytes = bytes
+        out compiler
+    }
+
+    skill label(compiler, name) {
+        compiler.machine = asm.define(compiler.machine, asm.SEC_CODE, name)
+        out compiler
+    }
+
+    skill data_label(compiler, where, name) {
+        compiler.machine = asm.define(compiler.machine, where, name)
+        out compiler
+    }
+
+    skill align(compiler, where, boundary) {
+        compiler.machine = asm.align_to(compiler.machine, where, boundary)
+        out compiler
+    }
+
+    skill data_byte(compiler, where, value) {
+        compiler.machine = asm.add_byte(compiler.machine, where, value)
+        out compiler
+    }
+
+    skill data32(compiler, where, value) {
+        out data_word(compiler, where, value)
+    }
+
+    skill data_word(compiler, where, value) {
+        compiler.machine = asm.add_word(compiler.machine, where, value)
+        out compiler
+    }
+
+    skill data_text(compiler, where, text) {
+        compiler.machine = asm.add_text(compiler.machine, where, text)
+        compiler.machine = asm.add_byte(compiler.machine, where, 0)
+        out compiler
+    }
+
+    skill reserve(compiler, bytes) {
+        @n = 256
+        (word.is_zero(bytes.high) == yes) { n = word.to_number(bytes.low) }
+        compiler.machine = asm.reserve(compiler.machine, n)
+        out compiler
+    }
+
+    skill load_immediate(compiler, to, value) {
+        @r = roles.reg(to)
+        (r >= 0) { compiler.machine = ops.imm_reg(compiler.machine, r, value) }
+        (r < 0) {
+            compiler.machine = access.spill(compiler.machine)
+            compiler.machine = ops.imm_reg(compiler.machine, 14, value)
+            compiler.machine = access.finish(compiler.machine, to)
+        }
+        out compiler
+    }
+
+    skill load_word(compiler, to, value) {
+        @n = value.b0 + value.b1 * 256 + value.b2 * 65536 + value.b3 * 16777216
+        out load_immediate(compiler, to, n)
+    }
+
+    skill load_address(compiler, to, name, addend) {
+        @r = roles.reg(to)
+        (r < 0) {
+            compiler.machine = access.spill(compiler.machine)
+            compiler.machine = asm.label_addr_fix(compiler.machine, 14, name, addend)
+            compiler.machine = access.finish(compiler.machine, to)
+            out compiler
+        }
+        compiler.machine = asm.label_addr_fix(compiler.machine, r, name, addend)
+        out compiler
+    }
+
+    skill move(compiler, to, from) {
+        compiler.machine = ops.move(compiler.machine, to, from)
+        out compiler
+    }
+
+    skill negate(compiler, to, from) {
+        compiler.machine = ops.neg(compiler.machine, to, from)
+        out compiler
+    }
+
+    skill add_immediate(compiler, to, from, value) {
+        compiler.machine = ops.binary_imm(compiler.machine, to, from, value, 0)
+        out compiler
+    }
+
+    skill add(compiler, to, left, right) {
+        compiler.machine = ops.binary(compiler.machine, to, left, right, 0)
+        out compiler
+    }
+
+    skill sub(compiler, to, left, right) {
+        compiler.machine = ops.binary(compiler.machine, to, left, right, 1)
+        out compiler
+    }
+
+    skill and(compiler, to, left, right) {
+        compiler.machine = ops.binary(compiler.machine, to, left, right, 2)
+        out compiler
+    }
+
+    skill or(compiler, to, left, right) {
+        compiler.machine = ops.binary(compiler.machine, to, left, right, 3)
+        out compiler
+    }
+
+    skill xor(compiler, to, left, right) {
+        compiler.machine = ops.binary(compiler.machine, to, left, right, 4)
+        out compiler
+    }
+
+    skill and_immediate(compiler, to, from, value) {
+        compiler.machine = ops.binary_imm(compiler.machine, to, from, value, 2)
+        out compiler
+    }
+
+    skill or_immediate(compiler, to, from, value) {
+        compiler.machine = ops.binary_imm(compiler.machine, to, from, value, 3)
+        out compiler
+    }
+
+    skill xor_immediate(compiler, to, from, value) {
+        compiler.machine = ops.binary_imm(compiler.machine, to, from, value, 4)
+        out compiler
+    }
+
+    skill shift_left(compiler, to, from, count) {
+        compiler.machine = ops.shift_c(compiler.machine, to, from, count, 0)
+        out compiler
+    }
+
+    skill shift_right_signed(compiler, to, from, count) {
+        compiler.machine = ops.shift_c(compiler.machine, to, from, count, 2)
+        out compiler
+    }
+
+    skill shift_right_unsigned(compiler, to, from, count) {
+        compiler.machine = ops.shift_c(compiler.machine, to, from, count, 1)
+        out compiler
+    }
+
+    skill shift_left_by(compiler, to, from, count) {
+        compiler.machine = ops.shift_by(compiler.machine, to, from, count, 0)
+        out compiler
+    }
+
+    skill shift_right_unsigned_by(compiler, to, from, count) {
+        compiler.machine = ops.shift_by(compiler.machine, to, from, count, 1)
+        out compiler
+    }
+
+    skill set_less(compiler, to, left, right) {
+        compiler.machine = ops.flag(compiler.machine, to, left, right, 0)
+        out compiler
+    }
+
+    skill set_less_unsigned(compiler, to, left, right) {
+        compiler.machine = ops.flag(compiler.machine, to, left, right, 1)
+        out compiler
+    }
+
+    skill set_less_unsigned_immediate(compiler, to, from, value) {
+        compiler.machine = access.spill(compiler.machine)
+        compiler.machine = access.fetch(compiler.machine, from, 14)
+        compiler.machine = ops.imm_reg(compiler.machine, 15, value)
+        compiler.machine = asm.emit3(compiler.machine, encode.bltu(14, 15, 9))
+        compiler.machine = asm.emit3(compiler.machine, encode.movi(14, 0))
+        compiler.machine = asm.emit3(compiler.machine, encode.jump(6))
+        compiler.machine = asm.emit3(compiler.machine, encode.movi(14, 1))
+        compiler.machine = access.finish(compiler.machine, to)
+        out compiler
+    }
+
+    skill set_zero(compiler, to, from) {
+        compiler.machine = ops.flag_zero(compiler.machine, to, from, yes)
+        out compiler
+    }
+
+    skill set_nonzero(compiler, to, from) {
+        compiler.machine = ops.flag_zero(compiler.machine, to, from, no)
+        out compiler
+    }
+
+    skill add_checked(compiler) {
+        compiler.machine = ops.checked(compiler.machine, 0)
+        out compiler
+    }
+
+    skill sub_checked(compiler) {
+        compiler.machine = ops.checked(compiler.machine, 1)
+        out compiler
+    }
+
+    skill load(compiler, to, base, offset) {
+        compiler.machine = access.load(compiler.machine, to, base, offset, 4)
+        out compiler
+    }
+
+    skill load32(compiler, to, base, offset) {
+        out load(compiler, to, base, offset)
+    }
+
+    skill load_byte(compiler, to, base, offset) {
+        compiler.machine = access.load(compiler.machine, to, base, offset, 1)
+        out compiler
+    }
+
+    skill load_half(compiler, to, base, offset) {
+        compiler.machine = access.load(compiler.machine, to, base, offset, 2)
+        out compiler
+    }
+
+    skill store(compiler, from, base, offset) {
+        compiler.machine = access.store(compiler.machine, from, base, offset, 4)
+        out compiler
+    }
+
+    skill store32(compiler, from, base, offset) {
+        out store(compiler, from, base, offset)
+    }
+
+    skill store_byte(compiler, from, base, offset) {
+        compiler.machine = access.store(compiler.machine, from, base, offset, 1)
+        out compiler
+    }
+
+    skill store_half(compiler, from, base, offset) {
+        compiler.machine = access.store(compiler.machine, from, base, offset, 2)
+        out compiler
+    }
+
+    skill store_zero(compiler, base, offset) {
+        compiler.machine = access.zero(compiler.machine, base, offset, 4)
+        out compiler
+    }
+
+    skill store_byte_zero(compiler, base, offset) {
+        compiler.machine = access.zero(compiler.machine, base, offset, 1)
+        out compiler
+    }
+
+    skill push(compiler, from) {
+        compiler = add_immediate(compiler, backend.STACK, backend.STACK, 0 - compiler.words.bytes)
+        out store(compiler, from, backend.STACK, 0)
+    }
+
+    skill pop(compiler, to) {
+        compiler = load(compiler, to, backend.STACK, 0)
+        out add_immediate(compiler, backend.STACK, backend.STACK, compiler.words.bytes)
+    }
+
+    skill branch_equal(compiler, left, right, name) {
+        compiler.machine = control.pair(compiler.machine, left, right, 0, name)
+        out compiler
+    }
+
+    skill branch_not_equal(compiler, left, right, name) {
+        compiler.machine = control.pair(compiler.machine, left, right, 1, name)
+        out compiler
+    }
+
+    skill branch_less(compiler, left, right, name) {
+        compiler.machine = control.pair(compiler.machine, left, right, 2, name)
+        out compiler
+    }
+
+    skill branch_greater_equal(compiler, left, right, name) {
+        compiler.machine = control.pair(compiler.machine, left, right, 3, name)
+        out compiler
+    }
+
+    skill branch_less_unsigned(compiler, left, right, name) {
+        compiler.machine = control.pair(compiler.machine, left, right, 4, name)
+        out compiler
+    }
+
+    skill branch_greater_equal_unsigned(compiler, left, right, name) {
+        compiler.machine = control.pair(compiler.machine, left, right, 5, name)
+        out compiler
+    }
+
+    skill branch_zero(compiler, from, name) {
+        compiler.machine = control.one(compiler.machine, from, 0, name)
+        out compiler
+    }
+
+    skill branch_nonzero(compiler, from, name) {
+        compiler.machine = control.one(compiler.machine, from, 1, name)
+        out compiler
+    }
+
+    skill branch_negative(compiler, from, name) {
+        compiler.machine = control.one(compiler.machine, from, 2, name)
+        out compiler
+    }
+
+    skill branch_not_negative(compiler, from, name) {
+        compiler.machine = control.one(compiler.machine, from, 3, name)
+        out compiler
+    }
+
+    skill branch_not_positive(compiler, from, name) {
+        compiler.machine = control.not_positive(compiler.machine, from, name)
+        out compiler
+    }
+
+    skill jump(compiler, name) {
+        compiler.machine = asm.jump_to(compiler.machine, name)
+        out compiler
+    }
+
+    skill jump_if_equal(compiler, left, right, name) {
+        out branch_equal(compiler, left, right, name)
+    }
+
+    skill jump_if_not_equal(compiler, left, right, name) {
+        out branch_not_equal(compiler, left, right, name)
+    }
+
+    skill jump_if_zero(compiler, from, name) {
+        out branch_zero(compiler, from, name)
+    }
+
+    skill jump_if_nonzero(compiler, from, name) {
+        out branch_nonzero(compiler, from, name)
+    }
+
+    skill jump_far(compiler, name) {
+        out jump(compiler, name)
+    }
+
+    skill call(compiler, name) {
+        compiler.machine = asm.call_to(compiler.machine, name)
+        out compiler
+    }
+
+    skill ret(compiler) {
+        compiler.machine = asm.emit3(compiler.machine, encode.ret())
+        out compiler
+    }
+
+    skill syscall(compiler, number) {
+        number = number
+        out load_immediate(compiler, backend.VALUE, 0)
+    }
+
+    skill wait(compiler) {
+        compiler.machine = asm.emit3(compiler.machine, encode.waiti(0))
+        out compiler
+    }
+
+    skill fence(compiler) {
+        compiler.machine = asm.emit3(compiler.machine, encode.memw())
+        out compiler
+    }
+
+    skill pin_stack(compiler, value) {
+        compiler.machine = asm.lit(compiler.machine, 1, value)
+        out compiler
+    }
+
+    skill read_cycles(compiler) {
+        compiler.machine = asm.emit3(compiler.machine, encode.rsr(2, 234))
+        compiler.machine = asm.emit3(compiler.machine, encode.slli(2, 2, 4))
+        compiler.machine = asm.emit3(compiler.machine, encode.srli(2, 2, 4))
+        out compiler
+    }
+}
+
+program() {
+    out none
+}

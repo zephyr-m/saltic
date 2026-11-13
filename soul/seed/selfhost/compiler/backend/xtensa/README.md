@@ -1,6 +1,8 @@
-# Xtensa — заглушка
+# Xtensa
 
-⬜ **Не начат.** Записан 03.11.2026.
+Кодировщик CALL0, исполнитель договора (`xtensa.saltic`) и прошивка «S».
+Образ — `formats/esp`. Платформа — `os/target/esp32`. На плате DevKit
+(D0WD-V3) `smoke` уже печатает `S` в UART 115200. Записан 03.11.2026.
 
 - **Набор команд:** Xtensa LX6 (ESP32) и LX7 (ESP32-S3).
 - **Что откроет:** ESP32-CAM, ESP32-WROVER, ESP32-S3 (DevKitC N16R8, XIAO

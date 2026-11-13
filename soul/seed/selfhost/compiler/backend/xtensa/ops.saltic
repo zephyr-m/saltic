@@ -1,0 +1,202 @@
+-- ops — константы, арифметика, сдвиги и сравнения. Временные a14 и a15
+-- прячутся на стек, если команде не хватает поля.
+
+use selfhost.abi
+use selfhost.compiler.backend.xtensa.asm
+use selfhost.compiler.backend.xtensa.encode
+use selfhost.compiler.backend.xtensa.roles
+use selfhost.compiler.backend.xtensa.access
+
+skill imm_reg(prog, reg, value) {
+    (value > 2047) { out asm.lit(prog, reg, value) }
+    (value < 0 - 2048) { out asm.lit(prog, reg, value) }
+    out asm.emit3(prog, encode.movi(reg, value))
+}
+
+skill move(prog, dest, src) {
+    @rd = roles.reg(dest)
+    @rs = roles.reg(src)
+    (rd >= 0) {
+        (rs >= 0) {
+            (rd == rs) { out prog }
+            out asm.emit3(prog, encode.or(rd, rs, rs))
+        }
+    }
+    prog = access.spill(prog)
+    prog = access.fetch(prog, src, 14)
+    out access.finish(prog, dest)
+}
+
+skill alu(prog, kind, rd, rs, rt) {
+    (kind == 0) { out asm.emit3(prog, encode.add(rd, rs, rt)) }
+    (kind == 1) { out asm.emit3(prog, encode.sub(rd, rs, rt)) }
+    (kind == 2) { out asm.emit3(prog, encode.and(rd, rs, rt)) }
+    (kind == 3) { out asm.emit3(prog, encode.or(rd, rs, rt)) }
+    out asm.emit3(prog, encode.xor(rd, rs, rt))
+}
+
+skill binary(prog, dest, left, right, kind) {
+    @rd = roles.reg(dest)
+    @rs = roles.reg(left)
+    @rt = roles.reg(right)
+    (rd >= 0) {
+        (rs >= 0) {
+            (rt >= 0) { out alu(prog, kind, rd, rs, rt) }
+        }
+    }
+    prog = access.spill(prog)
+    prog = access.fetch(prog, left, 14)
+    prog = access.fetch(prog, right, 15)
+    prog = alu(prog, kind, 14, 14, 15)
+    out access.finish(prog, dest)
+}
+
+skill imm_alu(prog, kind, rd, rs) {
+    (kind == 0) { out asm.emit3(prog, encode.add(rd, rs, 15)) }
+    (kind == 2) { out asm.emit3(prog, encode.and(rd, rs, 15)) }
+    (kind == 3) { out asm.emit3(prog, encode.or(rd, rs, 15)) }
+    out asm.emit3(prog, encode.xor(rd, rs, 15))
+}
+
+skill binary_imm(prog, dest, src, value, kind) {
+    @rd = roles.reg(dest)
+    @rs = roles.reg(src)
+    (kind == 0) {
+        (rd >= 0) {
+            (rs >= 0) {
+                (value < 128) {
+                    (value > 0 - 129) { out asm.emit3(prog, encode.addi(rd, rs, value)) }
+                }
+            }
+        }
+    }
+    prog = access.spill(prog)
+    prog = access.fetch(prog, src, 14)
+    prog = imm_reg(prog, 15, value)
+    prog = imm_alu(prog, kind, 14, 14)
+    out access.finish(prog, dest)
+}
+
+skill neg(prog, dest, src) {
+    @rd = roles.reg(dest)
+    @rs = roles.reg(src)
+    (rd >= 0) {
+        (rs >= 0) { out asm.emit3(prog, encode.neg(rd, rs)) }
+    }
+    prog = access.spill(prog)
+    prog = access.fetch(prog, src, 14)
+    prog = asm.emit3(prog, encode.neg(14, 14))
+    out access.finish(prog, dest)
+}
+
+skill shift_mask(prog, reg, count) {
+    @left = count
+    (left < 0) { left = 0 }
+    (left > 31) { left = 31 }
+    drum (left / 8) {
+        prog = asm.emit3(prog, encode.srli(reg, reg, 8))
+        left = left - 8
+    }
+    (left > 0) { prog = asm.emit3(prog, encode.srli(reg, reg, left)) }
+    out prog
+}
+
+skill shift_arith(prog, reg, count) {
+    @left = count
+    (left < 0) { left = 0 }
+    (left > 31) { left = 31 }
+    drum (left / 15) {
+        prog = asm.emit3(prog, encode.srai(reg, reg, 15))
+        left = left - 15
+    }
+    (left > 0) { prog = asm.emit3(prog, encode.srai(reg, reg, left)) }
+    out prog
+}
+
+skill shift_left(prog, reg, count) {
+    (count < 0) { out prog }
+    (count > 31) { count = 31 }
+    (count == 0) { out prog }
+    out asm.emit3(prog, encode.slli(reg, reg, count))
+}
+
+skill shift_c(prog, dest, src, count, kind) {
+    @rd = roles.reg(dest)
+    @rs = roles.reg(src)
+    (rd >= 0) {
+        (rs >= 0) {
+            (rd == rs) {
+                (kind == 0) { out shift_left(prog, rd, count) }
+                (kind == 1) { out shift_mask(prog, rd, count) }
+                out shift_arith(prog, rd, count)
+            }
+            prog = asm.emit3(prog, encode.or(rd, rs, rs))
+            (kind == 0) { out shift_left(prog, rd, count) }
+            (kind == 1) { out shift_mask(prog, rd, count) }
+            out shift_arith(prog, rd, count)
+        }
+    }
+    prog = access.spill(prog)
+    prog = access.fetch(prog, src, 14)
+    (kind == 0) { prog = shift_left(prog, 14, count) }
+    (kind == 1) { prog = shift_mask(prog, 14, count) }
+    (kind == 2) { prog = shift_arith(prog, 14, count) }
+    out access.finish(prog, dest)
+}
+
+skill shift_by(prog, dest, src, count, kind) {
+    prog = access.spill(prog)
+    prog = access.fetch(prog, src, 14)
+    prog = access.fetch(prog, count, 15)
+    (kind == 0) {
+        prog = asm.emit3(prog, encode.ssl(15))
+        prog = asm.emit3(prog, encode.sll_reg(14, 14))
+    }
+    (kind == 1) {
+        prog = asm.emit3(prog, encode.ssr(15))
+        prog = asm.emit3(prog, encode.srl_reg(14, 14))
+    }
+    out access.finish(prog, dest)
+}
+
+skill flag(prog, dest, left, right, kind) {
+    prog = access.spill(prog)
+    prog = access.fetch(prog, left, 14)
+    prog = access.fetch(prog, right, 15)
+    (kind == 0) { prog = asm.emit3(prog, encode.blt(14, 15, 9)) }
+    (kind == 1) { prog = asm.emit3(prog, encode.bltu(14, 15, 9)) }
+    prog = asm.emit3(prog, encode.movi(14, 0))
+    prog = asm.emit3(prog, encode.jump(6))
+    prog = asm.emit3(prog, encode.movi(14, 1))
+    out access.finish(prog, dest)
+}
+
+skill flag_zero(prog, dest, src, yes_on_zero) {
+    prog = access.spill(prog)
+    prog = access.fetch(prog, src, 14)
+    (yes_on_zero == yes) { prog = asm.emit3(prog, encode.bnez(14, 9)) }
+    (yes_on_zero == no) { prog = asm.emit3(prog, encode.beqz(14, 9)) }
+    prog = asm.emit3(prog, encode.movi(14, 1))
+    prog = asm.emit3(prog, encode.jump(6))
+    prog = asm.emit3(prog, encode.movi(14, 0))
+    out access.finish(prog, dest)
+}
+
+skill checked(prog, kind) {
+    (kind == 0) { prog = asm.emit3(prog, encode.add(6, 2, 3)) }
+    (kind == 1) { prog = asm.emit3(prog, encode.sub(6, 2, 3)) }
+    prog = asm.emit3(prog, encode.xor(7, 2, 3))
+    (kind == 0) { prog = asm.emit3(prog, encode.bltz(7, 9)) }
+    (kind == 1) { prog = asm.emit3(prog, encode.bgez(7, 9)) }
+    prog = asm.emit3(prog, encode.xor(7, 2, 6))
+    prog = asm.emit3(prog, encode.bltz(7, 12))
+    prog = asm.emit3(prog, encode.movi(3, abi.CALL_NO_ERROR))
+    prog = asm.emit3(prog, encode.or(2, 6, 6))
+    prog = asm.emit3(prog, encode.jump(9))
+    prog = asm.emit3(prog, encode.or(2, 6, 6))
+    out asm.emit3(prog, encode.movi(3, abi.ERROR_NUMBER_OVERFLOW))
+}
+
+program() {
+    out none
+}

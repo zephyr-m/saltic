@@ -1,0 +1,111 @@
+-- image — образ ESP32, который ПЗУ копирует в IRAM с флеша (смещение 0x1000).
+-- Заголовок 8 байт (magic 0xE9) и расширенные 16: chip id 0, SHA-256 нет.
+-- ПЗУ сумму SHA не смотрит. Контрольная сумма — XOR данных сегмента от 0xEF,
+-- её байт стоит так, чтобы длина файла делилась на 16.
+
+use core.bytes
+use core.group
+
+MAGIC = 233
+FLASH_DIO = 2
+FLASH_4MB_40MHZ = 32
+WP_DISABLED = 238
+CHECK_START = 239
+
+skill push(items, value) {
+    out group.add(items, value)
+}
+
+skill u32(items, value) {
+    @next = push(items, value % 256)
+    next = push(next, value / 256 % 256)
+    next = push(next, value / 65536 % 256)
+    out push(next, value / 16777216 % 256)
+}
+
+skill bit(n) {
+    @value = 1
+    drum (n) { value = value * 2 }
+    out value
+}
+
+skill byte_xor(left, right) {
+    @result = 0
+    drum (8) {
+        @mask = bit(beat)
+        @left_bit = left / mask % 2
+        @right_bit = right / mask % 2
+        ((left_bit == right_bit) == no) { result = result + mask }
+    }
+    out result
+}
+
+skill extended(items) {
+    @next = push(items, WP_DISABLED)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    next = push(next, 0)
+    out push(next, 0)
+}
+
+skill take(items, blob) {
+    drum (bytes.count(blob)) { items = push(items, bytes.get(blob, beat)) }
+    out items
+}
+
+skill mix(sum, blob) {
+    drum (bytes.count(blob)) { sum = byte_xor(sum, bytes.get(blob, beat)) }
+    out sum
+}
+
+skill app(entry, code_load, code, data_load, data) {
+    @nseg = 1
+    (bytes.count(data) > 0) { nseg = 2 }
+    @body = [MAGIC, nseg, FLASH_DIO, FLASH_4MB_40MHZ]
+    body = u32(body, entry)
+    body = extended(body)
+    body = u32(body, code_load)
+    body = u32(body, bytes.count(code))
+    body = take(body, code)
+    (nseg == 2) {
+        body = u32(body, data_load)
+        body = u32(body, bytes.count(data))
+        body = take(body, data)
+    }
+    @sum = mix(CHECK_START, code)
+    (nseg == 2) { sum = mix(sum, data) }
+    @pad = (16 - (group.count(body) + 1) % 16) % 16
+    drum (pad) { body = push(body, 0) }
+    body = push(body, sum)
+    out bytes.from_group(body)
+}
+
+skill ram(entry, load, code) {
+    @body = [MAGIC, 1, FLASH_DIO, FLASH_4MB_40MHZ]
+    body = u32(body, entry)
+    body = extended(body)
+    body = u32(body, load)
+    body = u32(body, group.count(code))
+    drum (group.count(code)) { body = push(body, group.get(code, beat)) }
+    @sum = CHECK_START
+    drum (group.count(code)) { sum = byte_xor(sum, group.get(code, beat)) }
+    @pad = (16 - (group.count(body) + 1) % 16) % 16
+    drum (pad) { body = push(body, 0) }
+    body = push(body, sum)
+    out bytes.from_group(body)
+}
+
+program() {
+    out none
+}
