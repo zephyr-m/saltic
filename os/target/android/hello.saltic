@@ -1,18 +1,28 @@
 -- hello — первая программа Saltic на телефоне: фон и «Привет, Зэф!» шрифтом
--- Spleen 16×32, увеличенным под ширину окна, ниже — подпись помельче. Окно
--- даёт платформа через cpu.firmware: 0 — адрес пикселей RGBA_8888, 1 —
--- ширина, 2 — высота, 3 — шаг строки в пикселях. Печать уходит в журнал.
+-- Spleen 16×32, увеличенным под ширину окна, над ним — каркасный куб хранителя
+-- экрана (os/target/esp32/cube: таблица синуса, перспектива), ниже — подпись
+-- помельче, кнопка «Нажми» и счёт нажатий, внизу — кадров в секунду. Куб
+-- крутится сам, кадр за кадром. Окно даёт платформа через cpu.firmware: 0 — адрес
+-- пикселей RGBA_8888, 1 — ширина, 2 — высота, 3 — шаг строки в пикселях,
+-- 4 / 5 — x / y последнего касания, 6 — счёт касаний. cpu.wait() показывает
+-- кадр и ждёт следующего; после него адрес пикселей читается заново. Печать уходит в журнал.
 
 use io
 use core.str
 use core.cpu
 use core.mem
 use core.u32
+use core.time
 use core.group
 use core.usize
 use core.address
 use os.fonts.spleen
 use os.drivers.font
+
+SINE = [0, 12, 25, 37, 49, 60, 71, 81, 90, 98, 106, 112, 117, 122, 125, 126, 127, 126, 125, 122, 117, 112, 106, 98, 90, 81, 71, 60, 49, 37, 25, 12, 0, -12, -25, -37, -49, -60, -71, -81, -90, -98, -106, -112, -117, -122, -125, -126, -127, -126, -125, -122, -117, -112, -106, -98, -90, -81, -71, -60, -49, -37, -25, -12]
+CORNERS = [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1], [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]]
+EDGES = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]
+SECOND = 1000
 
 skill background() {
     out u32.from(4281211678)
@@ -66,22 +76,122 @@ skill text(canvas, x, y, words, scale, color) {
     out none
 }
 
-program() {
-    @canvas = Canvas { bits = cpu.firmware(0), width = cpu.firmware(1), height = cpu.firmware(2), stride = cpu.firmware(3) }
-    io.show("окно {canvas.width}×{canvas.height}, шаг {canvas.stride}")
+skill dot(canvas, x, y, size, color) {
+    (x < 0) { out none }
+    (y < 0) { out none }
+    (x + size > canvas.width) { out none }
+    (y + size > canvas.height) { out none }
+    out block(canvas, x, y, size, color)
+}
+
+skill line(canvas, a, b, size, color) {
+    @x0 = group.get(a, 0)
+    @y0 = group.get(a, 1)
+    @dx = group.get(b, 0) - x0
+    @dy = group.get(b, 1) - y0
+    @steps = dx
+    (steps < 0) { steps = 0 - steps }
+    @other = dy
+    (other < 0) { other = 0 - other }
+    (other > steps) { steps = other }
+    (steps == 0) { out dot(canvas, x0, y0, size, color) }
+    drum (steps + 1) { dot(canvas, x0 + dx * beat / steps, y0 + dy * beat / steps, size, color) }
+    out none
+}
+
+skill corner(point, turn, size, center) {
+    @sine = group.get(SINE, turn % 64)
+    @cosine = group.get(SINE, (turn + 16) % 64)
+    @x = group.get(point, 0) * size
+    @y = group.get(point, 1) * size
+    @z = group.get(point, 2) * size
+    @x1 = (x * cosine - z * sine) / 127
+    @z1 = (x * sine + z * cosine) / 127
+    @tilt = turn / 2
+    @y2 = (y * group.get(SINE, (tilt + 16) % 64) - z1 * group.get(SINE, tilt % 64)) / 127
+    @z2 = (y * group.get(SINE, tilt % 64) + z1 * group.get(SINE, (tilt + 16) % 64)) / 127
+    @depth = size * 4
+    out [group.get(center, 0) + x1 * depth / (z2 + depth + size * 2), group.get(center, 1) + y2 * depth / (z2 + depth + size * 2)]
+}
+
+skill cube(canvas, turn, size, center, thickness) {
+    @points = []
+    drum (CORNERS) { points = group.add(points, corner(beat, turn, size, center)) }
+    drum (EDGES) { line(canvas, group.get(points, group.get(beat, 0)), group.get(points, group.get(beat, 1)), thickness, accent()) }
+    out none
+}
+
+skill canvas() {
+    out Canvas { bits = cpu.firmware(0), width = cpu.firmware(1), height = cpu.firmware(2), stride = cpu.firmware(3) }
+}
+
+skill rect(canvas, x, y, width, height, color) {
     @base = address.from(canvas.bits)
-    @paint = background()
-    drum (canvas.height) {
-        @row = beat * canvas.stride
-        drum (canvas.width) { mem.store32(base, usize.from((row + beat) * 4), paint) }
+    drum (height) {
+        @row = (y + beat) * canvas.stride + x
+        drum (width) { mem.store32(base, usize.from((row + beat) * 4), color) }
     }
+    out none
+}
+
+Button = Box {
+    x = 0,
+    y = 0,
+    width = 0,
+    height = 0
+}
+
+skill inside(button, x, y) {
+    (x < button.x) { out no }
+    (y < button.y) { out no }
+    (x >= button.x + button.width) { out no }
+    (y >= button.y + button.height) { out no }
+    out yes
+}
+
+skill draw(canvas, count, turn, rate) {
+    rect(canvas, 0, 0, canvas.width, canvas.height, background())
     @scale = canvas.width / (14 * 16)
     (scale < 1) { scale = 1 }
     @top = canvas.height / 3
-    text(canvas, scale * 16, top, "Привет, Зэф!", scale, ink())
+    @left = scale * 16
+    cube(canvas, turn, canvas.width / 6, [canvas.width / 2, top / 2 + left], scale)
+    text(canvas, left, top, "Привет, Зэф!", scale, ink())
     @small = scale / 2
     (small < 1) { small = 1 }
-    text(canvas, scale * 16, top + 40 * scale, "Saltic на Android", small, accent())
-    io.show("кадр готов")
+    text(canvas, left, top + 40 * scale, "Saltic на Android", small, accent())
+    @button = Button { x = left, y = top + 70 * scale, width = canvas.width - 2 * left, height = 32 * small + 2 * left }
+    rect(canvas, button.x, button.y, button.width, button.height, accent())
+    text(canvas, button.x + left, button.y + left, "Нажми", small, background())
+    @below = button.y + button.height + 16 * scale
+    text(canvas, left, below, "нажатий: {count}", small, ink())
+    (rate >= 0) { text(canvas, left, below + 48 * small, "кадр/с {rate}", small, accent()) }
+    out button
+}
+
+program() {
+    @count = 0
+    @seen = cpu.firmware(6)
+    @turn = 0
+    @frames = 0
+    @rate = -1
+    @since = time.now()
+    io.show("куб крутится")
+    always {
+        @button = draw(canvas(), count, turn, rate)
+        cpu.wait()
+        @touches = cpu.firmware(6)
+        ((touches == seen) == no) {
+            seen = touches
+            (inside(button, cpu.firmware(4), cpu.firmware(5))) { count = count + 1 }
+        }
+        turn = turn + 1
+        frames = frames + 1
+        (time.elapsed(since, time.now()) >= SECOND) {
+            rate = frames
+            frames = 0
+            since = time.now()
+        }
+    }
     out none
 }

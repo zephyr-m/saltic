@@ -56,6 +56,13 @@ DETACH = "AInputQueue_detachLooper"
 NEXT_EVENT = "AInputQueue_getEvent"
 PRE_DISPATCH = "AInputQueue_preDispatchEvent"
 FINISH = "AInputQueue_finishEvent"
+EVENT_TYPE = "AInputEvent_getType"
+MOTION_ACTION = "AMotionEvent_getAction"
+MOTION_X = "AMotionEvent_getX"
+MOTION_Y = "AMotionEvent_getY"
+THREAD_START = "pthread_create"
+PROGRAM = "android_program"
+DESTROYED = "android_destroyed"
 QUEUE_CREATED = "android_queue_created"
 QUEUE_DESTROYED = "android_queue_destroyed"
 DRAIN = "android_drain"
@@ -66,6 +73,12 @@ STACK = "android_stack"
 ARG0 = "android_arg0"
 TAG = "android_tag"
 FORMAT = "android_format"
+THREAD = "android_thread"
+STARTED = "android_started"
+TOUCH_X = "android_touch_x"
+TOUCH_Y = "android_touch_y"
+TOUCHES = "android_touches"
+DESTROY_SLOT = 40
 WINDOW_SLOT = 56
 QUEUE_CREATED_SLOT = 88
 QUEUE_DESTROYED_SLOT = 96
@@ -84,12 +97,15 @@ EVENT_AT = 16
 HEAP_HINT = 268435456
 FIXED_NOREPLACE = 1048576
 HEAP_LAST = 4026531840
+MOTION = 2
+ACTION_MASK = 255
+FCVTZS_SINGLE = 40504
 
 skill library() {
     out shared.Library {
         name = "libmain.so",
-        needed = ["libandroid.so", "liblog.so"],
-        imports = [GEOMETRY, LOCK, POST, LOG, LOOPER, ATTACH, DETACH, NEXT_EVENT, PRE_DISPATCH, FINISH],
+        needed = ["libandroid.so", "liblog.so", "libc.so"],
+        imports = [GEOMETRY, LOCK, POST, LOG, LOOPER, ATTACH, DETACH, NEXT_EVENT, PRE_DISPATCH, FINISH, EVENT_TYPE, MOTION_ACTION, MOTION_X, MOTION_Y, THREAD_START],
         exports = [CREATE]
     }
 }
@@ -131,6 +147,25 @@ skill frame(compiler, enter) {
     out executor.ret(compiler)
 }
 
+skill notify(compiler) {
+    @executor = compiler.executor
+    compiler = ops.emit(compiler, encoder.dmb())
+    compiler = executor.load_address(compiler, backend.SCRATCH0, TOUCHES, 0)
+    compiler = executor.load32(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, 1)
+    out executor.store32(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+}
+
+skill coordinate(compiler, name, to) {
+    @executor = compiler.executor
+    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 0, SP, EVENT_AT))
+    compiler = executor.load_immediate(compiler, backend.ERROR, 0)
+    compiler = direct(compiler, name)
+    compiler = ops.emit(compiler, encoder.encode(FCVTZS_SINGLE, 0, 0, 0, 0, 0))
+    compiler = executor.load_address(compiler, backend.SCRATCH0, to, 0)
+    out executor.store(compiler, backend.VALUE, backend.SCRATCH0, 0)
+}
+
 skill emit_queue(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, QUEUE_CREATED)
@@ -163,6 +198,19 @@ skill emit_queue(compiler) {
     compiler = direct(compiler, PRE_DISPATCH)
     compiler = int_result(compiler)
     compiler = executor.branch_nonzero(compiler, backend.VALUE, ".L_android_drain_next")
+    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 0, SP, EVENT_AT))
+    compiler = direct(compiler, EVENT_TYPE)
+    compiler = int_result(compiler)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, MOTION)
+    compiler = executor.branch_not_equal(compiler, backend.VALUE, backend.SCRATCH0, ".L_android_drain_finish")
+    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 0, SP, EVENT_AT))
+    compiler = direct(compiler, MOTION_ACTION)
+    compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, ACTION_MASK)
+    compiler = executor.branch_nonzero(compiler, backend.VALUE, ".L_android_drain_finish")
+    compiler = coordinate(compiler, MOTION_X, TOUCH_X)
+    compiler = coordinate(compiler, MOTION_Y, TOUCH_Y)
+    compiler = notify(compiler)
+    compiler = executor.label(compiler, ".L_android_drain_finish")
     compiler = ops.emit(compiler, encoder.add_immediate(0, QUEUE_KEEP, 0))
     compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 1, SP, EVENT_AT))
     compiler = executor.load_immediate(compiler, backend.ARG2, 0)
@@ -171,6 +219,12 @@ skill emit_queue(compiler) {
     compiler = executor.label(compiler, ".L_android_drain_done")
     compiler = executor.load_immediate(compiler, backend.VALUE, 1)
     out frame(compiler, no)
+}
+
+skill stored(compiler, name) {
+    @executor = compiler.executor
+    compiler = executor.load_address(compiler, backend.VALUE, name, 0)
+    out executor.load(compiler, backend.VALUE, backend.VALUE, 0)
 }
 
 skill window(compiler, to) {
@@ -189,29 +243,61 @@ skill emit_create(compiler) {
     compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, QUEUE_CREATED_SLOT)
     compiler = executor.load_address(compiler, backend.SCRATCH1, QUEUE_DESTROYED, 0)
     compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, QUEUE_DESTROYED_SLOT)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, DESTROYED, 0)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, DESTROY_SLOT)
     out executor.ret(compiler)
+}
+
+skill emit_destroyed(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, DESTROYED)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    out executor.syscall(compiler, system.SYSCALL_EXIT_GROUP)
 }
 
 skill emit_window(compiler) {
     @executor = compiler.executor
     compiler = executor.label(compiler, WINDOW_CREATED)
-    compiler = ops.emit(compiler, encoder.sub_immediate(SP, SP, SAVE_BYTES))
-    drum (group.count(C_SAVED)) { compiler = ops.emit(compiler, encoder.memory(encoder.X, no, group.get(C_SAVED, beat), SP, beat * 8)) }
-    compiler = ops.emit(compiler, encoder.add_immediate(9, SP, 0))
-    compiler = executor.load_address(compiler, backend.SCRATCH1, SAVED, 0)
-    compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
-    compiler = executor.load_address(compiler, backend.STACK, STACK, STACK_BYTES)
+    compiler = frame(compiler, yes)
     compiler = executor.load_address(compiler, backend.SCRATCH0, WINDOW, 0)
     compiler = executor.store(compiler, backend.ERROR, backend.SCRATCH0, 0)
     compiler = executor.move(compiler, backend.VALUE, backend.ERROR)
     compiler = executor.load_immediate(compiler, backend.ERROR, 0)
     compiler = executor.load_immediate(compiler, backend.ARG2, 0)
     compiler = executor.load_immediate(compiler, backend.ARG3, RGBA_8888)
-    compiler = c_call(compiler, GEOMETRY)
+    compiler = direct(compiler, GEOMETRY)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, STARTED, 0)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH1, ".L_android_window_again")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 1)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+    compiler = executor.load_address(compiler, backend.VALUE, THREAD, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, 0)
+    compiler = executor.load_address(compiler, backend.ARG2, PROGRAM, 0)
+    compiler = executor.load_immediate(compiler, backend.ARG3, 0)
+    compiler = direct(compiler, THREAD_START)
+    compiler = executor.label(compiler, ".L_android_window_again")
+    out frame(compiler, no)
+}
+
+skill lock(compiler) {
+    @executor = compiler.executor
     compiler = window(compiler, backend.VALUE)
     compiler = executor.load_address(compiler, backend.ERROR, BUFFER, 0)
     compiler = executor.load_immediate(compiler, backend.ARG2, 0)
-    compiler = c_call(compiler, LOCK)
+    out c_call(compiler, LOCK)
+}
+
+skill emit_program(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, PROGRAM)
+    compiler = ops.emit(compiler, encoder.sub_immediate(SP, SP, SAVE_BYTES))
+    drum (group.count(C_SAVED)) { compiler = ops.emit(compiler, encoder.memory(encoder.X, no, group.get(C_SAVED, beat), SP, beat * 8)) }
+    compiler = ops.emit(compiler, encoder.add_immediate(9, SP, 0))
+    compiler = executor.load_address(compiler, backend.SCRATCH1, SAVED, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
+    compiler = executor.load_address(compiler, backend.STACK, STACK, STACK_BYTES)
+    compiler = lock(compiler)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
     compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, 0)
@@ -220,6 +306,18 @@ skill emit_window(compiler) {
     compiler = executor.store_zero(compiler, backend.STACK, 16)
     compiler = executor.store_zero(compiler, backend.STACK, 24)
     out executor.jump(compiler, "_start")
+}
+
+skill emit_wait(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, platform.WAIT)
+    compiler = executor.push(compiler, backend.ARG2)
+    compiler = window(compiler, backend.VALUE)
+    compiler = c_call(compiler, POST)
+    compiler = lock(compiler)
+    compiler = ops.emit(compiler, encoder.dmb())
+    compiler = executor.pop(compiler, backend.ARG2)
+    out tails.ok(compiler)
 }
 
 skill emit_write(compiler) {
@@ -289,6 +387,12 @@ skill emit_firmware(compiler) {
     compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_height")
     compiler = executor.load_immediate(compiler, backend.SCRATCH1, 3)
     compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_stride")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 4)
+    compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_touch_x")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 5)
+    compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_touch_y")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 6)
+    compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_touches")
     compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH0, 16)
     compiler = tails.ok(compiler)
     compiler = executor.label(compiler, ".L_android_width")
@@ -299,6 +403,16 @@ skill emit_firmware(compiler) {
     compiler = tails.ok(compiler)
     compiler = executor.label(compiler, ".L_android_stride")
     compiler = executor.load32(compiler, backend.VALUE, backend.SCRATCH0, 8)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_android_touch_x")
+    compiler = stored(compiler, TOUCH_X)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_android_touch_y")
+    compiler = stored(compiler, TOUCH_Y)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_android_touches")
+    compiler = executor.load_address(compiler, backend.VALUE, TOUCHES, 0)
+    compiler = executor.load32(compiler, backend.VALUE, backend.VALUE, 0)
     out tails.ok(compiler)
 }
 
@@ -315,6 +429,10 @@ skill emit_data(compiler) {
     compiler = shared.zeroes(compiler, backend.DATA, 8)
     compiler = executor.data_label(compiler, backend.DATA, SAVED)
     compiler = shared.zeroes(compiler, backend.DATA, 8)
+    drum ([THREAD, STARTED, TOUCH_X, TOUCH_Y, TOUCHES]) {
+        compiler = executor.data_label(compiler, backend.DATA, beat)
+        compiler = shared.zeroes(compiler, backend.DATA, 8)
+    }
     compiler = executor.data_label(compiler, backend.DATA, BUFFER)
     compiler = shared.zeroes(compiler, backend.DATA, BUFFER_BYTES)
     compiler = executor.align(compiler, backend.BSS, 16)
@@ -330,6 +448,9 @@ Platform = Box {
     skill append(compiler) {
         compiler = emit_create(compiler)
         compiler = emit_window(compiler)
+        compiler = emit_program(compiler)
+        compiler = emit_wait(compiler)
+        compiler = emit_destroyed(compiler)
         compiler = emit_queue(compiler)
         compiler = emit_write(compiler)
         compiler = emit_exit(compiler)
@@ -348,6 +469,6 @@ Platform = Box {
         compiler = socket.append(compiler)
         compiler = emit_data(compiler)
         compiler = shared.reserve(compiler, library())
-        out platform.append_unsupported(compiler, ["wait", "call"])
+        out platform.append_unsupported(compiler, ["call"])
     }
 }
