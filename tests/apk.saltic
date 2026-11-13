@@ -1,0 +1,48 @@
+-- apk test — части APK из formats/apk: CRC32 zip против эталона «123456789»
+-- → CBF43926, архив из двух файлов: сигнатуры, выравнивание данных блоком
+-- 0xD935 (4 для обычного файла, 16384 для .so), центральный каталог в конце.
+-- Гоняет tests/run.saltic (apk) на цели прогона.
+--
+-- program() -> none; TestsFailed, если есть провалы
+
+use core.str
+use core.bytes
+use core.group
+use craft.testing
+use formats.apk.zip
+
+skill text_bytes(text) {
+    @buffer = bytes.new(str.bytes(text))
+    drum (str.bytes(text)) { bytes.set(buffer, beat, str.byte(text, beat)) }
+    out buffer
+}
+
+skill u16(buffer, at) {
+    out bytes.get(buffer, at) + bytes.get(buffer, at + 1) * 256
+}
+
+skill data_start(buffer, at) {
+    out at + 30 + u16(buffer, at + 26) + u16(buffer, at + 28)
+}
+
+program() {
+    @suite = testing.test_new()
+    @crc = zip.crc32(text_bytes("123456789"), zip.crc_table())
+    suite = testing.test_equal(suite, "zip: CRC32 младший байт", group.get(crc, 0), 38)
+    suite = testing.test_equal(suite, "zip: CRC32 старший байт", group.get(crc, 3), 203)
+    @text = zip.Entry { name = "a.txt", data = text_bytes("привет\n"), align = 4 }
+    @library = zip.Entry { name = "lib/arm64-v8a/libmain.so", data = text_bytes("SO"), align = 16384 }
+    @archive = zip.archive([text, library])
+    suite = testing.test_equal(suite, "zip: локальный заголовок", bytes.get(archive, 2), 3)
+    @first = data_start(archive, 0)
+    suite = testing.test_equal(suite, "zip: файл кратен 4", first % 4, 0)
+    suite = testing.test_equal(suite, "zip: блок выравнивания 0xD935", u16(archive, 30 + 5), 55605)
+    @second_at = first + 13
+    @second = data_start(archive, second_at)
+    suite = testing.test_equal(suite, "zip: .so с границы 16384", second, 16384)
+    suite = testing.test_equal(suite, "zip: данные .so", bytes.get(archive, second), 83)
+    @end = bytes.count(archive) - 22
+    suite = testing.test_equal(suite, "zip: конец каталога", bytes.get(archive, end + 2), 5)
+    suite = testing.test_equal(suite, "zip: файлов в каталоге", u16(archive, end + 10), 2)
+    out testing.test_finish(suite)
+}

@@ -1,0 +1,188 @@
+-- zip — архив zip без сжатия (STORED) для APK: локальные заголовки, центральный
+-- каталог, конец каталога. Данные файла выровнены: локальный заголовок
+-- дополняется нулевым полем extra, чтобы данные начинались с кратного align
+-- (Android грузит .so прямо из APK — ей нужна граница страницы) блоком 0xD935
+-- «выравнивание Android»: id, длина, выравнивание, нули. Дата всех
+-- файлов — 1980-01-01. CRC32 — табличный, полином 0xEDB88320.
+--
+-- Entry { name, data, align } — имя в архиве, буфер bytes, выравнивание данных
+-- crc_table() -> 256 пар [старшие 16 бит, младшие 16 бит] — половинками: на
+--     4-байтном слове 32-битное значение в группе не держится (FixedTooBig)
+-- crc32(buffer, table) -> 4 байта, младший первым
+-- archive(entries) -> буфер zip
+-- Внутри: put16 / put32 / put_bytes / put_text(buffer, at, …) -> at; local_size(entry, at)
+--     -> [начало данных, длина extra]; alignment(buffer, at, pad, align) -> at — блок
+--     0xD935; header(buffer, at, entry, crc, pad, central) -> at
+
+use core.str
+use core.num
+use core.u8
+use core.group
+use core.bytes
+use core.bits32
+
+LOCAL = 30
+CENTRAL = 46
+END = 22
+STORED = 0
+VERSION = 10
+DATE_1980 = 33
+ALIGNMENT_ID = 55605
+ALIGNMENT_HEAD = 6
+LOCAL_MAGIC = [80, 75, 3, 4]
+CENTRAL_MAGIC = [80, 75, 1, 2]
+END_MAGIC = [80, 75, 5, 6]
+
+Entry = Box {
+    name = "",
+    data = none,
+    align = 4
+}
+
+skill crc_table() {
+    @poly = bits32.or(bits32.shift_left(bits32.from(60856), u8.from(16)), bits32.from(33568))
+    @one = bits32.from(1)
+    @shift = u8.from(1)
+    @table = []
+    drum (256) {
+        @value = bits32.from(beat)
+        drum (8) {
+            @low = bits32.and(value, one)
+            value = bits32.shift_right(value, shift)
+            (low == one) { value = bits32.xor(value, poly) }
+        }
+        table = group.add(table, [num.from(bits32.shift_right(value, u8.from(16))), num.from(bits32.and(value, bits32.from(65535)))])
+    }
+    out table
+}
+
+skill crc32(buffer, table) {
+    @mask = bits32.from(255)
+    @eight = u8.from(8)
+    @sixteen = u8.from(16)
+    @value = bits32.invert(bits32.from(0))
+    drum (bytes.count(buffer)) {
+        @index = num.from(bits32.and(bits32.xor(value, bits32.from(bytes.get(buffer, beat))), mask))
+        @half = group.get(table, index)
+        @item = bits32.or(bits32.shift_left(bits32.from(group.get(half, 0)), sixteen), bits32.from(group.get(half, 1)))
+        value = bits32.xor(item, bits32.shift_right(value, eight))
+    }
+    value = bits32.invert(value)
+    @result = []
+    drum (4) { result = group.add(result, num.from(bits32.and(bits32.shift_right(value, u8.from(beat * 8)), mask))) }
+    out result
+}
+
+skill put16(buffer, at, value) {
+    bytes.set(buffer, at, value % 256)
+    bytes.set(buffer, at + 1, value / 256 % 256)
+    out at + 2
+}
+
+skill put32(buffer, at, value) {
+    @rest = value
+    drum (4) {
+        bytes.set(buffer, at + beat, rest % 256)
+        rest = rest / 256
+    }
+    out at + 4
+}
+
+skill put_bytes(buffer, at, items) {
+    drum (group.count(items)) { bytes.set(buffer, at + beat, group.get(items, beat)) }
+    out at + group.count(items)
+}
+
+skill put_text(buffer, at, text) {
+    drum (str.bytes(text)) { bytes.set(buffer, at + beat, str.byte(text, beat)) }
+    out at + str.bytes(text)
+}
+
+skill local_size(entry, at) {
+    @base = at + LOCAL + str.bytes(entry.name)
+    @pad = 0
+    (entry.align > 1) {
+        @rest = base % entry.align
+        (rest > 0) { pad = entry.align - rest }
+        (pad > 0) {
+            always {
+                (pad >= ALIGNMENT_HEAD) { leave }
+                pad = pad + entry.align
+            }
+        }
+    }
+    out [base + pad, pad]
+}
+
+skill alignment(buffer, at, pad, align) {
+    (pad == 0) { out at }
+    at = put16(buffer, at, ALIGNMENT_ID)
+    at = put16(buffer, at, pad - 4)
+    put16(buffer, at, align)
+    out at - 4 + pad
+}
+
+skill header(buffer, at, entry, crc, pad, central) {
+    @size = bytes.count(entry.data)
+    (central == no) { at = put_bytes(buffer, at, LOCAL_MAGIC) }
+    (central == yes) {
+        at = put_bytes(buffer, at, CENTRAL_MAGIC)
+        at = put16(buffer, at, VERSION)
+    }
+    at = put16(buffer, at, VERSION)
+    at = put16(buffer, at, 0)
+    at = put16(buffer, at, STORED)
+    at = put16(buffer, at, 0)
+    at = put16(buffer, at, DATE_1980)
+    at = put_bytes(buffer, at, crc)
+    at = put32(buffer, at, size)
+    at = put32(buffer, at, size)
+    at = put16(buffer, at, str.bytes(entry.name))
+    out put16(buffer, at, pad)
+}
+
+skill archive(entries) {
+    @table = crc_table()
+    @offsets = []
+    @pads = []
+    @crcs = []
+    @at = 0
+    @directory = 0
+    drum (entries) {
+        @placed = local_size(beat, at)
+        offsets = group.add(offsets, at)
+        pads = group.add(pads, group.get(placed, 1))
+        crcs = group.add(crcs, crc32(beat.data, table))
+        at = group.get(placed, 0) + bytes.count(beat.data)
+        directory = directory + CENTRAL + str.bytes(beat.name)
+    }
+    @central_at = at
+    @buffer = bytes.new(at + directory + END)
+    drum (group.count(entries)) {
+        @entry = group.get(entries, beat)
+        @pad = group.get(pads, beat)
+        @cursor = header(buffer, group.get(offsets, beat), entry, group.get(crcs, beat), pad, no)
+        cursor = alignment(buffer, put_text(buffer, cursor, entry.name), pad, entry.align)
+        drum (bytes.count(entry.data)) { bytes.set(buffer, cursor + beat, bytes.get(entry.data, beat)) }
+    }
+    @cursor = central_at
+    drum (group.count(entries)) {
+        @entry = group.get(entries, beat)
+        cursor = header(buffer, cursor, entry, group.get(crcs, beat), 0, yes)
+        cursor = put16(buffer, cursor, 0)
+        cursor = put16(buffer, cursor, 0)
+        cursor = put16(buffer, cursor, 0)
+        cursor = put32(buffer, cursor, 0)
+        cursor = put32(buffer, cursor, group.get(offsets, beat))
+        cursor = put_text(buffer, cursor, entry.name)
+    }
+    cursor = put_bytes(buffer, cursor, END_MAGIC)
+    cursor = put16(buffer, cursor, 0)
+    cursor = put16(buffer, cursor, 0)
+    cursor = put16(buffer, cursor, group.count(entries))
+    cursor = put16(buffer, cursor, group.count(entries))
+    cursor = put32(buffer, cursor, directory)
+    cursor = put32(buffer, cursor, central_at)
+    put16(buffer, cursor, 0)
+    out buffer
+}
