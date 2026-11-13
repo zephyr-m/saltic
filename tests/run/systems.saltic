@@ -2,7 +2,9 @@
 -- tasks, panels, mrpc) и платформы (набор platforms: qemu-virt — графическая
 -- ОС через os/target/qemu_virt/build-graphics.saltic, UEFI — сборка
 -- (os/target/uefi_x86_64/build.saltic) и запуск образа (run.saltic), closure — канон в ELF rv32i и запуск
--- под QEMU). Провал — TestFailed.
+-- под QEMU, wasm — сборщик os/target/wasm, probe и первые WASM_CANON_LINES строк
+-- канона под Node WASI: дальше канон зовёт процессы, их в WASI нет). Провал —
+-- TestFailed.
 --
 -- run_case(t, name) -> yes, если случай отсюда (и он прошёл); no — чужой
 -- Внутри: own_program(t, name, source, target)
@@ -18,6 +20,7 @@ use tests.run.core
 
 ELF = [127, 69, 76, 70]
 CANON_HEAP = "67108864"
+WASM_CANON_LINES = 35
 
 skill own_program(t, name, source, target) {
     @work = "{t.work}/{name}"
@@ -66,6 +69,24 @@ skill test_closure(t) {
     out io.show("closure: ok")
 }
 
+skill test_wasm(t) {
+    @work = "{t.work}/wasm"
+    process.run(["mkdir", "-p", work], "", [])
+    io.show("wasm: сборщик модулей")
+    core.build(t, "wasm", "os/target/wasm/toolchain.saltic", "{work}/toolchain", core.HEAP, "x86_64")
+    core.must(process.run(["{work}/toolchain", "os/target/esp32/probe.saltic", "{work}/probe.wasm", "65536"], "", []), "wasm: probe не собрался")
+    io.show("wasm: probe под Node WASI")
+    core.run(t, "wasm", ["{work}/probe.wasm"], "{work}/probe.txt")
+    core.same("tests/expected/esp32-probe.txt", "{work}/probe.txt")
+    io.show("wasm: канон до процессов — первые {WASM_CANON_LINES} строк")
+    core.must(process.run(["{work}/toolchain", "soul/canonical/main.saltic", "{work}/canonical.wasm", CANON_HEAP], "", []), "wasm: канон не собрался")
+    process.run(["cp", "tests/fixtures/input.txt", "{work}/input.txt"], "", [])
+    @script = "root=$(pwd) && cd \"$0\" && node --no-warnings \"$root/os/target/wasm/run.mjs\" canonical.wasm input.txt output.txt > stdout.txt 2> stderr.txt; head -n $1 stdout.txt > got.txt; head -n $1 \"$root/soul/canonical/expected/output.txt\" > want.txt"
+    process.run(["sh", "-c", script, work, "{WASM_CANON_LINES}"], "", [])
+    core.same("{work}/want.txt", "{work}/got.txt")
+    out io.show("wasm: ok")
+}
+
 skill run_case(t, name) {
     (name == "jtml") {
         own_program(t, name, "tests/jtml.saltic", t.host)
@@ -97,6 +118,10 @@ skill run_case(t, name) {
     }
     (name == "closure") {
         test_closure(t)
+        out yes
+    }
+    (name == "wasm") {
+        test_wasm(t)
         out yes
     }
     out no
