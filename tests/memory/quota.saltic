@@ -1,0 +1,97 @@
+-- quota — край квоты: довести кучу до MemoryExhausted разными путями — группой
+-- блоков, строкой, Box-цепочкой, внутри вечного цикла, внутри глубокой
+-- рекурсии. Норма — честная ошибка MemoryExhausted (текст «память исчерпана»),
+-- которую ловит rescue, и
+-- жизнь после неё; падение программы или тишина — провал.
+--
+-- Link { next, pad } — звено цепочки; Pile { blocks, text } — растущее в поле Box
+--     (внешней переменной always растущее не присвоить — запрет чекера)
+-- blocks() / text() / chain() / holder_grow() / in_depth(n) -> число (до ошибки не доходит)
+-- alive() -> 1, если после нехватки ещё можно взять блок
+-- CASES — случаи; program(chosen) — один случай, "" — все, "список" — имена случаев
+
+use core.str
+use core.group
+use core.bytes
+use craft.testing
+use tests.memory.meter
+
+CASES = ["группа блоков", "растущая строка", "цепочка Box", "внутри always", "внутри рекурсии"]
+
+Pile = Box {
+    blocks = [],
+    text = ""
+}
+
+Link = Box {
+    next = none,
+    pad = ""
+}
+
+skill blocks() {
+    @pile = Pile {}
+    always { pile.blocks = group.add(pile.blocks, bytes.new(32768)) }
+    out group.count(pile.blocks)
+}
+
+skill text() {
+    @pile = Pile {}
+    always { pile.text = "{pile.text}{pile.text}x" }
+    out str.bytes(pile.text)
+}
+
+skill chain() {
+    @head = Link {}
+    always { head.next = Link { next = head.next, pad = "звено" } }
+    out 0
+}
+
+skill holder_grow() {
+    @head = Link {}
+    @n = 0
+    always {
+        n = n + 1
+        head.next = Link { next = head.next, pad = "оборот {n}" }
+    }
+    out n
+}
+
+skill in_depth(n) {
+    @block = bytes.new(65536)
+    out in_depth(n + 1) + bytes.count(block)
+}
+
+skill alive() {
+    @block = bytes.new(4096)
+    bytes.set(block, 0, 1)
+    out bytes.get(block, 0)
+}
+
+skill caught(name) {
+    @answer = 0
+    (name == "группа блоков") { answer = blocks() }
+    (name == "растущая строка") { answer = text() }
+    (name == "цепочка Box") { answer = chain() }
+    (name == "внутри always") { answer = holder_grow() }
+    (name == "внутри рекурсии") { answer = in_depth(0) }
+    out "без ошибки {answer}"
+}
+
+program(chosen) {
+    @suite = testing.test_new()
+    @cases = CASES
+    (chosen == "список") { out meter.list(CASES) }
+    ((chosen == "") == no) { cases = [chosen] }
+    drum (cases) {
+        @name = beat
+        @used = meter.used()
+        @result = caught(name) rescue |err| { "{err}" }
+        meter.metric("квота, {name}: чем кончилось", result)
+        suite = testing.test_equal(suite, "{name}: честная ошибка", result, "память исчерпана")
+        suite = testing.test_equal(suite, "{name}: жизнь после", alive(), 1)
+        @left = meter.used() - used
+        suite = testing.test_equal(suite, "{name}: куча вернулась к прежней", left, 0)
+        meter.metric("квота, {name}: осталось в куче после выхода, байт", left)
+    }
+    out testing.test_finish(suite)
+}

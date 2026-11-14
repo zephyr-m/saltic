@@ -1,0 +1,125 @@
+-- forever — вечность: вечный цикл пишет в поля долгого Box и во внешние
+-- переменные, а куча обязана стоять на месте. Каждый вид сначала прогревается
+-- WARM оборотами, потом снимок, потом TURNS оборотов и второй снимок: рост
+-- между снимками — мёртвый груз навсегда, норма — ровно 0 байт и 0 побегов.
+-- Чистый вид потом выносит LONG оборотов: медленная утечка меньше байта за
+-- оборот видна только на миллионах. Кончилась память — провал с номером вида, а не падение набора. Аргумент —
+-- один вид (набор запускает каждый вид отдельной программой: нехватка памяти
+-- в always сейчас не ловится rescue и роняет программу целиком); "" — все.
+--
+-- Holder { score, name, items, inner, log, list } — долгое состояние
+-- Item { id, text } — Box внутри Box
+-- step(holder, kind, n) -> holder — один оборот вида kind из навыка
+-- outer(n) -> строка — внешнюю переменную always можно присвоить только из навыка
+-- measure(kind, turns) -> [байт, побегов] за turns оборотов после WARM, -1 —
+--     кончилась память. Замер — внутри того же навыка, что и цикл: на выходе
+--     навыка регион убирается и спрятал бы утечку, а вечный цикл не выходит никогда
+-- KINDS — виды: число, строка, группа, Box, окно, группа Box, внешняя строка,
+--     из навыка; program(chosen) — вид, "" — все, "список" — имена видов
+
+use core.group
+use craft.testing
+use tests.memory.meter
+
+WARM = 2000
+TURNS = 50000
+LONG = 5000000
+WINDOW = 8
+KINDS = ["число", "строка", "группа", "Box", "окно", "группа Box", "внешняя строка", "из навыка"]
+
+Item = Box {
+    id = 0,
+    text = ""
+}
+
+Holder = Box {
+    score = 0,
+    name = "",
+    items = [],
+    inner = none,
+    log = [],
+    list = []
+}
+
+skill window(log, n) {
+    @next = group.add(log, n)
+    (group.count(next) <= WINDOW) { out next }
+    @kept = []
+    drum (WINDOW) { kept = group.add(kept, group.get(next, group.count(next) - WINDOW + beat)) }
+    out kept
+}
+
+skill outer(n) {
+    out "снаружи {n}"
+}
+
+skill step(holder, kind, n) {
+    (kind == "число") { holder.score = holder.score + 1 }
+    (kind == "строка") { holder.name = "поле {n}" }
+    (kind == "группа") { holder.items = [n, n + 1, n + 2] }
+    (kind == "Box") { holder.inner = Item { id = n, text = "предмет {n}" } }
+    (kind == "окно") { holder.log = window(holder.log, n) }
+    (kind == "группа Box") { holder.list = [Item { id = n }, Item { id = n + 1 }] }
+    (kind == "из навыка") { holder.name = "из навыка {n}" }
+    out holder
+}
+
+skill measure(kind, turns) {
+    @holder = Holder {}
+    @outside = ""
+    @used = 0
+    @escaped = 0
+    @n = 0
+    always {
+        n = n + 1
+        (kind == "внешняя строка") { outside = outer(n) }
+        ((kind == "внешняя строка") == no) {
+            (kind == "из навыка") { holder = step(holder, kind, n) }
+            ((kind == "из навыка") == no) {
+                (kind == "число") { holder.score = holder.score + 1 }
+                (kind == "строка") { holder.name = "поле {n}" }
+                (kind == "группа") { holder.items = [n, n + 1, n + 2] }
+                (kind == "Box") { holder.inner = Item { id = n, text = "предмет {n}" } }
+                (kind == "окно") { holder.log = window(holder.log, n) }
+                (kind == "группа Box") { holder.list = [Item { id = n }, Item { id = n + 1 }] }
+            }
+        }
+        (n == WARM) {
+            used = meter.used()
+            escaped = meter.escapes()
+        }
+        (n == WARM + turns) { leave }
+    }
+    out [meter.used() - used, meter.escapes() - escaped]
+}
+
+program(chosen) {
+    @suite = testing.test_new()
+    @kinds = KINDS
+    (chosen == "список") { out meter.list(KINDS) }
+    ((chosen == "") == no) { kinds = [chosen] }
+    drum (kinds) {
+        @kind = beat
+        @result = measure(kind, TURNS) rescue |err| { [-1, -1] }
+        @bytes = group.get(result, 0)
+        @escapes = group.get(result, 1)
+        (bytes < 0) {
+            meter.metric("вечность, {kind}: память", "кончилась")
+            suite = testing.test_equal(suite, "вечность, {kind}: дожила до конца", "кончилась память", "дожила")
+        }
+        (bytes >= 0) {
+            @rate = meter.per_thousand(bytes, TURNS)
+            meter.metric("вечность, {kind}: байт на 1000 оборотов", rate)
+            meter.metric("вечность, {kind}: побегов за прогон", escapes)
+            suite = testing.test_equal(suite, "вечность, {kind}: рост кучи, байт", bytes, 0)
+            suite = testing.test_equal(suite, "вечность, {kind}: рост побегов", escapes, 0)
+            (bytes + escapes == 0) {
+                @endured = measure(kind, LONG) rescue |err| { [-1, -1] }
+                @long = group.get(endured, 0)
+                meter.metric("вечность, {kind}: рост за {LONG} оборотов, байт", long)
+                suite = testing.test_equal(suite, "вечность, {kind}: долгий рост кучи, байт", long, 0)
+            }
+        }
+    }
+    out testing.test_finish(suite)
+}

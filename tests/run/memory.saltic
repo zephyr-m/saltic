@@ -1,0 +1,69 @@
+-- memory — набор пыток памяти (`just test memory`, в ALL не входит): каждый
+-- файл tests/memory/<имя>.saltic собирается под SALTIC_TEST_HOST с кучей 4 МБ,
+-- каждый его случай — отдельным процессом, чтобы падение одного не роняло
+-- соседей. Строки «метрика:» печатаются как есть — по ним видно, сколько
+-- осталось в куче; провал — процесс упал до строки «итог:» или проверка
+-- внутри случая не сошлась (код не 0). В конце файла — список провалов и ошибка, если они есть.
+--
+-- FILES — файлы набора; run_case(t, name) -> yes для memory-<файл>, no — чужое имя
+-- Внутри: listed(t, binary) -> имена случаев, one(t, work, binary, chosen, n) -> текст провала или ""
+
+use io
+use core.str
+use core.group
+use core.process
+use tests.run.core
+
+FILES = ["forever", "depth", "width", "fragment", "tangle", "breaks", "quota", "impostor"]
+HEAP = "4194304"
+PREFIX = "случай памяти: "
+
+skill listed(t, binary) {
+    @done = process.capture(group.concat(core.runner(t.host), [binary, "список"]), "", t.env)
+    @names = []
+    drum (str.lines(done.output)) {
+        (str.starts_with(beat, PREFIX) == yes) { names = group.add(names, str.slice(beat, str.bytes(PREFIX), str.bytes(beat))) }
+    }
+    out names
+}
+
+skill one(t, work, binary, chosen, n) {
+    @output = "{work}/case-{n}.txt"
+    @code = core.run(t, t.host, [binary, chosen], output)
+    @lines = str.lines(core.contents(output))
+    @finished = no
+    drum (lines) {
+        (str.starts_with(beat, "метрика: ") == yes) { io.show("  {beat}") }
+        (str.starts_with(beat, "итог: ") == yes) { finished = yes }
+    }
+    (finished == no) {
+        @last = ""
+        (group.count(lines) > 0) { last = group.get(lines, group.count(lines) - 1) }
+        out "{chosen} — процесс упал, код {code}: {last}"
+    }
+    ((code == 0) == no) { out "{chosen} — проверка не сошлась, см. {output}" }
+    out ""
+}
+
+skill run_case(t, name) {
+    (str.starts_with(name, "memory-") == no) { out no }
+    @file = str.slice(name, 7, str.bytes(name))
+    (group.contains(FILES, file) == no) { out no }
+    @work = "{t.work}/{name}"
+    process.run(["mkdir", "-p", work], "", [])
+    @binary = "{work}/program"
+    core.build(t, name, "tests/memory/{file}.saltic", binary, HEAP, t.host)
+    @failed = []
+    @n = 0
+    drum (listed(t, binary)) {
+        n = n + 1
+        io.show("{file}: {beat}")
+        @why = one(t, work, binary, beat, n)
+        (str.bytes(why) > 0) { failed = group.add(failed, why) }
+    }
+    @broken = group.count(failed)
+    io.show("{file}: случаев {n}, провалов {broken}")
+    (broken == 0) { out yes }
+    drum (failed) { io.show("  провал: {beat}") }
+    out error.TestFailed
+}

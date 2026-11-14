@@ -1,6 +1,8 @@
 -- run — все проверки языка, ОС и платформ (`just test [набор]`, ветки
 -- global-check). Набор: all — язык (по умолчанию), os — модули ОС, platforms —
--- qemu-virt, UEFI, closure; или имена случаев через пробел. Печатает «случаи:» и
+-- qemu-virt, UEFI, closure, memory — пытки памяти (старый случай memory и
+-- memory-<файл> из tests/memory, в all не входят; набор memory идёт до конца,
+-- провалы — списком в конце); или имена случаев через пробел. Печатает «случаи:» и
 -- перед каждым «случай: имя» — по ним global-check рисует случаи ветки; в конце —
 -- таблица метрик. Хост тестовых программ — SALTIC_TEST_HOST (rv32i, x86_64,
 -- rv64), запускать из проектного Nix shell (нужны qemu, в том числе aarch64). Провал — ошибка
@@ -8,7 +10,7 @@
 -- (в .archive/); собирается родным компилятором с полки (bootstrap/saltic).
 --
 -- program(chosen) — chosen: набор или имена случаев, "" — all
--- Внутри: expand(chosen) -> имена случаев, one(t, name)
+-- Внутри: expand(chosen) -> имена случаев, one(t, name), attempt(t, name) -> ""
 
 use io
 use io.clock
@@ -21,22 +23,31 @@ use tests.run.core
 use tests.run.language
 use tests.run.systems
 use tests.run.metrics
+use tests.run.memory
 
 ALL = ["checker", "fixed-types", "fraction", "wide", "modules", "json-rpc", "diagnostics", "groups", "bytes", "edges", "always", "rva23", "rv64", "arm64", "x86-encoder", "arm64-encoder", "xtensa-encoder", "dict", "crypto", "apk", "seed-contract", "machine", "abi", "memory", "platform", "process", "native"]
 OS = ["jtml", "events", "tasks", "panels", "mrpc"]
 PLATFORMS = ["qemu-virt", "uefi", "closure"]
+MEMORY = ["memory", "memory-forever", "memory-depth", "memory-width", "memory-fragment", "memory-tangle", "memory-breaks", "memory-quota", "memory-impostor"]
 
 skill expand(chosen) {
     (str.bytes(chosen) == 0) { out ALL }
     (chosen == "all") { out ALL }
     (chosen == "os") { out OS }
     (chosen == "platforms") { out PLATFORMS }
+    (chosen == "memory") { out MEMORY }
     out str.split(chosen, " ")
+}
+
+skill attempt(t, name) {
+    one(t, name)
+    out ""
 }
 
 skill one(t, name) {
     (language.run_case(t, name) == yes) { out none }
     (systems.run_case(t, name) == yes) { out none }
+    (memory.run_case(t, name) == yes) { out none }
     io.show("неизвестная проверка: {name}")
     out error.UnknownCase
 }
@@ -46,20 +57,30 @@ program(chosen) {
     @names = expand(chosen)
     @listed = str.join(names, " ")
     io.show("случаи: {listed}")
+    @keep_going = chosen == "memory"
+    @failed = []
     drum (names) {
         @name = beat
         io.show("случай: {name}")
         t.current = name
         @started = time.now()
-        one(t, name) rescue |err| {
+        @why = attempt(t, name) rescue |err| {
             io.show("проверка: артефакты сохранены в {t.work}")
-            out err
+            (keep_going == no) { out err }
+            "{err}"
         }
+        (str.bytes(why) > 0) { failed = group.add(failed, name) }
         @spent = time.now() - started
         (spent < 0) { spent = spent + time.DAY_MILLISECONDS }
         metrics.finish_case(t, name, spent / 10)
     }
     metrics.report(t, names)
+    (group.count(failed) > 0) {
+        @broken = str.join(failed, " ")
+        io.show("провалены случаи: {broken}")
+        io.show("проверка: артефакты сохранены в {t.work}")
+        out error.TestFailed
+    }
     process.run(["rm", "-rf", t.work], "", [])
     out none
 }

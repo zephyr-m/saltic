@@ -1,0 +1,113 @@
+-- tangle — переплетения: одно значение в двух полях, перезапись поля, пока
+-- старое значение держит переменная, Box в Box в группе Box, цикл из двух Box,
+-- общий Box в двух владельцах. Значения обязаны остаться верными, а куча после
+-- выхода — вернуться к прежнему.
+--
+-- Item { id, tags } / Owner { item, items, other } — образцы
+-- CASES — случаи; program(chosen) — один случай, "" — все, "список" — имена случаев
+
+use core.group
+use craft.testing
+use tests.memory.meter
+
+CASES = ["одно значение в двух полях", "перезапись под чтением", "Box в Box в группе", "цикл из двух Box", "общий Box у двух владельцев", "перезапись в always под чтением"]
+
+Item = Box {
+    id = 0,
+    tags = []
+}
+
+Owner = Box {
+    item = none,
+    items = [],
+    other = none
+}
+
+skill two_fields() {
+    @shared = [1, 2, 3]
+    @a = Owner { items = shared }
+    @b = Owner { items = shared }
+    a.items = [9]
+    out group.get(b.items, 2)
+}
+
+skill under_read() {
+    @owner = Owner { items = [10, 20, 30] }
+    @view = owner.items
+    owner.items = [7]
+    out group.get(view, 1)
+}
+
+skill nested() {
+    @owner = Owner { items = [Item { id = 1, tags = ["а"] }, Item { id = 2, tags = ["б", "в"] }] }
+    @second = group.get(owner.items, 1)
+    second.id = 5
+    @again = group.get(owner.items, 1)
+    out again.id
+}
+
+skill cycle() {
+    @a = Owner {}
+    @b = Owner { other = a }
+    a.other = b
+    @here = a
+    @steps = 0
+    drum (1000) {
+        (here.other) |next| { here = next }
+        steps = steps + 1
+    }
+    out steps
+}
+
+skill shared_box() {
+    @item = Item { id = 3 }
+    @first = Owner { item = item }
+    @second = Owner { item = item }
+    item.id = 4
+    @seen = 0
+    (second.item) |found| { seen = found.id }
+    out seen
+}
+
+skill loop_read() {
+    @owner = Owner { items = [1] }
+    @n = 0
+    @sum = 0
+    always {
+        n = n + 1
+        @view = owner.items
+        owner.items = [n, n]
+        sum = sum + group.get(view, 0)
+        (n == 20000) { leave }
+    }
+    out sum
+}
+
+skill run(suite, name) {
+    (name == "одно значение в двух полях") { suite = testing.test_equal(suite, name, two_fields(), 3) }
+    (name == "перезапись под чтением") { suite = testing.test_equal(suite, name, under_read(), 20) }
+    (name == "Box в Box в группе") { suite = testing.test_equal(suite, name, nested(), 5) }
+    (name == "цикл из двух Box") { suite = testing.test_equal(suite, name, cycle(), 1000) }
+    (name == "общий Box у двух владельцев") { suite = testing.test_equal(suite, name, shared_box(), 4) }
+    (name == "перезапись в always под чтением") { suite = testing.test_equal(suite, name, loop_read(), 1 + 19999 * 20000 / 2) }
+    out suite
+}
+
+program(chosen) {
+    @suite = testing.test_new()
+    @cases = CASES
+    (chosen == "список") { out meter.list(CASES) }
+    ((chosen == "") == no) { cases = [chosen] }
+    drum (cases) {
+        @name = beat
+        @used = meter.used()
+        suite = run(suite, name) rescue |err| {
+            meter.metric("переплетения, {name}: ошибка", "{err}")
+            testing.test_equal(suite, "{name}: без ошибки", "{err}", "без ошибки")
+        }
+        @left = meter.used() - used
+        suite = testing.test_equal(suite, "{name}: куча вернулась к прежней", left, 0)
+        meter.metric("переплетения, {name}: осталось в куче после выхода, байт", left)
+    }
+    out testing.test_finish(suite)
+}

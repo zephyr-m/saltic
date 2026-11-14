@@ -1,0 +1,107 @@
+-- breaks — обрывы: ошибка посреди записи в Box, ошибка из глубины с мусором на
+-- каждом уровне, ошибка на каждом обороте вечного цикла, жизнь после нехватки
+-- памяти. После rescue значения обязаны быть целыми, а куча — вернуться к
+-- прежнему.
+--
+-- Holder { name, count } — долгое состояние; Pile { blocks } — куча блоков до нехватки
+-- half_write(holder, n) / fall(n) / every_turn(turns) / starve() / after_starve()
+-- CASES — случаи; program(chosen) — один случай, "" — все, "список" — имена случаев
+
+use core.group
+use core.bytes
+use core.mem
+use craft.testing
+use tests.memory.meter
+
+CASES = ["ошибка посреди записи", "ошибка из глубины 2000", "ошибка на каждом обороте", "жизнь после нехватки памяти"]
+
+Pile = Box {
+    blocks = []
+}
+
+Holder = Box {
+    name = "",
+    count = 0
+}
+
+skill half_write(holder, n) {
+    holder.name = "запись {n}"
+    (n % 2 == 1) { out error.Broken }
+    holder.count = holder.count + 1
+    out holder
+}
+
+skill fall(n) {
+    @junk = [n, n, n, n]
+    @text = "уровень {n}"
+    (n == 0) { out error.Bottom }
+    out fall(n - 1)
+}
+
+skill fails(n) {
+    @junk = "мусор {n}"
+    (n % 3 == 0) { out error.Third }
+    out n
+}
+
+skill every_turn(turns) {
+    @n = 0
+    @caught = 0
+    always {
+        n = n + 1
+        @value = fails(n) rescue |err| { -1 }
+        (value < 0) { caught = caught + 1 }
+        (n == turns) { leave }
+    }
+    out caught
+}
+
+skill starve() {
+    @pile = Pile {}
+    always {
+        pile.blocks = group.add(pile.blocks, bytes.new(65536))
+    }
+    out group.count(pile.blocks)
+}
+
+skill after_starve() {
+    @starved = starve() rescue |err| { -1 }
+    @small = bytes.new(1024)
+    bytes.set(small, 10, 42)
+    out bytes.get(small, 10)
+}
+
+skill run(suite, name) {
+    (name == "ошибка посреди записи") {
+        @holder = Holder {}
+        drum (10) { half_write(holder, beat) rescue |err| { holder } }
+        suite = testing.test_equal(suite, "{name}: последнее имя", holder.name, "запись 9")
+        suite = testing.test_equal(suite, "{name}: целых записей", holder.count, 5)
+    }
+    (name == "ошибка из глубины 2000") {
+        @caught = fall(2000) rescue |err| { "{err}" }
+        suite = testing.test_equal(suite, name, caught, "Bottom")
+    }
+    (name == "ошибка на каждом обороте") { suite = testing.test_equal(suite, name, every_turn(3000000), 1000000) }
+    (name == "жизнь после нехватки памяти") { suite = testing.test_equal(suite, name, after_starve(), 42) }
+    out suite
+}
+
+program(chosen) {
+    @suite = testing.test_new()
+    @cases = CASES
+    (chosen == "список") { out meter.list(CASES) }
+    ((chosen == "") == no) { cases = [chosen] }
+    drum (cases) {
+        @name = beat
+        @used = meter.used()
+        suite = run(suite, name) rescue |err| {
+            meter.metric("обрывы, {name}: ошибка", "{err}")
+            testing.test_equal(suite, "{name}: без ошибки", "{err}", "без ошибки")
+        }
+        @left = meter.used() - used
+        suite = testing.test_equal(suite, "{name}: куча вернулась к прежней", left, 0)
+        meter.metric("обрывы, {name}: осталось в куче после выхода, байт", left)
+    }
+    out testing.test_finish(suite)
+}

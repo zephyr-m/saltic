@@ -1,0 +1,110 @@
+-- depth — глубина: рекурсия до дна, мусор на каждом уровне, запись в долгий
+-- Box из глубины, вечный цикл внутри рекурсии, длинная цепочка Box (группа
+-- групп разной глубины не проходит проверку типов — она строго типизирована).
+-- После каждого случая куча обязана вернуться к прежнему (кроме законного
+-- результата); падение стека или кучи — провал с понятным текстом.
+--
+-- Holder { name, hits } — долгое состояние; Link { next, level } — звено цепочки
+-- dive(n) / dirty(n) / write_down(holder, n) / spin_down(n) / nest(n) / depth_of(value)
+-- CASES — случаи; program(chosen) — один случай, "" — все, "список" — имена случаев
+
+use core.str
+use core.group
+use craft.testing
+use tests.memory.meter
+
+CASES = ["рекурсия 1000", "рекурсия 10000", "рекурсия 100000", "рекурсия 1000000", "мусор на уровнях", "запись из глубины", "always в рекурсии", "цепочка Box"]
+
+Link = Box {
+    next = none,
+    level = 0
+}
+
+Holder = Box {
+    name = "",
+    hits = 0
+}
+
+skill dive(n) {
+    (n == 0) { out 0 }
+    out dive(n - 1) + 1
+}
+
+skill dirty(n) {
+    @junk = "уровень {n}"
+    @more = [n, n, n]
+    (n == 0) { out 0 }
+    out dirty(n - 1) + 1
+}
+
+skill write_down(holder, n) {
+    holder.name = "глубина {n}"
+    holder.hits = holder.hits + 1
+    (n == 0) { out holder }
+    out write_down(holder, n - 1)
+}
+
+skill spin_down(n) {
+    @count = 0
+    always {
+        count = count + 1
+        @junk = [count, n]
+        (count == 50) { leave }
+    }
+    (n == 0) { out count }
+    out spin_down(n - 1) + count
+}
+
+skill nest(n) {
+    @value = Link {}
+    drum (n) { value = Link { next = value, level = value.level + 1 } }
+    out value
+}
+
+skill depth_of(value) {
+    @level = 0
+    @here = value
+    always {
+        (here.next) |next| {
+            here = next
+            level = level + 1
+        }
+        (here.next == none) { leave }
+    }
+    out level
+}
+
+skill run(suite, name) {
+    (name == "рекурсия 1000") { suite = testing.test_equal(suite, name, dive(1000), 1000) }
+    (name == "рекурсия 10000") { suite = testing.test_equal(suite, name, dive(10000), 10000) }
+    (name == "рекурсия 100000") { suite = testing.test_equal(suite, name, dive(100000), 100000) }
+    (name == "рекурсия 1000000") { suite = testing.test_equal(suite, name, dive(1000000), 1000000) }
+    (name == "мусор на уровнях") { suite = testing.test_equal(suite, name, dirty(5000), 5000) }
+    (name == "запись из глубины") {
+        @holder = write_down(Holder {}, 3000)
+        suite = testing.test_equal(suite, "{name}: последняя запись", holder.name, "глубина 0")
+        suite = testing.test_equal(suite, "{name}: записей", holder.hits, 3001)
+    }
+    (name == "always в рекурсии") { suite = testing.test_equal(suite, name, spin_down(500), 501 * 50) }
+    (name == "цепочка Box") { suite = testing.test_equal(suite, name, depth_of(nest(2000)), 2000) }
+    out suite
+}
+
+program(chosen) {
+    @suite = testing.test_new()
+    @cases = CASES
+    (chosen == "список") { out meter.list(CASES) }
+    ((chosen == "") == no) { cases = [chosen] }
+    drum (cases) {
+        @name = beat
+        @used = meter.used()
+        suite = run(suite, name) rescue |err| {
+            meter.metric("глубина, {name}: ошибка", "{err}")
+            testing.test_equal(suite, "{name}: без ошибки", "{err}", "без ошибки")
+        }
+        @left = meter.used() - used
+        suite = testing.test_equal(suite, "{name}: куча вернулась к прежней", left, 0)
+        meter.metric("глубина, {name}: осталось в куче после выхода, байт", left)
+    }
+    out testing.test_finish(suite)
+}
