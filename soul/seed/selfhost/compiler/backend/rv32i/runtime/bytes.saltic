@@ -1,50 +1,88 @@
--- bytes — рантайм core.bytes: буфер — строка-объект кучи, байт — ячейка.
+-- bytes — рантайм core.bytes: буфер — строка-объект, байт — ячейка. Буфер
+-- изменяем, поэтому рождается сразу в хранилище (rt_store_cell, в карантине до
+-- первого выхода региона, где его никто не держит): так у него один адрес на всю
+-- жизнь, и запись в долгий Box его не копирует. Буфер, пришедший из региона
+-- (file.read_bytes), после переезда в хранилище читается и пишется по адресу
+-- переезда (бит FORWARDED).
 -- Каждый навык берёт и отдаёт compiler, определяя метку rt_bytes_* в коде.
 --
--- emit_bytes_new(compiler) — rt_bytes_new(n) -> нулевой буфер; InvalidSize, если n < 0
+-- emit_bytes_new(compiler) — rt_bytes_new(n) -> нулевой буфер; InvalidSize, если n < 0;
+--     MemoryExhausted
 -- emit_bytes_checked(compiler) — rt_bytes_get / rt_bytes_set (BytesBounds,
---     ByteOutsideRange), rt_bytes_slice (BytesBounds); get и slice после
---     проверки уходят в rt_string_byte / rt_string_slice
--- Внутри: emit_bytes_index(compiler, label) — метка и проверка индекса
+--     ByteOutsideRange), rt_bytes_slice (BytesBounds) — копия в хранилище; get после
+--     проверки уходит в rt_string_byte
+-- Внутри: emit_bytes_index(compiler, label) — метка, пересылка и проверка индекса;
+--     emit_bytes_store(compiler, prefix) — ячейка хранилища под VALUE байт и карантин
 
 use selfhost.abi
+use selfhost.memory.model
 use selfhost.compiler.backend
 use selfhost.compiler.backend.rv32i.runtime.tails
+
+skill emit_bytes_store(compiler, prefix) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -words.bytes * 4)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * 2)
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, words.payload + words.string_data + abi.OBJECT_ALIGNMENT)
+    compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, -abi.OBJECT_ALIGNMENT)
+    compiler = executor.call(compiler, "rt_store_cell")
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, "{prefix}_refused")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
+    compiler = executor.store32(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, words.bytes * 2)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH1, words.string_data + 1)
+    compiler = executor.store32(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.VALUE, words.payload)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.VALUE, words.payload + words.string_data)
+    compiler = executor.add(compiler, backend.SCRATCH3, backend.SCRATCH2, backend.SCRATCH1)
+    compiler = executor.label(compiler, "{prefix}_clear")
+    compiler = executor.store_byte_zero(compiler, backend.SCRATCH2, 0)
+    compiler = executor.branch_equal(compiler, backend.SCRATCH2, backend.SCRATCH3, "{prefix}_ready")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
+    compiler = executor.jump(compiler, "{prefix}_clear")
+    compiler = executor.label(compiler, "{prefix}_ready")
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * 2)
+    compiler = executor.call(compiler, "rt_quarantine_add")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * 2)
+    compiler = executor.label(compiler, "{prefix}_refused")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    out executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
+}
 
 skill emit_bytes_new(compiler) {
     @executor = compiler.executor
     @words = compiler.words
     compiler = executor.label(compiler, "rt_bytes_new")
-    compiler = executor.shift_right_signed(compiler, backend.SCRATCH0, backend.VALUE, abi.TAG_SHIFT)
-    compiler = executor.branch_negative(compiler, backend.SCRATCH0, ".L_bytes_size")
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -words.bytes * 4)
-    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
-    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes * 2)
-    compiler = executor.add_immediate(compiler, backend.VALUE, backend.SCRATCH0, words.string_data + 1)
-    compiler = executor.call(compiler, "rt_alloc")
-    compiler = executor.load_immediate(compiler, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
-    compiler = executor.store32(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
-    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, words.bytes * 2)
-    compiler = executor.store(compiler, backend.SCRATCH1, backend.VALUE, words.payload)
-    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.VALUE, words.payload + words.string_data)
-    compiler = executor.add(compiler, backend.SCRATCH3, backend.SCRATCH2, backend.SCRATCH1)
-    compiler = executor.label(compiler, ".L_bytes_new_clear")
-    compiler = executor.store_byte_zero(compiler, backend.SCRATCH2, 0)
-    compiler = executor.branch_equal(compiler, backend.SCRATCH2, backend.SCRATCH3, ".L_bytes_new_ready")
-    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
-    compiler = executor.jump(compiler, ".L_bytes_new_clear")
-    compiler = executor.label(compiler, ".L_bytes_new_ready")
+    compiler = executor.shift_right_signed(compiler, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    compiler = executor.branch_negative(compiler, backend.VALUE, ".L_bytes_size")
+    compiler = emit_bytes_store(compiler, ".L_bytes_new")
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_bytes_new_failed")
     compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
-    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
-    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
-    out tails.ok(compiler)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_bytes_new_failed")
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    out executor.ret(compiler)
+}
+
+skill emit_bytes_resolve(compiler, prefix) {
+    @executor = compiler.executor
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH2, backend.SCRATCH1, model.FORWARDED)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH2, "{prefix}_here")
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH1, abi.PAYLOAD_MASK)
+    compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_MASK)
+    compiler = executor.or(compiler, backend.VALUE, backend.VALUE, backend.SCRATCH0)
+    out executor.label(compiler, "{prefix}_here")
 }
 
 skill emit_bytes_index(compiler, label) {
     @executor = compiler.executor
     @words = compiler.words
     compiler = executor.label(compiler, label)
-    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = emit_bytes_resolve(compiler, label)
     compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, words.payload)
     compiler = executor.shift_right_signed(compiler, backend.SCRATCH2, backend.ERROR, abi.TAG_SHIFT)
     out executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH2, backend.SCRATCH1, ".L_bytes_bounds")
@@ -64,14 +102,39 @@ skill emit_bytes_checked(compiler) {
     compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
     compiler = tails.ok(compiler)
     compiler = executor.label(compiler, "rt_bytes_slice")
-    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+    compiler = emit_bytes_resolve(compiler, "rt_bytes_slice")
     compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, words.payload)
     compiler = executor.shift_right_signed(compiler, backend.SCRATCH2, backend.ERROR, abi.TAG_SHIFT)
     compiler = executor.shift_right_signed(compiler, backend.SCRATCH3, backend.ARG2, abi.TAG_SHIFT)
     compiler = executor.branch_negative(compiler, backend.SCRATCH2, ".L_bytes_bounds")
     compiler = executor.branch_less(compiler, backend.SCRATCH3, backend.SCRATCH2, ".L_bytes_bounds")
     compiler = executor.branch_less(compiler, backend.SCRATCH1, backend.SCRATCH3, ".L_bytes_bounds")
-    compiler = executor.jump(compiler, "rt_string_slice")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -words.bytes * 4)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.add(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH2)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes * 2)
+    compiler = executor.sub(compiler, backend.VALUE, backend.SCRATCH3, backend.SCRATCH2)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes)
+    compiler = emit_bytes_store(compiler, ".L_bytes_slice")
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_bytes_slice_failed")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes * 2)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.STACK, words.bytes)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.VALUE, words.payload + words.string_data)
+    compiler = executor.add(compiler, backend.SCRATCH1, backend.SCRATCH2, backend.SCRATCH1)
+    compiler = executor.label(compiler, ".L_bytes_slice_copy")
+    compiler = executor.branch_equal(compiler, backend.SCRATCH2, backend.SCRATCH1, ".L_bytes_slice_copied")
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH0, words.payload + words.string_data)
+    compiler = executor.store_byte(compiler, backend.SCRATCH3, backend.SCRATCH2, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, 1)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
+    compiler = executor.jump(compiler, ".L_bytes_slice_copy")
+    compiler = executor.label(compiler, ".L_bytes_slice_copied")
+    compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.label(compiler, ".L_bytes_slice_failed")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
+    compiler = executor.ret(compiler)
     compiler = tails.fail(compiler, ".L_bytes_bounds", abi.ERROR_BYTES_BOUNDS)
     compiler = tails.fail(compiler, ".L_bytes_value", abi.ERROR_BYTE_OUTSIDE_RANGE)
     out tails.fail(compiler, ".L_bytes_size", abi.ERROR_INVALID_SIZE)

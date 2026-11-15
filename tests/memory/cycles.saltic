@@ -1,0 +1,179 @@
+-- cycles — циклы ссылок и порядок записи в долгий Box: цикл через навык (Box
+-- уже в хранилище, обратная ссылка из глубины), цикл внутри переносимого
+-- (молодая пара, замкнутая под разными именами, переезжает в долгий Box), запись
+-- поля самим собой (сначала +1, потом −1 — значение живо), вызывающий держит
+-- старое значение, пока вызываемый перезаписывает поле, и нехватка памяти
+-- посреди переноса (строка на 0,6 квоты: в регионе есть, копии в хранилище нет —
+-- старое значение целое), толпа (долгий Box с рёбрами держит группу из 20 000 Box,
+-- добавление по одному: проверка цикла обходит только новое, а не весь список) и
+-- цикл через новый элемент толпы (ловится как прежде). Куча после каждого случая
+-- обязана вернуться к прежнему.
+--
+-- Owner { other, items, text } — образец
+-- attach(keeper, item) / back(item, keeper) / tie_young(pair) / same(holder, turns) /
+--     replace(holder) / huge(holder) / populate(world, n) / crowd(n) / crowd_back(n) —
+--     нагрузка случаев
+-- CASES — случаи; program(chosen) — один случай, "" — все, "список" — имена случаев
+
+use core.str
+use core.group
+use core.mem
+use craft.testing
+use tests.memory.meter
+
+CASES = ["цикл через навык", "цикл внутри переносимого", "поле самим собой", "вызывающий держит", "нехватка посреди переноса", "толпа по одному", "цикл через новый элемент толпы"]
+CROWD = 20000
+CYCLE_TEXT = "цикл ссылок запрещён: храни номер, а не объект"
+
+Owner = Box {
+    other = none,
+    items = [],
+    text = ""
+}
+
+skill attach(keeper, item) {
+    keeper.other = item
+    out keeper
+}
+
+skill back(item, keeper) {
+    item.other = keeper
+    out item
+}
+
+skill through_skill() {
+    @keeper = Owner {}
+    attach(keeper, Owner { items = [1, 2] })
+    (keeper.other) |item| { back(item, keeper) }
+    out "без ошибки"
+}
+
+skill tie_young(pair) {
+    @first = group.get(pair, 0)
+    @second = group.get(pair, 1)
+    @first_again = group.get(pair, 0)
+    first.other = second
+    second.other = first_again
+    out pair
+}
+
+skill moved_in() {
+    @keeper = Owner {}
+    @pair = tie_young([Owner { text = "а" }, Owner { text = "б" }])
+    attach(keeper, group.get(pair, 0))
+    out "без ошибки"
+}
+
+skill same(holder, turns) {
+    @n = 0
+    always {
+        n = n + 1
+        holder.text = holder.text
+        holder.items = holder.items
+        (n == turns) { leave }
+    }
+    out str.bytes(holder.text) + group.count(holder.items)
+}
+
+skill replace(holder) {
+    holder.items = [7, 8, 9]
+    holder.text = "новое"
+    out holder
+}
+
+skill holds_old(holder) {
+    @old_items = holder.items
+    @old_text = holder.text
+    replace(holder)
+    @kept = group.get(old_items, 1)
+    @fresh = group.get(holder.items, 0)
+    out "{kept} {old_text} {fresh} {holder.text}"
+}
+
+skill huge(holder) {
+    @parts = []
+    drum (mem.heap(2) * 6 / 100) { parts = group.add(parts, "0123456789") }
+    holder.text = str.join(parts, "")
+    out str.bytes(holder.text)
+}
+
+skill populate(world, n) {
+    drum (n) { world.items = group.add(world.items, Owner {}) }
+    out group.count(world.items)
+}
+
+skill crowd(n) {
+    @root = Owner {}
+    @world = Owner {}
+    attach(root, world)
+    @count = populate(world, n)
+    @last = group.get(world.items, n - 1)
+    last.text = "последний"
+    @again = group.get(world.items, n - 1)
+    @first = group.get(world.items, 0)
+    out "{count} {again.text} {first.text}"
+}
+
+skill crowd_back(n) {
+    @root = Owner {}
+    @world = Owner {}
+    attach(root, world)
+    populate(world, n)
+    world.items = group.add(world.items, Owner { other = root })
+    out "без ошибки"
+}
+
+skill run(suite, name) {
+    (name == "цикл через навык") {
+        @caught = through_skill() rescue |err| { "{err}" }
+        suite = testing.test_equal(suite, name, caught, CYCLE_TEXT)
+    }
+    (name == "цикл внутри переносимого") {
+        @caught = moved_in() rescue |err| { "{err}" }
+        suite = testing.test_equal(suite, name, caught, CYCLE_TEXT)
+    }
+    (name == "поле самим собой") {
+        @holder = Owner { text = "своё", items = [1, 2, 3] }
+        suite = testing.test_equal(suite, name, same(holder, 100000), 11)
+        suite = testing.test_equal(suite, "{name}: строка жива", holder.text, "своё")
+        suite = testing.test_equal(suite, "{name}: группа жива", group.get(holder.items, 2), 3)
+    }
+    (name == "вызывающий держит") {
+        @holder = Owner { text = "старое", items = [4, 5, 6] }
+        suite = testing.test_equal(suite, name, holds_old(holder), "5 старое 7 новое")
+    }
+    (name == "нехватка посреди переноса") {
+        @holder = Owner { text = "прежний" }
+        @result = huge(holder) rescue |err| { "{err}" }
+        suite = testing.test_equal(suite, name, result, "память исчерпана")
+        suite = testing.test_equal(suite, "{name}: старое значение целое", holder.text, "прежний")
+    }
+    (name == "толпа по одному") {
+        @seen = crowd(CROWD) rescue |err| { "{err}" }
+        suite = testing.test_equal(suite, name, seen, "{CROWD} последний ")
+    }
+    (name == "цикл через новый элемент толпы") {
+        @caught = crowd_back(100) rescue |err| { "{err}" }
+        suite = testing.test_equal(suite, name, caught, CYCLE_TEXT)
+    }
+    out suite
+}
+
+program(chosen) {
+    @suite = testing.test_new()
+    @cases = CASES
+    (chosen == "список") { out meter.list(CASES) }
+    ((chosen == "") == no) { cases = [chosen] }
+    drum (cases) {
+        @name = beat
+        @used = meter.used()
+        suite = run(suite, name) rescue |err| {
+            meter.metric("циклы, {name}: ошибка", "{err}")
+            testing.test_equal(suite, "{name}: без ошибки", "{err}", "без ошибки")
+        }
+        @left = meter.used() - used
+        suite = testing.test_equal(suite, "{name}: куча вернулась к прежней", left, 0)
+        meter.metric("циклы, {name}: осталось в куче после выхода, байт", left)
+    }
+    out testing.test_finish(suite)
+}

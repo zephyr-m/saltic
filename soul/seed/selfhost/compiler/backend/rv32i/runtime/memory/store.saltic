@@ -1,0 +1,345 @@
+-- store — хранилище как раздатчик страниц по 4 КБ с низа хранилища вниз
+-- (STORE_BOTTOM). Верх хранилища (rt_store_top, выровнен на страницу) занимает
+-- карта свободных страниц: бит i (1 — свободна) у страницы rt_store_top − i·4096;
+-- страницы ниже низа карта не описывает (они ещё не взяты). Запрос n страниц —
+-- сначала n подряд свободных по карте (от низа вверх, нулевые байты карты — по 8
+-- страниц за шаг), потом низ хранилища вниз; отказ — разбор карантина до конца
+-- (rt_quarantine_drain) и вторая попытка, потом ERROR_MEMORY_EXHAUSTED.
+-- Мелкие объекты (до STORE_LARGE_LIMIT) — ячейками класса размера; у страницы
+-- свой список свободных ячеек и счётчик занятых (заголовок STORE_PAGE_HEADER_BYTES:
+-- класс, занято, голова списка, prev и next в списке неполных страниц класса);
+-- опустевшая страница возвращается в карту. Крупные — прогон страниц (заголовок:
+-- 0, число страниц), объект за заголовком.
+-- Команды — методами compiler.executor (договор backend).
+--
+-- emit_store_init(compiler) — rt_store_init: из STORE_BOTTOM = конец квоты делает
+--     верх, карту и низ хранилища; зовёт _start
+-- emit_store_pages(compiler) — rt_store_pages(VALUE страниц) -> адрес первой
+-- emit_store_release_pages(compiler) — rt_store_release_pages(VALUE адрес, ERROR страниц)
+-- emit_store_run / emit_store_cell(compiler) — rt_store_run(VALUE страниц) -> прогон;
+--     rt_store_cell(VALUE байт объекта, кратно 8) -> адрес объекта
+-- emit_store_free(compiler) — rt_store_free(VALUE адрес объекта)
+-- Внутри: emit_class_lookup(compiler, size, prefix) — SCRATCH3 = смещение класса,
+--     SCRATCH2 = байты класса; emit_unlink_partial(compiler, page, prefix) — страница
+--     из списка неполных своего класса
+
+use selfhost.abi
+use selfhost.memory.model
+use selfhost.compiler.backend
+use selfhost.compiler.backend.rv32i.runtime.tails
+use selfhost.compiler.backend.rv32i.runtime.memory.walk
+
+PAGE_SHIFT = 12
+PAGE_LIVE = 4
+PAGE_FREE = 8
+PAGE_PREV = 16
+PAGE_NEXT = 24
+
+skill emit_store_init(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_store_init")
+    compiler = executor.move(compiler, backend.SCRATCH0, backend.STORE_BOTTOM)
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.SCRATCH0, PAGE_SHIFT)
+    compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.SCRATCH0, PAGE_SHIFT)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, walk.STORE_TOP_LABEL, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, walk.HEAP_START_LABEL, 0)
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH1, 0)
+    compiler = executor.sub(compiler, backend.SCRATCH1, backend.SCRATCH0, backend.SCRATCH1)
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH1, backend.SCRATCH1, PAGE_SHIFT + 3)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, model.STORE_PAGE_BYTES - 1)
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH1, backend.SCRATCH1, PAGE_SHIFT)
+    compiler = executor.shift_left(compiler, backend.SCRATCH1, backend.SCRATCH1, PAGE_SHIFT)
+    compiler = executor.sub(compiler, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH1)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, walk.STORE_BITMAP_LABEL, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
+    compiler = executor.move(compiler, backend.STORE_BOTTOM, backend.SCRATCH0)
+    compiler = executor.load_address(compiler, backend.SCRATCH1, walk.SWEEP_BATCH_LABEL, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, model.QUARANTINE_BATCH)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
+    out executor.ret(compiler)
+}
+
+skill emit_store_pages(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_store_pages")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -words.bytes * 4)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * 2)
+    compiler = executor.store_zero(compiler, backend.STACK, words.bytes)
+    compiler = executor.label(compiler, ".L_store_pages_try")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, words.bytes * 2)
+    compiler = executor.load_address(compiler, backend.SCRATCH4, walk.STORE_TOP_LABEL, 0)
+    compiler = executor.load(compiler, backend.SCRATCH4, backend.SCRATCH4, 0)
+    compiler = executor.load_address(compiler, backend.ARG7, walk.STORE_BITMAP_LABEL, 0)
+    compiler = executor.load(compiler, backend.ARG7, backend.ARG7, 0)
+    compiler = executor.sub(compiler, backend.SCRATCH0, backend.SCRATCH4, backend.STORE_BOTTOM)
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH0, backend.SCRATCH0, PAGE_SHIFT)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
+    compiler = executor.label(compiler, ".L_store_pages_scan")
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_store_pages_frontier")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH2, backend.SCRATCH0, 3)
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.ARG7, backend.SCRATCH2)
+    compiler = executor.load_byte(compiler, backend.SCRATCH2, backend.SCRATCH2, 0)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH2, ".L_store_pages_bit")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, -8)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, -1)
+    compiler = executor.branch_negative(compiler, backend.SCRATCH0, ".L_store_pages_frontier")
+    compiler = executor.jump(compiler, ".L_store_pages_scan")
+    compiler = executor.label(compiler, ".L_store_pages_bit")
+    compiler = executor.and_immediate(compiler, backend.SCRATCH3, backend.SCRATCH0, 7)
+    compiler = executor.shift_right_unsigned_by(compiler, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH3)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH2, backend.SCRATCH2, 1)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH2, ".L_store_pages_free")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
+    compiler = executor.jump(compiler, ".L_store_pages_step")
+    compiler = executor.label(compiler, ".L_store_pages_free")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, 1)
+    compiler = executor.branch_equal(compiler, backend.SCRATCH1, backend.VALUE, ".L_store_pages_found")
+    compiler = executor.label(compiler, ".L_store_pages_step")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.SCRATCH0, -1)
+    compiler = executor.jump(compiler, ".L_store_pages_scan")
+    compiler = executor.label(compiler, ".L_store_pages_found")
+    compiler = executor.add(compiler, backend.SCRATCH1, backend.SCRATCH0, backend.VALUE)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, -1)
+    compiler = executor.shift_left(compiler, backend.SCRATCH2, backend.SCRATCH1, PAGE_SHIFT)
+    compiler = executor.sub(compiler, backend.ERROR, backend.SCRATCH4, backend.SCRATCH2)
+    compiler = executor.label(compiler, ".L_store_pages_clear")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH2, backend.SCRATCH1, 3)
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.ARG7, backend.SCRATCH2)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH3, backend.SCRATCH1, 7)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, 1)
+    compiler = executor.shift_left_by(compiler, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH3)
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH2, 0)
+    compiler = executor.xor(compiler, backend.SCRATCH3, backend.SCRATCH3, backend.SCRATCH4)
+    compiler = executor.store_byte(compiler, backend.SCRATCH3, backend.SCRATCH2, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, -1)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH1, backend.SCRATCH0, ".L_store_pages_taken")
+    compiler = executor.jump(compiler, ".L_store_pages_clear")
+    compiler = executor.label(compiler, ".L_store_pages_taken")
+    compiler = executor.move(compiler, backend.VALUE, backend.ERROR)
+    compiler = executor.jump(compiler, ".L_store_pages_ok")
+    compiler = executor.label(compiler, ".L_store_pages_frontier")
+    compiler = executor.shift_left(compiler, backend.SCRATCH0, backend.VALUE, PAGE_SHIFT)
+    compiler = executor.sub(compiler, backend.SCRATCH1, backend.STORE_BOTTOM, backend.SCRATCH0)
+    compiler = executor.branch_less_unsigned(compiler, backend.STORE_BOTTOM, backend.SCRATCH1, ".L_store_pages_refused")
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH1, backend.HEAP_TOP, ".L_store_pages_refused")
+    compiler = executor.load_address(compiler, backend.SCRATCH2, walk.STORE_FLOOR_LABEL, 0)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH2, 0)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH1, backend.SCRATCH2, ".L_store_pages_refused")
+    compiler = executor.move(compiler, backend.STORE_BOTTOM, backend.SCRATCH1)
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH1)
+    compiler = executor.label(compiler, ".L_store_pages_ok")
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
+    compiler = executor.jump(compiler, ".L_store_pages_return")
+    compiler = executor.label(compiler, ".L_store_pages_refused")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, ".L_store_pages_failed")
+    compiler = executor.load_address(compiler, backend.SCRATCH0, walk.SWEEP_BUSY_LABEL, 0)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.SCRATCH0, 0)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, ".L_store_pages_failed")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, words.bytes)
+    compiler = executor.call(compiler, "rt_quarantine_drain")
+    compiler = executor.jump(compiler, ".L_store_pages_try")
+    compiler = executor.label(compiler, ".L_store_pages_failed")
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_MEMORY_EXHAUSTED)
+    compiler = executor.label(compiler, ".L_store_pages_return")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
+    out executor.ret(compiler)
+}
+
+skill emit_store_release_pages(compiler) {
+    @executor = compiler.executor
+    compiler = executor.label(compiler, "rt_store_release_pages")
+    compiler = executor.load_address(compiler, backend.SCRATCH4, walk.STORE_TOP_LABEL, 0)
+    compiler = executor.load(compiler, backend.SCRATCH4, backend.SCRATCH4, 0)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, walk.STORE_BITMAP_LABEL, 0)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.SCRATCH0, 0)
+    compiler = executor.sub(compiler, backend.SCRATCH1, backend.SCRATCH4, backend.VALUE)
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH1, backend.SCRATCH1, PAGE_SHIFT)
+    compiler = executor.label(compiler, ".L_release_pages_loop")
+    compiler = executor.branch_zero(compiler, backend.ERROR, ".L_release_pages_done")
+    compiler = executor.shift_right_unsigned(compiler, backend.SCRATCH2, backend.SCRATCH1, 3)
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH0, backend.SCRATCH2)
+    compiler = executor.and_immediate(compiler, backend.SCRATCH3, backend.SCRATCH1, 7)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH4, 1)
+    compiler = executor.shift_left_by(compiler, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH3)
+    compiler = executor.load_byte(compiler, backend.SCRATCH3, backend.SCRATCH2, 0)
+    compiler = executor.or(compiler, backend.SCRATCH3, backend.SCRATCH3, backend.SCRATCH4)
+    compiler = executor.store_byte(compiler, backend.SCRATCH3, backend.SCRATCH2, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.SCRATCH1, -1)
+    compiler = executor.add_immediate(compiler, backend.ERROR, backend.ERROR, -1)
+    compiler = executor.jump(compiler, ".L_release_pages_loop")
+    compiler = executor.label(compiler, ".L_release_pages_done")
+    out executor.ret(compiler)
+}
+
+skill emit_store_run(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_store_run")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -words.bytes * 4)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.store(compiler, backend.VALUE, backend.STACK, words.bytes * 2)
+    compiler = executor.call(compiler, "rt_store_pages")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.load(compiler, backend.SCRATCH3, backend.STACK, words.bytes * 2)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_store_run_refused")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH2, 0)
+    compiler = executor.store32(compiler, backend.SCRATCH2, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.store32(compiler, backend.SCRATCH3, backend.VALUE, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_store_run_refused")
+    out executor.ret(compiler)
+}
+
+skill emit_class_lookup(compiler, size, prefix) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.load_address(compiler, backend.SCRATCH4, walk.STORE_CLASSES_LABEL, 0)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, 0)
+    compiler = executor.label(compiler, "{prefix}_class")
+    compiler = executor.add(compiler, backend.SCRATCH2, backend.SCRATCH4, backend.SCRATCH3)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH2, 0)
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH2, size, "{prefix}_class_found")
+    compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, words.bytes)
+    compiler = executor.jump(compiler, "{prefix}_class")
+    out executor.label(compiler, "{prefix}_class_found")
+}
+
+skill emit_unlink_partial(compiler, page, prefix) {
+    @executor = compiler.executor
+    compiler = executor.load(compiler, backend.SCRATCH1, page, PAGE_NEXT)
+    compiler = executor.load(compiler, backend.SCRATCH0, page, PAGE_PREV)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, "{prefix}_unlink_mid")
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH4, 0)
+    compiler = executor.jump(compiler, "{prefix}_unlink_next")
+    compiler = executor.label(compiler, "{prefix}_unlink_mid")
+    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, PAGE_NEXT)
+    compiler = executor.label(compiler, "{prefix}_unlink_next")
+    compiler = executor.branch_zero(compiler, backend.SCRATCH1, "{prefix}_unlinked")
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, PAGE_PREV)
+    out executor.label(compiler, "{prefix}_unlinked")
+}
+
+skill emit_store_cell(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_store_cell")
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, model.STORE_LARGE_LIMIT)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH0, backend.VALUE, ".L_store_cell_large")
+    compiler = emit_class_lookup(compiler, backend.VALUE, ".L_store_cell")
+    compiler = executor.load_address(compiler, backend.SCRATCH4, walk.STORE_PARTIAL_LABEL, 0)
+    compiler = executor.add(compiler, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH3)
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.SCRATCH4, 0)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH0, ".L_store_cell_take")
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -words.bytes * 4)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.STACK, words.bytes * 2)
+    compiler = executor.store(compiler, backend.SCRATCH4, backend.STACK, words.bytes)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 1)
+    compiler = executor.call(compiler, "rt_store_pages")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.STACK, words.bytes * 2)
+    compiler = executor.load(compiler, backend.SCRATCH4, backend.STACK, words.bytes)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_store_cell_refused")
+    compiler = executor.store32(compiler, backend.SCRATCH2, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH3, 0)
+    compiler = executor.store32(compiler, backend.SCRATCH3, backend.VALUE, PAGE_LIVE)
+    compiler = executor.store_zero(compiler, backend.VALUE, PAGE_FREE)
+    compiler = executor.store_zero(compiler, backend.VALUE, PAGE_PREV)
+    compiler = executor.store_zero(compiler, backend.VALUE, PAGE_NEXT)
+    compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH4, 0)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH1, backend.VALUE, model.STORE_PAGE_BYTES)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH0, backend.VALUE, model.STORE_PAGE_HEADER_BYTES)
+    compiler = executor.label(compiler, ".L_store_cell_carve")
+    compiler = executor.add(compiler, backend.SCRATCH3, backend.SCRATCH0, backend.SCRATCH2)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH1, backend.SCRATCH3, ".L_store_cell_carved")
+    compiler = executor.load(compiler, backend.ARG7, backend.VALUE, PAGE_FREE)
+    compiler = executor.store(compiler, backend.ARG7, backend.SCRATCH0, words.payload)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.VALUE, PAGE_FREE)
+    compiler = executor.move(compiler, backend.SCRATCH0, backend.SCRATCH3)
+    compiler = executor.jump(compiler, ".L_store_cell_carve")
+    compiler = executor.label(compiler, ".L_store_cell_carved")
+    compiler = executor.move(compiler, backend.SCRATCH0, backend.VALUE)
+    compiler = executor.label(compiler, ".L_store_cell_take")
+    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, PAGE_FREE)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.SCRATCH1, words.payload)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.SCRATCH0, PAGE_FREE)
+    compiler = executor.load32(compiler, backend.SCRATCH3, backend.SCRATCH0, PAGE_LIVE)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, 1)
+    compiler = executor.store32(compiler, backend.SCRATCH3, backend.SCRATCH0, PAGE_LIVE)
+    compiler = executor.move(compiler, backend.VALUE, backend.SCRATCH1)
+    compiler = executor.store_zero(compiler, backend.VALUE, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH2, ".L_store_cell_ok")
+    compiler = emit_unlink_partial(compiler, backend.SCRATCH0, ".L_store_cell")
+    compiler = executor.label(compiler, ".L_store_cell_ok")
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_store_cell_large")
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, model.STORE_PAGE_HEADER_BYTES + model.STORE_PAGE_BYTES - 1)
+    compiler = executor.shift_right_unsigned(compiler, backend.VALUE, backend.VALUE, PAGE_SHIFT)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -words.bytes * 4)
+    compiler = executor.store(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.call(compiler, "rt_store_run")
+    compiler = executor.load(compiler, backend.RETURN, backend.STACK, words.bytes * 3)
+    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, words.bytes * 4)
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_store_cell_refused")
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, model.STORE_PAGE_HEADER_BYTES)
+    compiler = executor.store_zero(compiler, backend.VALUE, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = tails.ok(compiler)
+    compiler = executor.label(compiler, ".L_store_cell_refused")
+    out executor.ret(compiler)
+}
+
+skill emit_store_free(compiler) {
+    @executor = compiler.executor
+    @words = compiler.words
+    compiler = executor.label(compiler, "rt_store_free")
+    compiler = walk.emit_object_size(compiler, backend.SCRATCH1, backend.VALUE)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, model.STORE_LARGE_LIMIT)
+    compiler = executor.branch_less_unsigned(compiler, backend.SCRATCH0, backend.SCRATCH1, ".L_store_free_large")
+    compiler = executor.shift_right_unsigned(compiler, backend.ARG7, backend.VALUE, PAGE_SHIFT)
+    compiler = executor.shift_left(compiler, backend.ARG7, backend.ARG7, PAGE_SHIFT)
+    compiler = executor.load32(compiler, backend.SCRATCH1, backend.ARG7, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = emit_class_lookup(compiler, backend.SCRATCH1, ".L_store_free")
+    compiler = executor.load_address(compiler, backend.SCRATCH4, walk.STORE_PARTIAL_LABEL, 0)
+    compiler = executor.add(compiler, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH3)
+    compiler = executor.load_immediate(compiler, backend.SCRATCH0, model.STORE_KIND_FREE)
+    compiler = executor.store32(compiler, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    compiler = executor.store_zero(compiler, backend.VALUE, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    compiler = executor.load(compiler, backend.SCRATCH2, backend.ARG7, PAGE_FREE)
+    compiler = executor.store(compiler, backend.SCRATCH2, backend.VALUE, words.payload)
+    compiler = executor.store(compiler, backend.VALUE, backend.ARG7, PAGE_FREE)
+    compiler = executor.load32(compiler, backend.SCRATCH3, backend.ARG7, PAGE_LIVE)
+    compiler = executor.add_immediate(compiler, backend.SCRATCH3, backend.SCRATCH3, -1)
+    compiler = executor.store32(compiler, backend.SCRATCH3, backend.ARG7, PAGE_LIVE)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH3, ".L_store_free_page")
+    compiler = executor.branch_nonzero(compiler, backend.SCRATCH2, ".L_store_free_done")
+    compiler = executor.load(compiler, backend.SCRATCH0, backend.SCRATCH4, 0)
+    compiler = executor.store(compiler, backend.SCRATCH0, backend.ARG7, PAGE_NEXT)
+    compiler = executor.store_zero(compiler, backend.ARG7, PAGE_PREV)
+    compiler = executor.branch_zero(compiler, backend.SCRATCH0, ".L_store_free_front")
+    compiler = executor.store(compiler, backend.ARG7, backend.SCRATCH0, PAGE_PREV)
+    compiler = executor.label(compiler, ".L_store_free_front")
+    compiler = executor.store(compiler, backend.ARG7, backend.SCRATCH4, 0)
+    compiler = executor.label(compiler, ".L_store_free_done")
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, ".L_store_free_page")
+    compiler = executor.branch_zero(compiler, backend.SCRATCH2, ".L_store_free_release")
+    compiler = emit_unlink_partial(compiler, backend.ARG7, ".L_store_free")
+    compiler = executor.label(compiler, ".L_store_free_release")
+    compiler = executor.move(compiler, backend.VALUE, backend.ARG7)
+    compiler = executor.load_immediate(compiler, backend.ERROR, 1)
+    compiler = executor.jump(compiler, "rt_store_release_pages")
+    compiler = executor.label(compiler, ".L_store_free_large")
+    compiler = executor.add_immediate(compiler, backend.VALUE, backend.VALUE, -model.STORE_PAGE_HEADER_BYTES)
+    compiler = executor.load32(compiler, backend.ERROR, backend.VALUE, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
+    out executor.jump(compiler, "rt_store_release_pages")
+}

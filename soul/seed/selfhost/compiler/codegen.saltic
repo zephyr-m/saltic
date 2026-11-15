@@ -22,11 +22,12 @@
 -- дробные (Q-041): литерал — emitters.load_fraction, операции — rt_fraction_*,
 --     показ в "{…}" — навык core.fraction.text (constants.FRACTION_TEXT_LABEL)
 -- pack_fixed(compiler, stored) — фиксированное в VALUE → обычное число (rt_fixed_pack,
---     FixedTooBig): так оно ложится в поле Box и группу (Q-035); compile_stored — group.add
+--     FixedTooBig): так оно ложится в поле Box и группу (Q-035); compile_stored —
+--     group.add и group.replaced: последний аргумент (значение) — упакованным
 -- compile_template(compiler, plain) — строка "{…}" склейкой через rt_value_text
 -- compile_rescue(compiler, node) — выражение rescue с перехватом ошибки
 --
--- Внутри: emitters, loops (drum), endless (always: регион на оборот),
+-- Внутри: emitters, loops (drum: регион цикла, сжатие по порогу), endless (always: регион на оборот),
 -- failures (ошибки), lookup (имена, типы).
 
 use core.str
@@ -201,10 +202,12 @@ skill pack_fixed(compiler, stored) {
 
 skill compile_stored(compiler, args) {
     @executor = compiler.executor
-    compiler = executor.push(compile_expression(compiler, group.get(args, 0)), backend.VALUE)
-    compiler = pack_fixed(compile_expression(compiler, group.get(args, 1)), group.get(args, 1))
-    compiler = executor.move(compiler, backend.argument(1), backend.VALUE)
-    out executor.pop(compiler, backend.argument(0))
+    @last = group.count(args) - 1
+    drum (last) { compiler = executor.push(compile_expression(compiler, group.get(args, beat)), backend.VALUE) }
+    compiler = pack_fixed(compile_expression(compiler, group.get(args, last)), group.get(args, last))
+    compiler = executor.move(compiler, backend.argument(last), backend.VALUE)
+    drum (last) { compiler = executor.pop(compiler, backend.argument(last - 1 - beat)) }
+    out compiler
 }
 
 skill compile_show(compiler, args) {
@@ -336,7 +339,7 @@ skill compile_call(compiler, node) {
         @problem = errors.unresolved_call(call_text, compiler.current_function.name)
         io.show(problem.message)
     }
-    (name == "core.group.add") { out failures.check(executor.call(compile_stored(compiler, args), target)) }
+    (group.contains(["core.group.add", "core.group.replaced"], name) == yes) { out failures.check(executor.call(compile_stored(compiler, args), target)) }
     compiler = compile_arguments(compiler, args)
     compiler = executor.call(compiler, target)
     out failures.check(compiler)
@@ -534,22 +537,20 @@ skill compile_statement(compiler, node, keep) {
     }
     (tag == "drum") {
         @frame = loops.frame(compiler)
-        @uses_beat = state.block_uses_beat(group.get(plain, 2))
+        @body = group.get(plain, 2)
+        @uses_beat = state.block_uses_beat(body)
         compiler = compile_expression(compiler, group.get(plain, 1))
-        (uses_beat == no) {
-            compiler = loops.light_head(compiler, frame)
-            @light_exit = compiler.current_function.drum_exit
-            compiler.current_function.drum_exit = frame.end
-            compiler = compile_block(compiler, group.get(plain, 2), no)
-            compiler.current_function.drum_exit = light_exit
-            out loops.light_tail(compiler, frame)
-        }
-        compiler = loops.head(compiler, frame)
+        @region = loops.region_open(compiler, frame, body)
+        (uses_beat == no) { compiler = loops.light_head(compiler, frame) }
+        (uses_beat == yes) { compiler = loops.head(compiler, frame) }
         @outer_exit = compiler.current_function.drum_exit
         compiler.current_function.drum_exit = frame.end
-        compiler = compile_block(compiler, group.get(plain, 2), no)
+        compiler = compile_block(compiler, body, no)
         compiler.current_function.drum_exit = outer_exit
-        out loops.tail(compiler, frame)
+        compiler = loops.region_close(compiler, frame, region)
+        (uses_beat == no) { compiler = loops.light_tail(compiler, frame) }
+        (uses_beat == yes) { compiler = loops.tail(compiler, frame) }
+        out loops.region_restore(compiler, region)
     }
     out compiler
 }

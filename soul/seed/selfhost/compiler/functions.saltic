@@ -1,9 +1,12 @@
 -- functions — пролог/эпилог навыков, ленивые константы и диспетчеры методов.
--- Навык: метка saltic_<имя>, кадр по constants, аргументы из ARG0… в слоты,
--- выход через <имя>_return с rt_region_exit; ошибка — <имя>_failure (кладёт имя
--- навыка в путь ошибки — rt_trail_push).
--- Константа: геттер saltic_constant_get_<имя> считает один раз, цикл —
--- ERROR_CONSTANT_CYCLE. Метод Box: диспетчер по номеру типа в последнем поле.
+-- Навык: метка saltic_<имя>, страж стека (STACK ниже STACK_LIMIT — ошибка
+-- StackExhausted вызывающему прямо на месте: до rt_stack_exhausted прыжок RISC-V не дотянется), кадр по constants,
+-- аргументы из ARG0… в слоты, выход через <имя>_return с rt_region_exit (ARG3 =
+-- FRAME — откуда сканировать стек при разборе карантина; зовётся всегда:
+-- карантин разбирается и без выделений в регионе); ошибка — <имя>_failure
+-- (кладёт имя навыка в путь ошибки — rt_trail_push).
+-- Константа: геттер saltic_constant_get_<имя> считает один раз (значение
+-- переезжает в хранилище навсегда — rt_store_eternal), цикл — ERROR_CONSTANT_CYCLE. Метод Box: диспетчер по номеру типа в последнем поле.
 -- Команды — методами compiler.executor (договор backend).
 --
 -- compile_function(compiler, name, params, body, subject, module) — один навык
@@ -43,14 +46,18 @@ skill compile_function(compiler, name, params, body, subject, module) {
     compiler.current_function = state.Function { name = name, slots = slots, end = end, failure = failure, subject = subject, module = module, types = types }
     @function_label = str.concat("saltic_", state.safe(name))
     compiler = executor.label(compiler, function_label)
+    @stack_ready = state.label(compiler, "stack_ready")
+    compiler = executor.branch_greater_equal_unsigned(compiler, backend.STACK, backend.STACK_LIMIT, stack_ready)
+    compiler = executor.load_immediate(compiler, backend.VALUE, 0)
+    compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_STACK_EXHAUSTED)
+    compiler = executor.ret(compiler)
+    compiler = executor.label(compiler, stack_ready)
     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -frame)
     compiler = executor.store(compiler, backend.RETURN, backend.STACK, constants.return_address_save_offset(compiler.words, frame))
     compiler = executor.store(compiler, backend.FRAME, backend.STACK, constants.previous_frame_save_offset(compiler.words, frame))
     compiler = executor.store(compiler, backend.REGION_MARK, backend.STACK, constants.region_mark_save_offset(compiler.words, frame))
-    compiler = executor.store(compiler, backend.ESCAPE_MARK, backend.STACK, constants.region_escape_save_offset(compiler.words, frame))
     compiler = executor.add_immediate(compiler, backend.FRAME, backend.STACK, frame)
     compiler = executor.move(compiler, backend.REGION_MARK, backend.HEAP_TOP)
-    compiler = executor.move(compiler, backend.ESCAPE_MARK, backend.ESCAPE_BOTTOM)
     drum (group.count(params)) {
         @slot = state.slot(compiler, group.get(params, beat))
         compiler = executor.store(compiler, backend.argument(beat), backend.FRAME, slot)
@@ -67,13 +74,10 @@ skill compile_function(compiler, name, params, body, subject, module) {
     compiler = executor.load_immediate(compiler, backend.VALUE, 0)
     compiler = executor.load_immediate(compiler, backend.ARG2, constants.REGION_VALUE_SKIPPED)
     compiler = executor.label(compiler, end)
-    @region_done = "{end}_region"
-    compiler = executor.branch_equal(compiler, backend.HEAP_TOP, backend.REGION_MARK, region_done)
+    compiler = executor.move(compiler, backend.ARG3, backend.FRAME)
     compiler = executor.call(compiler, "rt_region_exit")
-    compiler = executor.label(compiler, region_done)
     compiler = executor.load(compiler, backend.RETURN, backend.FRAME, constants.return_address_load_offset(compiler.words))
     compiler = executor.load(compiler, backend.REGION_MARK, backend.FRAME, constants.region_mark_load_offset(compiler.words))
-    compiler = executor.load(compiler, backend.ESCAPE_MARK, backend.FRAME, constants.region_escape_load_offset(compiler.words))
     compiler = executor.load(compiler, backend.SCRATCH0, backend.FRAME, constants.previous_frame_load_offset(compiler.words))
     compiler = executor.move(compiler, backend.STACK, backend.FRAME)
     compiler = executor.move(compiler, backend.FRAME, backend.SCRATCH0)
@@ -109,9 +113,10 @@ skill compile_constant(compiler, constant) {
 
     compiler = codegen.compile_expression(compiler, constant.node)
     compiler = executor.jump_if_nonzero(compiler, backend.ERROR, failure)
+    compiler = executor.call(compiler, "rt_store_eternal")
+    compiler = executor.jump_if_nonzero(compiler, backend.ERROR, failure)
     compiler = executor.load_address(compiler, backend.SCRATCH0, constants.value_label(constant.name), 0)
     compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH0, 0)
-    compiler = executor.call(compiler, "rt_region_remember_slot")
     compiler = executor.load_address(compiler, backend.SCRATCH0, constants.state_label(constant.name), 0)
     compiler = executor.load_immediate(compiler, backend.SCRATCH1, constants.STATE_READY)
     compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)

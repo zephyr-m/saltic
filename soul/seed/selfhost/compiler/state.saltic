@@ -25,8 +25,15 @@
 -- header(compiler) — программа исполнителя с входом _start, heap_size
 -- start(compiler) — код _start: стек входа — в rt_environment_capture (envp),
 --     куча — кусок heap_bytes у платформы (rt_platform_heap, Q-050; не дали —
---     rt_out_of_memory), его начало — в слово HEAP_START; аргументы через
---     rt_cstring, вызов saltic_program, rt_platform_exit
+--     rt_out_of_memory), его начало — в слово HEAP_START, STORE_BOTTOM — её конец,
+--     rt_store_init ставит карту страниц и низ хранилища;
+--     свой стек — rt_platform_stack(load_stack_bytes: 1 ГБ на 8-байтном слове, 64 МБ на
+--     4-байтном; 1 ГБ — сдвигом из долей по STACK_MARGIN_BYTES: обычное число
+--     компилятора на 4-байтном хозяине его не вмещает): дала платформа — STACK переключается на него перед saltic_program,
+--     STACK_LIMIT — его низ плюс STACK_MARGIN_BYTES (страж рекурсии); не дала —
+--     стек входа и STACK_LIMIT = 0 (стража нет); верх стека — в слово rt_stack_base
+--     (разбор карантина сканирует стек до него); аргументы через rt_cstring,
+--     вызов saltic_program, rt_platform_exit
 -- finish_data(compiler) — выравнивание секций, saltic_arena и слово HEAP_START в bss
 -- box_number(compiler, name) -> номер Box (с 1); dispatch_label(method) -> метка
 
@@ -42,6 +49,11 @@ use selfhost.machine.word
 use selfhost.machine.wide
 
 HEAP_START = "saltic_heap_start"
+STACK_BASE = "rt_stack_base"
+STACK_BYTES_NARROW = 67108864
+STACK_UNITS_WIDE = 4096
+STACK_UNIT_SHIFT = 18
+STACK_MARGIN_BYTES = 262144
 
 Symbol = Box {
     name = "",
@@ -176,7 +188,6 @@ skill collect_names(names, node) {
         @always_number = num.text(names.next_always)
         names.next_always = names.next_always + 1
         names = name_add(names, "$always_mark:{always_number}")
-        names = name_add(names, "$always_escape:{always_number}")
     }
     (tag == "drum") {
         @drum_number = num.text(names.next_drum)
@@ -185,6 +196,8 @@ skill collect_names(names, node) {
         names = name_add(names, "$drum_source:{drum_number}")
         names = name_add(names, "$drum_index:{drum_number}")
         names = name_add(names, "$drum_saved:{drum_number}")
+        names = name_add(names, "$drum_mark:{drum_number}")
+        names = name_add(names, "$drum_limit:{drum_number}")
         names = name_add(names, ast.DRUM_BEAT)
     }
     drum (ast.children(node)) { names = collect_names(names, beat) }
@@ -321,11 +334,22 @@ skill start(compiler) {
     compiler = executor.move(compiler, backend.HEAP_TOP, backend.VALUE)
     compiler = executor.load_address(compiler, backend.SCRATCH0, HEAP_START, 0)
     compiler = executor.store(compiler, backend.HEAP_TOP, backend.SCRATCH0, 0)
-    compiler = load_heap_bytes(compiler, backend.ESCAPE_BOTTOM)
-    compiler = executor.add(compiler, backend.ESCAPE_BOTTOM, backend.HEAP_TOP, backend.ESCAPE_BOTTOM)
-    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
+    compiler = load_heap_bytes(compiler, backend.STORE_BOTTOM)
+    compiler = executor.add(compiler, backend.STORE_BOTTOM, backend.HEAP_TOP, backend.STORE_BOTTOM)
+    compiler = executor.call(compiler, "rt_store_init")
     compiler = executor.move(compiler, backend.REGION_MARK, backend.HEAP_TOP)
-    compiler = executor.move(compiler, backend.ESCAPE_MARK, backend.ESCAPE_BOTTOM)
+    compiler = executor.load_immediate(compiler, backend.STACK_LIMIT, 0)
+    compiler = executor.load_address(compiler, backend.SCRATCH0, STACK_BASE, 0)
+    compiler = executor.store(compiler, backend.STACK, backend.SCRATCH0, 0)
+    compiler = load_stack_bytes(compiler, backend.VALUE, 0)
+    compiler = executor.call(compiler, "rt_platform_stack")
+    compiler = executor.branch_nonzero(compiler, backend.ERROR, ".L_start_stack_ready")
+    compiler = executor.load_address(compiler, backend.SCRATCH0, STACK_BASE, 0)
+    compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH0, 0)
+    compiler = load_stack_bytes(compiler, backend.SCRATCH1, 1)
+    compiler = executor.sub(compiler, backend.STACK_LIMIT, backend.VALUE, backend.SCRATCH1)
+    compiler = executor.label(compiler, ".L_start_stack_ready")
+    compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, param_count + 1)
     compiler = executor.branch_greater_equal(compiler, backend.VALUE, backend.SCRATCH0, ".L_start_args_ready")
     compiler = executor.load_immediate(compiler, backend.VALUE, abi.tagged(param_count, abi.TAG_NUMBER))
@@ -342,6 +366,8 @@ skill start(compiler) {
     (param_count > 0) {
         compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, param_count * words.bytes)
     }
+    compiler = executor.load_address(compiler, backend.SCRATCH0, STACK_BASE, 0)
+    compiler = executor.load(compiler, backend.STACK, backend.SCRATCH0, 0)
     compiler = executor.call(compiler, "saltic_program")
     compiler = executor.branch_zero(compiler, backend.ERROR, ".L_start_done")
     compiler = executor.move(compiler, backend.VALUE, backend.ERROR)
@@ -349,6 +375,15 @@ skill start(compiler) {
     compiler = executor.label(compiler, ".L_start_done")
     compiler = executor.load_immediate(compiler, backend.VALUE, 0)
     out executor.call(compiler, "rt_platform_exit")
+}
+
+skill load_stack_bytes(compiler, role, margins) {
+    @executor = compiler.executor
+    (compiler.words.bytes == 8) {
+        compiler = executor.load_immediate(compiler, role, STACK_UNITS_WIDE - margins)
+        out executor.shift_left(compiler, role, role, STACK_UNIT_SHIFT)
+    }
+    out executor.load_immediate(compiler, role, STACK_BYTES_NARROW - margins * STACK_MARGIN_BYTES)
 }
 
 skill load_heap_bytes(compiler, role) {

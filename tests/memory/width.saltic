@@ -6,6 +6,9 @@
 -- места на копию при выходе не должна проходить молча.
 --
 -- grow(n) / long_text(n) / make_big(n) / again(times, n) / half() / big_block(size)
+-- value(name) -> что дал случай; expected(name) -> что должен; right(name) -> yes/no
+--     (ошибка и чужое значение — в метрику): ответ не занимает кучу, и замер «куча
+--     вернулась к прежней» не видит строк самой проверки (запись провала в suite)
 -- CASES — случаи; program(chosen) — один случай, "" — все, "список" — имена случаев
 
 use core.str
@@ -51,16 +54,31 @@ skill big_block(size) {
     out block
 }
 
-skill run(suite, name) {
-    (name == "группа 20000 по одному") { suite = testing.test_equal(suite, name, group.count(grow(20000)), 20000) }
-    (name == "строка 100000") { suite = testing.test_equal(suite, name, str.bytes(long_text(100000)), 100000) }
-    (name == "большой out 50 раз") { suite = testing.test_equal(suite, name, again(50, 5000), 250000) }
-    (name == "bytes на полкучи") { suite = testing.test_equal(suite, name, half(), 7) }
-    (name == "out почти всей кучи") {
-        @block = big_block(mem.heap(2) * 2 / 5)
-        suite = testing.test_equal(suite, name, bytes.get(block, 1), 9)
+skill value(name) {
+    (name == "группа 20000 по одному") { out group.count(grow(20000)) }
+    (name == "строка 100000") { out str.bytes(long_text(100000)) }
+    (name == "большой out 50 раз") { out again(50, 5000) }
+    (name == "bytes на полкучи") { out half() }
+    @block = big_block(mem.heap(2) * 2 / 5)
+    out bytes.get(block, 1)
+}
+
+skill expected(name) {
+    (name == "группа 20000 по одному") { out 20000 }
+    (name == "строка 100000") { out 100000 }
+    (name == "большой out 50 раз") { out 250000 }
+    (name == "bytes на полкучи") { out 7 }
+    out 9
+}
+
+skill right(name) {
+    @found = value(name) rescue |err| {
+        meter.metric("ширина, {name}: ошибка", "{err}")
+        out no
     }
-    out suite
+    (found == expected(name)) { out yes }
+    meter.metric("ширина, {name}: получено", found)
+    out no
 }
 
 program(chosen) {
@@ -71,11 +89,9 @@ program(chosen) {
     drum (cases) {
         @name = beat
         @used = meter.used()
-        suite = run(suite, name) rescue |err| {
-            meter.metric("ширина, {name}: ошибка", "{err}")
-            testing.test_equal(suite, "{name}: без ошибки", "{err}", "без ошибки")
-        }
+        @done = right(name)
         @left = meter.used() - used
+        suite = testing.test_equal(suite, "{name}: без ошибки и верно", done, yes)
         suite = testing.test_equal(suite, "{name}: куча вернулась к прежней", left, 0)
         meter.metric("ширина, {name}: осталось в куче после выхода, байт", left)
     }
