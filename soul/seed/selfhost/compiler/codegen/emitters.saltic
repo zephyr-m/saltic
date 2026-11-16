@@ -27,6 +27,10 @@
 -- static_group(items) -> yes: непустая, вся из constant_literal; load_static_group —
 --     её адрес в VALUE, сама группа — данными в rodata (group_label -> метка)
 -- emit_string_join(compiler) — rt_string_add для "{…}"
+-- on_error / fail_jump(compiler) — на ошибку (если ERROR / всегда): у навыка со
+--     слотом FAIL_LINE — через заглушку stub (строка оператора в FAIL_LINE, потом
+--     текущая метка failure; одна на пару строка + метка), иначе прямо; emit_stubs(compiler) — все заглушки
+--     навыка, после его тела
 -- load_number / load_number_into(compiler, [role,] number) — число с тегом
 -- load_simple(compiler, node, role) / load_fixed_literal(compiler, value)
 -- store_local(compiler, name, value) — запись в слот и вывод типа
@@ -101,8 +105,46 @@ skill number_tags(compiler, left_number, right_number) {
     compiler = executor.jump_if_zero(compiler, backend.SCRATCH0, ok)
     compiler = executor.load_immediate(compiler, backend.VALUE, 0)
     compiler = executor.load_immediate(compiler, backend.ERROR, abi.ERROR_TYPE_MISMATCH)
-    (str.bytes(compiler.current_function.failure) > 0) { compiler = executor.jump(compiler, compiler.current_function.failure) }
+    compiler = fail_jump(compiler)
     out executor.label(compiler, ok)
+}
+
+skill stub(compiler) {
+    drum (compiler.current_function.stubs) {
+        (beat.line == compiler.current_function.line) {
+            (beat.target == compiler.current_function.failure) { out beat.label }
+        }
+    }
+    @made = state.label(compiler, "fail_line")
+    compiler.current_function.stubs = group.add(compiler.current_function.stubs, state.Stub { label = made, line = compiler.current_function.line, target = compiler.current_function.failure })
+    out made
+}
+
+skill on_error(compiler) {
+    @executor = compiler.executor
+    (str.bytes(compiler.current_function.failure) == 0) { out compiler }
+    (compiler.current_function.lined == no) { out executor.jump_if_nonzero(compiler, backend.ERROR, compiler.current_function.failure) }
+    out executor.jump_if_nonzero(compiler, backend.ERROR, stub(compiler))
+}
+
+skill fail_jump(compiler) {
+    @executor = compiler.executor
+    (str.bytes(compiler.current_function.failure) == 0) { out compiler }
+    (compiler.current_function.lined == no) { out executor.jump(compiler, compiler.current_function.failure) }
+    out executor.jump(compiler, stub(compiler))
+}
+
+skill emit_stubs(compiler) {
+    @executor = compiler.executor
+    (compiler.current_function.lined == no) { out compiler }
+    @slot = state.slot(compiler, state.FAIL_LINE)
+    drum (compiler.current_function.stubs) {
+        compiler = executor.label(compiler, beat.label)
+        compiler = executor.load_immediate(compiler, backend.SCRATCH0, beat.line)
+        compiler = executor.store(compiler, backend.SCRATCH0, backend.FRAME, slot)
+        compiler = executor.jump(compiler, beat.target)
+    }
+    out compiler
 }
 
 skill emit_field_get(compiler, name) {
@@ -111,8 +153,7 @@ skill emit_field_get(compiler, name) {
     compiler = executor.load_immediate(compiler, backend.ERROR, field.value)
     compiler = executor.load_immediate(compiler, backend.ARG2, field.slot)
     compiler = executor.call(compiler, "rt_box_get")
-    (str.bytes(compiler.current_function.failure) == 0) { out compiler }
-    out executor.jump_if_nonzero(compiler, backend.ERROR, compiler.current_function.failure)
+    out on_error(compiler)
 }
 
 skill subject_field(compiler, name) {
@@ -142,8 +183,7 @@ skill emit_field_set(compiler, name) {
     compiler = executor.load_immediate(compiler, backend.ERROR, field.value)
     compiler = executor.load_immediate(compiler, backend.ARG3, field.slot)
     compiler = executor.call(compiler, "rt_box_set")
-    (str.bytes(compiler.current_function.failure) == 0) { out compiler }
-    out executor.jump_if_nonzero(compiler, backend.ERROR, compiler.current_function.failure)
+    out on_error(compiler)
 }
 
 skill emit_word_result(compiler) {

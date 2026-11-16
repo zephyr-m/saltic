@@ -11,10 +11,10 @@
 --
 -- build(source_path, output_path, heap_text, target) -> none;
 --     ParseFailed, CheckFailed, ValueOutsideRange, UnknownTarget, WriteFailed
--- build_machine(ast, heap_size, far_calls) -> машина RV32I: исполнитель
---     rv32i.Executor и платформа linux.Linux
--- write_x86(ast, heap_size, output_path, firmware) / write_rv64 / write_arm64(ast,
---     heap_size, output_path) -> none — слово 8 байт, числа 61-битные: ELF64
+-- build_machine(ast, heap_size, far_calls, source) -> машина RV32I: исполнитель
+--     rv32i.Executor и платформа linux.Linux; source — путь исходника для пути ошибки
+-- write_x86(ast, heap_size, output_path, firmware, source) / write_rv64 / write_arm64(ast,
+--     heap_size, output_path, source) -> none — слово 8 байт, числа 61-битные: ELF64
 --     Linux без окна или PE32+ UEFI в окне; ELF64 RISC-V (RVA23); ELF64 AArch64; WriteFailed
 -- show(problem) / toolchain_show_diagnostics(diagnostics) — печать
 
@@ -45,22 +45,22 @@ skill toolchain_show_diagnostics(diagnostics) {
     out none
 }
 
-skill build_machine(ast, heap_size, far_calls) {
-    out compiler.compile_machine(ast, heap_size, rv32i.Executor { far_calls = far_calls }, linux.Linux {})
+skill build_machine(ast, heap_size, far_calls, source) {
+    out compiler.compile_machine_from(ast, heap_size, rv32i.Executor { far_calls = far_calls }, linux.Linux {}, source, no)
 }
 
-skill write_x86(ast, heap_size, output_path, firmware) {
+skill write_x86(ast, heap_size, output_path, firmware, source) {
     @executor = x86_64_native.Executor { firmware = firmware, wide = yes }
     io.show("toolchain: пишу родной x86-64 {output_path}")
     (firmware == yes) {
-        @firmware_machine = compiler.compile_machine(ast, heap_size, executor, uefi.Uefi {})
+        @firmware_machine = compiler.compile_machine_from(ast, heap_size, executor, uefi.Uefi {}, source, no)
         x86_64_native.write_uefi(output_path, firmware_machine) rescue |failure| {
             io.show("toolchain: образ UEFI не собрался: {failure}")
             out error.WriteFailed
         }
         out none
     }
-    @machine = compiler.compile_machine(ast, heap_size, executor, linux.Linux {})
+    @machine = compiler.compile_machine_from(ast, heap_size, executor, linux.Linux {}, source, yes)
     x86_64_native.write_wide(output_path, machine) rescue |failure| {
         io.show("toolchain: образ x86-64 не собрался: {failure}")
         out error.WriteFailed
@@ -68,12 +68,12 @@ skill write_x86(ast, heap_size, output_path, firmware) {
     out none
 }
 
-skill write_rv64(ast, heap_size, output_path) {
-    @machine = compiler.compile_machine(ast, heap_size, rv64.Executor {}, linux.Linux {})
+skill write_rv64(ast, heap_size, output_path, source) {
+    @machine = compiler.compile_machine_from(ast, heap_size, rv64.Executor {}, linux.Linux {}, source, no)
     io.show("toolchain: пишу RV64 {output_path}")
     elf64.write(output_path, machine, elf64.RISCV, elf64.PAGE_BYTES) rescue |failure| {
         show(errors.near_calls_failed())
-        @far = compiler.compile_machine(ast, heap_size, rv64.Executor { far_calls = yes }, linux.Linux {})
+        @far = compiler.compile_machine_from(ast, heap_size, rv64.Executor { far_calls = yes }, linux.Linux {}, source, no)
         elf64.write(output_path, far, elf64.RISCV, elf64.PAGE_BYTES) rescue |again| {
             show(errors.far_calls_failed())
             out error.WriteFailed
@@ -83,9 +83,9 @@ skill write_rv64(ast, heap_size, output_path) {
     out none
 }
 
-skill write_arm64(ast, heap_size, output_path) {
+skill write_arm64(ast, heap_size, output_path, source) {
     @executor = arm64.fresh()
-    @machine = compiler.compile_machine(ast, heap_size, executor, linux.Linux {})
+    @machine = compiler.compile_machine_from(ast, heap_size, executor, linux.Linux {}, source, no)
     io.show("toolchain: пишу ARM64 {output_path}")
     arm64.write(output_path, machine, executor.fixups) rescue |failure| {
         io.show("toolchain: образ ARM64 не собрался: {failure}")
@@ -117,16 +117,16 @@ skill build(source_path, output_path, heap_text, target) {
     (str.starts_with(heap_text, "-") == yes) { out error.ValueOutsideRange }
     @heap_size = wide.from_decimal(heap_text)
     io.show("toolchain: собираю")
-    (target == "x86_64") { out write_x86(checked.tree, heap_size, output_path, no) }
-    (target == "x86_64-uefi") { out write_x86(checked.tree, heap_size, output_path, yes) }
-    (target == "rv64") { out write_rv64(checked.tree, heap_size, output_path) }
-    (target == "arm64") { out write_arm64(checked.tree, heap_size, output_path) }
+    (target == "x86_64") { out write_x86(checked.tree, heap_size, output_path, no, source_path) }
+    (target == "x86_64-uefi") { out write_x86(checked.tree, heap_size, output_path, yes, source_path) }
+    (target == "rv64") { out write_rv64(checked.tree, heap_size, output_path, source_path) }
+    (target == "arm64") { out write_arm64(checked.tree, heap_size, output_path, source_path) }
     ((target == "rv32i") == no) { out error.UnknownTarget }
-    @machine = build_machine(checked.tree, heap_size, no)
+    @machine = build_machine(checked.tree, heap_size, no, source_path)
     io.show("toolchain: пишу {output_path}")
     image.write(output_path, machine) rescue |failure| {
         show(errors.near_calls_failed())
-        @far = build_machine(checked.tree, heap_size, yes)
+        @far = build_machine(checked.tree, heap_size, yes, source_path)
         image.write(output_path, far) rescue |again| {
             show(errors.far_calls_failed())
             out error.WriteFailed

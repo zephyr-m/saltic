@@ -5,7 +5,11 @@
 -- исполнителя договора (backend) в executor; machine — его программа.
 --
 -- Symbol { name, kind, node, value, text, slot } / Function { name, slots, end,
---     subject, module, types, next_drum, drum_exit, failure, next_rescue, next_always }
+--     subject, module, types, next_drum, drum_exit, failure, next_rescue, next_always,
+--     line, lined, stubs } — line — строка текущего оператора; lined — у навыка
+--     есть слот FAIL_LINE (у геттеров констант нет); stubs — заглушки Stub
+-- Stub { label, line, target } — переход на ошибку через заглушку: строка в
+--     FAIL_LINE, затем на target (хвост навыка, цикла или rescue)
 -- Names { names, next_drum, next_rescue, next_always }
 -- State { …, executor, machine, words } — words — раскладка памяти под слово;
 --     arena_bytes, default_heap_bytes — память тела, их даёт платформа
@@ -14,7 +18,9 @@
 -- symbol_find / symbol_has / symbol_add / symbol_add_text(symbols, name, …)
 -- type_find(types, name) / type_set(types, name, type)
 -- safe(text) -> имя для метки; label(compiler, prefix) -> уникальная метка
--- collect_locals(params, body) -> Names; make_slots(words, names, first_slot) -> слоты
+-- at_line(compiler, node) -> compiler со строкой node в current_function.line
+-- collect_locals(params, body) -> Names (плюс служебный FAIL_LINE — строка, где
+--     ошибка покинула оператор навыка); make_slots(words, names, first_slot) -> слоты
 -- collect_names(names, node) -> Names: имена и служебные ячейки (drum, always, rescue)
 --     по всему поддереву; обход — ast.children
 -- outer_assigned(block) -> имена снаружи блока, которым блок присваивает
@@ -49,6 +55,7 @@ use selfhost.machine.word
 use selfhost.machine.wide
 
 HEAP_START = "saltic_heap_start"
+FAIL_LINE = "$fail_line"
 STACK_BASE = "rt_stack_base"
 STACK_BYTES_NARROW = 67108864
 STACK_UNITS_WIDE = 4096
@@ -75,7 +82,16 @@ Function = Box {
     drum_exit = "",
     failure = "",
     next_rescue = 1,
-    next_always = 1
+    next_always = 1,
+    line = 0,
+    lined = no,
+    stubs = []
+}
+
+Stub = Box {
+    label = "",
+    line = 0,
+    target = ""
 }
 
 Names = Box {
@@ -86,6 +102,9 @@ Names = Box {
 }
 
 State = Box {
+    source = "",
+    signals = no,
+    placed = [],
     ast = [],
     executor = backend.unassigned(),
     machine = backend.unassigned(),
@@ -236,9 +255,16 @@ skill block_uses_beat(block) {
     out uses_beat(block)
 }
 
+skill at_line(compiler, node) {
+    @place = ast.location(node)
+    (group.get(place, 0) > 0) { compiler.current_function.line = group.get(place, 0) }
+    out compiler
+}
+
 skill collect_locals(params, body) {
     @names = Names {}
     drum (params) { names = name_add(names, beat) }
+    names = name_add(names, FAIL_LINE)
     out collect_names(names, body)
 }
 
@@ -349,6 +375,7 @@ skill start(compiler) {
     compiler = load_stack_bytes(compiler, backend.SCRATCH1, 1)
     compiler = executor.sub(compiler, backend.STACK_LIMIT, backend.VALUE, backend.SCRATCH1)
     compiler = executor.label(compiler, ".L_start_stack_ready")
+    (compiler.signals == yes) { compiler = executor.call(compiler, "rt_install_signals") }
     compiler = executor.load(compiler, backend.VALUE, backend.STACK, 0)
     compiler = executor.load_immediate(compiler, backend.SCRATCH0, param_count + 1)
     compiler = executor.branch_greater_equal(compiler, backend.VALUE, backend.SCRATCH0, ".L_start_args_ready")

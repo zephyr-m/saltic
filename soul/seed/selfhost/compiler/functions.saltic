@@ -4,7 +4,8 @@
 -- аргументы из ARG0… в слоты, выход через <имя>_return с rt_region_exit (ARG3 =
 -- FRAME — откуда сканировать стек при разборе карантина; зовётся всегда:
 -- карантин разбирается и без выделений в регионе); ошибка — <имя>_failure
--- (кладёт имя навыка в путь ошибки — rt_trail_push).
+-- (кладёт в путь ошибки «навык · файл» и строку из слота FAIL_LINE — rt_trail_push;
+-- строку туда пишет заглушка оператора, emitters.on_error; в прологе — 0).
 -- Константа: геттер saltic_constant_get_<имя> считает один раз (значение
 -- переезжает в хранилище навсегда — rt_store_eternal), цикл — ERROR_CONSTANT_CYCLE. Метод Box: диспетчер по номеру типа в последнем поле.
 -- Команды — методами compiler.executor (договор backend).
@@ -29,6 +30,7 @@ use selfhost.compiler.constants
 use selfhost.compiler.backend
 use selfhost.compiler.codegen
 use selfhost.compiler.codegen.emitters
+use selfhost.compiler.codegen.failures
 use selfhost.checker
 use selfhost.compiler.backend.rv32i.runtime.tails
 
@@ -43,9 +45,10 @@ skill compile_function(compiler, name, params, body, subject, module) {
     @types = []
     drum (params) { types = state.type_set(types, beat, "unknown") }
     (str.bytes(subject) > 0) { types = state.type_set(types, "$self", "box:{subject}") }
-    compiler.current_function = state.Function { name = name, slots = slots, end = end, failure = failure, subject = subject, module = module, types = types }
+    compiler.current_function = state.Function { name = name, slots = slots, end = end, failure = failure, subject = subject, module = module, types = types, lined = yes }
     @function_label = str.concat("saltic_", state.safe(name))
     compiler = executor.label(compiler, function_label)
+    (compiler.signals == yes) { compiler.placed = group.add(compiler.placed, [function_label, emitters.string_label(compiler, failures.place_text(compiler))]) }
     @stack_ready = state.label(compiler, "stack_ready")
     compiler = executor.branch_greater_equal_unsigned(compiler, backend.STACK, backend.STACK_LIMIT, stack_ready)
     compiler = executor.load_immediate(compiler, backend.VALUE, 0)
@@ -62,14 +65,17 @@ skill compile_function(compiler, name, params, body, subject, module) {
         @slot = state.slot(compiler, group.get(params, beat))
         compiler = executor.store(compiler, backend.argument(beat), backend.FRAME, slot)
     }
+    compiler = executor.store_zero(compiler, backend.FRAME, state.slot(compiler, state.FAIL_LINE))
     compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
     compiler = codegen.compile_block(compiler, body, no)
     compiler = executor.load_immediate(compiler, backend.VALUE, abi.NONE)
     compiler = executor.load_immediate(compiler, backend.ERROR, abi.CALL_NO_ERROR)
     compiler = executor.jump(compiler, end)
+    compiler = emitters.emit_stubs(compiler)
     compiler = executor.label(compiler, failure)
-    compiler = executor.load_address(compiler, backend.VALUE, emitters.string_label(compiler, name), 0)
+    compiler = executor.load_address(compiler, backend.VALUE, emitters.string_label(compiler, failures.place_text(compiler)), 0)
     compiler = executor.or_immediate(compiler, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    compiler = executor.load(compiler, backend.ARG2, backend.FRAME, state.slot(compiler, state.FAIL_LINE))
     compiler = executor.call(compiler, "rt_trail_push")
     compiler = executor.load_immediate(compiler, backend.VALUE, 0)
     compiler = executor.load_immediate(compiler, backend.ARG2, constants.REGION_VALUE_SKIPPED)
