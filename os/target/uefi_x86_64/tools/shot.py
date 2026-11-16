@@ -11,7 +11,7 @@ LOCAL, ADDRESS = route()
 AGENT = (ADDRESS, 5555)
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((LOCAL, 0))
-sock.settimeout(30)
+sock.settimeout(1)
 started = time.time()
 sock.sendto(b"shot", AGENT)
 reply = sock.recvfrom(65535)[0].decode(errors="replace")
@@ -25,13 +25,15 @@ data = bytearray(total)
 sock.settimeout(1)
 retries = 0
 for index in range(chunks):
+    missed = 0
     while True:
         sock.sendto(f"shot-part {index}".encode(), AGENT)
         try:
             packet = sock.recvfrom(65535)[0]
         except socket.timeout:
             retries += 1
-            if retries > 50:
+            missed += 1
+            if missed > 1:
                 print(f"shot: агент молчит на куске {index}", file=sys.stderr)
                 sys.exit(1)
             continue

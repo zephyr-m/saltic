@@ -38,7 +38,7 @@ def bay_address(total):
     """Причал агента под заливку total байт: upload заранее даёт ему страницы
     нужного размера, upload.py потом получит те же."""
     asked = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    asked.settimeout(5)
+    asked.settimeout(1)
     asked.bind((LOCAL, 0))
     asked.sendto(f"upload {total}".encode(), (AGENT, 5555))
     asked.recvfrom(65535)
@@ -68,7 +68,7 @@ snippet = Path(sys.argv[2]).read_text() if sys.argv[1] == "-f" else " ".join(sys
 LOCAL, AGENT = route()
 os.environ["SALTIC_ACER"] = f"{LOCAL},{AGENT}"
 shown = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-shown.settimeout(5)
+shown.settimeout(1)
 shown.bind((LOCAL, 0))
 # Код уходит одним кадром: длинный разлетается на куски, а у агента 4 места
 # в кольце приёма — переполнение глушит приём карты насовсем.

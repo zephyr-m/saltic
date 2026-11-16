@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 PORT = 5555
-TRIES = 3
+TRIES = 1
 WAIT = 1.0
 CABLE = ("10.0.0.1", "10.0.0.2")
 MEMORY = Path.home() / ".cache" / "saltic" / "acer-wifi"

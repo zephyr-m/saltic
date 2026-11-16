@@ -51,7 +51,7 @@ def forget_path():
     os.environ.pop("SALTIC_ACER", None)
 
 
-def ask(cmd, params=None, timeout=8):
+def ask(cmd, params=None, timeout=1):
     global counter
     counter += 1
     local, agent = path()
@@ -102,7 +102,7 @@ def registry():
     commands, start = {}, 0
     try:
         while start is not None:
-            page = ask("help", {"from": start}, timeout=3).get("data", {})
+            page = ask("help", {"from": start}, timeout=1).get("data", {})
             commands.update(page.get("commands", {}))
             start = page.get("next")
     except OSError as err:
@@ -182,7 +182,7 @@ def handle(message, commands):
                 content, failed = call_extra(name, args)
             else:
                 cmd = next((key for key in commands if key.replace("-", "_") == name), name)
-                reply = ask(cmd, args, timeout=60 if cmd in ("volumes", "install", "keep", "usb", "pci", "wifi", "wifi-keep") else 8)
+                reply = ask(cmd, args, timeout=60 if cmd in ("volumes", "install", "keep", "drop", "keep-file", "usb", "pci", "wifi", "wifi-keep") else 1)
                 content, failed = reply_text(reply), reply.get("ok") is not True
         except (OSError, subprocess.TimeoutExpired) as err:
             forget_path()

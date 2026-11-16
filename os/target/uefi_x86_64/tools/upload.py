@@ -20,15 +20,19 @@ LOCAL, AGENT = route()
 sock.bind((LOCAL, 0))
 
 
-def ask(text, timeout=5, tries=3):
-    # Агент сразу после выхода из программы несколько секунд проверяет Wi-Fi
-    # и не слышит — первую команду повторяем.
+def ask(text, timeout=1, tries=1):
+    # Ответ дольше секунды — значит, не ответил (правило автора 16.11.2026).
     sock.settimeout(timeout)
     for attempt in range(tries):
         sock.sendto(text.encode(), (AGENT, COMMAND_PORT))
         try:
             reply, _ = sock.recvfrom(65535)
-            return reply.decode(errors="replace")
+            text = reply.decode(errors="replace")
+            # Запоздалое подтверждение куска (после повтора) — не ответ на команду.
+            while text.startswith("ok "):
+                reply, _ = sock.recvfrom(65535)
+                text = reply.decode(errors="replace")
+            return text
         except socket.timeout:
             if attempt == tries - 1:
                 raise
@@ -45,6 +49,7 @@ if answer.startswith("жду") == False:
 started = time.time()
 offset = 0
 retries = 0
+missed = 0
 next_report = 0
 sock.settimeout(1)
 while offset < len(data):
@@ -55,10 +60,12 @@ while offset < len(data):
         reply, _ = sock.recvfrom(65535)
     except socket.timeout:
         retries += 1
-        if retries > 20:
+        missed += 1
+        if missed > 1:
             print(f"upload: агент молчит на смещении {offset}, сдаюсь", file=sys.stderr)
             sys.exit(1)
         continue
+    missed = 0
     text = reply.decode(errors="replace")
     if not text.startswith("ok "):
         continue
@@ -77,4 +84,4 @@ if state.split()[-1] != str(local_sum):
     sys.exit(1)
 if run:
     print("upload: запускаю…", flush=True)
-    print(f"upload: агент: {ask('run', timeout=120)}", flush=True)
+    print(f"upload: агент: {ask('run', timeout=1)}", flush=True)
