@@ -1,12 +1,17 @@
 -- loader — собирает программу из файла и всех его use в одно дерево.
 -- Путь модуля — от root: seed/craft/canonical -> soul/, core/io/selfhost ->
--- soul/seed/, остальное — как есть. Узлы модуля обёрнуты ast.in_module;
+-- soul/seed/, остальное — как есть. Два корня (решение автора 17.11.2026):
+-- root — проект (его модули и tarantul/), дом Saltic — переменная окружения
+-- HOME_VARIABLE (core, io, os, registry…); модуля нет в проекте — берётся из
+-- дома; без переменной — один root, как прежде. Узлы модуля обёрнуты ast.in_module;
 -- entry (program) берётся только из корневого файла; повторный use
 -- пропускается, цикл — ошибка.
 --
 -- Load = Box { ast, included, diagnostics }
 -- join_path(base, relative) -> путь
 -- resolve_module(source_path, parts, root) -> путь к файлу модуля
+-- home() -> дом Saltic из HOME_VARIABLE или ""; located(path, parts, root) ->
+--     путь модуля: в проекте, а если там нет и дом задан — в доме
 -- load_error(path, problem, included, place) -> Load с одной ошибкой на месте place
 -- expand_file(path, root, locations, included, stack, module_name, place) -> Load;
 --     place = [строка, столбец] узла use, которым файл подключён ([0, 0] у корня)
@@ -15,10 +20,13 @@
 use io.file
 use core.str
 use core.group
+use core.process
 use selfhost.ast
 use selfhost.diagnostic
 use selfhost.errors
 use selfhost.parser.syntax
+
+HOME_VARIABLE = "SALTIC_HOME"
 
 Load = Box {
     ast = [],
@@ -41,6 +49,23 @@ skill resolve_module(source_path, parts, root) {
     (first == "io") { base = join_path(root, "soul/seed") }
     (first == "selfhost") { base = join_path(root, "soul/seed") }
     out join_path(base, str.concat(str.join(parts, "/"), ".saltic"))
+}
+
+skill home() {
+    @head = "{HOME_VARIABLE}="
+    drum (process.environment()) {
+        (str.starts_with(beat, head) == yes) { out str.slice(beat, str.bytes(head), str.bytes(beat)) }
+    }
+    out ""
+}
+
+skill located(path, parts, root) {
+    @here = resolve_module(path, parts, root)
+    @other = home()
+    (str.bytes(other) == 0) { out here }
+    (other == root) { out here }
+    file.read(here) rescue |err| { out resolve_module(path, parts, other) }
+    out here
 }
 
 skill load_error(path, problem, included, place) {
@@ -78,7 +103,7 @@ skill expand_file(path, root, locations, included, stack, module_name, place) {
         }
         (group.get(plain, 0) == "use") {
             @parts = syntax.append_tail([], plain, 1)
-            @module_path = resolve_module(path, parts, root)
+            @module_path = located(path, parts, root)
             @loaded = expand_file(module_path, root, locations, next_included, next_stack, str.join(parts, "."), ast.location(item))
             next_included = loaded.included
             (diagnostic.has(loaded.diagnostics) == yes) {

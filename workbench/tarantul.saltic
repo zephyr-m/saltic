@@ -1,0 +1,517 @@
+-- tarantul — пакетный менеджер Saltic, первая версия (решение автора
+-- 17.11.2026): `just tarantul get|update|list|check`. Что нужно проекту —
+-- MANIFEST в корне: {"project": имя, "packages": {имя: версия}}; что приехало
+-- на самом деле — замок LOCK: {"packages": {имя: {"version", "source",
+-- "fingerprint", "required_by"}}} (ключи — английские, решение автора 17.11.2026), его пишет только tarantul, оба файла — в git.
+-- Каталог пакетов — реестры CATALOGS (registry/adapters, registry/libraries:
+-- «имя путь»), версия пакета — own_version паспорта (workbench/passport).
+-- Привезённое — в tarantul/<имя>/ (в git не хранится: строку IGNORED tarantul
+-- сам дописывает в .gitignore), программы пишут `use tarantul.<имя>.<модуль>`.
+-- Внутри пакета пути реестра (registry.… и registry/…) переписываются на
+-- tarantul.<имя>; пакеты, которые он зовёт через use, привозятся тоже.
+-- Отпечаток — CRC32 (formats/apk/zip) привезённых файлов по порядку имён:
+-- пакет той же версии изменился (в каталоге или руками в tarantul/) — ошибка
+-- с причиной, а не тихая подмена. get держится замка, update берёт версии
+-- каталога и переписывает MANIFEST и LOCK. Чужой проект берёт каталог из дома
+-- Saltic (SALTIC_HOME, как загрузчик модулей selfhost.parser.loader).
+--
+-- Package { name, path, root, base, inside, version } — пакет каталога;
+--     inside = yes — вход в своей папке (<папка>/<имя>/<имя>), иначе вход и
+--     паспорт рядом с папкой (библиотека)
+-- Locked { name, version, source, print, asker } — строка замка
+-- program(command) — get, update, list или check
+-- Внутри: catalog / find — каталог; manifest / project_name — MANIFEST;
+--     locks / locked — замок; install(package, packages, asker, old) ->
+--     Locked; fingerprint(folder) -> «crc32 XXXXXXXX»; closure(names,
+--     packages) -> [[имя, кто попросил]]; save_lock / save_manifest — JSON;
+--     rewritten — пути реестра на tarantul; copy — файл, тексты переписанными
+
+use io
+use io.file
+use core.str
+use core.num
+use core.group
+use core.bytes
+use core.process
+use craft.protocols.data.json
+use craft.protocols.data.json.value
+use craft.protocols.data.json.reader
+use formats.apk.zip
+use selfhost.parser.loader
+use os.target.uefi_x86_64.network.mrpc
+use os.target.uefi_x86_64.platform.utf8
+use workbench.passport
+
+MANIFEST = "tarantul.json"
+LOCK = "tarantul.lock"
+HOME = "tarantul"
+CATALOGS = ["registry/adapters/adapters.txt", "registry/libraries/libraries.txt"]
+IGNORE = ".gitignore"
+IGNORED = "/tarantul/"
+TEXTS = [".saltic", ".jtml", ".txt", ".md", ".json"]
+HEX = "0123456789abcdef"
+PROJECT = "project"
+
+Package = Box {
+    name = "",
+    path = "",
+    root = "",
+    base = "",
+    inside = no,
+    version = ""
+}
+
+Locked = Box {
+    name = "",
+    version = "",
+    source = "",
+    print = "",
+    asker = ""
+}
+
+skill words(line) {
+    @found = []
+    drum (str.split(line, " ")) {
+        (str.bytes(beat) > 0) { found = group.add(found, beat) }
+    }
+    out found
+}
+
+skill last(path) {
+    @parts = str.split(path, "/")
+    out group.get(parts, group.count(parts) - 1)
+}
+
+skill parent(path) {
+    out str.slice(path, 0, str.bytes(path) - str.bytes(last(path)) - 1)
+}
+
+skill source(path) {
+    @home = loader.home()
+    (str.bytes(home) == 0) { out path }
+    out "{home}/{path}"
+}
+
+skill dots(path) {
+    out str.join(str.split(path, "/"), ".")
+}
+
+skill replaced(text, from, to) {
+    out str.join(str.split(text, from), to)
+}
+
+skill must(code, what) {
+    ((code == 0) == no) {
+        io.show("tarantul: не вышло — {what}, код {code}")
+        out error.TarantulFailed
+    }
+    out none
+}
+
+skill catalog() {
+    @found = []
+    drum (CATALOGS) {
+        @where = source(beat)
+        @text = file.read(where) rescue |err| {
+            io.show("tarantul: каталог {where} не прочитан ({err}) — дом Saltic задаёт SALTIC_HOME")
+            out error.NoCatalog
+        }
+        drum (str.lines(text)) {
+            @line = words(beat)
+            @usable = group.count(line) >= 2
+            (str.starts_with(beat, "#") == yes) { usable = no }
+            (usable == yes) {
+                @path = group.get(line, 1)
+                @base = last(path)
+                @inside = last(parent(path)) == base
+                @root = path
+                (inside == yes) { root = parent(path) }
+                @version = ""
+                @card = passport.read(source("{path}{passport.SUFFIX}")) rescue |err| { none }
+                (card) |card| { version = passport.field(card, "own_version") }
+                found = group.add(found, Package { name = group.get(line, 0), path = path, root = root, base = base, inside = inside, version = version })
+            }
+        }
+    }
+    out found
+}
+
+skill find(packages, name) {
+    drum (packages) {
+        (beat.name == name) { out beat }
+    }
+    @where = str.join(CATALOGS, ", ")
+    io.show("tarantul: пакета «{name}» нет в каталогах {where}")
+    out error.UnknownPackage
+}
+
+skill json_of(path, missing) {
+    @text = file.read(path) rescue |err| { out missing }
+    @parsed = reader.parse(text)
+    (parsed.ok == no) {
+        io.show("tarantul: {path} — не JSON: {parsed.message} (знак {parsed.index})")
+        out error.BadJson
+    }
+    out parsed.value
+}
+
+skill members(item, key) {
+    @found = value.get(item, key)
+    (found.found == no) { out [] }
+    out found.value.members
+}
+
+skill named(member) {
+    out mrpc.plain(value.string_text(member.name))
+}
+
+skill manifest() {
+    @made = json_of(MANIFEST, none)
+    (made == none) {
+        io.show("tarantul: нет {MANIFEST} в корне проекта — \{\"project\": имя, \"packages\": \{имя: версия\}\}")
+        out error.NoManifest
+    }
+    @found = []
+    drum (members(made, "packages")) { found = group.add(found, [named(beat), mrpc.plain(beat.value)]) }
+    out found
+}
+
+skill project_name() {
+    @made = json_of(MANIFEST, value.object([]))
+    out passport.field(made, PROJECT)
+}
+
+skill locks() {
+    @made = json_of(LOCK, value.object([]))
+    @found = []
+    drum (members(made, "packages")) {
+        @item = beat.value
+        found = group.add(found, Locked { name = named(beat), version = passport.field(item, "version"), source = passport.field(item, "source"), print = passport.field(item, "fingerprint"), asker = passport.field(item, "required_by") })
+    }
+    out found
+}
+
+skill locked(entries, name) {
+    drum (entries) {
+        (beat.name == name) { out beat }
+    }
+    out none
+}
+
+skill quoted(text) {
+    @made = mrpc.quoted_text(text)
+    out utf8.decode(made, 0, group.count(made))
+}
+
+skill save_lock(entries) {
+    @rows = []
+    drum (entries) {
+        @name = quoted(beat.name)
+        @version = quoted(beat.version)
+        @from = quoted(beat.source)
+        @print = quoted(beat.print)
+        @asker = quoted(beat.asker)
+        rows = group.add(rows, "    {name}: \{\"version\": {version}, \"source\": {from}, \"fingerprint\": {print}, \"required_by\": {asker}\}")
+    }
+    @inside = str.join(rows, ",\n")
+    out file.write(LOCK, "\{\n  \"packages\": \{\n{inside}\n  \}\n\}\n")
+}
+
+skill save_manifest(wanted) {
+    @rows = []
+    drum (wanted) {
+        @name = quoted(group.get(beat, 0))
+        @version = quoted(group.get(beat, 1))
+        rows = group.add(rows, "    {name}: {version}")
+    }
+    @inside = str.join(rows, ",\n")
+    @title = quoted(project_name())
+    out file.write(MANIFEST, "\{\n  \"project\": {title},\n  \"packages\": \{\n{inside}\n  \}\n\}\n")
+}
+
+skill rewritten(text, packages) {
+    @made = text
+    drum (packages) {
+        @to_dot = "{HOME}.{beat.name}"
+        @to_slash = "{HOME}/{beat.name}"
+        @from_dot = dots(beat.root)
+        made = replaced(made, "{from_dot}.", "{to_dot}.")
+        made = replaced(made, "{beat.root}/", "{to_slash}/")
+        (beat.inside == no) {
+            made = replaced(made, "{beat.root}.saltic", "{to_slash}/{beat.base}.saltic")
+            made = replaced(made, "{beat.root}{passport.SUFFIX}", "{to_slash}/{beat.base}{passport.SUFFIX}")
+            made = replaced(made, from_dot, "{to_dot}.{beat.base}")
+        }
+    }
+    out made
+}
+
+skill files(folder) {
+    @found = []
+    @names = file.list(folder) rescue |err| { out [folder] }
+    drum (names) { found = group.concat(found, files("{folder}/{beat}")) }
+    out found
+}
+
+skill before(left, right) {
+    @count = str.bytes(left)
+    (str.bytes(right) < count) { count = str.bytes(right) }
+    drum (count) {
+        @a = str.byte(left, beat)
+        @b = str.byte(right, beat)
+        (a < b) { out yes }
+        (a > b) { out no }
+    }
+    out str.bytes(left) < str.bytes(right)
+}
+
+skill sorted(items) {
+    @made = []
+    drum (items) {
+        @item = beat
+        @at = 0
+        drum (group.count(made)) {
+            (before(group.get(made, beat), item) == yes) { at = beat + 1 }
+        }
+        made = group.concat(group.add(group.slice(made, 0, at), item), group.slice(made, at, group.count(made)))
+    }
+    out made
+}
+
+skill fingerprint(folder) {
+    @parts = []
+    @total = 0
+    drum (sorted(files(folder))) {
+        @name = str.slice(beat, str.bytes(folder), str.bytes(beat))
+        @body = file.read_bytes(beat)
+        parts = group.add(parts, [name, body])
+        total = total + str.bytes(name) + 1 + bytes.count(body)
+    }
+    @buffer = bytes.new(total)
+    @at = 0
+    drum (parts) {
+        @name = group.get(beat, 0)
+        @body = group.get(beat, 1)
+        drum (str.bytes(name)) { bytes.set(buffer, at + beat, str.byte(name, beat)) }
+        at = at + str.bytes(name) + 1
+        drum (bytes.count(body)) { bytes.set(buffer, at + beat, bytes.get(body, beat)) }
+        at = at + bytes.count(body)
+    }
+    @sum = zip.crc32(buffer, zip.crc_table())
+    @text = "crc32 "
+    drum (4) {
+        @byte = group.get(sum, 3 - beat)
+        text = str.concat(text, str.concat(str.get(HEX, byte / 16), str.get(HEX, byte % 16)))
+    }
+    out text
+}
+
+skill outside(package) {
+    (package.inside == yes) { out [] }
+    out [[source("{package.path}.saltic"), "{package.base}.saltic"], [source("{package.path}{passport.SUFFIX}"), "{package.base}{passport.SUFFIX}"]]
+}
+
+skill texts(package) {
+    @all = ""
+    @paths = files(source(package.root))
+    drum (outside(package)) { paths = group.add(paths, group.get(beat, 0)) }
+    drum (paths) {
+        @path = beat
+        drum (TEXTS) {
+            (str.ends_with(path, beat) == yes) {
+                @text = file.read(path) rescue |err| { "" }
+                all = str.concat(all, text)
+            }
+        }
+    }
+    out all
+}
+
+skill needed(package, packages) {
+    @code = texts(package)
+    @found = []
+    drum (packages) {
+        ((beat.name == package.name) == no) {
+            @prefix = dots(beat.root)
+            (str.contains(code, "use {prefix}") == yes) { found = group.add(found, beat.name) }
+        }
+    }
+    out found
+}
+
+skill closure(names, packages) {
+    @queue = []
+    drum (names) { queue = group.add(queue, [beat, PROJECT]) }
+    @at = 0
+    drum (64) {
+        (at < group.count(queue)) {
+            @asker = group.get(group.get(queue, at), 0)
+            @have = []
+            drum (queue) { have = group.add(have, group.get(beat, 0)) }
+            drum (needed(find(packages, asker), packages)) {
+                (group.contains(have, beat) == no) {
+                    io.show("tarantul: «{beat}» нужен «{asker}» — привезу по зависимости")
+                    queue = group.add(queue, [beat, asker])
+                    have = group.add(have, beat)
+                }
+            }
+            at = at + 1
+        }
+    }
+    out queue
+}
+
+skill copy(from, to, packages) {
+    @folder = parent(to)
+    must(process.run(["mkdir", "-p", folder], "", []), "папка {folder}")
+    drum (TEXTS) {
+        (str.ends_with(from, beat) == yes) {
+            @text = file.read(from) rescue |err| {
+                io.show("tarantul: не прочитан {from} ({err})")
+                out error.TarantulFailed
+            }
+            out file.write(to, rewritten(text, packages))
+        }
+    }
+    out file.write_bytes(to, file.read_bytes(from))
+}
+
+skill install(package, packages, asker, old) {
+    @place = "{HOME}/{package.name}"
+    @fresh = "{HOME}/.{package.name}.new"
+    must(process.run(["rm", "-rf", fresh], "", []), "убрать {fresh}")
+    @from = source(package.root)
+    drum (files(from)) { copy(beat, str.concat(fresh, str.slice(beat, str.bytes(from), str.bytes(beat))), packages) }
+    drum (outside(package)) {
+        @target = group.get(beat, 1)
+        copy(group.get(beat, 0), "{fresh}/{target}", packages)
+    }
+    @print = fingerprint(fresh)
+    (old) |old| {
+        (old.version == package.version) {
+            ((old.print == print) == no) {
+                must(process.run(["rm", "-rf", fresh], "", []), "убрать {fresh}")
+                io.show("tarantul: «{package.name}» версии {package.version} изменился без новой версии — в замке {old.print}, сейчас {print}; поднимите own_version в паспорте ({package.path}{passport.SUFFIX}) и `just tarantul update`")
+                out error.ChangedWithoutVersion
+            }
+        }
+    }
+    must(process.run(["rm", "-rf", place], "", []), "убрать старый {place}")
+    must(process.run(["mv", fresh, place], "", []), "положить {place}")
+    out Locked { name = package.name, version = package.version, source = package.root, print = print, asker = asker }
+}
+
+skill ignored() {
+    @text = file.read(IGNORE) rescue |err| { "" }
+    drum (str.lines(text)) {
+        (beat == IGNORED) { out none }
+    }
+    @tail = ""
+    (str.bytes(text) > 0) {
+        (str.ends_with(text, "\n") == no) { tail = "\n" }
+    }
+    file.write(IGNORE, "{text}{tail}# пакеты, которые привёз tarantul (по {MANIFEST}) — у каждого проекта свои\n{IGNORED}\n")
+    out io.show("tarantul: дописала {IGNORED} в {IGNORE} — привезённое в git не уходит")
+}
+
+skill fetch(fresh) {
+    @packages = catalog()
+    @wanted = manifest()
+    @previous = locks()
+    (fresh == yes) { previous = [] }
+    @names = []
+    @kept = []
+    drum (wanted) {
+        @name = group.get(beat, 0)
+        @version = group.get(beat, 1)
+        @package = find(packages, name)
+        (fresh == yes) { version = package.version }
+        @old = locked(previous, name)
+        (old) |old| {
+            ((old.version == version) == no) {
+                io.show("tarantul: «{name}» — в {MANIFEST} версия {version}, в замке {old.version}; `just tarantul update` возьмёт версии каталога")
+                out error.VersionMismatch
+            }
+        }
+        ((package.version == version) == no) {
+            io.show("tarantul: «{name}» — нужна версия {version}, в каталоге {package.version} ({package.path}{passport.SUFFIX}); `just tarantul update` возьмёт её")
+            out error.VersionMismatch
+        }
+        names = group.add(names, name)
+        kept = group.add(kept, [name, version])
+    }
+    @queue = closure(names, packages)
+    @total = group.count(queue)
+    @made = []
+    drum (total) {
+        @name = group.get(group.get(queue, beat), 0)
+        @package = find(packages, name)
+        @number = beat + 1
+        io.show("tarantul: {number}/{total} {name} {package.version} ← {package.root}")
+        made = group.add(made, install(package, packages, group.get(group.get(queue, beat), 1), locked(previous, name)))
+    }
+    save_lock(made)
+    (fresh == yes) {
+        save_manifest(kept)
+        io.show("tarantul: {MANIFEST} — версии каталога")
+    }
+    ignored()
+    out io.show("tarantul: привезено {total} в {HOME}/, замок — {LOCK}")
+}
+
+skill list() {
+    @entries = locks()
+    @count = group.count(entries)
+    io.show("tarantul: в замке {LOCK} — {count}")
+    drum (entries) {
+        @have = fingerprint("{HOME}/{beat.name}") rescue |err| { "не привезён" }
+        @why = "для проекта"
+        ((beat.asker == PROJECT) == no) { why = "по зависимости «{beat.asker}»" }
+        io.show("  {beat.name} {beat.version} — {why}, откуда {beat.source}, {have}")
+    }
+    out none
+}
+
+skill check() {
+    @entries = locks()
+    @problems = 0
+    drum (manifest()) {
+        @name = group.get(beat, 0)
+        @version = group.get(beat, 1)
+        @old = locked(entries, name)
+        (old == none) {
+            io.show("  {name}: нет в замке — just tarantul")
+            problems = problems + 1
+        }
+        (old) |old| {
+            ((old.version == version) == no) {
+                io.show("  {name}: в {MANIFEST} {version}, в замке {old.version}")
+                problems = problems + 1
+            }
+        }
+    }
+    drum (entries) {
+        @have = fingerprint("{HOME}/{beat.name}") rescue |err| { "не привезён" }
+        pick {
+            ((have == beat.print) == no) {
+                io.show("  {beat.name}: в замке {beat.print}, привезено {have} — just tarantul")
+                problems = problems + 1
+            }
+            { io.show("  {beat.name} {beat.version} — на месте, {have}") }
+        }
+    }
+    (problems > 0) {
+        io.show("tarantul: не сходится {problems}")
+        out error.TarantulBroken
+    }
+    out io.show("tarantul: всё на месте")
+}
+
+program(command) {
+    (command == "get") { out fetch(no) }
+    (command == "update") { out fetch(yes) }
+    (command == "list") { out list() }
+    (command == "check") { out check() }
+    io.show("tarantul: команды — get (привезти по {MANIFEST} и {LOCK}), update (версии каталога), list (что есть), check (всё ли на месте)")
+    out error.UnknownCommand
+}

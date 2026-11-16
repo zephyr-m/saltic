@@ -9,13 +9,18 @@
 -- Agent — всё состояние цикла; card.base — guest_base. Ответ на команду —
 -- текст до REPLY_LIMIT байт плюс вывод запущенной программы (reply.*).
 --
--- Agent { card, frames, commands, arp, expected, received, total, columns,
+-- Agent { card, frames, commands, arp, expected, received, total, spent, columns,
 --     rows, line, cursor, console, shown_second, rounds, failures, last_error,
 --     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, limit,
 --     linked, opening, saver, active_at, wifi, wifi_text, dream, via, trace }
+--     spent — принятое уже запускалось: пока оно работало, его буфер (bay) мог
+--     занять кто угодно, поэтому после возврата принятое забывается, а run
+--     отвечает «залей заново», а не прыгает в затёртый образ (зависал)
 -- Входы (кабель, Wi-Fi: transmit, wifi_up, …) — agent.inputs; журнал сети
 --     для отладки (экран и \SALTIC\agent.log) — agent.trace, поле trace
 -- wifi_keep(agent) -> текст — посылку из причала на диск
+-- keep_file_command(agent, words) -> текст — keep-file <папка> <имя>: принятый
+--     файл в \SALTIC\папка\имя (шрифты в FONTS, данные программ)
 -- poll_wifi(agent) — до WIFI_FRAMES кадров из Wi-Fi в handle с via = wifi;
 --     точка выгнала (chip.lost) — подключиться заново
 -- day_second(base) -> секунда суток / wake(agent) -> yes, если снят хранитель;
@@ -24,7 +29,7 @@
 --     только если за круг не пришло ни одного кадра сети (seen — счётчик
 --     кадров в начале круга): снимок и заливка идут сотнями пакетов подряд
 -- log(agent, message) — в консоль, пока console = yes
--- begin_upload / upload_state / launch / keep_program / open_by_word /
+-- begin_upload / upload_state / launch / keep_program / drop_program / open_by_word /
 --     memory_dump / prepare_disk / install_image / time_reply / show_code /
 --     device_list / information / draw_test / clear_screen / home_state /
 --     print_line / restart_later(agent[, words|payload]) -> текст ответа команды
@@ -95,7 +100,7 @@ use os.target.uefi_x86_64.platform.utf8
 use os.target.uefi_x86_64.agent.inputs
 use os.target.uefi_x86_64.agent.trace
 
-VERSION = 50
+VERSION = 55
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -121,6 +126,8 @@ Agent = Box {
     expected = 0,
     received = 0,
     total = 0,
+    spent = no,
+    bar = 0,
     columns = 0,
     rows = 0,
     line = 0,
@@ -207,6 +214,7 @@ skill begin_upload(agent, words) {
     agent.expected = size
     agent.received = 0
     agent.total = 0
+    agent.spent = no
     log(agent, "upload: waiting for {size} bytes on port 5556")
     out "жду {size} байт на порту 5556"
 }
@@ -219,6 +227,7 @@ skill upload_state(agent) {
 }
 
 skill launch(agent) {
+    (agent.spent == yes) { out "принятая программа уже отработала: её буфер могла занять она сама — залей заново (upload)" }
     (agent.expected == 0) { out "ничего не принято" }
     ((agent.received == agent.expected) == no) { out str.concat("приём не закончен: ", upload_state(agent)) }
     @size = agent.expected
@@ -233,6 +242,9 @@ skill launch(agent) {
     @status = "{code}"
     (outcome.failed == yes) { status = "ошибка прошивки {code}" }
     log(agent, "run: image returned")
+    agent.expected = 0
+    agent.received = 0
+    agent.spent = yes
     rtl8111.configure(agent.card)
     rtl8111.wait_link(agent.card) rescue |err| { none }
     agent.linked = has_link(agent.card)
@@ -414,6 +426,16 @@ skill keep_program(agent, words) {
     out "сохранил {name}: {written} байт в \\SALTIC\\BIN"
 }
 
+skill drop_program(agent, words) {
+    (group.count(words) < 2) { out "как: drop <имя>" }
+    @name = group.get(words, 1)
+    @removed = programs.drop(agent.card.base, name)
+    (removed == no) { out "{name} на полке нет" }
+    system_panel.measure_disk(agent.card.base) rescue |err| { none }
+    (agent.lent == no) { refresh_shelf(agent) }
+    out "удалил {name} с полки \\SALTIC\\BIN"
+}
+
 skill home_state(agent) {
     @shelf_list = str.join(agent.names, ", ")
     @chosen = "нет"
@@ -445,6 +467,7 @@ skill open_program(agent) {
     trim_bay(agent, size)
     agent.expected = size
     agent.received = size
+    agent.spent = no
     feed.show_command(agent, "клавиатура", feed.text_bytes("открываю {name}", 64))
     @result = launch(agent)
     out feed.show_reply(agent, feed.text_bytes(result, 200))
@@ -558,6 +581,7 @@ skill execute(agent, text, payload) {
     (name == "usb") { out usb.report(agent.card.base) }
     (name == "code") { out show_code(agent, payload) }
     (name == "keep") { out keep_program(agent, words) }
+    (name == "drop") { out drop_program(agent, words) }
     (name == "open") { out open_by_word(agent, words) }
     (name == "state") { out home_state(agent) }
     (name == "camera") { out camera.report(agent.card.base) }
@@ -578,6 +602,7 @@ skill execute(agent, text, payload) {
         out inputs.wifi_up(agent, network, VERSION)
     }
     (name == "wifi-keep") { out wifi_keep(agent) }
+    (name == "keep-file") { out keep_file_command(agent, words) }
     (name == "log") { out trace.level(agent.trace, agent.card.base, words) }
     (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
     @help = commands.help_text()
@@ -753,6 +778,17 @@ skill wifi_keep(agent) {
     out "сохранил прошивку Wi-Fi: {written} байт в \\SALTIC\\{WIFI_FOLDER}\\{WIFI_FILE}"
 }
 
+skill keep_file_command(agent, words) {
+    (group.count(words) < 3) { out "как: keep-file <папка> <имя>" }
+    (agent.expected == 0) { out "ничего не принято" }
+    ((agent.received == agent.expected) == no) { out str.concat("приём не закончен: ", upload_state(agent)) }
+    @folder = str.upper(group.get(words, 1))
+    @name = str.upper(group.get(words, 2))
+    @written = programs.keep_file(agent.card.base, agent.bay, agent.expected, folder, name)
+    system_panel.measure_disk(agent.card.base) rescue |err| { none }
+    out "сохранил {written} байт в \\SALTIC\\{folder}\\{name}"
+}
+
 skill poll_wifi(agent) {
     (agent.wifi == none) { out none }
     (agent.wifi.lost == yes) {
@@ -868,6 +904,7 @@ skill run() {
         trace.urgent(tracer, card.base, "card: configure failed ({err})")
         out err
     }
+    trace.wire(tracer, card)
     trace.link(tracer, card)
     arena_map.check()
     @bay = firmware.region(card.base, "bay")

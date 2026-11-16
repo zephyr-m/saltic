@@ -2,24 +2,26 @@
 -- registry/adapters/adapters.txt проверяется по паспорту и коду, итог —
 -- registry/adapters/index.json.
 -- Проверки адаптера:
---   паспорт — <путь>.passport.txt есть, все поля FIELDS на месте (и «журнал: что
+--   паспорт — <путь>.passport.json (workbench/passport) есть, все поля FIELDS на месте (и «журнал: что
 --     пишет», решение автора 11.11.2026), роль «адаптер»
 --   архитектуры — каждая из паспорта известна (ARCHES) и путь лежит в её папке
 --   код — lens check чист у <путь>.saltic и у всех *.saltic в папке <путь>/:
 --     разбор, чекер, лимиты канона (драйвер — модуль, своей сборки у него нет)
 --   эффекты — заявленное в «эффекты:» совпадает с выведенным из кода: нашёл
 --     своё устройство (firmware.find_device) и пишет (firmware.write…) — «пишет
---     в железо», иначе «только читает»; пишет файлы (files.write) — в паспорте
+--     в железо»; на голом железе ESP32 устройство по адресу, без поиска: пишет
+--     в регистры (mem.store) — тоже «пишет в железо»; иначе «только читает»; пишет файлы (files.write) — в паспорте
 --     должно быть слово «диск»
---   идентификаторы — у «pci VVVV:DDDD» и «usb VVVV» числа стоят константами
---     в коде; «uefi …» — протокол прошивки, сверять нечего
+--   идентификаторы — у «pci VVVV:DDDD», «usb VVVV» и «i2c AA» (адрес со
+--     сдвигом) числа стоят константами в коде; «uefi …», «esp32 …», «android
+--     …» (NAMED) — протокол прошивки, блок чипа или служба системы, сверять нечего
 -- Печатает ход по каждому адаптеру; есть провал — ошибка RegistryBroken.
 --
 -- program() — сверить всё, записать индекс
 -- Внутри: entries(text) -> [[имя, путь]]; field(passport, key) -> значение
 --     или ""; stripped(text) -> без пробелов слева; codes(folder) -> файлы
 --     *.saltic в папке и глубже; lensed(path) -> "ok" или замечания;
---     inferred(code) -> эффекты; hex(text) -> число; id_problems(ids, code);
+--     inferred(code, archs) -> эффекты; hex(text) -> число; id_problems(ids, code);
 --     checked(name, path) -> [замечания, json адаптера]; quoted(text) -> JSON-строка
 
 use io
@@ -27,12 +29,15 @@ use io.file
 use core.str
 use core.group
 use core.process
+use workbench.passport
 
 LIST = "registry/adapters/adapters.txt"
 INDEX = "registry/adapters/index.json"
 LENS = ".cache/build/workbench/lens"
-FIELDS = ["адаптер", "версия", "автор", "роль", "время жизни", "срок", "эффекты", "железо", "идентификаторы", "своя версия", "протоколы", "архитектуры", "примитивы", "зависит от", "среда", "состояние", "журнал"]
-ARCHES = [["x86_64-uefi", "os/target/uefi_x86_64/"]]
+FIELDS = ["title", "saltic_version", "author", "role", "lifetime", "deadline", "effects", "hardware", "identifiers", "own_version", "protocols", "architectures", "primitives", "depends_on", "environment", "state", "log"]
+ROLE = "adapter"
+ARCHES = [["x86_64-uefi", "os/target/uefi_x86_64/"], ["xtensa-esp32", "registry/adapters/esp32/"], ["arm64-android", "registry/adapters/android/"]]
+NAMED = ["uefi", "esp32", "android"]
 HARDWARE = "пишет в железо"
 READS = "только читает"
 
@@ -61,12 +66,8 @@ skill stripped(text) {
     out str.slice(text, start, str.bytes(text))
 }
 
-skill field(passport, key) {
-    @head = "{key}:"
-    drum (str.lines(passport)) {
-        (str.starts_with(beat, head) == yes) { out stripped(str.slice(beat, str.bytes(head), str.bytes(beat))) }
-    }
-    out ""
+skill field(card, key) {
+    out passport.field(card, key)
 }
 
 skill codes(folder) {
@@ -87,9 +88,12 @@ skill lensed(path) {
     out text
 }
 
-skill inferred(code) {
+skill inferred(code, archs) {
     (str.contains(code, "firmware.find_device") == yes) {
         (str.contains(code, "firmware.write") == yes) { out HARDWARE }
+    }
+    (str.contains(archs, "xtensa-esp32") == yes) {
+        (str.contains(code, "mem.store") == yes) { out HARDWARE }
     }
     out READS
 }
@@ -123,7 +127,8 @@ skill id_problems(ids, code) {
             @numbers = []
             (kind == "pci") { numbers = str.split(group.get(words, 1), ":") }
             (kind == "usb") { numbers = [group.get(words, 1)] }
-            ((kind == "uefi") == no) {
+            (kind == "i2c") { numbers = [group.get(words, 1)] }
+            (group.contains(NAMED, kind) == no) {
                 (group.count(numbers) == 0) { problems = group.add(problems, "неизвестный вид идентификатора «{kind}»") }
             }
             drum (numbers) {
@@ -195,44 +200,44 @@ skill text_of(files) {
 }
 
 skill checked(name, path) {
-    @passport_path = "{path}.passport.txt"
-    @passport = file.read(passport_path) rescue |err| {
-        @missing = ["нет паспорта {passport_path}"]
+    @passport_path = "{path}{passport.SUFFIX}"
+    @card = passport.read(passport_path) rescue |err| {
+        @missing = ["паспорт {passport_path}: {err}"]
         out [missing, object([pair("name", quoted(name)), pair("ok", "false"), pair("problems", listed(missing))])]
     }
     @problems = []
     drum (FIELDS) {
-        (str.bytes(field(passport, beat)) == 0) { problems = group.add(problems, "в паспорте нет поля «{beat}»") }
+        (str.bytes(field(card, beat)) == 0) { problems = group.add(problems, "в паспорте нет поля «{beat}»") }
     }
-    ((field(passport, "роль") == "адаптер") == no) { problems = group.add(problems, "роль в паспорте — не «адаптер»") }
-    problems = group.concat(problems, arch_problems(field(passport, "архитектуры"), path))
+    ((field(card, "role") == ROLE) == no) { problems = group.add(problems, "role в паспорте — не «{ROLE}»") }
+    problems = group.concat(problems, arch_problems(field(card, "architectures"), path))
     @files = group.concat(["{path}.saltic"], codes(path))
     problems = group.concat(problems, code_problems(files))
     @code = text_of(files)
-    @effects = field(passport, "эффекты")
+    @effects = field(card, "effects")
     @declared = effects
     (str.contains(effects, ":") == yes) { declared = group.get(str.split(effects, ":"), 0) }
-    @effect = inferred(code)
+    @effect = inferred(code, field(card, "architectures"))
     ((declared == effect) == no) { problems = group.add(problems, "эффекты: в паспорте «{declared}», по коду «{effect}»") }
     (str.contains(code, "files.write") == yes) {
         (str.contains(effects, "диск") == no) { problems = group.add(problems, "код пишет файлы, а в эффектах нет диска") }
     }
-    @ids = field(passport, "идентификаторы")
+    @ids = field(card, "identifiers")
     problems = group.concat(problems, id_problems(ids, code))
     @good = "true"
     (group.count(problems) > 0) { good = "false" }
     @count = group.count(files)
     @made = object([
         pair("name", quoted(name)),
-        pair("title", quoted(field(passport, "адаптер"))),
+        pair("title", quoted(field(card, "title"))),
         pair("code", quoted("{path}.saltic")),
         pair("passport", quoted(passport_path)),
         pair("files", "{count}"),
         pair("ids", listed(str.split(ids, ", "))),
-        pair("own_version", quoted(field(passport, "своя версия"))),
-        pair("arches", listed(str.split(field(passport, "архитектуры"), ", "))),
+        pair("own_version", quoted(field(card, "own_version"))),
+        pair("arches", listed(str.split(field(card, "architectures"), ", "))),
         pair("effects", quoted(effect)),
-        pair("state", quoted(field(passport, "состояние"))),
+        pair("state", quoted(field(card, "state"))),
         pair("ok", good),
         pair("problems", listed(problems))
     ])

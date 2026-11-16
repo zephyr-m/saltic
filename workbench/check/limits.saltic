@@ -7,10 +7,14 @@
 -- автор): им можно не расти, но не ухудшаться. Новое или выросшее — ошибка
 -- LimitsBroken (код 1). Вместо workbench/limits.sh (в .archive/); вызывается
 -- `just limits` и global-check.
+-- Немота запрещена (закон автора 16.11.2026): вывод программы в никуда — путь
+-- MUTE в .saltic, justfile, скриптах .sh и workflows — ошибка Muted (код 1),
+-- без исключений и без KNOWN. Вывод — в журнал-файл или на экран.
 --
--- Tally { checked, old, new, grown, long } — итог; long — длинных шапок; замер и сверка — limits/canon
+-- Tally { checked, old, new, grown, long, mute } — итог; long — длинных шапок,
+--     mute — файлов с немотой; замер и сверка — limits/canon
 -- program() — проверить все файлы, напечатать нарушения и итог
--- Внутри: check(tally, known, path)
+-- Внутри: check(tally, known, path); silent(tally, path) — поиск немоты
 
 use io
 use io.file
@@ -24,7 +28,25 @@ Tally = Box {
     old = 0,
     new = 0,
     grown = 0,
-    long = 0
+    long = 0,
+    mute = 0
+}
+
+MUTE = str.concat("/dev/", "null")
+SCRIPTS = ["justfile", "*.sh", ".github/workflows/*.yml"]
+
+skill silent(tally, path) {
+    @lines = str.lines(file.read(path))
+    @found = no
+    drum (group.count(lines)) {
+        (str.contains(group.get(lines, beat), MUTE) == yes) {
+            @number = beat + 1
+            io.show("немота: {path}:{number} — вывод в никуда; пиши в журнал или на экран")
+            found = yes
+        }
+    }
+    (found == yes) { tally.mute = tally.mute + 1 }
+    out none
 }
 
 skill check(tally, known, path) {
@@ -60,10 +82,18 @@ program() {
         @path = beat
         @skip = str.starts_with(path, ".archive/")
         (str.contains(path, "/generated/") == yes) { skip = yes }
-        (skip == no) { check(tally, known, path) }
+        (skip == no) {
+            check(tally, known, path)
+            silent(tally, path)
+        }
     }
-    io.show("лимиты канона: файлов {tally.checked}, известных нарушений {tally.old}, новых {tally.new}, выросших {tally.grown}, длинных шапок {tally.long}")
+    @scripts = process.capture(group.concat(["git", "ls-files"], SCRIPTS), "", [])
+    drum (str.lines(scripts.output)) {
+        (str.starts_with(beat, ".archive/") == no) { silent(tally, beat) }
+    }
+    io.show("лимиты канона: файлов {tally.checked}, известных нарушений {tally.old}, новых {tally.new}, выросших {tally.grown}, длинных шапок {tally.long}, с немотой {tally.mute}")
     (tally.new > 0) { out error.LimitsBroken }
     (tally.grown > 0) { out error.LimitsBroken }
+    (tally.mute > 0) { out error.Muted }
     out none
 }

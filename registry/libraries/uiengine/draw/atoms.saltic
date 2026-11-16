@@ -1,0 +1,546 @@
+-- atoms — четыре атома JTML (registry/libraries/uiengine/jtml) на экране Acer: раскладка общая
+-- (jtml.children_layout, jtml.mount), здесь только мерка текста шрифтами
+-- lettering и рисунок. Цвет атома — имя tone из палитры экрана (up, down,
+-- accent, quiet, info, ink, line, ground, panel, select, keyword, string,
+-- number, comment, name, use, value, gutter, raise, up_soft, down_soft — фон
+-- полосок глубины под цифрами, well — колодец внутри панели; mustard,
+-- watermelon и их *_edge — кнопки окна «свернуть» и «закрыть», во всех темах одни); тёмная палитра —
+-- «три ступени тьмы» пульта (docs/site/private/CONSOLE-LOOK.html): ground, panel,
+-- well; без tone рамка толщиной 1 — линия, толще — заливка
+-- цветом ink, у box без рамки с tone — фон; текст с «# » — заголовок.
+-- Текст: size normal — 8×16, big — 12×24, huge — 16×32; weight bold — второй
+-- проход со сдвигом на точку (+1 к ширине); cut — не влезает в ширину —
+-- обрезается по буквам и кончается «...». Ширина TEXT, заданная в узле, — его.
+-- Шрифты TTF (with_fonts): палитра держит Inter и Inter Bold с диска Acer
+-- (screen/typeface); fitted мерит текст ими, draw рисует гладкими буквами —
+-- normal 15, big и «# » 22, huge 34 пикселя, bold — свой файл; caps — 12 px
+-- прописными с разрядкой CAPS_SPACING, mono — JetBrains Mono (ровные столбцы цифр); поле — скруглённая
+-- рамка и текст Inter, ручка ползунка — круг. Без шрифтов — Spleen.
+-- Вид box (рисует screen/shapes): shadow — мягкая тень цветом palette.shadow,
+-- inset — внутренняя тень сверху; fill —
+-- фон, edge — рамка толщиной border (не меньше 1), radius — скругление всего
+-- этого; без fill и edge — прежний tone.
+--
+-- Palette { ground, line, ink, quiet, accent, up, down, info, panel, select,
+--     keyword, string, number, comment, name, imports, value, gutter, raise } —
+--     цвета экрана
+-- palette(screen) / palette_light(screen) -> Palette — тёмная и светлая тема;
+--     palette_site(screen) -> Palette — светлая тема 1 SalticIDE с сайта;
+--     palette_alchemy(screen) -> Palette — алхимия языка: тёмное дерево,
+--     пергамент (ink), латунь (accent), изумруд (up);
+--     palette_armor(screen) -> Palette — «Броня» пульта: холодный неон на
+--     почти чёрном (CONSOLE-LOOK.html, :root)
+-- tone_color(palette, tone, fallback) -> пиксель
+-- with_fonts(palette, base) -> Palette со шрифтами TTF с диска Acer; ошибки
+--     чтения шрифта — как есть (вызывающий решает, рисовать ли Spleen)
+-- with_faces(palette, regular, bold, mono) -> Palette с готовыми Typeface
+--     (хост читает файлы сам, os/target/linux)
+-- with_icons(palette, set) -> Palette со значками os/icons: box с icon рисует
+--     значок посреди себя цветом ink (draw_icon); без значков icon не рисуется
+-- fitted(node, in_row, palette) -> как measured, но мерка — шрифтами палитры
+-- measured(node, in_row) -> копия дерева, у TEXT — свои ширина (в ряду) и
+--     высота по шрифту Acer: общая раскладка берёт их вместо шрифта qemu
+-- draw(screen, runtime, palette) — всё дерево runtime.root на screen
+-- Внутри: face_of / shown(text) — шрифт и текст без «# »; face_for(node) —
+--     шрифт по size; text_width(node) — ширина с жирностью; trimmed(line,
+--     face, width) — строка с «...»; letters(text) — символов UTF-8;
+--     draw_node, draw_field, draw_slider, copy_node; фигуры со сглаженными
+--     краями и тени — screen/shapes
+
+use core.str
+use core.group
+use core.bytes
+use core.num
+use core.mem
+use core.u32
+use core.usize
+use core.address
+use os.icons
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.screen.lettering
+use registry.libraries.uiengine.draw.typeface
+use registry.libraries.uiengine.draw.shapes
+use os.drivers.text_field
+use registry.libraries.uiengine.jtml
+use registry.libraries.uiengine.jtml.atom
+use registry.libraries.uiengine.jtml.slider
+
+HEADING = "# "
+REGULAR = "INTER.TTF"
+BOLD = "INTERB.TTF"
+MONO = "JBMONO.TTF"
+CAPS_SIZE = 12
+CAPS_SPACING = 1
+INSET = 6
+KNOB = 8
+TRACK = 4
+FIELD_RADIUS = 6
+ROUND_KNOB = 14
+
+Palette = Box {
+    ground = 0,
+    line = 0,
+    ink = 0,
+    quiet = 0,
+    accent = 0,
+    up = 0,
+    down = 0,
+    info = 0,
+    panel = 0,
+    select = 0,
+    keyword = 0,
+    string = 0,
+    number = 0,
+    comment = 0,
+    name = 0,
+    imports = 0,
+    value = 0,
+    gutter = 0,
+    raise = 0,
+    up_soft = 0,
+    down_soft = 0,
+    shadow = 0,
+    typed = no,
+    regular = typeface.Typeface {},
+    bold = typeface.Typeface {},
+    mono = typeface.Typeface {},
+    well = 0,
+    mustard = 0,
+    mustard_edge = 0,
+    watermelon = 0,
+    watermelon_edge = 0,
+    iconed = no,
+    icons = icons.Icons {}
+}
+
+skill palette(screen) {
+    out Palette { ground = graphics.color(screen, 7, 9, 13), line = graphics.color(screen, 34, 42, 55), ink = graphics.color(screen, 238, 241, 246), quiet = graphics.color(screen, 139, 148, 164), accent = graphics.color(screen, 70, 200, 255), up = graphics.color(screen, 109, 255, 154), down = graphics.color(screen, 255, 90, 110), info = graphics.color(screen, 166, 107, 242), panel = graphics.color(screen, 15, 20, 29), select = graphics.color(screen, 34, 42, 55), well = graphics.color(screen, 9, 12, 18), mustard = graphics.color(screen, 222, 170, 52), mustard_edge = graphics.color(screen, 178, 128, 24), watermelon = graphics.color(screen, 236, 78, 98), watermelon_edge = graphics.color(screen, 190, 44, 68), keyword = graphics.color(screen, 197, 134, 192), string = graphics.color(screen, 206, 145, 120), number = graphics.color(screen, 181, 206, 168), comment = graphics.color(screen, 106, 153, 85), name = graphics.color(screen, 78, 201, 176), up_soft = graphics.color(screen, 28, 53, 46), down_soft = graphics.color(screen, 49, 30, 40), shadow = graphics.color(screen, 3, 4, 6) }
+}
+
+skill palette_light(screen) {
+    @dark = palette(screen)
+    dark.ground = graphics.color(screen, 255, 255, 255)
+    dark.panel = graphics.color(screen, 243, 243, 243)
+    dark.select = graphics.color(screen, 228, 238, 252)
+    dark.line = graphics.color(screen, 222, 222, 226)
+    dark.ink = graphics.color(screen, 36, 41, 47)
+    dark.quiet = graphics.color(screen, 110, 119, 129)
+    dark.accent = graphics.color(screen, 0, 122, 204)
+    dark.up = graphics.color(screen, 26, 127, 55)
+    dark.down = graphics.color(screen, 207, 34, 46)
+    dark.info = graphics.color(screen, 9, 105, 218)
+    dark.keyword = graphics.color(screen, 175, 0, 219)
+    dark.string = graphics.color(screen, 163, 21, 21)
+    dark.number = graphics.color(screen, 9, 134, 88)
+    dark.comment = graphics.color(screen, 0, 128, 0)
+    dark.name = graphics.color(screen, 38, 127, 153)
+    dark.up_soft = graphics.color(screen, 220, 239, 225)
+    dark.down_soft = graphics.color(screen, 250, 222, 224)
+    dark.shadow = graphics.color(screen, 205, 205, 212)
+    dark.well = graphics.color(screen, 236, 237, 240)
+    out dark
+}
+
+skill palette_site(screen) {
+    @site = palette_light(screen)
+    site.ground = graphics.color(screen, 251, 246, 239)
+    site.panel = graphics.color(screen, 243, 234, 223)
+    site.select = graphics.color(screen, 245, 237, 227)
+    site.line = graphics.color(screen, 227, 214, 198)
+    site.ink = graphics.color(screen, 43, 35, 30)
+    site.quiet = graphics.color(screen, 125, 104, 88)
+    site.accent = graphics.color(screen, 31, 149, 168)
+    site.up = graphics.color(screen, 79, 122, 18)
+    site.down = graphics.color(screen, 194, 74, 40)
+    site.info = graphics.color(screen, 11, 125, 143)
+    site.keyword = graphics.color(screen, 133, 114, 98)
+    site.string = graphics.color(screen, 154, 106, 18)
+    site.number = graphics.color(screen, 154, 106, 18)
+    site.comment = graphics.color(screen, 133, 114, 98)
+    site.name = graphics.color(screen, 117, 71, 192)
+    site.imports = graphics.color(screen, 180, 96, 12)
+    site.value = graphics.color(screen, 146, 100, 212)
+    site.gutter = graphics.color(screen, 168, 151, 138)
+    site.raise = graphics.color(screen, 234, 223, 208)
+    site.up_soft = graphics.color(screen, 226, 232, 212)
+    site.down_soft = graphics.color(screen, 244, 222, 214)
+    site.shadow = graphics.color(screen, 220, 206, 190)
+    site.well = graphics.color(screen, 239, 229, 216)
+    out site
+}
+
+skill palette_alchemy(screen) {
+    @guild = palette(screen)
+    guild.ground = graphics.color(screen, 33, 24, 20)
+    guild.panel = graphics.color(screen, 47, 35, 29)
+    guild.well = graphics.color(screen, 26, 18, 16)
+    guild.raise = graphics.color(screen, 62, 45, 35)
+    guild.select = graphics.color(screen, 62, 45, 35)
+    guild.line = graphics.color(screen, 92, 70, 42)
+    guild.ink = graphics.color(screen, 243, 228, 188)
+    guild.quiet = graphics.color(screen, 186, 170, 140)
+    guild.accent = graphics.color(screen, 242, 203, 115)
+    guild.up = graphics.color(screen, 87, 181, 134)
+    guild.up_soft = graphics.color(screen, 38, 56, 44)
+    guild.down = graphics.color(screen, 180, 76, 62)
+    guild.shadow = graphics.color(screen, 12, 8, 7)
+    out guild
+}
+
+skill palette_armor(screen) {
+    @armor = palette(screen)
+    armor.ground = graphics.color(screen, 1, 6, 8)
+    armor.panel = graphics.color(screen, 0, 14, 18)
+    armor.well = graphics.color(screen, 1, 9, 12)
+    armor.raise = graphics.color(screen, 0, 24, 30)
+    armor.select = graphics.color(screen, 1, 57, 62)
+    armor.line = graphics.color(screen, 1, 57, 62)
+    armor.ink = graphics.color(screen, 223, 252, 255)
+    armor.quiet = graphics.color(screen, 79, 163, 179)
+    armor.gutter = graphics.color(screen, 29, 74, 84)
+    armor.accent = graphics.color(screen, 0, 225, 255)
+    armor.up = graphics.color(screen, 93, 255, 176)
+    armor.down = graphics.color(screen, 255, 90, 54)
+    armor.shadow = graphics.color(screen, 0, 0, 0)
+    out armor
+}
+
+skill with_fonts(palette, base) {
+    palette.regular = typeface.load(base, REGULAR)
+    palette.bold = typeface.load(base, BOLD)
+    palette.mono = typeface.load(base, MONO)
+    palette.typed = yes
+    out palette
+}
+
+skill with_faces(palette, regular, bold, mono) {
+    palette.regular = regular
+    palette.bold = bold
+    palette.mono = mono
+    palette.typed = yes
+    out palette
+}
+
+skill with_icons(palette, set) {
+    palette.icons = set
+    palette.iconed = yes
+    out palette
+}
+
+skill draw_icon(screen, palette, node, place) {
+    @x = group.get(place, 0)
+    @y = group.get(place, 1)
+    @width = group.get(place, 2)
+    @height = group.get(place, 3)
+    @sides = node.sides
+    (group.count(sides) == 0) { sides = [node.padding, node.padding, node.padding, node.padding] }
+    @inner_width = width - group.get(sides, 1) - group.get(sides, 3)
+    @inner_height = height - group.get(sides, 0) - group.get(sides, 2)
+    @size = inner_width
+    (inner_height < size) { size = inner_height }
+    (size < 1) { out none }
+    @made = icons.mask(palette.icons, node.icon, size)
+    @ink = tone_color(palette, node.ink, palette.ink)
+    @left = x + group.get(sides, 3) + (inner_width - size) / 2 + made.left
+    @top = y + group.get(sides, 0) + (inner_height - size) / 2 - made.top
+    drum (made.height) {
+        @row = top + beat
+        @line = beat * made.width
+        @inside = row >= 0
+        (row >= screen.height) { inside = no }
+        (inside == yes) {
+            drum (made.width) {
+                @column = left + beat
+                @alpha = bytes.get(made.mask, line + beat)
+                @lit = alpha > 0
+                (column < 0) { lit = no }
+                (column >= screen.width) { lit = no }
+                (lit == yes) {
+                    @at = usize.from((row * screen.stride + column) * graphics.PIXEL_BYTES)
+                    @value = ink
+                    (alpha < 255) { value = graphics.mix(num.from(mem.load32(address.from(screen.memory), at)), ink, alpha) }
+                    mem.store32(address.from(screen.memory), at, u32.from(value))
+                }
+            }
+        }
+    }
+    out none
+}
+
+skill pixels(node) {
+    (node.pixels > 0) { out node.pixels }
+    (node.caps == yes) { out CAPS_SIZE }
+    (node.size == "big") { out 22 }
+    (node.size == "huge") { out 34 }
+    (heading(node.value) == yes) { out 22 }
+    out 15
+}
+
+skill typed_face(palette, node) {
+    (node.mono == yes) { out palette.mono }
+    (node.weight == "bold") { out palette.bold }
+    out palette.regular
+}
+
+skill spacing(node) {
+    (node.caps == yes) { out CAPS_SPACING }
+    out 0
+}
+
+skill typed_text(node) {
+    (node.caps == yes) { out str.upper(shown(node.value)) }
+    out shown(node.value)
+}
+
+skill typed_trim(face, line, size, width, gap) {
+    (typeface.measure(face, line, size, gap) <= width) { out line }
+    @letters = str.letters(line)
+    @keep = group.count(letters)
+    drum (group.count(letters)) {
+        @tried = str.concat(str.join(group.slice(letters, 0, keep), ""), "...")
+        (typeface.measure(face, tried, size, gap) <= width) { out tried }
+        keep = keep - 1
+    }
+    out "..."
+}
+
+skill fitted(node, in_row, palette) {
+    (palette.typed == no) { out measured(node, in_row) }
+    (node.kind == atom.Kind.TEXT) {
+        @face = typed_face(palette, node)
+        @size = pixels(node)
+        @natural = typeface.measure(face, typed_text(node), size, spacing(node))
+        @width = node.width
+        (width == 0) {
+            (in_row == yes) { width = natural }
+        }
+        @tall = typeface.line_height(face, size)
+        (node.leading > 0) { tall = node.leading }
+        @copy = copy_node(node, width, tall, [])
+        copy.natural = natural
+        out copy
+    }
+    (node.kind == atom.Kind.BOX) {
+        @children = []
+        drum (node.children) { children = group.add(children, fitted(beat, node.flow == atom.Flow.ROW, palette)) }
+        @copy = copy_node(node, node.width, node.height, children)
+        @layers = []
+        drum (node.layers) { layers = group.add(layers, fitted(beat, no, palette)) }
+        copy.layers = layers
+        out copy
+    }
+    out node
+}
+
+skill tone_color(palette, tone, fallback) {
+    (tone == "up") { out palette.up }
+    (tone == "down") { out palette.down }
+    (tone == "accent") { out palette.accent }
+    (tone == "quiet") { out palette.quiet }
+    (tone == "info") { out palette.info }
+    (tone == "ink") { out palette.ink }
+    (tone == "line") { out palette.line }
+    (tone == "ground") { out palette.ground }
+    (tone == "panel") { out palette.panel }
+    (tone == "select") { out palette.select }
+    (tone == "keyword") { out palette.keyword }
+    (tone == "string") { out palette.string }
+    (tone == "number") { out palette.number }
+    (tone == "comment") { out palette.comment }
+    (tone == "name") { out palette.name }
+    (tone == "use") { out palette.imports }
+    (tone == "value") { out palette.value }
+    (tone == "gutter") { out palette.gutter }
+    (tone == "raise") { out palette.raise }
+    (tone == "up_soft") { out palette.up_soft }
+    (tone == "down_soft") { out palette.down_soft }
+    (tone == "well") { out palette.well }
+    (tone == "mustard") { out palette.mustard }
+    (tone == "mustard_edge") { out palette.mustard_edge }
+    (tone == "watermelon") { out palette.watermelon }
+    (tone == "watermelon_edge") { out palette.watermelon_edge }
+    out fallback
+}
+
+skill heading(text) {
+    out str.starts_with(text, HEADING)
+}
+
+skill face_of(text) {
+    (heading(text) == yes) { out lettering.FACE_TEXT }
+    out lettering.FACE_SMALL
+}
+
+skill face_for(node) {
+    (node.size == "big") { out lettering.FACE_TEXT }
+    (node.size == "huge") { out lettering.FACE_TITLE }
+    out face_of(node.value)
+}
+
+skill text_width(node) {
+    @face = face_for(node)
+    @wide = letters(shown(node.value)) * face.width
+    (node.weight == "bold") { wide = wide + 1 }
+    out wide
+}
+
+skill trimmed(line, face, width) {
+    (letters(line) * face.width <= width) { out line }
+    @keep = width / face.width - 3
+    (keep < 0) { keep = 0 }
+    out str.concat(str.join(group.slice(str.letters(line), 0, keep), ""), "...")
+}
+
+skill shown(text) {
+    (heading(text) == yes) { out str.slice(text, str.bytes(HEADING), str.bytes(text)) }
+    out text
+}
+
+skill letters(text) {
+    @count = 0
+    drum (str.bytes(text)) {
+        @byte = str.byte(text, beat)
+        (byte < 128) { count = count + 1 }
+        (byte >= 192) { count = count + 1 }
+    }
+    out count
+}
+
+skill copy_node(node, width, height, children) {
+    out atom.Node { kind = node.kind, id = node.id, value = node.value, align = node.align, flow = node.flow, width = width, height = height, grow = node.grow, padding = node.padding, gap = node.gap, border = node.border, children = children, layers = node.layers, level = node.level, least = node.least, most = node.most, tone = node.tone, size = node.size, weight = node.weight, cut = node.cut, caps = node.caps, mono = node.mono, pixels = node.pixels, leading = node.leading, fade = node.fade, inset = node.inset, sides = node.sides, fill = node.fill, edge = node.edge, radius = node.radius, shadow = node.shadow, icon = node.icon, ink = node.ink, corners = node.corners, justify = node.justify, cross = node.cross, natural = node.natural }
+}
+
+skill measured(node, in_row) {
+    (node.kind == atom.Kind.TEXT) {
+        @face = face_for(node)
+        @width = node.width
+        (width == 0) {
+            (in_row == yes) { width = text_width(node) }
+        }
+        @copy = copy_node(node, width, face.height, [])
+        copy.natural = text_width(node)
+        out copy
+    }
+    (node.kind == atom.Kind.BOX) {
+        @children = []
+        drum (group.count(node.children)) { children = group.add(children, measured(group.get(node.children, beat), node.flow == atom.Flow.ROW)) }
+        @copy = copy_node(node, node.width, node.height, children)
+        @layers = []
+        drum (node.layers) { layers = group.add(layers, measured(beat, no)) }
+        copy.layers = layers
+        out copy
+    }
+    out node
+}
+
+skill draw(screen, runtime, palette) {
+    graphics.fill(screen, 0, 0, screen.width, screen.height, palette.ground)
+    out draw_node(screen, runtime, palette, runtime.root, [0, 0, runtime.width, runtime.height])
+}
+
+skill draw_node(screen, runtime, palette, node, place) {
+    @x = group.get(place, 0)
+    @y = group.get(place, 1)
+    @width = group.get(place, 2)
+    @height = group.get(place, 3)
+    (node.kind == atom.Kind.TEXT) {
+        @ink = palette.ink
+        (str.bytes(node.id) > 0) { ink = palette.accent }
+        ink = tone_color(palette, node.tone, ink)
+        (palette.typed == yes) {
+            @typed = typed_face(palette, node)
+            @size = pixels(node)
+            @gap = spacing(node)
+            @shown_line = typed_text(node)
+            (node.cut == yes) { shown_line = typed_trim(typed, shown_line, size, width, gap) }
+            @measured_width = typeface.measure(typed, shown_line, size, gap)
+            @start = x
+            (node.align == atom.Align.CENTER) { start = x + (width - measured_width) / 2 }
+            (node.align == atom.Align.END) { start = x + width - measured_width }
+            @fade = ink
+            (str.bytes(node.fade) > 0) { fade = tone_color(palette, node.fade, ink) }
+            typeface.paint(screen, typed, start, y + (height - typeface.line_height(typed, size)) / 2, shown_line, typeface.Brush { size = size, ink = ink, fade = fade, spacing = gap })
+            out none
+        }
+        @face = face_for(node)
+        @line = shown(node.value)
+        (node.cut == yes) { line = trimmed(line, face, width) }
+        @wide = letters(line) * face.width
+        (node.weight == "bold") { wide = wide + 1 }
+        @left = x
+        (node.align == atom.Align.CENTER) { left = x + (width - wide) / 2 }
+        (node.align == atom.Align.END) { left = x + width - wide }
+        lettering.paint_text(screen, face, left, y + (height - face.height) / 2, line, ink)
+        (node.weight == "bold") { lettering.paint_text(screen, face, left + 1, y + (height - face.height) / 2, line, ink) }
+        out none
+    }
+    (node.kind == atom.Kind.FIELD) { out draw_field(screen, runtime, palette, node.id) }
+    (node.kind == atom.Kind.SLIDER) { out draw_slider(screen, runtime, palette, node.id) }
+    (node.kind == atom.Kind.BOX) {
+        (node.shadow > 0) { shapes.soft_shadow(screen, x, y, width, height, node.radius, node.shadow, palette.shadow) }
+        (str.bytes(node.fill) > 0) {
+            @color = tone_color(palette, node.fill, palette.panel)
+            (node.corners == "all") { shapes.shape(screen, x, y, width, height, node.radius, color) }
+            ((node.corners == "all") == no) { shapes.partly(screen, [x, y, width, height], node.radius, color, node.corners) }
+        }
+        (node.inset > 0) { shapes.inner_shadow(screen, x, y, width, node.radius, node.inset, palette.shadow) }
+        (str.bytes(node.edge) > 0) {
+            @thick = node.border
+            (thick == 0) { thick = 1 }
+            shapes.ring(screen, x, y, width, height, node.radius, thick, tone_color(palette, node.edge, palette.line))
+        }
+        (str.bytes(node.fill) + str.bytes(node.edge) == 0) {
+            (node.border == 0) {
+                (str.bytes(node.tone) > 0) { graphics.fill(screen, x, y, width, height, tone_color(palette, node.tone, palette.line)) }
+            }
+            (node.border == 1) { shapes.frame(screen, x, y, width, height, tone_color(palette, node.tone, palette.line)) }
+            (node.border > 1) { graphics.fill(screen, x, y, width, height, tone_color(palette, node.tone, palette.ink)) }
+        }
+        (str.bytes(node.icon) > 0) { (palette.iconed == yes) { draw_icon(screen, palette, node, place) } }
+        drum (jtml.children_layout(node, x, y, width, height)) { draw_node(screen, runtime, palette, beat.node, [beat.x, beat.y, beat.width, beat.height]) }
+    }
+    out none
+}
+
+skill draw_field(screen, runtime, palette, id) {
+    @lookup = jtml.find_field(runtime, id)
+    (lookup.found == no) { out none }
+    @field = lookup.slot.field
+    (palette.typed == yes) {
+        @size = 15
+        @tall = typeface.line_height(palette.regular, size) + INSET * 2
+        @upper = field.y + (text_field.TEXT_FIELD_HEIGHT - tall) / 2
+        @edge = palette.line
+        (id == runtime.focused) { edge = palette.accent }
+        shapes.shape(screen, field.x, upper, field.width, tall, FIELD_RADIUS, palette.ground)
+        shapes.ring(screen, field.x, upper, field.width, tall, FIELD_RADIUS, 1, edge)
+        @after = typeface.paint(screen, palette.regular, field.x + INSET + 2, upper + INSET, field.text, typeface.Brush { size = size, ink = palette.ink, fade = palette.ink })
+        (id == runtime.focused) { graphics.fill(screen, after + 1, upper + INSET, 2, tall - INSET * 2, palette.accent) }
+        out none
+    }
+    @face = lettering.FACE_SMALL
+    @height = face.height + INSET * 2
+    @top = field.y + (text_field.TEXT_FIELD_HEIGHT - height) / 2
+    @color = palette.line
+    (id == runtime.focused) { color = palette.accent }
+    shapes.frame(screen, field.x, top, field.width, height, color)
+    @end = lettering.paint_text(screen, face, field.x + INSET, top + INSET, field.text, palette.ink)
+    (id == runtime.focused) { graphics.fill(screen, end + 1, top + INSET, 2, face.height, palette.accent) }
+    out none
+}
+
+skill draw_slider(screen, runtime, palette, id) {
+    @lookup = jtml.find_slider(runtime, id)
+    (lookup.found == no) { out none }
+    @slot = lookup.slot
+    @span = slot.most - slot.least
+    (span < 1) { span = 1 }
+    @filled = (slot.level - slot.least) * slot.width / span
+    @middle = slot.y + slider.HEIGHT / 2
+    graphics.fill(screen, slot.x, middle - TRACK / 2, slot.width, TRACK, palette.line)
+    graphics.fill(screen, slot.x, middle - TRACK / 2, filled, TRACK, palette.accent)
+    @knob = palette.ink
+    (id == runtime.focused) { knob = palette.accent }
+    (palette.typed == yes) { out shapes.shape(screen, slot.x + filled - ROUND_KNOB / 2, middle - ROUND_KNOB / 2, ROUND_KNOB, ROUND_KNOB, ROUND_KNOB / 2, knob) }
+    out graphics.fill(screen, slot.x + filled - KNOB / 2, slot.y + 3, KNOB, slider.HEIGHT - 6, knob)
+}

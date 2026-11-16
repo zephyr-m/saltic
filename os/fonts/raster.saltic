@@ -1,0 +1,282 @@
+-- raster — буква TTF (os/fonts/ttf) в маску покрытия со сглаживанием: каждая
+-- точка маски — 0…255, насколько пиксель закрыт буквой. Координаты — целые в
+-- FINE долях пикселя; квадратичная кривая режется на STEPS отрезков; в каждом
+-- пикселе ROWS строк выборки, по каждой — пересечения с краями, заливка по
+-- правилу ненулевой обмотки (так велит TrueType), покрытие копится в долях
+-- пикселя по горизонтали: максимум FINE × ROWS частей — яркость 255.
+--
+-- Glyph { width, height, left, top, advance, mask } — маска width × height
+--     (core.bytes, построчно сверху), left — сдвиг от пера вправо, top — сколько
+--     над базовой линией, advance — шаг пера, всё в пикселях
+-- render(font, code, size) -> Glyph — буква кода Unicode размером size пикселей
+--     на кегль (em)
+-- filled(edges) -> Glyph без шага пера — маска любых краёв [x0, y0, x1, y1] в
+--     FINE долях пикселя, y вверх (так рисуются и значки, os/icons)
+-- Image { width, height, pixels } / line_image(font, text, size) -> Image —
+--     строка текста серым (255 — чернила), для проверки и картинок
+-- code_of(letter) -> код Unicode одной буквы UTF-8
+-- Внутри: below / above — деление вниз и вверх; scaled — точка в долях
+--     пикселя; flat(contour, size, units) -> края [x0, y0, x1, y1] (y вверх);
+--     curve — кривая отрезками; crossings — пересечения строки выборки с
+--     краями, отсортированные по x; cover — добавить отрезок покрытия
+
+use core.str
+use core.group
+use core.bytes
+use os.fonts.ttf
+
+FINE = 8
+ROWS = 4
+STEPS = 6
+
+Glyph = Box {
+    width = 0,
+    height = 0,
+    left = 0,
+    top = 0,
+    advance = 0,
+    mask = bytes.new(0)
+}
+
+Image = Box {
+    width = 0,
+    height = 0,
+    pixels = bytes.new(0)
+}
+
+skill below(value, by) {
+    (value >= 0) { out value / by }
+    out 0 - (0 - value + by - 1) / by
+}
+
+skill above(value, by) {
+    out 0 - below(0 - value, by)
+}
+
+skill scaled(point, size, units) {
+    out [below(group.get(point, 0) * size * FINE, units), below(group.get(point, 1) * size * FINE, units)]
+}
+
+skill middle(a, b) {
+    out [below(group.get(a, 0) + group.get(b, 0), 2), below(group.get(a, 1) + group.get(b, 1), 2)]
+}
+
+skill line(edges, from, to) {
+    (group.get(from, 1) == group.get(to, 1)) { out edges }
+    out group.add(edges, [group.get(from, 0), group.get(from, 1), group.get(to, 0), group.get(to, 1)])
+}
+
+skill curve(edges, from, control, to) {
+    @made = edges
+    @previous = from
+    @whole = STEPS * STEPS
+    drum (STEPS) {
+        @i = beat + 1
+        @rest = STEPS - i
+        @x = below(rest * rest * group.get(from, 0) + 2 * i * rest * group.get(control, 0) + i * i * group.get(to, 0), whole)
+        @y = below(rest * rest * group.get(from, 1) + 2 * i * rest * group.get(control, 1) + i * i * group.get(to, 1), whole)
+        made = line(made, previous, [x, y])
+        previous = [x, y]
+    }
+    out made
+}
+
+skill flat(contour, size, units) {
+    @count = group.count(contour)
+    (count < 2) { out [] }
+    @points = []
+    @kinds = []
+    drum (contour) {
+        points = group.add(points, scaled(beat, size, units))
+        kinds = group.add(kinds, group.get(beat, 2))
+    }
+    @start = group.get(points, 0)
+    @order = group.slice(points, 1, count)
+    @order_kinds = group.slice(kinds, 1, count)
+    (group.get(kinds, 0) == 0) {
+        (group.get(kinds, count - 1) == 1) {
+            start = group.get(points, count - 1)
+            order = group.slice(points, 0, count - 1)
+            order_kinds = group.slice(kinds, 0, count - 1)
+        }
+        (group.get(kinds, count - 1) == 0) {
+            start = middle(group.get(points, count - 1), group.get(points, 0))
+            order = points
+            order_kinds = kinds
+        }
+    }
+    order = group.add(order, start)
+    order_kinds = group.add(order_kinds, 1)
+    @edges = []
+    @current = start
+    @control = start
+    @pending = no
+    drum (group.count(order)) {
+        @point = group.get(order, beat)
+        (group.get(order_kinds, beat) == 1) {
+            (pending == yes) { edges = curve(edges, current, control, point) }
+            (pending == no) { edges = line(edges, current, point) }
+            current = point
+            pending = no
+        }
+        (group.get(order_kinds, beat) == 0) {
+            (pending == yes) {
+                @mid = middle(control, point)
+                edges = curve(edges, current, control, mid)
+                current = mid
+            }
+            control = point
+            pending = yes
+        }
+    }
+    out edges
+}
+
+skill crossings(edges, level) {
+    @found = []
+    drum (edges) {
+        @y0 = group.get(beat, 1)
+        @y1 = group.get(beat, 3)
+        @inside = no
+        (y0 <= level) { (level < y1) { inside = yes } }
+        (y1 <= level) { (level < y0) { inside = yes } }
+        (inside == yes) {
+            @x0 = group.get(beat, 0)
+            @x = x0 + (level - y0) * (group.get(beat, 2) - x0) / (y1 - y0)
+            @turn = 1
+            (y1 < y0) { turn = -1 }
+            @at = group.count(found)
+            drum (group.count(found)) {
+                @other = group.get(found, group.count(found) - 1 - beat)
+                (group.get(other, 0) > x) { at = group.count(found) - 1 - beat }
+            }
+            found = group.concat(group.add(group.slice(found, 0, at), [x, turn]), group.slice(found, at, group.count(found)))
+        }
+    }
+    out found
+}
+
+skill cover(mask, row, width, from, to) {
+    @a = from
+    @b = to
+    (a < 0) { a = 0 }
+    (b > width * FINE) { b = width * FINE }
+    (b <= a) { out none }
+    @first = a / FINE
+    @last = b / FINE
+    @base = row * width
+    (first == last) {
+        bytes.set(mask, base + first, bytes.get(mask, base + first) + b - a)
+        out none
+    }
+    bytes.set(mask, base + first, bytes.get(mask, base + first) + FINE - a % FINE)
+    drum (last - first - 1) {
+        @spot = base + first + 1 + beat
+        bytes.set(mask, spot, bytes.get(mask, spot) + FINE)
+    }
+    (last < width) { bytes.set(mask, base + last, bytes.get(mask, base + last) + b % FINE) }
+    out none
+}
+
+skill render(font, code, size) {
+    @glyph = ttf.glyph_of(font, code)
+    @advance = below(ttf.advance(font, glyph) * size, font.units)
+    @edges = []
+    drum (ttf.outline(font, glyph)) { edges = group.concat(edges, flat(beat, size, font.units)) }
+    (group.count(edges) == 0) { out Glyph { advance = advance } }
+    @made = filled(edges)
+    made.advance = advance
+    out made
+}
+
+skill filled(edges) {
+    (group.count(edges) == 0) { out Glyph {} }
+    @low_x = group.get(group.get(edges, 0), 0)
+    @high_x = low_x
+    @low_y = group.get(group.get(edges, 0), 1)
+    @high_y = low_y
+    drum (edges) {
+        drum ([[group.get(beat, 0), group.get(beat, 1)], [group.get(beat, 2), group.get(beat, 3)]]) {
+            @x = group.get(beat, 0)
+            @y = group.get(beat, 1)
+            (x < low_x) { low_x = x }
+            (x > high_x) { high_x = x }
+            (y < low_y) { low_y = y }
+            (y > high_y) { high_y = y }
+        }
+    }
+    @left = below(low_x, FINE)
+    @top = above(high_y, FINE)
+    @width = above(high_x, FINE) - left
+    @height = top - below(low_y, FINE)
+    @mask = bytes.new(width * height)
+    @shift = left * FINE
+    drum (height) {
+        @row = beat
+        drum (ROWS) {
+            @level = top * FINE - row * FINE - beat * FINE / ROWS - FINE / ROWS / 2
+            @found = crossings(edges, level)
+            @winding = 0
+            drum (group.count(found)) {
+                @here = group.get(found, beat)
+                winding = winding + group.get(here, 1)
+                ((winding == 0) == no) {
+                    (beat + 1 < group.count(found)) {
+                        @next = group.get(found, beat + 1)
+                        cover(mask, row, width, group.get(here, 0) - shift, group.get(next, 0) - shift)
+                    }
+                }
+            }
+        }
+    }
+    @full = FINE * ROWS
+    drum (width * height) {
+        @value = bytes.get(mask, beat)
+        (value > full) { value = full }
+        bytes.set(mask, beat, value * 255 / full)
+    }
+    out Glyph { width = width, height = height, left = left, top = top, mask = mask }
+}
+
+skill code_of(letter) {
+    @first = str.byte(letter, 0)
+    (first < 128) { out first }
+    (first < 224) { out (first - 192) * 64 + str.byte(letter, 1) - 128 }
+    (first < 240) { out (first - 224) * 4096 + (str.byte(letter, 1) - 128) * 64 + str.byte(letter, 2) - 128 }
+    out (first - 240) * 262144 + (str.byte(letter, 1) - 128) * 4096 + (str.byte(letter, 2) - 128) * 64 + str.byte(letter, 3) - 128
+}
+
+skill line_image(font, text, size) {
+    @rise = above(font.ascent * size, font.units)
+    @height = rise + above((0 - font.descent) * size, font.units)
+    @glyphs = []
+    @width = 0
+    drum (str.letters(text)) {
+        @made = render(font, code_of(beat), size)
+        glyphs = group.add(glyphs, made)
+        width = width + made.advance
+    }
+    @pixels = bytes.new(width * height)
+    @pen = 0
+    drum (glyphs) {
+        @glyph = beat
+        drum (glyph.height) {
+            @row = rise - glyph.top + beat
+            (row >= 0) {
+                (row < height) {
+                    drum (glyph.width) {
+                        @column = pen + glyph.left + beat
+                        (column >= 0) {
+                            (column < width) {
+                                @value = bytes.get(glyph.mask, (row - rise + glyph.top) * glyph.width + beat)
+                                (value > bytes.get(pixels, row * width + column)) { bytes.set(pixels, row * width + column, value) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pen = pen + glyph.advance
+    }
+    out Image { width = width, height = height, pixels = pixels }
+}

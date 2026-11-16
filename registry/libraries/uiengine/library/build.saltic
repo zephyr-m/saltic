@@ -1,0 +1,142 @@
+-- build — собирает закрытую библиотеку JTML: registry/libraries/uiengine/library/level-2…4/*.jtml →
+-- registry/libraries/uiengine/library.saltic (списки NAMES, LEVELS, TEXTS — имя, уровень, текст). Уровень 1 — атомы,
+-- 5 — страница программы (решение автора 16.11.2026). Проверяет каждый файл:
+-- один {"component": {"name", "params", "body"}}, name — имя файла без .jtml,
+-- тело зовёт только атомы и жителей уровнем ниже (так циклов нет). Печатает шаги;
+-- ошибка — с именем файла, модуль тогда не пишется.
+--
+-- program() — собрать и записать
+-- Внутри: escaped(text) — текст для строки Saltic; calls(node) -> имена
+--     не-атомов в дереве (узлы — корень тела и элементы массивов свойств);
+--     body_of(read) -> тело компонента; level_of(names, levels, name) -> уровень или 0
+
+use io
+use io.file
+use core.str
+use core.group
+use registry.libraries.uiengine.jtml.reader
+
+ROOT = "registry/libraries/uiengine/library"
+OUTPUT = "registry/libraries/uiengine/library.saltic"
+BUILT_IN = ["box", "text", "field", "slider", "layer"]
+TAIL = ".jtml"
+
+skill escaped(text) {
+    @done = reader.replaced(text, "\\", "\\\\")
+    done = reader.replaced(done, "\"", "\\\"")
+    done = reader.replaced(done, "\{", "\\\{")
+    done = reader.replaced(done, "\}", "\\\}")
+    out reader.replaced(done, "\n", " ")
+}
+
+skill calls(node) {
+    @found = []
+    ((node.kind == reader.Kind.JTML_OBJECT) == no) { out found }
+    ((group.count(node.keys) == 1) == no) { out found }
+    @tag = group.get(node.keys, 0)
+    (group.contains(BUILT_IN, tag) == no) { found = group.add(found, tag) }
+    @props = group.get(node.items, 0)
+    (props.kind == reader.Kind.JTML_OBJECT) {
+        drum (props.items) {
+            (beat.kind == reader.Kind.JTML_ARRAY) {
+                drum (beat.items) { found = group.concat(found, calls(beat)) }
+            }
+        }
+    }
+    out found
+}
+
+skill body_of(read) {
+    @about = group.get(read.items, 0)
+    drum (group.count(about.keys)) {
+        (group.get(about.keys, beat) == "body") { out group.get(about.items, beat) }
+    }
+    out reader.Value {}
+}
+
+skill level_of(names, levels, name) {
+    drum (group.count(names)) {
+        (group.get(names, beat) == name) { out group.get(levels, beat) }
+    }
+    out 0
+}
+
+program() {
+    @names = []
+    @levels = []
+    @texts = []
+    @bodies = []
+    drum (3) {
+        @level = beat + 2
+        @folder = "{ROOT}/level-{level}"
+        @files = file.list(folder)
+        @count = group.count(files)
+        io.show("уровень {level}: {folder}, файлов {count}")
+        drum (files) {
+            @name = beat
+            (str.ends_with(name, TAIL) == yes) {
+                @short = str.slice(name, 0, str.bytes(name) - str.bytes(TAIL))
+                @text = file.read("{folder}/{name}")
+                @read = reader.read_jtml(text) rescue |err| {
+                    io.show("  {name}: не JTML ({err})")
+                    out err
+                }
+                ((group.get(read.keys, 0) == "component") == no) {
+                    io.show("  {name}: не \{\"component\": …\}")
+                    out error.NotComponent
+                }
+                @about = group.get(read.items, 0)
+                @told = ""
+                drum (group.count(about.keys)) {
+                    (group.get(about.keys, beat) == "name") {
+                        @said = group.get(about.items, beat)
+                        told = said.words
+                    }
+                }
+                ((told == short) == no) {
+                    io.show("  {name}: name «{told}» не совпадает с именем файла")
+                    out error.NameMismatch
+                }
+                names = group.add(names, short)
+                levels = group.add(levels, level)
+                texts = group.add(texts, text)
+                bodies = group.add(bodies, read)
+            }
+        }
+    }
+    drum (group.count(names)) {
+        @index = beat
+        @name = group.get(names, index)
+        @level = group.get(levels, index)
+        drum (calls(body_of(group.get(bodies, index)))) {
+            @below = level_of(names, levels, beat)
+            (below == 0) {
+                io.show("  {name}: зовёт «{beat}», а его нет в библиотеке")
+                out error.UnknownComponent
+            }
+            (below >= level) {
+                io.show("  {name} (уровень {level}) зовёт «{beat}» уровня {below} — можно только ниже")
+                out error.LevelUp
+            }
+        }
+    }
+    @quoted = []
+    @numbers = []
+    @bodies_text = []
+    drum (group.count(names)) {
+        @name = group.get(names, beat)
+        @level = group.get(levels, beat)
+        @text = escaped(group.get(texts, beat))
+        quoted = group.add(quoted, "    \"{name}\"")
+        numbers = group.add(numbers, "    {level}")
+        bodies_text = group.add(bodies_text, "    \"{text}\"")
+    }
+    @name_list = str.join(quoted, ",\n")
+    @level_list = str.join(numbers, ",\n")
+    @text_list = str.join(bodies_text, ",\n")
+    @module = "-- library — закрытая библиотека компонентов JTML (решение автора 16.11.2026):\n-- уровень 1 — атомы, 2–4 — жители из registry/libraries/uiengine/library/level-N/*.jtml, 5 — страница\n-- программы. Сгенерировано registry/libraries/uiengine/library/build.saltic — руками не править.\n--\n-- find(name) -> текст JTML компонента; UnknownComponent\n-- level(name) -> уровень; UnknownComponent\n\nuse core.group\n\nNAMES = [\n{name_list}\n]\nLEVELS = [\n{level_list}\n]\nTEXTS = [\n{text_list}\n]\n\nskill find(name) \{\n    drum (group.count(NAMES)) \{\n        (group.get(NAMES, beat) == name) \{ out group.get(TEXTS, beat) \}\n    \}\n    out error.UnknownComponent\n\}\n\nskill level(name) \{\n    drum (group.count(NAMES)) \{\n        (group.get(NAMES, beat) == name) \{ out group.get(LEVELS, beat) \}\n    \}\n    out error.UnknownComponent\n\}\n"
+    file.write(OUTPUT, module)
+    @total = group.count(names)
+    io.show("записано {OUTPUT}: жителей {total}, уровни проверены")
+    out none
+}

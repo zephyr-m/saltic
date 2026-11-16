@@ -1,0 +1,288 @@
+-- ttf — разбор шрифта TrueType (docs/os/FONTS.md, решение автора 11.11.2026):
+-- таблицы head, maxp, hhea, hmtx, cmap (формат 4), loca и glyf. Числа в файле —
+-- big-endian. Контур — группа точек [x, y, на кривой 1 / управляющая 0] в единицах шрифта,
+-- y вверх; составная буква (Й, ё у Inter) — части со сдвигом, масштаб частей
+-- не читается (у обычных шрифтов его нет).
+--
+-- Source { data, memory, raw } — откуда читать байты файла: буфер core.bytes
+--     (from_bytes, Linux) или память (from_memory: адрес числом, как его даёт
+--     core.address; Acer — файл, который прошивка прочла в страницы, без копии)
+-- Font { data, units, glyphs, ascent, descent, gap, long_loca, metrics, loca,
+--     glyf, hmtx, cmap } — data — Source всего файла, остальное — смещения
+--     таблиц и числа из них
+-- open(source) -> Font; NotTrueType (нет нужной таблицы), NoUnicodeMap (нет
+--     cmap формата 4)
+-- glyph_of(font, code) -> номер буквы для кода Unicode (0 — «нет такой»)
+-- advance(font, glyph) -> ширина буквы в единицах шрифта
+-- outline(font, glyph) -> группа контуров
+-- Внутри: u8, u16, i16, u32 — числа файла; table(data, tag) -> смещение;
+--     place(font, glyph) -> [начало, длина] в glyf; simple / compound — контуры
+
+use core.str
+use core.group
+use core.bytes
+use core.num
+use core.mem
+use core.usize
+use core.address
+
+Source = Box {
+    data = bytes.new(0),
+    memory = 0,
+    raw = no
+}
+
+Font = Box {
+    data = Source {},
+    units = 1000,
+    glyphs = 0,
+    ascent = 0,
+    descent = 0,
+    gap = 0,
+    long_loca = no,
+    metrics = 0,
+    loca = 0,
+    glyf = 0,
+    hmtx = 0,
+    cmap = 0
+}
+
+X_SHORT = 2
+Y_SHORT = 4
+REPEAT = 8
+X_SAME = 16
+Y_SAME = 32
+WORDS = 1
+MORE = 32
+HAS_SCALE = 8
+HAS_XY_SCALE = 64
+HAS_TWO_BY_TWO = 128
+
+skill from_bytes(buffer) {
+    out Source { data = buffer }
+}
+
+skill from_memory(memory) {
+    out Source { memory = memory, raw = yes }
+}
+
+skill u8(data, at) {
+    (data.raw == yes) { out num.from(mem.load8(address.from(data.memory), usize.from(at))) }
+    out bytes.get(data.data, at)
+}
+
+skill u16(data, at) {
+    out u8(data, at) * 256 + u8(data, at + 1)
+}
+
+skill i16(data, at) {
+    @value = u16(data, at)
+    (value >= 32768) { out value - 65536 }
+    out value
+}
+
+skill u32(data, at) {
+    out u16(data, at) * 65536 + u16(data, at + 2)
+}
+
+skill table(data, tag) {
+    @count = u16(data, 4)
+    drum (count) {
+        @record = 12 + beat * 16
+        @name = ""
+        drum (4) { name = str.concat(name, str.from_byte(u8(data, record + beat))) }
+        (name == tag) { out u32(data, record + 8) }
+    }
+    out error.NotTrueType
+}
+
+skill unicode_map(data) {
+    @cmap = table(data, "cmap")
+    @count = u16(data, cmap + 2)
+    drum (count) {
+        @record = cmap + 4 + beat * 8
+        @platform = u16(data, record)
+        @encoding = u16(data, record + 2)
+        @at = cmap + u32(data, record + 4)
+        @windows = platform == 3
+        @unicode = platform == 0
+        (windows == yes) {
+            (encoding == 1) { (u16(data, at) == 4) { out at } }
+        }
+        (unicode == yes) { (u16(data, at) == 4) { out at } }
+    }
+    out error.NoUnicodeMap
+}
+
+skill open(data) {
+    @head = table(data, "head")
+    @maxp = table(data, "maxp")
+    @hhea = table(data, "hhea")
+    out Font {
+        data = data,
+        units = u16(data, head + 18),
+        glyphs = u16(data, maxp + 4),
+        ascent = i16(data, hhea + 4),
+        descent = i16(data, hhea + 6),
+        gap = i16(data, hhea + 8),
+        long_loca = i16(data, head + 50) == 1,
+        metrics = u16(data, hhea + 34),
+        loca = table(data, "loca"),
+        glyf = table(data, "glyf"),
+        hmtx = table(data, "hmtx"),
+        cmap = unicode_map(data)
+    }
+}
+
+skill glyph_of(font, code) {
+    @data = font.data
+    @at = font.cmap
+    @segments = u16(data, at + 6) / 2
+    @ends = at + 14
+    @starts = ends + segments * 2 + 2
+    @deltas = starts + segments * 2
+    @ranges = deltas + segments * 2
+    drum (segments) {
+        @end = u16(data, ends + beat * 2)
+        (code <= end) {
+            @start = u16(data, starts + beat * 2)
+            (code < start) { out 0 }
+            @delta = i16(data, deltas + beat * 2)
+            @range_at = ranges + beat * 2
+            @range = u16(data, range_at)
+            (range == 0) { out (code + delta + 65536) % 65536 }
+            @glyph = u16(data, range_at + range + (code - start) * 2)
+            (glyph == 0) { out 0 }
+            out (glyph + delta + 65536) % 65536
+        }
+    }
+    out 0
+}
+
+skill advance(font, glyph) {
+    @index = glyph
+    (index >= font.metrics) { index = font.metrics - 1 }
+    out u16(font.data, font.hmtx + index * 4)
+}
+
+skill place(font, glyph) {
+    (font.long_loca == yes) {
+        @from = u32(font.data, font.loca + glyph * 4)
+        out [font.glyf + from, u32(font.data, font.loca + glyph * 4 + 4) - from]
+    }
+    @from = u16(font.data, font.loca + glyph * 2) * 2
+    out [font.glyf + from, u16(font.data, font.loca + glyph * 2 + 2) * 2 - from]
+}
+
+skill outline(font, glyph) {
+    @spot = place(font, glyph)
+    @at = group.get(spot, 0)
+    (group.get(spot, 1) == 0) { out [] }
+    @contours = i16(font.data, at)
+    (contours >= 0) { out simple(font.data, at, contours) }
+    out compound(font, at)
+}
+
+skill simple(data, at, contours) {
+    @ends = []
+    drum (contours) { ends = group.add(ends, u16(data, at + 10 + beat * 2)) }
+    (contours == 0) { out [] }
+    @total = group.get(ends, contours - 1) + 1
+    @cursor = at + 10 + contours * 2
+    cursor = cursor + 2 + u16(data, cursor)
+    @flags = []
+    drum (total) {
+        (group.count(flags) < total) {
+            @flag = u8(data, cursor)
+            cursor = cursor + 1
+            flags = group.add(flags, flag)
+            (flag / REPEAT % 2 == 1) {
+                @times = u8(data, cursor)
+                cursor = cursor + 1
+                drum (times) { flags = group.add(flags, flag) }
+            }
+        }
+    }
+    @xs = []
+    @x = 0
+    drum (total) {
+        @flag = group.get(flags, beat)
+        (flag / X_SHORT % 2 == 1) {
+            @step = u8(data, cursor)
+            cursor = cursor + 1
+            (flag / X_SAME % 2 == 1) { x = x + step }
+            (flag / X_SAME % 2 == 0) { x = x - step }
+        }
+        (flag / X_SHORT % 2 == 0) {
+            (flag / X_SAME % 2 == 0) {
+                x = x + i16(data, cursor)
+                cursor = cursor + 2
+            }
+        }
+        xs = group.add(xs, x)
+    }
+    @points = []
+    @y = 0
+    drum (total) {
+        @flag = group.get(flags, beat)
+        (flag / Y_SHORT % 2 == 1) {
+            @step = u8(data, cursor)
+            cursor = cursor + 1
+            (flag / Y_SAME % 2 == 1) { y = y + step }
+            (flag / Y_SAME % 2 == 0) { y = y - step }
+        }
+        (flag / Y_SHORT % 2 == 0) {
+            (flag / Y_SAME % 2 == 0) {
+                y = y + i16(data, cursor)
+                cursor = cursor + 2
+            }
+        }
+        points = group.add(points, [group.get(xs, beat), y, flag % 2])
+    }
+    @shapes = []
+    @first = 0
+    drum (contours) {
+        @last = group.get(ends, beat)
+        shapes = group.add(shapes, group.slice(points, first, last + 1))
+        first = last + 1
+    }
+    out shapes
+}
+
+skill compound(font, at) {
+    @data = font.data
+    @shapes = []
+    @cursor = at + 10
+    @more = yes
+    drum (64) {
+        (more == yes) {
+            @flags = u16(data, cursor)
+            @part = u16(data, cursor + 2)
+            cursor = cursor + 4
+            @dx = 0
+            @dy = 0
+            (flags % 2 == WORDS) {
+                dx = i16(data, cursor)
+                dy = i16(data, cursor + 2)
+                cursor = cursor + 4
+            }
+            (flags % 2 == 0) {
+                dx = u8(data, cursor)
+                dy = u8(data, cursor + 1)
+                (dx >= 128) { dx = dx - 256 }
+                (dy >= 128) { dy = dy - 256 }
+                cursor = cursor + 2
+            }
+            (flags / HAS_SCALE % 2 == 1) { cursor = cursor + 2 }
+            (flags / HAS_XY_SCALE % 2 == 1) { cursor = cursor + 4 }
+            (flags / HAS_TWO_BY_TWO % 2 == 1) { cursor = cursor + 8 }
+            drum (outline(font, part)) {
+                @moved = []
+                drum (beat) { moved = group.add(moved, [group.get(beat, 0) + dx, group.get(beat, 1) + dy, group.get(beat, 2)]) }
+                shapes = group.add(shapes, moved)
+            }
+            more = flags / MORE % 2 == 1
+        }
+    }
+    out shapes
+}

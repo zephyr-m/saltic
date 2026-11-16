@@ -23,16 +23,58 @@
 ]}}
 ```
 
+## Слои
+
+**Решение автора, 16.11.2026.** Наложение — только явными слоями, а не
+«детьми друг на друге». У `box` либо `children` (раскладываются рядом), либо
+`layers` (каждый слой на всю внутреннюю площадь, рисуются по порядку, первый —
+внизу). Слой — не атом, а часть `box`, с обязательным именем:
+
+```json
+{"box": {"layers": [
+  {"layer": {"name": "сетка", "children": [ ... ]}},
+  {"layer": {"name": "свечи", "flow": "row", "gap": 3, "children": [ ... ]}},
+  {"layer": {"name": "цена",  "children": [ ... ]}}
+]}}
+```
+
+Ошибки чтения: `ChildrenAndLayers`, `NamelessLayer`, `NotLayer`.
+
+## Свойства: всё, что умеет CSS, без его лишнего
+
+**Решение автора, 16.11.2026.** JTML не уступает CSS по возможностям, но не
+повторяет его свойства: одна раскладка вместо пяти, один отступ, одна единица,
+слои вместо position и z-index, стили по имени вместо каскада.
+
+| что | свойства | заменяет в CSS |
+|---|---|---|
+| раскладка `box` | `flow` row/column, `wrap`, `justify` start/center/end/between, `align` start/center/end/stretch, `gap` | flex, grid, float, table, inline |
+| отступ | `padding` числом или `[верх, право, низ, лево]`; между детьми — `gap` родителя | margin, padding, схлопывание |
+| размер | `width`, `height` в пикселях, `grow` — доля свободного | px, em, rem, %, vh, flex-basis |
+| вид `box` | `fill` (фон), `edge` (цвет рамки), `border` (толщина), `radius`, `shadow` | background, border-*, border-radius, box-shadow |
+| текст | `size` normal/big/huge, `weight` regular/bold, `cut` — обрезать с «...», `tone`, `align` | font-*, text-overflow, color |
+| наложение | `layers` | position, z-index |
+| стили | `style` — имя стиля из словаря `styles` страницы; свойства узла поверх стиля, наследования нет | class, каскад, специфичность |
+| состояния | `hover`, `focus`, `press` — свойства, которые меняются в этом состоянии | :hover, :focus, :active |
+
+Цвета — имена из палитры экрана (`tone`, `fill`, `edge`). Единица — пиксель и
+доля `grow`, других нет. Старый `tone` у `box` (фон без рамки, цвет рамки при
+`border` 1, заливка при толще) работает, пока программы не переедут на `fill` и
+`edge`.
+
+Делается по шагам, каждый виден на бирже Acer: текст → вид `box` → раскладка
+→ стили → состояния. Прокрутка, отзывчивость и движение — потом.
+
 ## Где живёт
 
-- `os/ui/jtml.saltic` — лицо: раскладка, Runtime (значения полей и
+- `registry/libraries/uiengine/jtml.saltic` — лицо: раскладка, Runtime (значения полей и
   ползунков, фокус, цели щелчков), рисование. Tab — следующий в фокус,
   стрелки двигают ползунок, щелчок ставит его положение.
-- `os/ui/jtml/atom.saltic` — атомы: виды узлов, Node, конструкторы.
-- `os/ui/jtml/slider.saltic` — ползунок без дерева: пределы, шаг, щелчок,
+- `registry/libraries/uiengine/jtml/atom.saltic` — атомы: виды узлов, Node, конструкторы.
+- `registry/libraries/uiengine/jtml/slider.saltic` — ползунок без дерева: пределы, шаг, щелчок,
   рисунок.
-- `os/ui/jtml/read.saltic` — текст JTML → дерево атомов.
-- `os/ui/jtml/reader.saltic` — разбор JSON-подмножества (переехал из
+- `registry/libraries/uiengine/jtml/read.saltic` — текст JTML → дерево атомов.
+- `registry/libraries/uiengine/jtml/reader.saltic` — разбор JSON-подмножества (переехал из
   uiengine).
 - Проверка — `tests/jtml.saltic`.
 

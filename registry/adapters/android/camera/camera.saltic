@@ -1,0 +1,192 @@
+-- camera — фронтальная камера телефона через мост к функциям C (clib):
+-- NDK libcamera2ndk (менеджер, камера, сессия, повторяющийся запрос превью) и
+-- libmediandk (AImageReader — кадры YUV_420_888 WIDE × HIGH, яркость — слой 0).
+-- Камера выбирается по ACAMERA_LENS_FACING = FRONT. Колбэки камеры и сессии
+-- Android зовёт сам; своих колбэков у моста пока нет, поэтому в них — адрес
+-- безвредной getpid (ничего не трогает, отвечает числом). Каждый шаг с
+-- ответом C ≠ 0 — ошибка Failed с шагом и кодом в problem (причина в лицо).
+-- Право CAMERA — adb shell pm grant <пакет> android.permission.CAMERA.
+--
+-- Camera { bridge, reader, image, noop, acquire, plane, stride, drop, problem }
+--     — открытая камера; функции кадра ищутся один раз в open, место моста
+--     под ответы кадра отдаётся в конце frame (clib.mark / rewind)
+-- open(camera) — открыть камеру Camera { bridge }; Failed — где и какой код
+--     в camera.problem (Box остаётся у вызывающего)
+-- frame(camera) -> Frame { ready, data, row } — последний кадр: адрес слоя
+--     яркости и шаг его строки; ready = no — нового кадра ещё нет
+-- done(camera, frame) — отдать кадр обратно (AImage_delete)
+-- shrink(frame, buffer, at, wide, high, step) — кадр серым стоя в буфер с at:
+--     wide × high, каждая step-я точка, повёрнут как на экране телефона (общее
+--     у сборщика collect и угадывания gaze — сеть видит то же, что при сборе)
+-- place(word) -> адрес числом без метки старшего байта (метка Android — только
+--     подпись указателя, читать по адресу без неё можно)
+-- Внутри: fn(camera, name) -> Word адреса функции; step(camera, name,
+--     arguments, what) -> ответ, не 0 — Failed; out_word — ответ C через
+--     указатель; front(camera, manager, list) -> id фронтальной камеры
+
+use core.str
+use core.mem
+use core.num
+use core.bytes
+use core.group
+use core.usize
+use core.address
+use os.target.android.clib
+
+WIDE = 640
+HIGH = 480
+YUV_420 = 35
+IMAGES = 2
+PREVIEW = 1
+LENS_FACING = 524293
+FACING_FRONT = 0
+HALF = 4294967296
+TAG_FREE = 16777216
+CAMERA = "libcamera2ndk.so"
+MEDIA = "libmediandk.so"
+
+Camera = Box {
+    bridge = clib.Bridge {},
+    reader = clib.Word {},
+    image = clib.Word {},
+    noop = clib.Word {},
+    acquire = clib.Word {},
+    plane = clib.Word {},
+    stride = clib.Word {},
+    drop = clib.Word {},
+    problem = ""
+}
+
+Frame = Box {
+    ready = no,
+    data = clib.Word {},
+    row = 0
+}
+
+skill fn(camera, library, name) {
+    out clib.find(camera.bridge, library, name)
+}
+
+skill step(camera, library, name, arguments) {
+    @function = fn(camera, library, name) rescue |err| {
+        camera.problem = "{name}: нет функции ({err})"
+        out error.Failed
+    }
+    @answer = clib.small(clib.call(camera.bridge, function, arguments)) rescue |err| {
+        camera.problem = "{name}: ответ не число"
+        out error.Failed
+    }
+    ((answer == 0) == no) {
+        camera.problem = "{name}: код {answer}"
+        out error.Failed
+    }
+    out none
+}
+
+skill answer_at(camera, count) {
+    out clib.put_words(camera.bridge, count)
+}
+
+skill place(value) {
+    out (value.high % TAG_FREE) * HALF + value.low
+}
+
+skill read_at(at) {
+    out clib.word(place(at))
+}
+
+skill front(camera, manager, list) {
+    @count = clib.small(clib.word(place(list))) rescue |err| { out error.Failed }
+    @ids = clib.word(place(list) + 8)
+    drum (count) {
+        @id = clib.word(place(ids) + beat * 8)
+        @meta = answer_at(camera, 1)
+        step(camera, CAMERA, "ACameraManager_getCameraCharacteristics", [manager, id, meta])
+        @entry = answer_at(camera, 4)
+        step(camera, CAMERA, "ACameraMetadata_getConstEntry", [read_at(meta), clib.number(LENS_FACING), entry])
+        @data = clib.word(place(entry) + 16)
+        @facing = clib.small(clib.word(place(data))) rescue |err| { -1 }
+        (facing % 256 == FACING_FRONT) { out id }
+    }
+    camera.problem = "фронтальной камеры нет среди {count}"
+    out error.Failed
+}
+
+skill open(camera) {
+    @bridge = camera.bridge
+    camera.noop = clib.find(bridge, "libc.so", "getpid")
+    @manager = clib.call(bridge, fn(camera, CAMERA, "ACameraManager_create"), [])
+    (clib.zero(manager) == yes) {
+        camera.problem = "ACameraManager_create: пусто"
+        out error.Failed
+    }
+    @list = answer_at(camera, 1)
+    step(camera, CAMERA, "ACameraManager_getCameraIdList", [manager, list])
+    @id = front(camera, manager, read_at(list))
+    @reader = answer_at(camera, 1)
+    step(camera, MEDIA, "AImageReader_new", [clib.number(WIDE), clib.number(HIGH), clib.number(YUV_420), clib.number(IMAGES), reader])
+    camera.reader = read_at(reader)
+    @window = answer_at(camera, 1)
+    step(camera, MEDIA, "AImageReader_getWindow", [camera.reader, window])
+    @device_calls = answer_at(camera, 3)
+    clib.set_word(place(device_calls) + 8, camera.noop)
+    clib.set_word(place(device_calls) + 16, camera.noop)
+    @device = answer_at(camera, 1)
+    step(camera, CAMERA, "ACameraManager_openCamera", [manager, id, device_calls, device])
+    @outputs = answer_at(camera, 1)
+    step(camera, CAMERA, "ACaptureSessionOutputContainer_create", [outputs])
+    @output = answer_at(camera, 1)
+    step(camera, CAMERA, "ACaptureSessionOutput_create", [read_at(window), output])
+    step(camera, CAMERA, "ACaptureSessionOutputContainer_add", [read_at(outputs), read_at(output)])
+    @target = answer_at(camera, 1)
+    step(camera, CAMERA, "ACameraOutputTarget_create", [read_at(window), target])
+    @request = answer_at(camera, 1)
+    step(camera, CAMERA, "ACameraDevice_createCaptureRequest", [read_at(device), clib.number(PREVIEW), request])
+    step(camera, CAMERA, "ACaptureRequest_addTarget", [read_at(request), read_at(target)])
+    @session_calls = answer_at(camera, 4)
+    drum (3) { clib.set_word(place(session_calls) + 8 + beat * 8, camera.noop) }
+    @session = answer_at(camera, 1)
+    step(camera, CAMERA, "ACameraDevice_createCaptureSession", [read_at(device), read_at(outputs), session_calls, session])
+    step(camera, CAMERA, "ACameraCaptureSession_setRepeatingRequest", [read_at(session), clib.number(0), clib.number(1), request, clib.number(0)])
+    camera.acquire = fn(camera, MEDIA, "AImageReader_acquireLatestImage")
+    camera.plane = fn(camera, MEDIA, "AImage_getPlaneData")
+    camera.stride = fn(camera, MEDIA, "AImage_getPlaneRowStride")
+    camera.drop = fn(camera, MEDIA, "AImage_delete")
+    out camera
+}
+
+skill frame(camera) {
+    @start = clib.mark(camera.bridge)
+    @image = answer_at(camera, 1)
+    @got = clib.small(clib.call(camera.bridge, camera.acquire, [camera.reader, image])) rescue |err| { -1 }
+    ((got == 0) == no) {
+        clib.rewind(camera.bridge, start)
+        out Frame {}
+    }
+    camera.image = read_at(image)
+    @data = answer_at(camera, 2)
+    clib.call(camera.bridge, camera.plane, [camera.image, clib.number(0), data, clib.number(place(data) + 8)])
+    @row = answer_at(camera, 1)
+    clib.call(camera.bridge, camera.stride, [camera.image, clib.number(0), row])
+    @stride = clib.small(clib.word(place(row))) rescue |err| { WIDE }
+    @made = Frame { ready = yes, data = read_at(data), row = stride % 65536 }
+    clib.rewind(camera.bridge, start)
+    out made
+}
+
+skill shrink(frame, buffer, at, wide, high, step) {
+    @base = address.from(place(frame.data))
+    drum (high) {
+        @oy = beat
+        @sx = (high - 1 - oy) * step
+        @row = at + oy * wide
+        drum (wide) { bytes.set(buffer, row + beat, num.from(mem.load8(base, usize.from(beat * step * frame.row + sx)))) }
+    }
+    out none
+}
+
+skill done(camera, frame) {
+    (frame.ready == no) { out none }
+    clib.call(camera.bridge, camera.drop, [camera.image])
+    out none
+}

@@ -16,6 +16,12 @@
 --     описаниями, страницей с параметра from до limit байт, next — откуда
 --     следующая /
 --     describe(call, registry, ms) -> байты ответа
+-- success_data(call, fields, ms, limit) -> ответ с объектом data из полей; не
+--     влезает в limit — ошибка internal с размером (MRPC-UDP §4: объект не
+--     режется); fits(call, fields, limit) -> влезет ли; size(call, fields) -> байт
+-- Поля и значения — байты JSON: field(name, value); number_value(n),
+--     text_value(text), flag_value(yes/no), list_value(values),
+--     object_value(fields)
 
 use core.group
 use os.target.uefi_x86_64.platform.utf8
@@ -275,6 +281,60 @@ skill help(call, registry, ms, limit) {
     @tail = "\},\"total\":{total}\}\}"
     (next < total) { tail = "\},\"total\":{total},\"next\":{next}\}\}" }
     out group.concat(bytes, utf8.encode(tail))
+}
+
+skill field(name, item) {
+    out group.concat(group.add(quoted_text(name), 58), item)
+}
+
+skill number_value(number) {
+    out utf8.encode("{number}")
+}
+
+skill text_value(text) {
+    out quoted_text(text)
+}
+
+skill flag_value(flag) {
+    (flag == yes) { out utf8.encode("true") }
+    out utf8.encode("false")
+}
+
+skill joined(pieces, open, close) {
+    @bytes = [open]
+    drum (group.count(pieces)) {
+        (beat > 0) { bytes = group.add(bytes, 44) }
+        bytes = group.concat(bytes, group.get(pieces, beat))
+    }
+    out group.add(bytes, close)
+}
+
+skill list_value(values) {
+    out joined(values, 91, 93)
+}
+
+skill object_value(fields) {
+    out joined(fields, 123, 125)
+}
+
+skill data_bytes(call, fields, ms) {
+    @bytes = group.concat(group.concat(head(call, yes, ms), utf8.encode(",\"data\":")), object_value(fields))
+    out group.add(bytes, 125)
+}
+
+skill fits(call, fields, limit) {
+    out size(call, fields) <= limit
+}
+
+skill size(call, fields) {
+    out group.count(data_bytes(call, fields, 0))
+}
+
+skill success_data(call, fields, ms, limit) {
+    @bytes = data_bytes(call, fields, ms)
+    @size = group.count(bytes)
+    (size > limit) { out failure(call, "internal", "ответ {size} байт не влезает в датаграмму ({limit}); попроси меньше (from, номер)", "", ms) }
+    out bytes
 }
 
 skill describe(call, registry, ms) {

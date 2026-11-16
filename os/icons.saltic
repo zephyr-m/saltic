@@ -1,0 +1,211 @@
+-- icons — значки Lucide — пол картинок Saltic (решение автора 16.11.2026):
+-- файл os/icons/lucide/icons.txt (переводит os/icons/build) — строка
+-- «имя|черта;черта;…», черта «o:» или «c:» и точки «x,y» в 1/GRID клетки 24×24.
+-- Значок обводится линией в две клетки Lucide со скруглёнными стыками и
+-- концами: полоска на каждый отрезок и CORNERS-угольник на каждой точке, все
+-- одной ориентации; их края заливает os/fonts/raster (filled) по ненулевой
+-- обмотке — края сглажены, как у букв. Маски — в кэше по имени и размеру.
+-- Файл читается через ttf.Source (буфер хоста или память Acer), оглавление
+-- строк строится при первом обращении.
+--
+-- Icons { data, length, starts, names, keys, glyphs } — файл, его длина,
+--     начала строк и имена, кэш масок
+-- open(source, length) -> Icons
+-- mask(icons, name, size) -> raster.Glyph: маска значка size × size (y вниз от
+--     верха: строка маски 0 — на высоте -glyph.top); UnknownIcon
+-- Внутри: index(icons) — оглавление; find(icons, name) -> начало точек строки;
+--     strokes(icons, at) -> группа черт (группа точек [x, y]); root — целый
+--     корень; quad / dot — края полоски и кружка; outline(strokes, size) -> края
+
+use core.str
+use core.group
+use os.fonts.ttf
+use os.fonts.raster
+
+GRID = 384
+CORNERS = 12
+UNIT = 1000
+COSINES = [1000, 866, 500, 0, -500, -866, -1000, -866, -500, 0, 500, 866]
+SINES = [0, 500, 866, 1000, 866, 500, 0, -500, -866, -1000, -866, -500]
+NEWLINE = 10
+BAR = 124
+SEMICOLON = 59
+COMMA = 44
+SPACE = 32
+
+Icons = Box {
+    data = ttf.Source {},
+    length = 0,
+    starts = [],
+    names = [],
+    keys = [],
+    glyphs = []
+}
+
+skill open(source, length) {
+    out Icons { data = source, length = length }
+}
+
+skill index(icons) {
+    (group.count(icons.starts) > 0) { out none }
+    @starts = []
+    @names = []
+    @name = ""
+    @in_name = yes
+    drum (icons.length) {
+        @byte = ttf.u8(icons.data, beat)
+        (byte == NEWLINE) {
+            name = ""
+            in_name = yes
+        }
+        (in_name == yes) {
+            (byte == BAR) {
+                starts = group.add(starts, beat + 1)
+                names = group.add(names, name)
+                in_name = no
+            }
+            @letter = (byte == BAR) == no
+            (byte == NEWLINE) { letter = no }
+            (letter == yes) { name = str.concat(name, str.from_byte(byte)) }
+        }
+    }
+    icons.starts = starts
+    icons.names = names
+    out none
+}
+
+skill find(icons, name) {
+    index(icons)
+    drum (group.count(icons.names)) {
+        (group.get(icons.names, beat) == name) { out group.get(icons.starts, beat) }
+    }
+    out error.UnknownIcon
+}
+
+skill strokes(icons, at) {
+    @found = []
+    @points = []
+    @number = 0
+    @negative = no
+    @x = 0
+    @reading = no
+    @cursor = at + 2
+    drum (icons.length - cursor) {
+        @byte = ttf.u8(icons.data, cursor + beat)
+        @digit = byte >= 48
+        (byte > 57) { digit = no }
+        (digit == yes) {
+            number = number * 10 + byte - 48
+            reading = yes
+        }
+        (byte == 45) { negative = yes }
+        (byte == COMMA) {
+            x = number
+            (negative == yes) { x = -number }
+            number = 0
+            negative = no
+            reading = no
+        }
+        @ends_point = byte == SPACE
+        (byte == SEMICOLON) { ends_point = yes }
+        (byte == NEWLINE) { ends_point = yes }
+        (ends_point == yes) {
+            (reading == yes) {
+                @y = number
+                (negative == yes) { y = -number }
+                points = group.add(points, [x, y])
+            }
+            number = 0
+            negative = no
+            reading = no
+        }
+        (byte == SEMICOLON) {
+            found = group.add(found, points)
+            points = []
+            cursor = cursor + 2
+        }
+        (byte == NEWLINE) {
+            found = group.add(found, points)
+            out found
+        }
+    }
+    found = group.add(found, points)
+    out found
+}
+
+skill root(value) {
+    (value <= 0) { out 0 }
+    @guess = value
+    @next = (guess + 1) / 2
+    drum (64) {
+        (next < guess) {
+            guess = next
+            next = (guess + value / guess) / 2
+        }
+    }
+    out guess
+}
+
+skill polygon(edges, points) {
+    @area = 0
+    @count = group.count(points)
+    drum (count) {
+        @a = group.get(points, beat)
+        @b = group.get(points, (beat + 1) % count)
+        area = area + group.get(a, 0) * group.get(b, 1) - group.get(b, 0) * group.get(a, 1)
+    }
+    @made = edges
+    drum (count) {
+        @from = group.get(points, beat)
+        @to = group.get(points, (beat + 1) % count)
+        (area < 0) {
+            from = group.get(points, (beat + 1) % count)
+            to = group.get(points, beat)
+        }
+        made = raster.line(made, from, to)
+    }
+    out made
+}
+
+skill quad(edges, a, b, half) {
+    @dx = group.get(b, 0) - group.get(a, 0)
+    @dy = group.get(b, 1) - group.get(a, 1)
+    @length = root(dx * dx + dy * dy)
+    (length == 0) { out edges }
+    @nx = (0 - dy) * half / length
+    @ny = dx * half / length
+    out polygon(edges, [[group.get(a, 0) + nx, group.get(a, 1) + ny], [group.get(b, 0) + nx, group.get(b, 1) + ny], [group.get(b, 0) - nx, group.get(b, 1) - ny], [group.get(a, 0) - nx, group.get(a, 1) - ny]])
+}
+
+skill dot(edges, center, half) {
+    @points = []
+    drum (CORNERS) { points = group.add(points, [group.get(center, 0) + half * group.get(COSINES, beat) / UNIT, group.get(center, 1) + half * group.get(SINES, beat) / UNIT]) }
+    out polygon(edges, points)
+}
+
+skill outline(lines, size) {
+    @half = size * raster.FINE / 24
+    @edges = []
+    drum (lines) {
+        @stroke = beat
+        @scaled = []
+        drum (stroke) { scaled = group.add(scaled, [group.get(beat, 0) * size * raster.FINE / GRID, 0 - group.get(beat, 1) * size * raster.FINE / GRID]) }
+        @count = group.count(scaled)
+        drum (count) {
+            edges = dot(edges, group.get(scaled, beat), half)
+            (beat + 1 < count) { edges = quad(edges, group.get(scaled, beat), group.get(scaled, beat + 1), half) }
+        }
+    }
+    out edges
+}
+
+skill mask(icons, name, size) {
+    @key = "{name}:{size}"
+    drum (group.count(icons.keys)) {
+        (group.get(icons.keys, beat) == key) { out group.get(icons.glyphs, beat) }
+    }
+    @made = raster.filled(outline(strokes(icons, find(icons, name)), size))
+    icons.keys = group.add(icons.keys, key)
+    icons.glyphs = group.add(icons.glyphs, made)
+    out made
+}

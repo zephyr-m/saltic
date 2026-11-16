@@ -1,23 +1,102 @@
 -- salticide — SalticIDE с сайта в окне Wayland. Страница та же, что на Acer:
--- programs/salticide/page, рисунок atoms.draw в адаптер os.target.linux.screen.
--- Щелчок закрывает окно.
+-- programs/salticide/page (компоненты и жители библиотеки), рисунок atoms.draw
+-- шрифтами TTF из os/fonts и значками os/icons в адаптер os.target.linux.screen,
+-- окно WIDE × HIGH; строк кода — сколько влезет (page.fit).
+-- Ввод — жестами (os/ui/gestures, из ядра событий окна way_events): клик по
+-- «×» (цель close) — выход, по «–» (minimize) — свернуть окно, по строке кода
+-- — курсор на неё, по полосе прокрутки — код туда же (page.click); колесо —
+-- прокрутка кода и ползунка (page.wheel); Esc — выход. Файлы — с диска
+-- (salticide/disk): дерево от папки запуска, щелчок по папке — раскрыть или
+-- свернуть, по файлу — открыть во вкладке, по вкладке — переключиться.
+-- Поменялось — экран заново. Журнал — JOURNAL: каждый жест (место и цель) и
+-- каждая перерисовка с кучей и побегами, строка дописывается сразу (dd),
+-- чтобы при падении было видно, что нажимали перед ним.
+--
+-- program() — вход; face(path) -> Typeface из файла; drawn(canvas, view,
+--     palette) -> runtime нарисованной страницы; pressed(view, files, hit, y)
+--     -> yes, если щелчок что-то поменял (дерево — здесь, остальное — page);
+--     note(text) — строка в журнал со временем
 
 use core.bytes
 use core.group
 use core.socket
-use os.ui.jtml
+use io.file
+use os.icons
+use os.fonts.ttf
+use core.str
+use core.mem
+use core.process
+use io.clock
+use registry.libraries.uiengine.jtml.read
+use os.target.uefi_x86_64.programs.salticide.components.project
+use os.target.linux.salticide.disk
+use registry.libraries.uiengine.draw.typeface
+use os.target.uefi_x86_64.programs.salticide.code
+use registry.libraries.uiengine.jtml
 use os.target.linux.screen
-use os.target.uefi_x86_64.screen.atoms
+use registry.libraries.uiengine.draw.atoms
 use os.target.uefi_x86_64.programs.salticide.page
+use os.ui.gestures
+
+REGULAR = "os/fonts/inter/Inter-Regular.ttf"
+BOLD = "os/fonts/inter/Inter-Bold.ttf"
+MONO = "os/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
+ICONS = "os/icons/lucide/icons.txt"
+TITLE = "SalticIDE"
+JOURNAL = ".cache/salticide.log"
+WIDE = 1600
+HIGH = 1000
+
+skill face(path) {
+    out typeface.from_bytes(file.read_bytes(path))
+}
+
+skill drawn(canvas, view, palette) {
+    @tree = atoms.fitted(read.page(view.jtml()), no, palette)
+    @runtime = jtml.mount(canvas, tree)
+    atoms.draw(canvas, runtime, palette)
+    out runtime
+}
+
+skill note(text) {
+    @moment = clock.stamp()
+    @used = mem.heap(0) / 1024
+    @escapes = mem.heap(1) / 1024
+    @writer = process.talk(["dd", "of={JOURNAL}", "oflag=append", "conv=notrunc", "status=none"], "", [])
+    writer.send("{moment}  {text} · куча {used} КБ, побеги {escapes} КБ\n")
+    out writer.code()
+}
+
+skill pressed(view, files, hit, y) {
+    (str.starts_with(hit.id, project.FOLDER) == yes) {
+        files.toggle(str.slice(hit.id, str.bytes(project.FOLDER), str.bytes(hit.id)))
+        view.files(files.rows())
+        out yes
+    }
+    (str.starts_with(hit.id, project.FILE) == yes) {
+        @path = str.slice(hit.id, str.bytes(project.FILE), str.bytes(hit.id))
+        view.open(path, files.read(path))
+        out yes
+    }
+    out view.click(hit, y)
+}
 
 program() {
-    @host = screen.open()
+    @host = screen.sized(TITLE, WIDE, HIGH)
     (group.count(host) == 0) { out none }
-    @face = group.get(host, 0)
+    @canvas = group.get(host, 0)
     @link = group.get(host, 1)
-    @runtime = jtml.mount(face, atoms.measured(page.tree(), no))
-    atoms.draw(face, runtime, atoms.palette_site(face))
+    @palette = atoms.with_faces(atoms.palette_site(canvas), face(REGULAR), face(BOLD), face(MONO))
+    @sheet = file.read_bytes(ICONS)
+    palette = atoms.with_icons(palette, icons.open(ttf.from_bytes(sheet), bytes.count(sheet)))
+    @view = page.opened(code.ACTOR)
+    view.fit(canvas.height)
+    @files = disk.Disk {}
+    view.files(files.rows())
+    @runtime = drawn(canvas, view, palette)
     screen.present(link)
+    note("старт: окно {WIDE}×{HIGH}")
+    @reader = gestures.Reader {}
     @packet = bytes.new(8192)
     @hold = bytes.new(4096)
     @joined = bytes.new(12288)
@@ -25,7 +104,31 @@ program() {
         (link.way_closed == yes) { leave }
         (link.way_failed == yes) { leave }
         screen.pump(link, packet, hold, joined)
-        socket.sleep(50)
+        @drained = reader.drain(link.way_events)
+        link.way_events = drained.core
+        @changed = no
+        @closing = no
+        drum (drained.gestures) {
+            (beat.kind == gestures.Kind.CLICK) {
+                @hit = jtml.hit(runtime, beat.x, beat.y)
+                note("клик {beat.x},{beat.y} → «{hit.id}»")
+                (hit.id == "close") { closing = yes }
+                (hit.id == "minimize") { screen.minimize(link) }
+                (pressed(view, files, hit, beat.y) == yes) { changed = yes }
+            }
+            (beat.kind == gestures.Kind.WHEEL) {
+                note("колесо {beat.amount}")
+                view.wheel(beat.amount)
+                changed = yes
+            }
+        }
+        (closing == yes) { leave }
+        (changed == yes) {
+            runtime = drawn(canvas, view, palette)
+            screen.present(link)
+            note("перерисовка")
+        }
+        socket.sleep(16)
     }
     out none
 }

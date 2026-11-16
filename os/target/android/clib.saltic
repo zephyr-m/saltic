@@ -1,0 +1,144 @@
+-- clib — мост Saltic к функциям C на Android (решение автора 16.11.2026):
+-- платформа (os/target/android/platform) по cpu.call(hi, lo) берёт кусок
+-- памяти по адресу hi·65536 + lo — [функция, 6 аргументов, ответ в +ANSWER] —
+-- и зовёт функцию по правилам C (аргументы в x0…x5, ответ — x0). Адреса
+-- dlopen / dlsym дают куски cpu.firmware 10 / 11, через них find находит
+-- любую функцию любой библиотеки. Кусок — своя память (memfd, ROOM байт):
+-- вызов в начале, дальше — место для строк C и структур (put_text, words).
+-- Значения C — по 64 бита двумя половинами (core.mem умеет 32).
+--
+-- Word { high, low } — 64-битное значение C парой 32-битных половин: указатели
+--     Android помечены в старшем байте и в число Saltic не влезают
+-- number(n) -> Word из числа (−1 — все единицы); small(word) -> число, если
+--     оно 32-битное со знаком (иначе NotSmall); zero(word) -> yes/no
+-- Bridge { block, room, next } — кусок вызова, начало места, следующий
+--     свободный байт
+-- open() -> Bridge; NoMemory
+-- find(bridge, library, name) -> Word адреса функции; NoLibrary, NoSymbol
+-- call(bridge, function, arguments) -> Word ответа x0; аргументы — Word (до 6);
+--     TooManyArguments
+-- put_text(bridge, text) -> Word адреса строки C с нулём на конце
+-- put_words(bridge, count) -> Word адреса count нулевых 64-битных слов (ответы C)
+-- word(address) -> Word по адресу; set_word(address, word)
+-- mark(bridge) -> место / rewind(bridge, место) — отдать всё взятое после mark
+--     (что берётся на каждом кадре, отдаётся в конце кадра: место — ROOM байт)
+-- Место кончилось — NoRoom (room_for), а не запись за край куска
+-- Внутри: LOCAL_NOW — RTLD_NOW у dlopen; CALL_BREAK — как адрес делится на hi и lo
+
+use core.str
+use core.cpu
+use core.mem
+use core.u8
+use core.u32
+use core.num
+use core.group
+use core.usize
+use core.socket
+use core.address
+
+ROOM = 65536
+ANSWER = 56
+ARGUMENTS = 6
+HALF = 4294967296
+LOCAL_NOW = 2
+CALL_BREAK = 65536
+
+Word = Box {
+    high = 0,
+    low = 0
+}
+
+Bridge = Box {
+    block = 0,
+    room = 0,
+    next = 0
+}
+
+skill open() {
+    @fd = socket.memory("saltic-native")
+    (fd < 0) { out error.NoMemory }
+    socket.resize(fd, ROOM)
+    @made = socket.map(fd, ROOM)
+    (made <= 0) { out error.NoMemory }
+    out Bridge { block = made, room = made + 64, next = made + 64 }
+}
+
+skill number(value) {
+    (value < 0) { out Word { high = HALF - 1, low = HALF + value % HALF } }
+    out Word { high = value / HALF, low = value % HALF }
+}
+
+skill small(value) {
+    (value.high == 0) { out value.low }
+    (value.high == HALF - 1) { out value.low - HALF }
+    out error.NotSmall
+}
+
+skill zero(value) {
+    (value.high == 0) { out value.low == 0 }
+    out no
+}
+
+skill word(at) {
+    @low = num.from(mem.load32(address.from(at), usize.from(0)))
+    @high = num.from(mem.load32(address.from(at), usize.from(4)))
+    out Word { high = high, low = low }
+}
+
+skill set_word(at, value) {
+    mem.store32(address.from(at), usize.from(0), u32.from(value.low))
+    mem.store32(address.from(at), usize.from(4), u32.from(value.high))
+    out none
+}
+
+skill call(bridge, function, arguments) {
+    (group.count(arguments) > ARGUMENTS) { out error.TooManyArguments }
+    set_word(bridge.block, function)
+    drum (ARGUMENTS) {
+        @value = Word {}
+        (beat < group.count(arguments)) { value = group.get(arguments, beat) }
+        set_word(bridge.block + 8 + beat * 8, value)
+    }
+    set_word(bridge.block + ANSWER, Word {})
+    cpu.call(bridge.block / CALL_BREAK, bridge.block % CALL_BREAK)
+    out word(bridge.block + ANSWER)
+}
+
+skill room_for(bridge, size) {
+    (bridge.next + size > bridge.block + ROOM) { out error.NoRoom }
+    out none
+}
+
+skill mark(bridge) {
+    out bridge.next
+}
+
+skill rewind(bridge, place) {
+    bridge.next = place
+    out none
+}
+
+skill put_text(bridge, text) {
+    room_for(bridge, str.bytes(text) + 8)
+    @at = bridge.next
+    drum (str.bytes(text)) { mem.store8(address.from(at), usize.from(beat), u8.from(str.byte(text, beat))) }
+    mem.store8(address.from(at), usize.from(str.bytes(text)), u8.from(0))
+    bridge.next = at + str.bytes(text) + 8 - (str.bytes(text) % 8)
+    out number(at)
+}
+
+skill put_words(bridge, count) {
+    room_for(bridge, count * 8)
+    @at = bridge.next
+    drum (count) { set_word(at + beat * 8, Word {}) }
+    bridge.next = at + count * 8
+    out number(at)
+}
+
+skill find(bridge, library, name) {
+    @handle = call(bridge, number(cpu.firmware(10)), [put_text(bridge, library), number(LOCAL_NOW)])
+    (zero(handle) == yes) { out error.NoLibrary }
+    @found = call(bridge, number(cpu.firmware(11)), [handle, put_text(bridge, name)])
+    (zero(found) == yes) { out error.NoSymbol }
+    out found
+}

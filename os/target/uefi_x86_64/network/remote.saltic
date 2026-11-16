@@ -12,6 +12,11 @@
 -- Каждый запрос и ответ (и программы) пишется в netlog — панель слева, кроме
 -- кусков shot-part. Раз в PANEL_EVERY вызовов serve — system_panel.tick
 -- (панель справа) со счётчиком кадров: один serve — один кадр.
+-- Журнал к нам в файл (stream, только кабель): открытие сети, пульс раз в
+-- HEARTBEAT кругов с кольцами карты (rtl8111.rings), каждый принятый кадр и ответ.
+-- Каждый круг serve сбрасывает регистр прерываний карты (rtl8111.interrupts):
+-- кольцо приёма — 4 ячейки, пачка кадров его заполняет, карта поднимает
+-- RX_RING_FULL и не принимает, пока флаг не сброшен, — программа глохла.
 --
 -- Remote — карта, Wi-Fi (или none), via, состояние программы текстом, байты
 --     последнего снимка, meter — счётчик кадров для системной панели
@@ -22,8 +27,12 @@
 -- own(remote, place, pages) — страницы прошивки, которые вернуть при quit
 -- offer(remote, commands) — свои команды mRPC (mrpc.Command): видны в help,
 --     такие запросы remote отдаёт программе пакетом
--- reply_mrpc / fail_mrpc(remote, packet, …) — ответ программы: текст / ошибка
+-- reply_mrpc / fail_mrpc(remote, packet, …) — ответ программы: текст / ошибка;
+--     reply_data(remote, packet, fields) — объектом data (mrpc.success_data)
 -- hide_panels(remote) — не рисовать панели и не писать журнал: весь экран
+-- own_panels(remote) — журнал и счётчики ведутся (netlog.keep, system_panel
+--     в холст), но на экран не кладутся: панели рисует программа (пульт)
+-- Внутри: logged(remote, kind, bytes) — строка в журнал по panels и drawn
 -- reply_text(remote, packet, text) — ответить отправителю
 -- send_to(remote, packet, port, text_bytes) — ответить на другой порт
 -- answer(remote, bytes) -> пакет или none — разбор одного кадра (для serve)
@@ -40,6 +49,8 @@ use os.target.uefi_x86_64.network.shot
 use os.target.uefi_x86_64.platform.parse
 use os.target.uefi_x86_64.network.reply
 use os.target.uefi_x86_64.network.netlog
+use os.target.uefi_x86_64.network.netlog.journal
+use os.target.uefi_x86_64.network.stream
 use os.target.uefi_x86_64.screen.system_panel
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
@@ -52,6 +63,7 @@ PORT = 5555
 PART = "shot-part "
 
 PANEL_EVERY = 8
+HEARTBEAT = 100
 WIFI_FRAMES = 4
 REPLY_LIMIT = 1400
 QUIET_STATE = "программа не рассказала о себе (нет remote.tell)"
@@ -68,6 +80,7 @@ Remote = Box {
     owned = [],
     commands = [],
     panels = yes,
+    drawn = yes,
     rounds = 0,
     meter = system_panel.Meter {},
     wifi = none,
@@ -81,6 +94,8 @@ skill open_remote() {
     rtl8111.wait_link(card) rescue |err| { none }
     @cabled = rtl8111.has_bit(rtl8111.status(card), rtl8111.PHY_LINK)
     @remote = Remote { card = card, cabled = cabled }
+    @rings = rtl8111.rings(card)
+    stream.send(card, "программа: сеть открыта, кабель {cabled}, {rings}")
     @wifi = handoff.adopt(card.base) rescue |err| { none }
     remote.wifi = wifi
     (cabled == no) {
@@ -109,7 +124,8 @@ skill transmit(remote, frame) {
 }
 
 skill reply_text(remote, packet, text) {
-    (remote.panels == yes) { netlog.say_text(remote.card.base, text) }
+    logged(remote, journal.SAY, journal.bytes_of(text))
+    stream.send(remote.card, "программа: ответ «{text}»")
     out transmit(remote, net.udp_frame(our_mac(remote), my_ip(remote), packet.from_mac, packet.from_ip, PORT, packet.from_port, text))
 }
 
@@ -130,7 +146,7 @@ skill answer(remote, bytes) {
         shot.send_chunk(remote.card, remote.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(PART), str.bytes(packet.text))))
         out none
     }
-    (remote.panels == yes) { netlog.ask(remote.card.base, packet.payload) }
+    logged(remote, journal.ASK, packet.payload)
     (mrpc.is_request(packet.payload) == yes) {
         (theirs(remote, packet) == yes) { out packet }
         answer_mrpc(remote, packet)
@@ -195,6 +211,16 @@ skill answer_mrpc(remote, packet) {
 
 skill serve(remote) {
     remote.rounds = remote.rounds + 1
+    @rounds = remote.rounds
+    @pending = rtl8111.interrupts(remote.card)
+    (rtl8111.has_bit(pending, rtl8111.RX_RING_FULL) == yes) {
+        @isr = firmware.hex(pending, 4)
+        stream.send(remote.card, "программа: круг {rounds}, isr 0x{isr} — кольцо приёма было полным, сбросила")
+    }
+    (rounds % HEARTBEAT == 0) {
+        @rings = rtl8111.rings(remote.card)
+        stream.send(remote.card, "программа: круг {rounds}, {rings}")
+    }
     @meter = remote.meter
     meter.rounds = remote.rounds
     (remote.rounds % PANEL_EVERY == 0) {
@@ -205,6 +231,8 @@ skill serve(remote) {
         (rtl8111.received(remote.card, beat) == yes) {
             @bytes = rtl8111.read_frame(remote.card, beat)
             rtl8111.release(remote.card, beat)
+            @size = group.count(bytes)
+            stream.send(remote.card, "программа: круг {rounds}, принят кадр {size} байт в ячейке {beat}")
             remote.via = "cable"
             @packet = answer(remote, bytes)
             (packet) |packet| { packets = group.add(packets, packet) }
@@ -223,7 +251,9 @@ skill serve(remote) {
 }
 
 skill send_to(remote, packet, port, text_bytes) {
-    (remote.panels == yes) { netlog.say(remote.card.base, text_bytes) }
+    logged(remote, journal.SAY, text_bytes)
+    @size = group.count(text_bytes)
+    stream.send(remote.card, "программа: ответ {size} байт на порт {port}")
     out transmit(remote, net.udp_frame_bytes(our_mac(remote), my_ip(remote), packet.from_mac, packet.from_ip, PORT, port, text_bytes))
 }
 
@@ -250,9 +280,27 @@ skill reply_mrpc(remote, packet, text) {
     out send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode(text), 0, REPLY_LIMIT))
 }
 
+skill reply_data(remote, packet, fields) {
+    @call = mrpc.decode(packet.text)
+    out send_to(remote, packet, packet.from_port, mrpc.success_data(call, fields, 0, REPLY_LIMIT))
+}
+
 skill fail_mrpc(remote, packet, message) {
     @call = mrpc.decode(packet.text)
     out send_to(remote, packet, packet.from_port, mrpc.failure(call, "invalid_param", message, "", 0))
+}
+
+skill logged(remote, kind, bytes) {
+    (remote.panels == no) { out none }
+    (remote.drawn == no) { out netlog.keep(remote.card.base, kind, bytes) rescue |err| { none } }
+    out netlog.add(remote.card.base, kind, bytes) rescue |err| { none }
+}
+
+skill own_panels(remote) {
+    remote.drawn = no
+    @meter = remote.meter
+    meter.hidden = yes
+    out none
 }
 
 skill hide_panels(remote) {

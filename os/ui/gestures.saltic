@@ -1,0 +1,108 @@
+-- gestures — ядро жестов, верхнее над ядром событий os/ui/events
+-- (docs/os/EVENTS.md): изменения нижнего ядра → жесты фиксированного словаря
+-- (первая версия, решение автора 17.11.2026): клик, двойной клик, колесо,
+-- набор текста. Программа своих жестов не задаёт, словарь пополняет автор.
+-- Канал не важен: мышь, другая машина или агент дают те же изменения.
+-- Имена нижнего ядра — POINTER_X / POINTER_Y (место, events.pair),
+-- POINTER_LEFT (счётчик нажатий левой, events.bump), POINTER_WHEEL (сумма
+-- шагов колеса: вниз — плюс), TYPED (счётчик набранного, знак — в text).
+-- Место жеста — где был указатель в момент изменения; что под ним, решает
+-- программа (jtml.hit) — переезд попадания сюда ещё впереди.
+--
+-- Kind — CLICK, DOUBLE, WHEEL, TYPE
+-- Gesture { kind, x, y, amount, text, time } — amount — шагов колеса
+-- Drained { core, gestures } — ядро без прочитанного и жесты по порядку
+-- Reader { x, y, wheel, last_time, last_x, last_y } — что ядро жестов
+--     помнит между изменениями: read(change) -> [Gesture] (клик — один, клик
+--     рядом и вскоре после прошлого — ещё и двойной); drain(core) -> Drained
+-- DOUBLE_TIME — мс между кликами двойного; NEAR — на сколько точек можно
+--     сдвинуться между ними
+
+use core.group
+use os.ui.events
+
+POINTER_X = "pointer.x"
+POINTER_Y = "pointer.y"
+POINTER_LEFT = "pointer.left"
+POINTER_WHEEL = "pointer.wheel"
+TYPED = "keyboard.typed"
+DOUBLE_TIME = 400
+NEAR = 4
+
+Kind = enum {
+    CLICK,
+    DOUBLE,
+    WHEEL,
+    TYPE
+}
+
+Gesture = Box {
+    kind = Kind.CLICK,
+    x = 0,
+    y = 0,
+    amount = 0,
+    text = "",
+    time = 0
+}
+
+Drained = Box {
+    core = events.Core {},
+    gestures = []
+}
+
+skill apart(a, b) {
+    (a > b) { out a - b }
+    out b - a
+}
+
+Reader = Box {
+    x = 0,
+    y = 0,
+    wheel = 0,
+    last_time = -1000000,
+    last_x = -1000,
+    last_y = -1000
+
+    skill read(change) {
+        (change.id == POINTER_X) {
+            x = change.number
+            out []
+        }
+        (change.id == POINTER_Y) {
+            y = change.number
+            out []
+        }
+        (change.id == POINTER_LEFT) {
+            @made = [Gesture { kind = Kind.CLICK, x = x, y = y, time = change.time }]
+            @quick = change.time - last_time <= DOUBLE_TIME
+            (apart(x, last_x) > NEAR) { quick = no }
+            (apart(y, last_y) > NEAR) { quick = no }
+            last_time = change.time
+            last_x = x
+            last_y = y
+            (quick == yes) {
+                made = group.add(made, Gesture { kind = Kind.DOUBLE, x = x, y = y, time = change.time })
+                last_time = -1000000
+            }
+            out made
+        }
+        (change.id == POINTER_WHEEL) {
+            @step = change.number - wheel
+            wheel = change.number
+            out [Gesture { kind = Kind.WHEEL, x = x, y = y, amount = step, time = change.time }]
+        }
+        (change.id == TYPED) { out [Gesture { kind = Kind.TYPE, x = x, y = y, text = change.text, time = change.time }] }
+        out []
+    }
+
+    skill drain(core) {
+        @rest = core
+        @made = []
+        drum (group.count(core.queue)) {
+            @taken = events.take(rest)
+            rest = taken.core
+            made = group.concat(made, read(taken.change))
+        }
+        out Drained { core = rest, gestures = made }
+    }
+}

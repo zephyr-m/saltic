@@ -1,0 +1,171 @@
+-- shapes — фигуры экрана со сглаженными краями (для atoms): скруглённые
+-- заливка и рамка, скругление с одной стороны, мягкая и внутренняя тень,
+-- рамка в точку. Края считаются в 1/SUB точки: крайние точки ряда смешаны с
+-- фоном по покрытию (graphics.blend).
+--
+-- rounded(screen, x, y, w, h, radius, color, alpha) / shape(… color) /
+--     shape_alpha(… color, alpha) — скруглённая заливка; ring(screen, x, y, w,
+--     h, radius, thick, color) — скруглённая рамка; partly(screen, [x, y, w,
+--     h], radius, color, corners) — скругление только с одной стороны (corners
+--     у box: top, bottom, left, right); soft_shadow(screen, x, y, w, h,
+--     radius, blur, color) — тень слоями с прозрачностью SHADOW_ALPHA / blur,
+--     сдвиг вниз — треть; inner_shadow(screen, x, y, w, radius, depth, color) —
+--     полосы сверху до INSET_ALPHA; frame(screen, x, y, w, h, color) — рамка в точку
+-- Внутри: root — целый корень; corner(radius, row, height) — отступ ряда от
+--     края в скруглении в 1/SUB точки; span — отрезок строки с дробными краями
+
+use core.group
+use os.target.uefi_x86_64.screen.graphics
+
+SHADOW_ALPHA = 70
+SUB = 16
+SHIFT = 1048576
+OPAQUE = 255
+INSET_ALPHA = 60
+
+skill root(value) {
+    (value <= 0) { out 0 }
+    @guess = value
+    @next = (guess + 1) / 2
+    drum (64) {
+        (next < guess) {
+            guess = next
+            next = (guess + value / guess) / 2
+        }
+    }
+    out guess
+}
+
+skill corner(radius, row, height) {
+    @k = row
+    (height - 1 - row < k) { k = height - 1 - row }
+    (k >= radius) { out 0 }
+    @rise = radius * SUB - (k * SUB + SUB / 2)
+    out radius * SUB - root(radius * radius * SUB * SUB - rise * rise)
+}
+
+skill span(screen, from, to, y, color, alpha) {
+    (to <= from) { out none }
+    @first = (from + SHIFT) / SUB - SHIFT / SUB
+    @last = (to - 1 + SHIFT) / SUB - SHIFT / SUB
+    (first == last) { out graphics.blend(screen, first, y, 1, 1, color, alpha * (to - from) / SUB) }
+    graphics.blend(screen, first, y, 1, 1, color, alpha * (first * SUB + SUB - from) / SUB)
+    graphics.blend(screen, first + 1, y, last - first - 1, 1, color, alpha)
+    out graphics.blend(screen, last, y, 1, 1, color, alpha * (to - last * SUB) / SUB)
+}
+
+skill soft_shadow(screen, x, y, width, height, radius, blur, color) {
+    @drop = blur / 3
+    @step = SHADOW_ALPHA / blur
+    (step < 1) { step = 1 }
+    drum (blur) {
+        @grow = blur - beat
+        shape_alpha(screen, x - grow, y - grow + drop, width + grow * 2, height + grow * 2, radius + grow, color, step)
+    }
+    out none
+}
+
+skill inner_shadow(screen, x, y, width, radius, depth, color) {
+    drum (depth) { graphics.blend(screen, x + radius, y + beat, width - radius * 2, 1, color, INSET_ALPHA * (depth - beat) / depth) }
+    out none
+}
+
+skill rounded(screen, x, y, width, height, radius, color, alpha) {
+    @round = radius
+    (round * 2 > width) { round = width / 2 }
+    (round * 2 > height) { round = height / 2 }
+    (round <= 0) { out graphics.blend(screen, x, y, width, height, color, alpha) }
+    @left = x * SUB
+    @right = (x + width) * SUB
+    drum (round) {
+        @inset = corner(round, beat, height)
+        span(screen, left + inset, right - inset, y + beat, color, alpha)
+        span(screen, left + inset, right - inset, y + height - 1 - beat, color, alpha)
+    }
+    out graphics.blend(screen, x, y + round, width, height - round * 2, color, alpha)
+}
+
+skill partly(screen, place, radius, color, corners) {
+    @x = group.get(place, 0)
+    @y = group.get(place, 1)
+    @width = group.get(place, 2)
+    @height = group.get(place, 3)
+    @round = radius
+    (round * 2 > width) { round = width / 2 }
+    @top = corners == "top"
+    (corners == "left") { top = yes }
+    (corners == "right") { top = yes }
+    @bottom = corners == "bottom"
+    (corners == "left") { bottom = yes }
+    (corners == "right") { bottom = yes }
+    @rounds_left = corners == "left"
+    @rounds_right = corners == "right"
+    (top == yes) { (bottom == no) { rounds_left = yes } }
+    (top == yes) { (bottom == no) { rounds_right = yes } }
+    (bottom == yes) { (top == no) { rounds_left = yes } }
+    (bottom == yes) { (top == no) { rounds_right = yes } }
+    @both = top == bottom
+    ((both == yes) == no) { (round > height) { round = height } }
+    (both == yes) { (round * 2 > height) { round = height / 2 } }
+    (round <= 0) { out graphics.fill(screen, x, y, width, height, color) }
+    @left = x * SUB
+    @right = (x + width) * SUB
+    @first = 0
+    @rows = height
+    drum (round) {
+        @inset = corner(round, beat, round * 2)
+        @from = left
+        (rounds_left == yes) { from = left + inset }
+        @to = right
+        (rounds_right == yes) { to = right - inset }
+        (top == yes) { span(screen, from, to, y + beat, color, OPAQUE) }
+        (bottom == yes) { span(screen, from, to, y + height - 1 - beat, color, OPAQUE) }
+    }
+    (top == yes) { first = round }
+    (top == yes) { rows = rows - round }
+    (bottom == yes) { rows = rows - round }
+    out graphics.fill(screen, x, y + first, width, rows, color)
+}
+
+skill shape_alpha(screen, x, y, width, height, radius, color, alpha) {
+    out rounded(screen, x, y, width, height, radius, color, alpha)
+}
+
+skill shape(screen, x, y, width, height, radius, color) {
+    out rounded(screen, x, y, width, height, radius, color, OPAQUE)
+}
+
+skill ring(screen, x, y, width, height, radius, thick, color) {
+    @round = radius
+    (round * 2 > width) { round = width / 2 }
+    (round * 2 > height) { round = height / 2 }
+    @inner = round - thick
+    (inner < 0) { inner = 0 }
+    @band = round
+    (band < thick) { band = thick }
+    @left = x * SUB
+    @right = (x + width) * SUB
+    drum (band) {
+        @top = beat
+        drum (2) {
+            @row = top
+            (beat == 1) { row = height - 1 - top }
+            @outer = corner(round, row, height)
+            (top < thick) { span(screen, left + outer, right - outer, y + row, color, OPAQUE) }
+            (top >= thick) {
+                @edge = thick * SUB + corner(inner, row - thick, height - thick * 2)
+                span(screen, left + outer, left + edge, y + row, color, OPAQUE)
+                span(screen, right - edge, right - outer, y + row, color, OPAQUE)
+            }
+        }
+    }
+    graphics.fill(screen, x, y + band, thick, height - band * 2, color)
+    out graphics.fill(screen, x + width - thick, y + band, thick, height - band * 2, color)
+}
+
+skill frame(screen, x, y, width, height, color) {
+    graphics.fill(screen, x, y, width, 1, color)
+    graphics.fill(screen, x, y + height - 1, width, 1, color)
+    graphics.fill(screen, x, y, 1, height, color)
+    out graphics.fill(screen, x + width - 1, y, 1, height, color)
+}

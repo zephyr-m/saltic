@@ -1,9 +1,17 @@
 -- store — доска на диске Acer: \SALTIC\TASKS.TXT, по строке на задачу:
--- «колонка|текст» (колонка — цифра 0..2). Пишется целиком заново; старый
+-- «колонка|текст» (колонка — цифра 0..2), под ней её пункты строками
+-- «  [x] ДД.ММ.ГГГГ ЧЧ:ММ|текст» (сделан; [ ] — нет; время — последнего
+-- изменения), события «  @ ДД.ММ.ГГГГ ЧЧ:ММ|что случилось» и сообщения
+-- «  > ДД.ММ.ГГГГ ЧЧ:ММ|автор|текст» (автор без «|»). Старые строки
+-- без времени («  [x]|текст») и файлы без пунктов читаются как раньше — время
+-- у них "" (неизвестно). Пишется целиком заново; старый
 -- файл сначала удаляется. Нет файла — доска начинается с наших задач.
 -- Буфер — участок арены "tasks" из arena_map (32 КБ).
 --
 -- load_desk(base) -> Board; нет файла — starting_board
+-- Внутри: stamped(found, stamp) — « время|» или «|»; under(desk, last, stored,
+--     start, end) — строка пункта или события под задачей last; bar_after,
+--     stamp_between — где «|» и что перед ним
 -- save_desk(base, desk) -> байт записано; DeskTooBig, WriteFailed
 
 use core.str
@@ -21,6 +29,13 @@ MODE_READ_WRITE = 3
 LINE_END = 10
 BAR = 124
 ZERO = 48
+SPACE = 32
+OPEN = 91
+CLOSE = 93
+TICK = 120
+AT = 64
+QUOTED = 62
+ITEM_HEAD = 6
 
 skill desk_buffer(base) {
     out firmware.region(base, "tasks")
@@ -38,8 +53,47 @@ skill desk_bytes(desk) {
         found = group.add(found, BAR)
         found = group.concat(found, utf8.encode(group.get(desk.names, beat)))
         found = group.add(found, LINE_END)
+        drum (group.get(desk.items, beat)) {
+            @mark = SPACE
+            (group.get(beat, 0) == yes) { mark = TICK }
+            found = group.concat(found, [SPACE, SPACE, OPEN, mark, CLOSE])
+            found = stamped(found, group.get(beat, 2))
+            found = group.concat(found, utf8.encode(group.get(beat, 1)))
+            found = group.add(found, LINE_END)
+        }
+        drum (group.get(desk.events, beat)) {
+            found = group.concat(found, [SPACE, SPACE, AT])
+            found = stamped(found, group.get(beat, 0))
+            found = group.concat(found, utf8.encode(group.get(beat, 1)))
+            found = group.add(found, LINE_END)
+        }
+        drum (group.get(desk.messages, beat)) {
+            found = group.concat(found, [SPACE, SPACE, QUOTED])
+            found = stamped(found, group.get(beat, 0))
+            found = group.add(group.concat(found, utf8.encode(group.get(beat, 1))), BAR)
+            found = group.concat(found, utf8.encode(group.get(beat, 2)))
+            found = group.add(found, LINE_END)
+        }
     }
     out found
+}
+
+skill stamped(found, stamp) {
+    @made = found
+    (str.bytes(stamp) > 0) { made = group.concat(group.add(made, SPACE), utf8.encode(stamp)) }
+    out group.add(made, BAR)
+}
+
+skill bar_after(stored, from, end) {
+    drum (end - from) {
+        (group.get(stored, from + beat) == BAR) { out from + beat }
+    }
+    out -1
+}
+
+skill stamp_between(stored, from, bar) {
+    (bar - from < 2) { out "" }
+    out utf8.decode(stored, from + 1, bar - from - 1)
 }
 
 skill drop_old(base, folder) {
@@ -89,6 +143,28 @@ skill stored_bytes(base) {
     out found
 }
 
+skill under(desk, last, stored, start, end) {
+    @event = group.get(stored, start + 2) == AT
+    @message = group.get(stored, start + 2) == QUOTED
+    @from = start + 5
+    (event == yes) { from = start + 3 }
+    (message == yes) { from = start + 3 }
+    @bar = bar_after(stored, from, end)
+    (bar < 0) { out none }
+    @stamp = stamp_between(stored, from, bar)
+    @text = utf8.decode(stored, bar + 1, end - bar - 1)
+    (event == yes) { out board.note_event(desk, last, stamp, text) }
+    (message == yes) {
+        @split = bar_after(stored, bar + 1, end)
+        (split < 0) { out none }
+        board.post(desk, last, stamp, utf8.decode(stored, bar + 1, split - bar - 1), utf8.decode(stored, split + 1, end - split - 1))
+        out none
+    }
+    @place = board.add_item(desk, last, text, stamp)
+    (group.get(stored, start + 3) == TICK) { board.tick_item(desk, last, place, stamp) }
+    out none
+}
+
 skill load_desk(base) {
     @stored = stored_bytes(base)
     (group.count(stored) == 0) { out board.starting_board() }
@@ -96,9 +172,16 @@ skill load_desk(base) {
     @start = 0
     drum (group.count(stored)) {
         (group.get(stored, beat) == LINE_END) {
-            (beat - start > 2) {
-                @column = group.get(stored, start) - ZERO
-                board.put_task(desk, column, utf8.decode(stored, start + 2, beat - start - 2))
+            @item = group.get(stored, start) == SPACE
+            (item == no) {
+                (beat - start > 2) {
+                    @column = group.get(stored, start) - ZERO
+                    board.put_task(desk, column, utf8.decode(stored, start + 2, beat - start - 2))
+                }
+            }
+            (item == yes) {
+                @last = group.count(desk.names)
+                (last > 0) { (beat - start >= ITEM_HEAD) { under(desk, last, stored, start, beat) } }
             }
             start = beat + 1
         }

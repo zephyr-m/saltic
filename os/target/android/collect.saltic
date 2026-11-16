@@ -1,0 +1,232 @@
+-- collect — сборщик данных для своей сети взгляда (APK, just android collect):
+-- тёмная точка прыгает по сетке COLUMNS × ROWS экрана в перемешанном порядке,
+-- ты смотришь на неё; первые SETTLE мс на точке глаза переводят взгляд —
+-- не пишутся, потом до SHOTS кадров с фронтальной камеры (camera, мост clib)
+-- пишутся вместе с координатами точки. Кадр — серый WIDE × HIGH стоя (каждая
+-- STEP-я точка кадра камеры, повёрнутая как на экране). Касание — старт и
+-- пауза. Сверху — житель label: сессия, снимков, точка; в углу — превью того,
+-- что пишется (лицо в кадре?). Экран — светлая палитра, шрифты TTF из FILES.
+-- Файл сессии — FILES/S<время>.GAZE, переписывается после каждой точки:
+-- «GAZE», ширина и высота (по 2 байта), дальше записи: x, y точки в точках
+-- экрана (по 2 байта, младший первым) и WIDE × HIGH байт яркости по строкам.
+-- Право CAMERA — adb shell pm grant dev.saltic.collect android.permission.CAMERA.
+--
+-- program() -> none
+-- Внутри: Session { … } — состояние сборщика; targets(width, height) ->
+--     точки в перемешанном порядке; sample(session, frame) — кадр в запись;
+--     preview / dot — превью и точка на экране; saved(session) — файл;
+--     sample_preview — превью без записи (на паузе); advance — следующая точка
+
+use io
+use io.file
+use core.str
+use core.cpu
+use core.mem
+use core.num
+use core.u32
+use core.time
+use core.bytes
+use core.group
+use core.usize
+use core.address
+use registry.libraries.uiengine.jtml
+use registry.libraries.uiengine.jtml.read
+use registry.libraries.uiengine.jtml.calls
+use os.target.uefi_x86_64.screen.graphics
+use registry.libraries.uiengine.draw.shapes
+use registry.libraries.uiengine.draw.atoms
+use registry.libraries.uiengine.draw.typeface
+use os.target.android.clib
+use tarantul.camera_android.camera
+
+FILES = "/sdcard/Android/data/dev.saltic.collect/files/"
+WIDE = 96
+HIGH = 128
+STEP = 5
+COLUMNS = 4
+ROWS = 6
+SETTLE = 400
+SHOTS = 8
+SPOT = 14
+INSET = 40
+TOP = 90
+HEAD = 8
+LIMIT = 400
+
+Session = Box {
+    name = "",
+    points = [],
+    place = 0,
+    since = 0,
+    shots = 0,
+    total = 0,
+    running = no,
+    buffer = bytes.new(0),
+    used = 0,
+    last = bytes.new(0)
+}
+
+skill canvas() {
+    out graphics.Screen { width = cpu.firmware(1), height = cpu.firmware(2), stride = cpu.firmware(3), format = graphics.FORMAT_RGB, memory = cpu.firmware(0), vsync = no }
+}
+
+skill face(name) {
+    out typeface.from_bytes(file.read_bytes("{FILES}{name}"))
+}
+
+skill dressed(screen) {
+    @plain = atoms.palette_light(screen)
+    @typed = atoms.with_faces(atoms.palette_light(screen), face("INTER.TTF"), face("INTERB.TTF"), face("MONO.TTF")) rescue |err| {
+        io.show("collect: шрифтов нет в {FILES} ({err}), рисую Spleen")
+        out plain
+    }
+    out typed
+}
+
+skill targets(width, height) {
+    @found = []
+    drum (ROWS) {
+        @row = beat
+        drum (COLUMNS) { found = group.add(found, [INSET + beat * (width - 2 * INSET) / (COLUMNS - 1), TOP + INSET + row * (height - TOP - 2 * INSET) / (ROWS - 1)]) }
+    }
+    @mixed = []
+    @seed = 7
+    drum (group.count(found)) {
+        seed = (seed * 75 + 74) % 65537
+        @at = seed % (group.count(mixed) + 1)
+        mixed = group.concat(group.concat(group.slice(mixed, 0, at), [group.get(found, beat)]), group.slice(mixed, at, group.count(mixed)))
+    }
+    out mixed
+}
+
+skill status(session) {
+    @text = "коснись и смотри на точку · касание — пауза"
+    (session.running == yes) {
+        @place = session.place + 1
+        @count = group.count(session.points)
+        text = "снимков {session.total} · точка {place} из {count}"
+    }
+    (session.place >= group.count(session.points)) { text = "готово: снимков {session.total} · {session.name}" }
+    out text
+}
+
+skill mounted(screen, palette, session) {
+    @line = calls.call("label", [["text", calls.quoted(status(session))]])
+    @page = "\{\"box\": \{\"fill\": \"ground\", \"padding\": [56, 16, 16, 16], \"children\": [{line}]\}\}"
+    out jtml.mount(screen, atoms.fitted(read.page(page), no, palette))
+}
+
+skill sample(session, frame) {
+    @at = session.used
+    @point = group.get(session.points, session.place)
+    @x = group.get(point, 0)
+    @y = group.get(point, 1)
+    bytes.set(session.buffer, at, x % 256)
+    bytes.set(session.buffer, at + 1, x / 256)
+    bytes.set(session.buffer, at + 2, y % 256)
+    bytes.set(session.buffer, at + 3, y / 256)
+    camera.shrink(frame, session.buffer, at + 4, WIDE, HIGH, STEP)
+    camera.shrink(frame, session.last, 0, WIDE, HIGH, STEP)
+    session.used = at + 4 + WIDE * HIGH
+    session.total = session.total + 1
+    out none
+}
+
+skill saved(session) {
+    file.write_bytes("{FILES}{session.name}", bytes.slice(session.buffer, 0, session.used))
+    out none
+}
+
+skill preview(screen, session) {
+    @left = screen.width - WIDE - 12
+    drum (HIGH) {
+        @oy = beat
+        @row = ((56 + oy) * screen.stride + left) * graphics.PIXEL_BYTES
+        drum (WIDE) {
+            @light = bytes.get(session.last, oy * WIDE + beat)
+            mem.store32(address.from(screen.memory), usize.from(row + beat * graphics.PIXEL_BYTES), u32.from(graphics.color(screen, light, light, light)))
+        }
+    }
+    out none
+}
+
+skill dot(screen, session) {
+    (session.place >= group.count(session.points)) { out none }
+    @point = group.get(session.points, session.place)
+    @x = group.get(point, 0)
+    @y = group.get(point, 1)
+    @size = SPOT * 2
+    @ink = graphics.color(screen, 30, 36, 46)
+    (session.running == no) { ink = graphics.color(screen, 160, 166, 176) }
+    shapes.shape(screen, x - SPOT, y - SPOT, size, size, SPOT, ink)
+    out shapes.shape(screen, x - 3, y - 3, 6, 6, 3, graphics.color(screen, 250, 250, 250))
+}
+
+skill advance(session, now) {
+    (session.running == no) { out no }
+    (session.place >= group.count(session.points)) { out no }
+    (now - session.since < SETTLE) { out no }
+    (session.shots >= SHOTS) {
+        saved(session)
+        session.place = session.place + 1
+        session.since = now
+        session.shots = 0
+        (session.place >= group.count(session.points)) { session.running = no }
+        out yes
+    }
+    out no
+}
+
+program() {
+    @screen = canvas()
+    @palette = dressed(screen)
+    @bridge = clib.open() rescue |err| { out io.show("collect: нет памяти под мост ({err})") }
+    @eye = camera.Camera { bridge = bridge }
+    camera.open(eye) rescue |err| { out io.show("collect: камера не открылась: {eye.problem}") }
+    @started = time.now()
+    @session = Session { name = "S{started}.GAZE", points = targets(screen.width, screen.height), buffer = bytes.new(HEAD + LIMIT * (4 + WIDE * HIGH)), last = bytes.new(WIDE * HIGH) }
+    @head = "GAZE"
+    drum (4) { bytes.set(session.buffer, beat, str.byte(head, beat)) }
+    bytes.set(session.buffer, 4, WIDE)
+    bytes.set(session.buffer, 6, HIGH)
+    session.used = HEAD
+    @runtime = mounted(screen, palette, session)
+    @seen = cpu.firmware(9)
+    always {
+        @shown = canvas()
+        atoms.draw(shown, runtime, palette)
+        @now = time.now()
+        @frame = camera.frame(eye)
+        (frame.ready == yes) {
+            @writing = session.running == yes
+            (now - session.since < SETTLE) { writing = no }
+            (session.shots >= SHOTS) { writing = no }
+            (session.total >= LIMIT) { writing = no }
+            (session.place >= group.count(session.points)) { writing = no }
+            pick {
+                (writing == yes) {
+                    sample(session, frame)
+                    session.shots = session.shots + 1
+                }
+                { (session.running == no) { sample_preview(session, frame) } }
+            }
+            camera.done(eye, frame)
+        }
+        (advance(session, now) == yes) { runtime = mounted(shown, palette, session) }
+        preview(shown, session)
+        dot(shown, session)
+        cpu.wait()
+        @released = cpu.firmware(9)
+        ((released == seen) == no) {
+            seen = released
+            session.running = session.running == no
+            session.since = time.now()
+            runtime = mounted(canvas(), palette, session)
+        }
+    }
+    out none
+}
+
+skill sample_preview(session, frame) {
+    out camera.shrink(frame, session.last, 0, WIDE, HIGH, STEP)
+}

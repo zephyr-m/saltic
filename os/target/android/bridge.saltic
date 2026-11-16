@@ -1,0 +1,77 @@
+-- bridge — проверка моста к функциям C (os/target/android/clib) на экране
+-- телефона: getpid из libc, strlen строки «Привет, Зэф!» (в UTF-8 — 21 байт)
+-- и есть ли в libcamera2ndk ACameraManager_create — шаг к камере. Каждый
+-- ответ — строкой на экране: жители закрытой библиотеки (section-title,
+-- card, label), светлая палитра, шрифты TTF из FILES; не вышло — причина той
+-- же строкой. Кадр рисуется заново на каждый cpu.wait().
+--
+-- program() -> none
+-- Внутри: canvas() -> graphics.Screen окна; line(text) -> житель label;
+--     dressed / face — палитра со шрифтами;
+--     tried(bridge) -> строки ответов
+
+use io
+use io.file
+use core.str
+use core.cpu
+use core.group
+use registry.libraries.uiengine.jtml
+use registry.libraries.uiengine.jtml.read
+use registry.libraries.uiengine.jtml.calls
+use os.target.uefi_x86_64.screen.graphics
+use registry.libraries.uiengine.draw.atoms
+use registry.libraries.uiengine.draw.typeface
+use os.target.android.clib
+
+GREETING = "Привет, Зэф!"
+FILES = "/sdcard/Android/data/dev.saltic.bridge/files/"
+
+skill canvas() {
+    out graphics.Screen { width = cpu.firmware(1), height = cpu.firmware(2), stride = cpu.firmware(3), format = graphics.FORMAT_RGB, memory = cpu.firmware(0), vsync = no }
+}
+
+skill line(text) {
+    io.show("bridge: {text}")
+    out calls.call("label", [["text", calls.quoted(text)]])
+}
+
+skill face(name) {
+    out typeface.from_bytes(file.read_bytes("{FILES}{name}"))
+}
+
+skill dressed(screen) {
+    @plain = atoms.palette_light(screen)
+    @typed = atoms.with_faces(atoms.palette_light(screen), face("INTER.TTF"), face("INTERB.TTF"), face("MONO.TTF")) rescue |err| {
+        io.show("bridge: шрифтов нет в {FILES} ({err}), рисую Spleen")
+        out plain
+    }
+    out typed
+}
+
+skill tried(bridge) {
+    @lines = [calls.call("section-title", [["text", calls.quoted("Мост к функциям C")]])]
+    @pid = clib.find(bridge, "libc.so", "getpid") rescue |err| { out group.add(lines, line("getpid не найдена: {err}")) }
+    @got = clib.small(clib.call(bridge, pid, [])) rescue |err| { out group.add(lines, line("getpid: ответ не число ({err})")) }
+    lines = group.add(lines, line("getpid -> {got}"))
+    @length = clib.find(bridge, "libc.so", "strlen") rescue |err| { out group.add(lines, line("strlen не найдена: {err}")) }
+    @counted = clib.small(clib.call(bridge, length, [clib.put_text(bridge, GREETING)])) rescue |err| { out group.add(lines, line("strlen: ответ не число ({err})")) }
+    lines = group.add(lines, line("strlen -> {counted} байт"))
+    @camera = clib.find(bridge, "libcamera2ndk.so", "ACameraManager_create") rescue |err| { out group.add(lines, line("камера: {err}")) }
+    out group.add(lines, line("камера: ACameraManager_create есть"))
+}
+
+program() {
+    @bridge = clib.open() rescue |err| { out io.show("bridge: нет памяти под мост ({err})") }
+    @lines = tried(bridge)
+    @card = calls.call("card", [["gap", "10"], ["padding", "16"], ["children", calls.listed(group.slice(lines, 1, group.count(lines)))]])
+    @title = group.get(lines, 0)
+    @page = "\{\"box\": \{\"fill\": \"ground\", \"padding\": [56, 16, 16, 16], \"gap\": 14, \"children\": [{title}, {card}]\}\}"
+    @screen = canvas()
+    @palette = dressed(screen)
+    @runtime = jtml.mount(screen, atoms.fitted(read.page(page), no, palette))
+    always {
+        atoms.draw(canvas(), runtime, palette)
+        cpu.wait()
+    }
+    out none
+}

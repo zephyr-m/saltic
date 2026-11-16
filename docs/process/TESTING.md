@@ -65,7 +65,7 @@
   числа на родном x86-64;
 `os` — модули ОС, не язык; в `just global-check` (под x86_64):
 
-- `jtml`, `tasks` — `os.ui.jtml` и `os.apps.tasks`;
+- `jtml`, `tasks` — `registry.libraries.uiengine.jtml` и `os.apps.tasks`;
 - `panels`, `mrpc` — системная панель и mRPC агента (`mrpc` — всегда под
   x86_64: модули ОС UEFI — 61-битный мир).
 

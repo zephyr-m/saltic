@@ -1,0 +1,252 @@
+-- read — текст JTML в дерево атомов (jtml/atom). Узел — объект с одним
+-- ключом-тегом, тегов ровно четыре:
+--   {"box": {"id" (цель касания по всей площади), "flow": "row" | "column", "width", "height", "grow", "padding"
+--            (число или [верх, право, низ, лево]), "gap", "border", "tone",
+--            "fill", "edge", "radius", "shadow" (размытие), "inset" (внутренняя тень),
+--            "icon" (значок Lucide по имени), "ink" (его цвет),
+--            "corners": "all" | "top" | "bottom" | "left" | "right" (углы radius),
+--            "justify": "start" | "center" |
+--            "end" | "between", "align": "start" | "center" | "end" | "stretch",
+--            "children": [узлы]
+--            или "layers": [{"layer": {"name", "flow", "padding", "gap",
+--                                      "justify", "align", "tone", "fill",
+--                                      "children": [узлы]}}]}}
+-- Любой узел — "style": имя из словаря "styles" корня страницы: свойства стиля
+-- ложатся под свойства узла (свои важнее), наследования от родителя нет.
+--   {"text": {"value", "id", "align": "start" | "center" | "end", "grow", "tone",
+--             "size": "normal" | "big" | "huge" или число пикселей, "leading",
+--             "fade" (второй цвет переливания), "weight": "regular" | "bold",
+--             "cut", "caps", "mono": "yes" | "no"}}
+--   {"field": {"id", "value", "grow"}}
+--   {"slider": {"id", "value", "min", "max"}}
+-- Пропущенное свойство — умолчание атома (gap у box — atom.DEFAULT_GAP).
+-- Не атом — житель закрытой библиотеки (registry/libraries/uiengine/library, решение автора
+-- 16.11.2026): {"имя": {"параметр": значение}} разворачивается в его тело,
+-- "{параметр}" в теле — значение: целиком строка "{p}" — само значение (число,
+-- дерево, список; список посреди массива вклеивается — слот), внутри строки —
+-- текстом. Нет в библиотеке — UnknownComponent, чужой параметр — UnknownParam.
+-- Слой — не атом, а часть box: только внутри "layers", с именем; у box и
+-- children, и layers сразу — ChildrenAndLayers, слой без имени — NamelessLayer,
+-- в "layers" не слой — NotLayer. Чужое значение size — UnknownSize, weight —
+-- UnknownWeight, justify — UnknownJustify, align у box — UnknownAlign; padding
+-- массивом не из четырёх чисел — BadPadding; чужое corners — UnknownCorners; стиля нет в словаре — UnknownStyle.
+--
+-- page(source) -> atom.Node корня; InvalidJtml (reader), UnknownAtom, NotAtom
+-- node(value, styles) -> atom.Node из прочитанного reader.Value; styles —
+--     словарь стилей корня (styles_of)
+-- Внутри: prop, words, amount, flag, children_of, layers_of, layer, styled,
+--     shaped (вид и раскладка box и слоя) — свойства объекта; expand(tag,
+--     props, styles) — житель библиотеки в атомы; filled(value, names, args) —
+--     подстановка параметров; spoken(value) — значение текстом
+
+use core.str
+use core.group
+use registry.libraries.uiengine.jtml.atom
+use registry.libraries.uiengine.jtml.reader
+use registry.libraries.uiengine.library
+
+skill page(source) {
+    @root = reader.read_jtml(source)
+    out node(root, styles_of(root))
+}
+
+skill styles_of(root) {
+    ((root.kind == reader.Kind.JTML_OBJECT) == no) { out reader.Value {} }
+    out prop(group.get(root.items, 0), "styles")
+}
+
+skill styled(props, styles) {
+    @name = words(props, "style", "")
+    (name == "") { out props }
+    @found = prop(styles, name)
+    ((found.kind == reader.Kind.JTML_OBJECT) == no) { out error.UnknownStyle }
+    @keys = props.keys
+    @items = props.items
+    drum (group.count(found.keys)) {
+        @key = group.get(found.keys, beat)
+        (group.contains(props.keys, key) == no) {
+            keys = group.add(keys, key)
+            items = group.add(items, group.get(found.items, beat))
+        }
+    }
+    out reader.Value { kind = reader.Kind.JTML_OBJECT, keys = keys, items = items }
+}
+
+skill prop(props, name) {
+    drum (group.count(props.keys)) {
+        (group.get(props.keys, beat) == name) { out group.get(props.items, beat) }
+    }
+    out reader.Value {}
+}
+
+skill words(props, name, fallback) {
+    @found = prop(props, name)
+    (found.kind == reader.Kind.WORDS) { out found.words }
+    out fallback
+}
+
+skill amount(props, name, fallback) {
+    @found = prop(props, name)
+    (found.kind == reader.Kind.AMOUNT) { out found.amount }
+    out fallback
+}
+
+skill flag(props, name) {
+    @found = prop(props, name)
+    (found.kind == reader.Kind.TRUTH) { out found.truth }
+    (found.kind == reader.Kind.WORDS) { out found.words == "yes" }
+    out no
+}
+
+skill children_of(props, styles) {
+    @found = prop(props, "children")
+    @nodes = []
+    (found.kind == reader.Kind.JTML_ARRAY) {
+        drum (group.count(found.items)) { nodes = group.add(nodes, node(group.get(found.items, beat), styles)) }
+    }
+    out nodes
+}
+
+skill shaped(made, props) {
+    made.tone = words(props, "tone", "")
+    made.fill = words(props, "fill", "")
+    made.edge = words(props, "edge", "")
+    made.radius = amount(props, "radius", 0)
+    made.shadow = amount(props, "shadow", 0)
+    made.inset = amount(props, "inset", 0)
+    made.icon = words(props, "icon", "")
+    made.ink = words(props, "ink", "")
+    made.corners = words(props, "corners", "all")
+    (group.contains(["all", "top", "bottom", "left", "right"], made.corners) == no) { out error.UnknownCorners }
+    made.justify = words(props, "justify", "start")
+    (group.contains(["start", "center", "end", "between"], made.justify) == no) { out error.UnknownJustify }
+    made.cross = words(props, "align", "stretch")
+    (group.contains(["start", "center", "end", "stretch"], made.cross) == no) { out error.UnknownAlign }
+    @padding = prop(props, "padding")
+    (padding.kind == reader.Kind.JTML_ARRAY) {
+        ((group.count(padding.items) == 4) == no) { out error.BadPadding }
+        @sides = []
+        drum (padding.items) {
+            ((beat.kind == reader.Kind.AMOUNT) == no) { out error.BadPadding }
+            sides = group.add(sides, beat.amount)
+        }
+        made.sides = sides
+    }
+    out made
+}
+
+skill layer(value, styles) {
+    ((value.kind == reader.Kind.JTML_OBJECT) == no) { out error.NotLayer }
+    ((group.get(value.keys, 0) == "layer") == no) { out error.NotLayer }
+    @props = styled(group.get(value.items, 0), styles)
+    @name = words(props, "name", "")
+    (name == "") { out error.NamelessLayer }
+    @flow = atom.Flow.COLUMN
+    (words(props, "flow", "column") == "row") { flow = atom.Flow.ROW }
+    @made = atom.frame(flow, 0, 0, 0, amount(props, "padding", 0), amount(props, "gap", atom.DEFAULT_GAP), 0, children_of(props, styles))
+    made.id = name
+    out shaped(made, props)
+}
+
+skill layers_of(props, styles) {
+    @found = prop(props, "layers")
+    @made = []
+    (found.kind == reader.Kind.JTML_ARRAY) {
+        drum (found.items) { made = group.add(made, layer(beat, styles)) }
+    }
+    out made
+}
+
+skill node(value, styles) {
+    ((value.kind == reader.Kind.JTML_OBJECT) == no) { out error.NotAtom }
+    @tag = group.get(value.keys, 0)
+    @props = styled(group.get(value.items, 0), styles)
+    (tag == "box") {
+        @flow = atom.Flow.COLUMN
+        (words(props, "flow", "column") == "row") { flow = atom.Flow.ROW }
+        @made = shaped(atom.frame(flow, amount(props, "width", 0), amount(props, "height", 0), amount(props, "grow", 0), amount(props, "padding", 0), amount(props, "gap", atom.DEFAULT_GAP), amount(props, "border", 0), children_of(props, styles)), props)
+        made.id = words(props, "id", "")
+        made.layers = layers_of(props, styles)
+        (group.count(made.layers) > 0) {
+            (group.count(made.children) > 0) { out error.ChildrenAndLayers }
+        }
+        out made
+    }
+    (tag == "text") {
+        @align = atom.Align.START
+        (words(props, "align", "") == "center") { align = atom.Align.CENTER }
+        (words(props, "align", "") == "end") { align = atom.Align.END }
+        @size = words(props, "size", "normal")
+        @pixels = amount(props, "size", 0)
+        (pixels > 0) { size = "normal" }
+        (group.contains(["normal", "big", "huge"], size) == no) { out error.UnknownSize }
+        @weight = words(props, "weight", "regular")
+        (group.contains(["regular", "bold"], weight) == no) { out error.UnknownWeight }
+        out atom.Node { kind = atom.Kind.TEXT, id = words(props, "id", ""), value = words(props, "value", ""), align = align, grow = amount(props, "grow", 0), tone = words(props, "tone", ""), width = amount(props, "width", 0), size = size, weight = weight, cut = flag(props, "cut"), caps = flag(props, "caps"), mono = flag(props, "mono"), pixels = pixels, leading = amount(props, "leading", 0), fade = words(props, "fade", "") }
+    }
+    (tag == "field") {
+        out atom.Node { kind = atom.Kind.FIELD, id = words(props, "id", ""), value = words(props, "value", ""), grow = amount(props, "grow", 0) }
+    }
+    (tag == "slider") {
+        out atom.slider(words(props, "id", ""), amount(props, "value", 0), amount(props, "min", 0), amount(props, "max", 100))
+    }
+    out expand(tag, props, styles)
+}
+
+skill spoken(value) {
+    (value.kind == reader.Kind.AMOUNT) { out "{value.amount}" }
+    (value.kind == reader.Kind.TRUTH) {
+        (value.truth == yes) { out "yes" }
+        out "no"
+    }
+    out value.words
+}
+
+skill filled(value, names, args) {
+    (value.kind == reader.Kind.WORDS) {
+        @text = value.words
+        drum (group.count(names)) {
+            @name = group.get(names, beat)
+            @arg = group.get(args, beat)
+            (text == "\{{name}\}") { out arg }
+            text = reader.replaced(text, "\{{name}\}", spoken(arg))
+        }
+        out reader.Value { kind = reader.Kind.WORDS, words = text }
+    }
+    (value.kind == reader.Kind.JTML_ARRAY) {
+        @items = []
+        drum (value.items) {
+            @made = filled(beat, names, args)
+            @spliced = no
+            (beat.kind == reader.Kind.WORDS) {
+                (made.kind == reader.Kind.JTML_ARRAY) {
+                    items = group.concat(items, made.items)
+                    spliced = yes
+                }
+            }
+            (spliced == no) { items = group.add(items, made) }
+        }
+        out reader.Value { kind = reader.Kind.JTML_ARRAY, items = items }
+    }
+    (value.kind == reader.Kind.JTML_OBJECT) {
+        @items = []
+        drum (value.items) { items = group.add(items, filled(beat, names, args)) }
+        out reader.Value { kind = reader.Kind.JTML_OBJECT, keys = value.keys, items = items }
+    }
+    out value
+}
+
+skill expand(tag, props, styles) {
+    @source = library.find(tag) rescue |err| { out error.UnknownComponent }
+    @declared = reader.read_jtml(source)
+    @about = group.get(declared.items, 0)
+    @listed = prop(about, "params")
+    @names = []
+    drum (listed.items) { names = group.add(names, beat.words) }
+    drum (props.keys) {
+        (group.contains(names, beat) == no) { out error.UnknownParam }
+    }
+    @args = []
+    drum (names) { args = group.add(args, prop(props, beat)) }
+    out node(filled(prop(about, "body"), names, args), styles)
+}

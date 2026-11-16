@@ -77,7 +77,7 @@ x86-версия с 154:47:128 — родной бэкенд, а не перев
 | `os/uiengine/components/desktop/drop.saltic` | 686 — исключение по решению автора |
 | `soul/seed/selfhost/compiler/backend/rv32i/machine/layout.saltic` | 610 |
 | `os/apps/colony/colony.saltic` | 582 |
-| `os/ui/jtml.saltic` | 566 |
+| `registry/libraries/uiengine/jtml.saltic` | 566 |
 | `soul/seed/tests/contract.saltic` | 561 |
 | `soul/seed/selfhost/compiler/codegen.saltic` | 550 |
 | `soul/seed/selfhost/checker/walk.saltic` | 527 |

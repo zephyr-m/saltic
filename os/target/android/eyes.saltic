@@ -1,0 +1,195 @@
+-- eyes — глаза и зрачки на сером кадре простой математикой, без нейросети
+-- (первый шаг к взгляду, gaze). Кадр — Gray { data, row, wide, high }: адрес
+-- яркости, шаг строки, размер. Сетка: каждая STEP-я точка (cells × rows),
+-- над ней суммирующая таблица — средняя яркость любого прямоугольника за 4
+-- чтения. Глаз — тёмная середина, светлая с трёх сторон: для каждой клетки
+-- и радиуса из RADII оценка = самая тёмная из сторон (слева, справа и снизу
+-- на экране; сверху — бровь, не в счёт) − середина: у пряди на краю волос
+-- светло лишь с одной стороны. Пара — с наибольшей суммой оценок среди пятен
+-- одного радиуса на той же высоте (по строкам кадра — столбцам экрана) в
+-- пределах FAR и дальше NEAR. Зрачок —
+-- самая тёмная точка (среднее 3×3) в квадрате глаза в полном разрешении.
+-- Координаты — точки кадра (как у камеры, до поворота на экран).
+--
+-- Gray { data, row, wide, high } / Spot { x, y, radius, score } / Pair { found,
+--     left, right } — кадр, пятно (центр в точках кадра), пара глаз
+-- find(gray) -> Pair; found = no — пары нет
+-- Внутри: grid(gray) -> [cells, rows, таблица]; box(table, cells, x0, y0, x1,
+--     y1) -> сумма; spots(…) -> лучшие пятна; pupil(gray, spot) -> Spot зрачка
+
+use core.mem
+use core.num
+use core.group
+use core.usize
+use core.address
+
+STEP = 5
+RADII = [2, 3, 4]
+NEAR = 8
+FAR = 40
+SAME_LINE = 6
+BEST = 12
+
+Gray = Box {
+    data = 0,
+    row = 0,
+    wide = 0,
+    high = 0
+}
+
+Spot = Box {
+    x = 0,
+    y = 0,
+    radius = 0,
+    score = 0
+}
+
+Pair = Box {
+    found = no,
+    left = Spot {},
+    right = Spot {}
+}
+
+skill light(gray, x, y) {
+    out num.from(mem.load8(address.from(gray.data), usize.from(y * gray.row + x)))
+}
+
+skill grid(gray) {
+    @cells = gray.wide / STEP
+    @rows = gray.high / STEP
+    @table = []
+    drum (cells + 1) { table = group.add(table, 0) }
+    drum (rows) {
+        @y = beat
+        @line = 0
+        table = group.add(table, 0)
+        drum (cells) {
+            line = line + light(gray, beat * STEP, y * STEP)
+            table = group.add(table, group.get(table, y * (cells + 1) + beat + 1) + line)
+        }
+    }
+    out [cells, rows, table]
+}
+
+skill box(table, cells, x0, y0, x1, y1) {
+    @wide = cells + 1
+    out group.get(table, y1 * wide + x1) - group.get(table, y0 * wide + x1) - group.get(table, y1 * wide + x0) + group.get(table, y0 * wide + x0)
+}
+
+skill spots(made) {
+    @cells = group.get(made, 0)
+    @rows = group.get(made, 1)
+    @table = group.get(made, 2)
+    @found = []
+    drum (RADII) {
+        @r = beat
+        @outer = r * 2
+        drum (rows - outer * 2) {
+            @y = beat + outer
+            drum (cells - outer * 2) {
+                @x = beat + outer
+                @inner_area = r * r * 4
+                @inner = box(table, cells, x - r, y - r, x + r, y + r) / inner_area
+                @side_area = r * (outer - r) * 2
+                @before = box(table, cells, x - r, y - outer, x + r, y - r) / side_area
+                @after = box(table, cells, x - r, y + r, x + r, y + outer) / side_area
+                @below = box(table, cells, x - outer, y - r, x - r, y + r) / side_area
+                @lightest = before
+                (after < lightest) { lightest = after }
+                (below < lightest) { lightest = below }
+                @score = lightest - inner
+                (score > 0) { found = keep(found, Spot { x = x * STEP, y = y * STEP, radius = r * STEP, score = score }) }
+            }
+        }
+    }
+    out found
+}
+
+skill keep(found, spot) {
+    @made = []
+    @placed = no
+    drum (found) {
+        @near = (beat.x - spot.x) * (beat.x - spot.x) + (beat.y - spot.y) * (beat.y - spot.y) < (beat.radius + spot.radius) * (beat.radius + spot.radius)
+        pick {
+            (near == yes) {
+                (beat.score >= spot.score) {
+                    made = group.add(made, beat)
+                    placed = yes
+                }
+            }
+            { made = group.add(made, beat) }
+        }
+    }
+    (placed == no) { made = insert(made, spot) }
+    (group.count(made) > BEST) { made = group.slice(made, 0, BEST) }
+    out made
+}
+
+skill insert(list, spot) {
+    @made = []
+    @done = no
+    drum (list) {
+        (done == no) {
+            (spot.score > beat.score) {
+                made = group.add(made, spot)
+                done = yes
+            }
+        }
+        made = group.add(made, beat)
+    }
+    (done == no) { made = group.add(made, spot) }
+    out made
+}
+
+skill pupil(gray, spot) {
+    @best = Spot { x = spot.x, y = spot.y, radius = spot.radius, score = 256 * 9 }
+    @r = spot.radius
+    drum (r) {
+        @y = spot.y - r / 2 + beat
+        drum (r) {
+            @x = spot.x - r / 2 + beat
+            @inside = x > 0
+            (y <= 0) { inside = no }
+            (x >= gray.wide - 1) { inside = no }
+            (y >= gray.high - 1) { inside = no }
+            (inside == yes) {
+                @sum = 0
+                drum (3) {
+                    @dy = beat - 1
+                    drum (3) { sum = sum + light(gray, x + beat - 1, y + dy) }
+                }
+                (sum < best.score) { best = Spot { x = x, y = y, radius = r, score = sum } }
+            }
+        }
+    }
+    out best
+}
+
+skill find(gray) {
+    @list = spots(grid(gray))
+    (group.count(list) < 2) { out Pair {} }
+    @best = 0
+    @chosen = Pair {}
+    drum (list) {
+        @first = beat
+        drum (list) {
+            @second = beat
+            @across = second.y - first.y
+            (across < 0) { across = 0 - across }
+            @along = second.x - first.x
+            (along < 0) { along = 0 - along }
+            @fits = across >= NEAR * STEP
+            (across > FAR * STEP) { fits = no }
+            (along > SAME_LINE * STEP) { fits = no }
+            ((first.radius == second.radius) == no) { fits = no }
+            (fits == yes) {
+                (first.score + second.score > best) {
+                    best = first.score + second.score
+                    chosen = Pair { found = yes, left = first, right = second }
+                }
+            }
+        }
+    }
+    (chosen.found == no) { out chosen }
+    out Pair { found = yes, left = pupil(gray, chosen.left), right = pupil(gray, chosen.right) }
+}

@@ -1,0 +1,153 @@
+-- typeface — шрифт TTF на экране Acer (docs/os/FONTS.md): файл
+-- \SALTIC\FONTS\ИМЯ с диска агента (agent/programs.load_file) читается в
+-- страницы окна программы и разбирается os/fonts/ttf прямо оттуда, без копии
+-- (страницы живут, пока жива программа; place и pages — отдать агенту через
+-- remote.own, иначе при выходе они утекут и окно программ кончится). Буква растеризуется
+-- os/fonts/raster один раз на пару (код, размер) и живёт в кэше Typeface;
+-- рисунок мешает цвет чернил с тем, что уже на экране, по маске покрытия —
+-- каждый канал точки отдельно, поэтому порядок RGB или BGR не важен.
+--
+-- Typeface { font, keys, glyphs, place, pages } — разобранный шрифт, кэш букв и
+--     страницы прошивки, где лежит файл
+-- load(base, name) -> Typeface; ReadFailed (agent/programs), NotTrueType
+-- from_bytes(buffer) -> Typeface из буфера core.bytes (файл, прочитанный хостом)
+-- Sheet { set, place, pages } / load_icons(base) -> Sheet — значки os/icons из
+--     \SALTIC\FONTS\ICONS.TXT так же, страницами окна (их тоже — remote.own)
+-- glyph(face, code, size) -> raster.Glyph из кэша
+-- measure(face, text, size, spacing) -> ширина строки в пикселях; spacing —
+--     добавка к шагу пера после каждой буквы (разрядка)
+-- rise(face, size) / line_height(face, size) -> над базовой линией / вся строка
+-- Brush { size, ink, fade, spacing } — чем писать: кегль, цвет, цвет правого
+--     края строки (переливание от ink; равен ink — сплошной), разрядка
+-- paint(screen, face, x, y, text, brush) -> x после строки; y — верх строки;
+--     за края экрана не рисует
+-- Смешивание точек — graphics.mix
+
+use core.str
+use core.group
+use core.bytes
+use core.num
+use core.mem
+use core.usize
+use core.address
+use core.u32
+use os.fonts.ttf
+use os.icons
+use os.fonts.raster
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.agent.programs
+
+LIMIT = 524288
+PAGE = 4096
+FOLDER = "FONTS\\"
+ICONS = "ICONS.TXT"
+
+Brush = Box {
+    size = 15,
+    ink = 0,
+    fade = 0,
+    spacing = 0
+}
+
+Typeface = Box {
+    font = ttf.Font {},
+    keys = [],
+    glyphs = [],
+    place = 0,
+    pages = 0
+}
+
+skill load(base, name) {
+    @pages = LIMIT / PAGE
+    @place = uefi.pages_in_window(base, pages)
+    programs.load_file(base, str.concat(FOLDER, name), place, LIMIT)
+    firmware.guest(place, base)
+    out Typeface { font = ttf.open(ttf.from_memory(place - base)), place = place, pages = pages }
+}
+
+Sheet = Box {
+    set = icons.Icons {},
+    place = 0,
+    pages = 0
+}
+
+skill load_icons(base) {
+    @pages = LIMIT / PAGE
+    @place = uefi.pages_in_window(base, pages)
+    @length = programs.load_file(base, str.concat(FOLDER, ICONS), place, LIMIT)
+    firmware.guest(place, base)
+    out Sheet { set = icons.open(ttf.from_memory(place - base), length), place = place, pages = pages }
+}
+
+skill from_bytes(buffer) {
+    out Typeface { font = ttf.open(ttf.from_bytes(buffer)) }
+}
+
+skill glyph(face, code, size) {
+    @key = code * 256 + size
+    drum (group.count(face.keys)) {
+        (group.get(face.keys, beat) == key) { out group.get(face.glyphs, beat) }
+    }
+    @made = raster.render(face.font, code, size)
+    face.keys = group.add(face.keys, key)
+    face.glyphs = group.add(face.glyphs, made)
+    out made
+}
+
+skill measure(face, text, size, spacing) {
+    @width = 0
+    drum (str.letters(text)) {
+        @made = glyph(face, raster.code_of(beat), size)
+        width = width + made.advance + spacing
+    }
+    out width
+}
+
+skill rise(face, size) {
+    out raster.above(face.font.ascent * size, face.font.units)
+}
+
+skill line_height(face, size) {
+    out rise(face, size) + raster.above((0 - face.font.descent) * size, face.font.units)
+}
+
+skill paint(screen, face, x, y, text, brush) {
+    @pen = x
+    @size = brush.size
+    @ink = brush.ink
+    @fade = brush.fade
+    @spacing = brush.spacing
+    @wide = measure(face, text, size, spacing)
+    (wide < 1) { wide = 1 }
+    @base_line = y + rise(face, size)
+    drum (str.letters(text)) {
+        @made = glyph(face, raster.code_of(beat), size)
+        drum (made.height) {
+            @row = base_line - made.top + beat
+            (row >= 0) {
+                (row < screen.height) {
+                    @line = beat * made.width
+                    drum (made.width) {
+                        @column = pen + made.left + beat
+                        @alpha = bytes.get(made.mask, line + beat)
+                        (alpha > 0) {
+                            (column >= 0) {
+                                (column < screen.width) {
+                                    @at = usize.from((row * screen.stride + column) * graphics.PIXEL_BYTES)
+                                    @value = ink
+                                    ((fade == ink) == no) { value = graphics.mix(ink, fade, (column - x) * 255 / wide) }
+                                    (alpha < 255) { value = graphics.mix(num.from(mem.load32(address.from(screen.memory), at)), value, alpha) }
+                                    mem.store32(address.from(screen.memory), at, u32.from(value))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pen = pen + made.advance + spacing
+    }
+    out pen
+}

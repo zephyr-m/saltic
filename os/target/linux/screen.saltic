@@ -1,7 +1,17 @@
 -- screen — адаптер экрана Wayland. open отдаёт Screen того же лица, что рисует
--- Acer: width, height, stride, format, memory как [hi, lo]. atoms.draw и
+-- Acer: width, height, stride, format, memory — адрес отображения числом. atoms.draw и
 -- lettering пишут в него через mem.store32. present показывает кадр.
 -- Память — общее отображение memfd в младших 2 ГБ, формат BGR (XRGB на проводе).
+-- Щелчок левой кнопкой — way_clicked и место (way_click_x, way_click_y): что он
+-- значит, решает программа (jtml.hit); Esc — way_closed. minimize(link) —
+-- свернуть окно (xdg_toplevel.set_minimized). sized(title, width, height) —
+-- то же окно своего размера и заголовка; open() — 1366×768, «Saltic».
+-- Сырой ввод — ещё и в ядро событий way_events (os/ui/events, имена —
+-- os/ui/gestures): место указателя (pair), нажатия левой (bump), шаги колеса
+-- (сумма, вниз — плюс), набранные знаки (раскладка US, Shift — заглавные и
+-- верхний ряд; кириллица — когда будет раскладка от композитора). Время —
+-- из событий Wayland, мс. Жесты из них собирает программа (gestures.Reader).
+-- Внутри: typed(scan, shift) -> знак или ""; wheel_step(value) -> ±1
 
 use core.str
 use core.bytes
@@ -11,6 +21,8 @@ use core.socket
 use io
 use os.apps.wayland.wire
 use os.target.uefi_x86_64.screen.graphics
+use os.ui.events
+use os.ui.gestures
 
 DISPLAY = 1
 REGISTRY = 2
@@ -26,12 +38,16 @@ POINTER = 11
 KEYBOARD = 12
 POOL = 13
 BUFFER = 14
-WIDTH = 1280
-HEIGHT = 720
-STRIDE = 5120
-PIXELS = 3686400
+WIDTH = 1366
+HEIGHT = 768
+TITLE = "Saltic"
+PIXEL = 4
 FORMAT_BGR = 1
 LEFT_BUTTON = 272
+SHIFT = 1
+SIGN = 2147483648
+LETTERS = [[2, "1", "!"], [3, "2", "@"], [4, "3", "#"], [5, "4", "$"], [6, "5", "%"], [7, "6", "^"], [8, "7", "&"], [9, "8", "*"], [10, "9", "("], [11, "0", ")"], [12, "-", "_"], [13, "=", "+"], [15, "\t", "\t"], [16, "q", "Q"], [17, "w", "W"], [18, "e", "E"], [19, "r", "R"], [20, "t", "T"], [21, "y", "Y"], [22, "u", "U"], [23, "i", "I"], [24, "o", "O"], [25, "p", "P"], [26, "[", "\{"], [27, "]", "\}"], [28, "\n", "\n"], [30, "a", "A"], [31, "s", "S"], [32, "d", "D"], [33, "f", "F"], [34, "g", "G"], [35, "h", "H"], [36, "j", "J"], [37, "k", "K"], [38, "l", "L"], [39, ";", ":"], [40, "'", "\""], [41, "`", "~"], [43, "\\", "|"], [44, "z", "Z"], [45, "x", "X"], [46, "c", "C"], [47, "v", "V"], [48, "b", "B"], [49, "n", "N"], [50, "m", "M"], [51, ",", "<"], [52, ".", ">"], [53, "/", "?"], [57, " ", " "]]
+MINIMIZE = 13
 NO_DATA = -11
 STREAM = 2049
 
@@ -48,6 +64,9 @@ Link = Box {
     way_seat_version = 0,
     way_pointer_x = 0,
     way_pointer_y = 0,
+    way_clicked = no,
+    way_click_x = 0,
+    way_click_y = 0,
     way_synced = no,
     way_configured = no,
     way_closed = no,
@@ -55,7 +74,26 @@ Link = Box {
     way_serial = 0,
     way_ping = 0,
     way_pinged = no,
-    way_hold = 0
+    way_hold = 0,
+    way_shift = no,
+    way_width = 1366,
+    way_height = 768,
+    way_events = events.Core {}
+}
+
+skill typed(scan, shift) {
+    drum (LETTERS) {
+        (group.get(beat, 0) == scan) {
+            (shift == yes) { out group.get(beat, 2) }
+            out group.get(beat, 1)
+        }
+    }
+    out ""
+}
+
+skill wheel_step(value) {
+    (value >= SIGN) { out -1 }
+    out 1
 }
 
 skill cap(version, limit) {
@@ -92,10 +130,6 @@ skill unix_address(path) {
     bytes.set(buffer, 0, 1)
     drum (str.bytes(path)) { bytes.set(buffer, beat + 2, str.byte(path, beat)) }
     out buffer
-}
-
-skill halves(pointer) {
-    out [pointer / 65536, pointer % 65536]
 }
 
 skill send_buffer(fd, buffer) {
@@ -185,6 +219,15 @@ skill take(link, packet, count) {
                 (size >= 20) {
                     link.way_pointer_x = wire.get32(packet, at + 12) / 256
                     link.way_pointer_y = wire.get32(packet, at + 16) / 256
+                    link.way_events = events.pair(link.way_events, gestures.POINTER_X, link.way_pointer_x, gestures.POINTER_Y, link.way_pointer_y, wire.get32(packet, at + 8))
+                }
+            }
+            (opcode == 4) {
+                (size >= 20) {
+                    (wire.get32(packet, at + 12) == 0) {
+                        @wheel = events.current(link.way_events, gestures.POINTER_WHEEL)
+                        link.way_events = events.change(link.way_events, gestures.POINTER_WHEEL, wheel.change.number + wheel_step(wire.get32(packet, at + 16)), "", wire.get32(packet, at + 8))
+                    }
                 }
             }
             (opcode == 3) {
@@ -193,9 +236,11 @@ skill take(link, packet, count) {
                     @state = wire.get32(packet, at + 20)
                     (button == LEFT_BUTTON) {
                         (state == 1) {
-                            (link.way_pointer_x >= WIDTH - 48) {
-                                (link.way_pointer_y < 48) { link.way_closed = yes }
-                            }
+                            link.way_clicked = yes
+                            link.way_click_x = link.way_pointer_x
+                            link.way_click_y = link.way_pointer_y
+                            link.way_events = events.pair(link.way_events, gestures.POINTER_X, link.way_pointer_x, gestures.POINTER_Y, link.way_pointer_y, wire.get32(packet, at + 12))
+                            link.way_events = events.bump(link.way_events, gestures.POINTER_LEFT, wire.get32(packet, at + 12))
                         }
                     }
                 }
@@ -208,8 +253,16 @@ skill take(link, packet, count) {
                     @down = wire.get32(packet, at + 20)
                     (down == 1) {
                         (scan == 1) { link.way_closed = yes }
+                        @letter = typed(scan, link.way_shift)
+                        (str.bytes(letter) > 0) {
+                            @before = events.current(link.way_events, gestures.TYPED)
+                            link.way_events = events.change(link.way_events, gestures.TYPED, before.change.number + 1, letter, wire.get32(packet, at + 12))
+                        }
                     }
                 }
+            }
+            (opcode == 4) {
+                (size >= 28) { link.way_shift = wire.get32(packet, at + 12) % 2 == SHIFT }
             }
         }
         at = at + size
@@ -239,19 +292,28 @@ skill wait(link, packet, hold, joined, until_synced) {
     out none
 }
 
+skill minimize(link) {
+    out send_buffer(link.way_fd, wire.request(TOPLEVEL, MINIMIZE, 8))
+}
+
 skill present(link) {
     @attach = wire.request(SURFACE, 1, 20)
     wire.put32(attach, 8, BUFFER)
     send_buffer(link.way_fd, attach)
     @damage = wire.request(SURFACE, 2, 24)
-    wire.put32(damage, 16, WIDTH)
-    wire.put32(damage, 20, HEIGHT)
+    wire.put32(damage, 16, link.way_width)
+    wire.put32(damage, 20, link.way_height)
     send_buffer(link.way_fd, damage)
     @commit = wire.request(SURFACE, 6, 8)
     out send_buffer(link.way_fd, commit)
 }
 
 skill open() {
+    out sized(TITLE, WIDTH, HEIGHT)
+}
+
+skill sized(name, width, height) {
+    @pixels = width * height * PIXEL
     @path = socket_path()
     (str.bytes(path) == 0) {
         io.show("нет сокета")
@@ -266,7 +328,7 @@ skill open() {
         io.show("соединение")
         out []
     }
-    @link = Link { way_fd = fd }
+    @link = Link { way_fd = fd, way_width = width, way_height = height }
     @registry = wire.request(DISPLAY, 1, 12)
     wire.put32(registry, 8, REGISTRY)
     send_buffer(fd, registry)
@@ -315,9 +377,9 @@ skill open() {
     @top = wire.request(XDG_SURFACE, 1, 12)
     wire.put32(top, 8, TOPLEVEL)
     send_buffer(fd, top)
-    @title_len = str.bytes("SalticIDE") + 1
+    @title_len = str.bytes(name) + 1
     @title = wire.request(TOPLEVEL, 2, 12 + (title_len + 3) / 4 * 4)
-    wire.put_text(title, 8, "SalticIDE")
+    wire.put_text(title, 8, name)
     send_buffer(fd, title)
     (link.way_seat_name == 0) {
         io.show("нет места")
@@ -346,36 +408,36 @@ skill open() {
         out []
     }
     link.way_memfd = memfd
-    (socket.resize(memfd, PIXELS) < 0) {
+    (socket.resize(memfd, pixels) < 0) {
         io.show("размер")
         out []
     }
     @pool = wire.request(SHM, 0, 16)
     wire.put32(pool, 8, POOL)
-    wire.put32(pool, 12, PIXELS)
+    wire.put32(pool, 12, pixels)
     (socket.send(fd, pool, 16, memfd) < 0) {
         io.show("пул")
         out []
     }
     @made = wire.request(POOL, 0, 32)
     wire.put32(made, 8, BUFFER)
-    wire.put32(made, 16, WIDTH)
-    wire.put32(made, 20, HEIGHT)
-    wire.put32(made, 24, STRIDE)
+    wire.put32(made, 16, width)
+    wire.put32(made, 20, height)
+    wire.put32(made, 24, width * PIXEL)
     wire.put32(made, 28, FORMAT_BGR)
     send_buffer(fd, made)
-    @address = socket.map(memfd, PIXELS)
+    @address = socket.map(memfd, pixels)
     (address < 0) {
         io.show("память {address}")
         out []
     }
     @face = graphics.Screen {
-        width = WIDTH,
-        height = HEIGHT,
-        stride = WIDTH,
+        width = width,
+        height = height,
+        stride = width,
         format = FORMAT_BGR,
         frame = 0,
-        memory = halves(address),
+        memory = address,
         accel = [],
         vsync = no
     }
