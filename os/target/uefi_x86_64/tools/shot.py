@@ -11,10 +11,19 @@ LOCAL, ADDRESS = route()
 AGENT = (ADDRESS, 5555)
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((LOCAL, 0))
-sock.settimeout(1)
+STREAM_WAIT = 10
 started = time.time()
-sock.sendto(b"shot", AGENT)
-reply = sock.recvfrom(65535)[0].decode(errors="replace")
+streamed = True
+sock.settimeout(STREAM_WAIT)
+sock.sendto(b"shot-stream", AGENT)
+try:
+    reply = sock.recvfrom(65535)[0].decode(errors="replace")
+except socket.timeout:
+    print(f"shot: на поток за {STREAM_WAIT} с не ответили — прошу по старинке", flush=True)
+    streamed = False
+    sock.settimeout(1)
+    sock.sendto(b"shot", AGENT)
+    reply = sock.recvfrom(65535)[0].decode(errors="replace")
 words = reply.split()
 if len(words) != 5 or words[0] != "снимок":
     print(f"shot: агент ответил не снимком: {reply}", file=sys.stderr)
@@ -22,9 +31,29 @@ if len(words) != 5 or words[0] != "снимок":
 width, height, total, chunks = map(int, words[1:])
 print(f"shot: экран {width} × {height}, {total} байт, {chunks} кусков", flush=True)
 data = bytearray(total)
+have = set()
+if streamed:
+    sock.settimeout(1)
+    while len(have) < chunks:
+        try:
+            packet = sock.recvfrom(65535)[0]
+        except socket.timeout:
+            break
+        if len(packet) < 4:
+            continue
+        number = struct.unpack(">HH", packet[:4])
+        index = number[0] * 65536 + number[1]
+        if index >= chunks:
+            continue
+        size = min(1024, total - index * 1024)
+        data[index * 1024:index * 1024 + size] = packet[4:4 + size]
+        have.add(index)
+    print(f"shot: потоком пришло {len(have)} из {chunks}, остальное — по одному", flush=True)
 sock.settimeout(1)
 retries = 0
 for index in range(chunks):
+    if index in have:
+        continue
     missed = 0
     while True:
         sock.sendto(f"shot-part {index}".encode(), AGENT)

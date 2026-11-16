@@ -4,6 +4,9 @@
 --   quit — на главный экран агента (reply.home); state — текст программы из
 --   tell; shot — снимок экрана (tools/shot.py); key <клавиша или текст> —
 --   нажатие в очередь keys, программа читает его через uefi.poll_key
+-- shot-stream — снимок потоком: заголовок и сразу все куски подряд в этом же
+-- заходе serve (только кабель; Wi-Fi — по кускам), чтобы снимок не зависел
+-- от того, как долго программа рисует кадр
 -- state, quit, key и help — и по mRPC (network.mrpc), чужой cmd — unknown_cmd
 -- со списком. Прочие пакеты UDP на 5555 — программе, у неё свои команды.
 -- Вход — кабель (rtl8111) и Wi-Fi, поднятый агентом (qca9377.handoff): ответ
@@ -30,9 +33,12 @@
 -- reply_mrpc / fail_mrpc(remote, packet, …) — ответ программы: текст / ошибка;
 --     reply_data(remote, packet, fields) — объектом data (mrpc.success_data)
 -- hide_panels(remote) — не рисовать панели и не писать журнал: весь экран
--- own_panels(remote) — журнал и счётчики ведутся (netlog.keep, system_panel
---     в холст), но на экран не кладутся: панели рисует программа (пульт)
--- Внутри: logged(remote, kind, bytes) — строка в журнал по panels и drawn
+-- own_panels(remote) — журнал и счётчики ведутся, но панели не рисуются:
+--     их рисует программа сама (пульт)
+-- Панели по бокам рисует screen/sides; палитра со шрифтами агента — skin(),
+--     собирается один раз на программу (кэш букв у шрифтов свой)
+-- Внутри: logged(remote, kind, bytes) — строка в журнал по panels и drawn;
+--     painted(remote) -> палитра панелей
 -- reply_text(remote, packet, text) — ответить отправителю
 -- send_to(remote, packet, port, text_bytes) — ответить на другой порт
 -- answer(remote, bytes) -> пакет или none — разбор одного кадра (для serve)
@@ -52,6 +58,8 @@ use os.target.uefi_x86_64.network.netlog
 use os.target.uefi_x86_64.network.netlog.journal
 use os.target.uefi_x86_64.network.stream
 use os.target.uefi_x86_64.screen.system_panel
+use os.target.uefi_x86_64.screen.sides
+use registry.libraries.uiengine.draw.atoms
 use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.network.mrpc
@@ -61,6 +69,7 @@ use os.target.uefi_x86_64.platform.keys
 MY_IP = [10, 0, 0, 2]
 PORT = 5555
 PART = "shot-part "
+STREAM = "shot-stream"
 
 PANEL_EVERY = 8
 HEARTBEAT = 100
@@ -81,6 +90,8 @@ Remote = Box {
     commands = [],
     panels = yes,
     drawn = yes,
+    skinned = no,
+    skin = atoms.Palette {},
     rounds = 0,
     meter = system_panel.Meter {},
     wifi = none,
@@ -161,6 +172,18 @@ skill answer(remote, bytes) {
         reply_text(remote, packet, shot.caption(remote.card, remote.shot_bytes))
         out none
     }
+    (packet.text == STREAM) {
+        @taken = shot.capture(remote.card) rescue |err| {
+            reply_text(remote, packet, "снимок не сделан: {err} (участок shot — половина экрана до 1920 × 1080)")
+            out none
+        }
+        remote.shot_bytes = taken
+        reply_text(remote, packet, shot.caption(remote.card, taken))
+        (remote.via == "cable") {
+            drum ((taken + shot.SHOT_CHUNK - 1) / shot.SHOT_CHUNK) { shot.send_chunk(remote.card, taken, packet, beat) }
+        }
+        out none
+    }
     (str.starts_with(packet.text, "key ") == yes) {
         reply_text(remote, packet, key_reply(str.slice(packet.text, 4, str.bytes(packet.text))))
         out none
@@ -224,7 +247,12 @@ skill serve(remote) {
     @meter = remote.meter
     meter.rounds = remote.rounds
     (remote.rounds % PANEL_EVERY == 0) {
-        (remote.panels == yes) { system_panel.tick(remote.card.base, remote.card, meter) rescue |err| { none } }
+        (remote.panels == yes) {
+            pick {
+                (remote.drawn == yes) { sides.tick(remote.card.base, remote.card, meter, painted(remote)) rescue |err| { none } }
+                { system_panel.tick(remote.card.base, remote.card, meter) rescue |err| { none } }
+            }
+        }
     }
     @packets = []
     drum (rtl8111.RX_COUNT) {
@@ -290,10 +318,19 @@ skill fail_mrpc(remote, packet, message) {
     out send_to(remote, packet, packet.from_port, mrpc.failure(call, "invalid_param", message, "", 0))
 }
 
+skill painted(remote) {
+    (remote.skinned == no) {
+        remote.skin = sides.skin(remote.card.base)
+        remote.skinned = yes
+    }
+    out remote.skin
+}
+
 skill logged(remote, kind, bytes) {
     (remote.panels == no) { out none }
-    (remote.drawn == no) { out netlog.keep(remote.card.base, kind, bytes) rescue |err| { none } }
-    out netlog.add(remote.card.base, kind, bytes) rescue |err| { none }
+    netlog.add(remote.card.base, kind, bytes) rescue |err| { none }
+    (remote.drawn == no) { out none }
+    out sides.log(remote.card.base, painted(remote)) rescue |err| { none }
 }
 
 skill own_panels(remote) {

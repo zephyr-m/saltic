@@ -11,7 +11,8 @@
 --
 -- Agent { card, frames, commands, arp, expected, received, total, spent, columns,
 --     rows, line, cursor, console, shown_second, rounds, failures, last_error,
---     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, limit,
+--     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, lines,
+--     badge, address, back (лента, шапка и задний буфер середины — agent/front), limit,
 --     linked, opening, saver, active_at, wifi, wifi_text, dream, via, trace }
 --     spent — принятое уже запускалось: пока оно работало, его буфер (bay) мог
 --     занять кто угодно, поэтому после возврата принятое забывается, а run
@@ -76,6 +77,8 @@ use os.target.uefi_x86_64.network.net
 use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.screen.lettering
+use os.target.uefi_x86_64.screen.sides
+use registry.libraries.uiengine.draw.atoms
 use os.target.uefi_x86_64.storage.files
 use os.target.uefi_x86_64.storage.disk
 use os.target.uefi_x86_64.platform.clock
@@ -90,7 +93,7 @@ use os.target.uefi_x86_64.network.netlog
 use os.target.uefi_x86_64.network.netlog.journal
 use os.target.uefi_x86_64.screen.system_panel
 use os.target.uefi_x86_64.agent.programs
-use os.target.uefi_x86_64.agent.shelf
+use os.target.uefi_x86_64.agent.front
 use os.target.uefi_x86_64.agent.saver
 use os.target.uefi_x86_64.agent.commands
 use os.target.uefi_x86_64.platform.keys
@@ -100,7 +103,7 @@ use os.target.uefi_x86_64.platform.utf8
 use os.target.uefi_x86_64.agent.inputs
 use os.target.uefi_x86_64.agent.trace
 
-VERSION = 55
+VERSION = 56
 KEY_EVERY = 256
 ENTER = 13
 SCAN_RIGHT = 3
@@ -144,6 +147,10 @@ Agent = Box {
     bay = 0,
     bay_pages = 0,
     names = [],
+    lines = [],
+    badge = "",
+    address = "",
+    back = 0,
     chosen = 0,
     limit = 0,
     linked = no,
@@ -405,15 +412,16 @@ skill clear_screen(agent) {
     agent.console = no
     agent.lent = no
     refresh_shelf(agent)
-    netlog.draw(agent.card.base) rescue |err| { none }
-    system_panel.draw(agent.card.base, agent.card) rescue |err| { none }
+    @tracer = agent.trace
+    sides.log(agent.card.base, tracer.skin) rescue |err| { none }
+    sides.system(agent.card.base, agent.card, agent.meter, yes, tracer.skin) rescue |err| { none }
     out "экран очищен"
 }
 
 skill refresh_shelf(agent) {
     agent.names = programs.shelf_names(agent.card.base) rescue |err| { [] }
     (agent.chosen >= group.count(agent.names)) { agent.chosen = 0 }
-    out shelf.draw_shelf(agent.card.base, agent.names, agent.chosen)
+    out front.draw(agent)
 }
 
 skill keep_program(agent, words) {
@@ -514,7 +522,7 @@ skill press(agent, key) {
     (key.scan == SCAN_RIGHT) { agent.chosen = (agent.chosen + 1) % count }
     (key.scan == SCAN_LEFT) { agent.chosen = (agent.chosen + count - 1) % count }
     (key.char == ENTER) { out open_program(agent) rescue |err| { feed.show_reply(agent, feed.text_bytes("не открылась: {err}", 200)) } }
-    out shelf.draw_shelf(agent.card.base, agent.names, agent.chosen)
+    out front.draw(agent)
 }
 
 skill print_line(agent, line_bytes) {
@@ -857,7 +865,8 @@ skill tick(agent) {
                 (agent.lent == no) { feed.draw_clock(agent) }
                 doze(agent)
             }
-            system_panel.tick(agent.card.base, agent.card, agent.meter) rescue |err| { none }
+            @tracer = agent.trace
+            sides.tick(agent.card.base, agent.card, agent.meter, tracer.skin) rescue |err| { none }
         }
     }
     out none
@@ -906,6 +915,10 @@ skill run() {
     }
     trace.wire(tracer, card)
     trace.link(tracer, card)
+    tracer.skin = sides.load_fonts(card.base) rescue |err| {
+        trace.urgent(tracer, card.base, "fonts: TTF for side panels failed ({err}), Spleen")
+        atoms.palette(graphics.open_whole(card.base))
+    }
     arena_map.check()
     @bay = firmware.region(card.base, "bay")
     @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = UPLOAD_LIMIT, trace = tracer }
@@ -915,6 +928,7 @@ skill run() {
     feed.show_reply(agent, feed.text_bytes("Wi-Fi выключен — поднять командой wifi", 200))
     watch_link(agent)
     netlog.say_text(card.base, "агент Saltic {VERSION} слушает 10.0.0.2:5555")
+    sides.log(card.base, tracer.skin) rescue |err| { none }
     serve(agent) rescue |err| {
         last_cry(card, "агент остановился: {err}")
         out err

@@ -1,5 +1,6 @@
--- netlog — сетевой журнал в левой четверти экрана: запросы к Saltic и его
--- ответы, один на агента и любую программу. Строки лежат в страницах
+-- netlog — сетевой журнал: запросы к Saltic и его ответы, один на агента и
+-- любую программу; рисует его панель «Сеть» screen/sides (сам журнал только
+-- хранит строки и числа соседей). Строки лежат в страницах
 -- прошивки, помеченных таблицей конфигурации UEFI (GUID ниже), поэтому
 -- программа, запущенная агентом, пишет в тот же журнал. Если страницы
 -- журнала ниже окна программы, она заводит новые и ставит их в таблицу
@@ -10,13 +11,12 @@
 -- [вид, длина, байты строки]. Новые строки — внизу, длинные переносятся.
 --
 -- ask(base, bytes) / say(base, bytes) / say_text(base, text) — записать запрос
---     или ответ и перерисовать; ошибок не бросают (нет экрана — молчат)
--- draw(base) — перерисовать панель / clear(base) — забыть строки и перерисовать
+--     или ответ; ошибок не бросают; перерисовать — sides.log
+-- clear(base) — забыть строки
 -- find(base) -> адрес журнала; новый, если его нет или он вне окна
--- add(base, kind, bytes) — записать строку и перерисовать; put(base, kind, line)
---     — готовую строку без перерисовки; note(base, bytes) — строка журнала
---     агента (agent.trace) без перерисовки, ошибок не бросает; keep(base,
---     kind, bytes) — как add, но без перерисовки (панели рисует сама программа)
+-- add(base, kind, bytes) — записать строку со временем; put(base, kind, line)
+--     — готовую строку; note(base, bytes) — строка журнала агента
+--     (agent.trace), ошибок не бросает
 -- entries(base) -> [[вид, [байты]], …] — строки журнала, новые первыми
 -- number_at(base, log, offset) / set_number(base, log, offset, value) —
 --     число до 2^28 в заголовке, offset от NUMBERS до HEADER
@@ -28,7 +28,6 @@ use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
 use os.target.uefi_x86_64.platform.clock
 use os.target.uefi_x86_64.screen.graphics
-use os.target.uefi_x86_64.screen.lettering
 use os.target.uefi_x86_64.network.netlog.journal
 
 GUID = [83, 65, 76, 84, 73, 67, 45, 78, 69, 84, 76, 79, 71, 0, 0, 2]
@@ -38,9 +37,6 @@ NUMBERS = 16
 LEFT_CANVAS = 52
 SLOTS = 32
 SLOT = 256
-MARGIN = 16
-ROW = 18
-FACE = lettering.FACE_SMALL
 
 skill create(base) {
     @place = uefi.pages_below_4g(base, PAGES)
@@ -56,11 +52,6 @@ skill find(base) {
 }
 
 skill add(base, kind, bytes) {
-    put(base, kind, journal.entry(kind, clock.clock_text(clock.local_time(uefi.now(base))), bytes, SLOT - 2))
-    out draw(base)
-}
-
-skill keep(base, kind, bytes) {
     out put(base, kind, journal.entry(kind, clock.clock_text(clock.local_time(uefi.now(base))), bytes, SLOT - 2))
 }
 
@@ -97,8 +88,7 @@ skill put(base, kind, line) {
 skill clear(base) {
     @log = find(base)
     firmware.write16(log, base, 0, 0)
-    firmware.write16(log, base, 2, 0)
-    out draw(base)
+    out firmware.write16(log, base, 2, 0)
 }
 
 skill ask(base, bytes) {
@@ -136,36 +126,3 @@ skill canvas(base, offset, width, whole) {
     out graphics.canvas(base, place, width, whole.height, whole)
 }
 
-skill draw(base) {
-    @whole = graphics.open_whole(base)
-    @side = graphics.side_width(whole.width)
-    @panel = canvas(base, LEFT_CANVAS, side, whole)
-    graphics.fill(panel, 0, 0, side, whole.height, graphics.color(whole, 24, 24, 27))
-    graphics.fill(panel, side - 1, 0, 1, whole.height, graphics.color(whole, 63, 63, 70))
-    lettering.paint_text(panel, FACE, MARGIN, MARGIN, "сеть — 10.0.0.2:5555", graphics.color(whole, 113, 113, 122))
-    @face = FACE
-    @letters = (side - 2 * MARGIN) / face.width
-    @top = MARGIN + ROW * 2
-    @y = whole.height - MARGIN
-    @ask_ink = graphics.color(whole, 251, 146, 60)
-    @say_ink = graphics.color(whole, 228, 228, 231)
-    @note_ink = graphics.color(whole, 125, 211, 252)
-    @log = find(base)
-    @next = firmware.read16(log, base, 0)
-    drum (firmware.read16(log, base, 2)) {
-        @slot = firmware.add(log, HEADER + (next - 1 - beat + SLOTS) % SLOTS * SLOT)
-        @ink = say_ink
-        (firmware.read8(slot, base, 0) == journal.ASK) { ink = ask_ink }
-        (firmware.read8(slot, base, 0) == journal.NOTE) { ink = note_ink }
-        @bytes = []
-        drum (firmware.read8(slot, base, 1)) { bytes = group.add(bytes, firmware.read8(slot, base, 2 + beat)) }
-        @rows = journal.wrap(bytes, letters)
-        @count = group.count(rows)
-        (y - count * ROW < top) { leave }
-        drum (count) {
-            y = y - ROW
-            lettering.paint_bytes(panel, FACE, MARGIN, y, group.get(rows, count - 1 - beat), ink)
-        }
-    }
-    out graphics.put(base, panel, whole, 0)
-}

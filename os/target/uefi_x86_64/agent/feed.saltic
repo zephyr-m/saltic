@@ -1,109 +1,55 @@
--- feed — лента агента на экране: шапка с часами и маскотом, журнал команд
--- и ответов с прокруткой, полоса приёма, баннер тревоги.
--- agent — Box агента (agent.saltic): card.base, cursor, console, lent, saver,
--- shown_second, received, expected. В консольном, отданном (lent) режиме и под
--- хранителем (saver) показ команд и ответов молчит. Разметка: MARGIN, TOP, BAR_SPACE, SHELF_SPACE.
+-- feed — лента агента: команды и ответы, крупная строка, часы, приём
+-- программы — запоминаются строками (agent/front.Entry в agent.lines) и
+-- показываются серединой экрана жителями UIEngine (agent/front.draw); баннер
+-- тревоги — сам по себе, тёмной полосой внизу (его зовут и без агента: авария,
+-- старт). В консольном, отданном (lent) режиме и под хранителем (saver) лента
+-- молчит.
 --
--- paper(screen) -> цвет фона
--- draw_header(agent, version, details) — заголовок, бейдж версии, линия, маскот
--- draw_mascot(base) — карточка с паучком справа
--- scroll(agent, screen, amount) — сдвигает ленту вверх копированием строк кадра
---     по ширине экрана агента (боковые панели не трогает)
--- next_row(agent, screen, height) -> y новой строки, прокручивая при нужде
+-- paper(screen) -> цвет фона (тёмный, как у панелей)
+-- draw_header(agent, version, details) — метка версии и адрес в шапку
 -- text_bytes(text, limit) -> [байты], не больше limit
--- room(screen, indent) -> сколько букв влезает левее паучка
--- fit(bytes, letters) -> [байты] не длиннее letters букв UTF-8
 -- show_command(agent, who, payload) — строка: время, кто, байты команды
 -- split_lines(bytes) -> [[байты]] по переводам строки
--- show_reply / show_code(agent, bytes) — ответ (или код синим моно) с отступом
--- show_lines(agent, bytes, indent, is_code) — не больше REPLY_LINES строк
--- print_big(agent, line_bytes) — строка крупным шрифтом
--- draw_clock(agent) -> agent; перерисовывает, если сменилась секунда
--- draw_progress(agent) — полоса приёма по received/expected: не стирает и не
---     рисует заново — подпись в своей строке, тёмная заливка дорастает поверх
---     старой (agent.bar — уже залито); дорожка — только в начале нового приёма
--- banner(base, message) — красный баннер над полосой
+-- show_reply / show_code(agent, bytes) — ответ (или код моноширинно), не
+--     больше REPLY_LINES строк и «… и ещё N строк»
+-- print_big(agent, line_bytes) — крупная строка
+-- draw_clock(agent) -> agent; середина заново, если сменилась секунда
+-- draw_progress(agent) — середина заново, когда процент приёма перешагнул
+--     очередные STEP % (agent.bar — показанный процент): перерисовка середины
+--     гладким шрифтом дорогая, на каждый процент заливка шла в шесть раз дольше
+-- banner(base, message) — тёмно-красная полоса с текстом внизу середины
+-- Внутри: quiet(agent) -> yes, если лента молчит; told(agent, bytes, kind)
 
 use core.str
 use core.group
-use os.target.uefi_x86_64.platform.firmware
 use os.target.uefi_x86_64.platform.uefi
-use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.platform.clock
-use os.target.uefi_x86_64.screen.spider
+use os.target.uefi_x86_64.screen.graphics
 use os.target.uefi_x86_64.screen.lettering
-use os.uiengine.canvas
-use os.uiengine.shapes
-use os.uiengine.fonts
+use os.target.uefi_x86_64.agent.front
 
 MARGIN = 40
 BAR_SPACE = 64
 SHELF_SPACE = 212
 TOP = 92
-LINE_GAP = 4
-LETTER = 8
-REPLY_INDENT = 24
 REPLY_LINES = 24
-CLOCK_WIDTH = 120
-BOOT_COPY_MEM = 352
-MASCOT_WIDTH = 200
-MASCOT_HEIGHT = 150
-MASCOT_SCALE = 4
-CODE_BLUE = canvas.Rgb { red = 37, green = 99, blue = 235 }
-ALARM_FILL = canvas.Rgb { red = 254, green = 226, blue = 226 }
-ALARM_INK = canvas.Rgb { red = 153, green = 27, blue = 27 }
+STEP = 10
 
 skill paper(screen) {
-    out canvas.paint(screen, canvas.PAPER)
+    out graphics.color(screen, 7, 9, 13)
+}
+
+skill quiet(agent) {
+    (agent.console == yes) { out yes }
+    (agent.saver == yes) { out yes }
+    out agent.lent
 }
 
 skill draw_header(agent, version, details) {
-    @screen = graphics.open(agent.card.base)
-    @heading = fonts.HEADING
-    @after = fonts.draw_text(screen, MARGIN, 24, "Saltic", canvas.ZINC_900, heading)
-    @label = "агент {version}"
-    @small = fonts.SMALL
-    @wide = fonts.measure(label, small) + 16
-    shapes.rounded(screen, after + 12, 26, wide, 20, 10, canvas.ZINC_100, canvas.PAPER)
-    fonts.draw_text(screen, after + 20, 26 + (20 - small.line) / 2, label, canvas.ZINC_900, small)
-    fonts.draw_text(screen, after + 24 + wide, 26, details, canvas.ZINC_500, fonts.REGULAR)
-    shapes.hairline(screen, MARGIN, 68, screen.width - MARGIN * 2, canvas.ZINC_200)
-    out draw_mascot(agent.card.base)
-}
-
-skill draw_mascot(base) {
-    @screen = graphics.open(base)
-    @left = screen.width - MARGIN - MASCOT_WIDTH
-    shapes.shadow(screen, left, TOP, MASCOT_WIDTH, MASCOT_HEIGHT, 12, canvas.PAPER, 3)
-    shapes.framed_box(screen, left, TOP, MASCOT_WIDTH, MASCOT_HEIGHT, 12, canvas.Look { fill = canvas.WHITE, edge = canvas.ZINC_200, framed = yes }, canvas.PAPER)
-    spider.draw_at(base, left + (MASCOT_WIDTH - 40 * MASCOT_SCALE) / 2, TOP + 12, MASCOT_SCALE)
-    @caption = "паучок-скакун"
-    out fonts.draw_text(screen, left + (MASCOT_WIDTH - fonts.measure(caption, fonts.SMALL)) / 2, TOP + MASCOT_HEIGHT - 24, caption, canvas.ZINC_500, fonts.SMALL)
-}
-
-skill scroll(agent, screen, amount) {
-    @base = agent.card.base
-    @services = uefi.boot_services(base)
-    @limit = screen.height - BAR_SPACE - 32 - SHELF_SPACE
-    @row_bytes = screen.stride * graphics.PIXEL_BYTES
-    @copy = firmware.pointer(services, base, BOOT_COPY_MEM)
-    @span = firmware.number(screen.width * graphics.PIXEL_BYTES)
-    drum (limit - TOP + 8 - amount) {
-        @y = TOP - 8 + beat
-        firmware.call(base, copy, [firmware.add(screen.frame, y * row_bytes), firmware.add(screen.frame, (y + amount) * row_bytes), span])
-    }
-    graphics.fill(screen, 0, limit - amount, screen.width, amount, paper(screen))
-    draw_mascot(base)
-    agent.cursor = agent.cursor - amount
-    out none
-}
-
-skill next_row(agent, screen, height) {
-    @limit = screen.height - BAR_SPACE - 32 - SHELF_SPACE
-    (agent.cursor + height > limit) { scroll(agent, screen, agent.cursor + height - limit) }
-    @y = agent.cursor
-    agent.cursor = agent.cursor + height + LINE_GAP
-    out y
+    agent.badge = "агент {version}"
+    agent.address = details
+    (quiet(agent) == yes) { out none }
+    out front.draw(agent)
 }
 
 skill text_bytes(text, limit) {
@@ -114,33 +60,11 @@ skill text_bytes(text, limit) {
     out bytes
 }
 
-skill room(screen, indent) {
-    out (screen.width - 2 * MARGIN - MASCOT_WIDTH - 16 - indent) / LETTER
-}
-
-skill fit(bytes, letters) {
-    @index = 0
-    drum (letters) {
-        (index < group.count(bytes)) {
-            @point = lettering.decode(bytes, index)
-            index = index + point.width
-        }
-    }
-    (index > group.count(bytes)) { index = group.count(bytes) }
-    out group.slice(bytes, 0, index)
-}
-
 skill show_command(agent, who, payload) {
-    (agent.console == yes) { out none }
-    (agent.saver == yes) { out none }
-    (agent.lent == yes) { out none }
-    @screen = graphics.open(agent.card.base)
-    @face = fonts.MEDIUM
-    @row = next_row(agent, screen, face.line)
-    @moment_text = clock.clock_text(clock.local_time(uefi.now(agent.card.base)))
-    @pen = fonts.draw_text(screen, MARGIN, row + 2, moment_text, canvas.ZINC_500, fonts.MONO)
-    pen = fonts.draw_text(screen, pen + 12, row + 1, who, canvas.ZINC_500, fonts.SMALL)
-    out fonts.draw_bytes(screen, pen + 12, row, fit(payload, room(screen, pen + 12 - MARGIN)), canvas.ZINC_900, face)
+    (quiet(agent) == yes) { out none }
+    @moment = clock.clock_text(clock.local_time(uefi.now(agent.card.base)))
+    front.remember(agent, front.Entry { kind = front.COMMAND, time = moment, who = who, bytes = payload })
+    out front.draw(agent)
 }
 
 skill split_lines(bytes) {
@@ -156,88 +80,54 @@ skill split_lines(bytes) {
     out group.add(lines, line)
 }
 
+skill told(agent, bytes, kind) {
+    (quiet(agent) == yes) { out none }
+    @all = split_lines(bytes)
+    @shown = group.count(all)
+    (shown > REPLY_LINES) { shown = REPLY_LINES }
+    drum (shown) { front.remember(agent, front.Entry { kind = kind, bytes = group.get(all, beat) }) }
+    @hidden = group.count(all) - shown
+    (hidden > 0) { front.remember(agent, front.Entry { kind = front.REPLY, bytes = text_bytes("… и ещё {hidden} строк", 200) }) }
+    out front.draw(agent)
+}
+
 skill show_reply(agent, bytes) {
-    out show_lines(agent, bytes, REPLY_INDENT, no)
+    out told(agent, bytes, front.REPLY)
 }
 
 skill show_code(agent, bytes) {
-    out show_lines(agent, bytes, REPLY_INDENT * 2, yes)
-}
-
-skill show_lines(agent, bytes, indent, is_code) {
-    (agent.console == yes) { out none }
-    (agent.saver == yes) { out none }
-    (agent.lent == yes) { out none }
-    @screen = graphics.open(agent.card.base)
-    @color = canvas.ZINC_900
-    @face = fonts.REGULAR
-    (is_code == yes) {
-        color = CODE_BLUE
-        face = fonts.MONO
-    }
-    @lines = split_lines(bytes)
-    @shown = group.count(lines)
-    (shown > REPLY_LINES) { shown = REPLY_LINES }
-    drum (shown) {
-        @row = next_row(agent, screen, face.line)
-        fonts.draw_bytes(screen, MARGIN + indent, row, fit(group.get(lines, beat), room(screen, indent)), color, face)
-    }
-    @hidden = group.count(lines) - shown
-    (hidden > 0) {
-        @row = next_row(agent, screen, face.line)
-        fonts.draw_text(screen, MARGIN + indent, row, "… и ещё {hidden} строк", canvas.ZINC_500, fonts.REGULAR)
-    }
-    out none
+    out told(agent, bytes, front.CODE)
 }
 
 skill print_big(agent, line_bytes) {
-    @screen = graphics.open(agent.card.base)
-    @face = fonts.HEADING
-    out fonts.draw_bytes(screen, MARGIN, next_row(agent, screen, face.line), line_bytes, canvas.ZINC_900, face)
+    (quiet(agent) == yes) { out none }
+    front.remember(agent, front.Entry { kind = front.BIG, bytes = line_bytes })
+    out front.draw(agent)
 }
 
 skill draw_clock(agent) {
     @moment = clock.local_time(uefi.now(agent.card.base))
     (moment.second == agent.shown_second) { out agent }
     agent.shown_second = moment.second
-    @screen = graphics.open(agent.card.base)
-    @left = screen.width - MARGIN - CLOCK_WIDTH
-    graphics.fill(screen, left, 20, CLOCK_WIDTH, 32, paper(screen))
-    @shown = clock.clock_text(moment)
-    @face = fonts.HEADING
-    fonts.draw_text(screen, screen.width - MARGIN - fonts.measure(shown, face), 24, shown, canvas.ZINC_900, face)
+    front.draw(agent)
     out agent
 }
 
 skill draw_progress(agent) {
-    @screen = graphics.open(agent.card.base)
-    @width = screen.width - MARGIN * 2
-    @top = screen.height - BAR_SPACE
-    @done = agent.received / 1024
-    @total = agent.expected / 1024
-    @percent = done * 100 / total
-    @filled = width * percent / 100
-    (filled < agent.bar) { agent.bar = 0 }
-    (agent.bar == 0) {
-        graphics.fill(screen, 0, top - 24, screen.width, BAR_SPACE + 24, paper(screen))
-        shapes.rounded(screen, MARGIN, top, width, 8, 4, canvas.ZINC_100, canvas.PAPER)
-    }
-    @label = "приём программы: {done} КБ из {total} КБ, {percent} %"
-    (agent.received == agent.expected) { label = "программа принята целиком: {total} КБ" }
-    graphics.fill(screen, 0, top - 24, screen.width, 20, paper(screen))
-    fonts.draw_text(screen, MARGIN, top - 22, label, canvas.ZINC_500, fonts.SMALL)
-    (filled > 8) {
-        (filled > agent.bar) { shapes.rounded(screen, MARGIN, top, filled, 8, 4, canvas.ZINC_900, canvas.ZINC_100) }
-    }
-    agent.bar = filled
-    out none
+    (agent.expected < 1) { out none }
+    @percent = agent.received / 1024 * 100 / (agent.expected / 1024 + 1)
+    (agent.received == agent.expected) { percent = 100 }
+    percent = percent / STEP * STEP
+    (percent == agent.bar) { out none }
+    agent.bar = percent
+    (quiet(agent) == yes) { out none }
+    out front.draw(agent)
 }
 
 skill banner(base, message) {
     @screen = graphics.open(base)
     @top = screen.height - BAR_SPACE - 44
-    graphics.fill(screen, 0, top - 2, screen.width, 40, paper(screen))
-    shapes.framed_box(screen, MARGIN, top, screen.width - 2 * MARGIN, 36, 8, canvas.Look { fill = ALARM_FILL, edge = ALARM_INK, framed = yes }, canvas.PAPER)
-    @face = fonts.MEDIUM
-    out fonts.draw_text(screen, MARGIN + 14, top + (36 - face.line) / 2, message, ALARM_INK, face)
+    graphics.fill(screen, 16, top, screen.width - 32, 36, graphics.color(screen, 49, 30, 40))
+    graphics.fill(screen, 16, top, 3, 36, graphics.color(screen, 255, 90, 110))
+    out lettering.paint_text(screen, lettering.FACE_SMALL, 30, top + 12, message, graphics.color(screen, 255, 170, 180))
 }

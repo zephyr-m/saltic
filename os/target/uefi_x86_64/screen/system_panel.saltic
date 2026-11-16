@@ -1,38 +1,32 @@
--- system_panel — правая четверть экрана: память, диск и сеть, только то, что
--- прошивка и карта знают точно. Числа, которые должны пережить смену программы
--- (байты сети, место на диске), лежат в заголовке netlog по смещениям ниже.
--- Скорость — байты карты с прошлого tick, делённые на прошедшие секунды.
+-- system_panel — сведения правой панели «Система»: память, диск и сеть, только
+-- то, что прошивка и карта знают точно; рисует её screen/sides (жителями
+-- UIEngine), здесь — только данные. Числа, которые должны пережить смену
+-- программы (байты сети, место на диске), лежат в заголовке netlog по
+-- смещениям ниже. Скорость — байты карты с прошлого tick, делённые на
+-- прошедшие секунды.
 --
 -- Memory { total_mb, free_mb } — ОЗУ по карте памяти прошивки
 -- memory(base) -> Memory; NoMemoryMap
 -- measure_disk(base) — размер и свободное место тома Saltic в netlog
 --     (агент зовёт при старте и после записи на диск); нет тома — нули
--- Meter { rounds, mark, rates, received, hidden } — кадры программы: rounds — сколько
---     раз она позвала сеть (раз в кадр), rates — кадров в секунду за последние
---     RATES секунд (у агента rounds = 0, графика кадров нет); received — приём
---     по кабелю, байт в секунду за те же секунды (график приёма); hidden = yes —
---     панель только в холст, на экран не кладёт (экран занят хранителем агента)
--- tick(base, card, meter) — раз в секунду: счётчики карты в netlog, кадры в
---     meter и show без принуждения; чаще — ничего не делает; звать из цикла сети
+-- Meter { rounds, mark, rates, received, hidden } — кадры программы: rounds —
+--     сколько раз она позвала сеть (раз в кадр), rates — кадров в секунду за
+--     последние RATES секунд (у агента rounds = 0, графика кадров нет);
+--     received — приём по кабелю, байт в секунду за те же секунды; hidden = yes
+--     — панель только в холст, на экран не кладёт (экран занят хранителем)
+-- tick(base, card, meter) -> yes, если прошла секунда: счётчики карты в
+--     netlog, кадры в meter; чаще — ничего не делает и no
 -- flush(base, card) — счётчики карты в итоги netlog и в ноль (перед сменой образа)
--- draw(base, card) — перерисовать панель / show(base, card, forced, meter) —
---     то же, но при forced = no — только если подписи изменились; meter — графики
---     кадров и приёма (пусто — без них); рисует в холст (netlog.canvas) и кладёт
---     на экран одним копированием
 -- Facts { memory_used, memory_total (МБ), disk_used, disk_total (МБ), heap_used,
 --     heap_total (КБ), escapes, cable, linked, incoming, outgoing, received, sent,
---     wifi_step, wifi_text, rates, heard } — всё, что панель показывает
--- facts(base, card, meter) -> Facts — то же, что рисует show (пульт рисует сам)
+--     wifi_step, wifi_text, rates, heard } — всё, что показывает панель
+-- facts(base, card, meter) -> Facts
+-- signature(text) -> отпечаток подписей (SIGNATURE в netlog — перерисовать ли)
 -- link_speed(status) -> «100 Мбит/с» или «нет»; cable_text(status) —
 --     «подключён · 1000 Мбит/с · дуплекс» или «не подключён»
 -- Куча программы (core.mem.heap) — того, кто рисует панель: агента или
 -- запущенной программы; растёт у вечной программы — утечка.
--- Сверху — Wi-Fi: иконка (серая, пока не подключён; бирюзовая — подключён)
--- и ход подъёма или адрес с сетью — со страницы qca9377.handoff (stage).
--- Внутри: icon — значок 16 × 16 (# — точка: WIFI_ICON, CABLE_ICON); gauge — подпись,
---     полоса и «занято X из Y»; frames — график кадров; record — кадры за
---     секунду в meter; add_bytes — КБ и остаток;
---     cable_icon — вилка; received_graph — график приёма; signature — отпечаток подписей
+-- Внутри: record — кадры за секунду в meter; add_bytes — КБ и остаток
 
 use core.str
 use core.group
@@ -43,8 +37,6 @@ use os.target.uefi_x86_64.drivers.rtl8111
 use os.target.uefi_x86_64.drivers.qca9377.handoff
 use os.target.uefi_x86_64.storage.files
 use os.target.uefi_x86_64.network.netlog
-use os.target.uefi_x86_64.screen.graphics
-use os.target.uefi_x86_64.screen.lettering
 use os.target.uefi_x86_64.screen.system_panel.sizes
 
 BOOT_GET_MEMORY_MAP = 56
@@ -69,49 +61,7 @@ RIGHT_CANVAS = 56
 SIGNATURE = 60
 SIGNATURE_MOD = 65521
 SECONDS_PER_HOUR = 3600
-MARGIN = 16
-ROW = 18
-BAR = 8
-FACE = lettering.FACE_SMALL
-WIFI_ICON = [
-    "................",
-    "....########....",
-    "..##........##..",
-    ".#............#.",
-    "#....######....#",
-    "...##......##...",
-    "..#..........#..",
-    ".....######.....",
-    "....#......#....",
-    "................",
-    ".......##.......",
-    "......####......",
-    ".......##.......",
-    "................",
-    "................",
-    "................"
-]
-CABLE_ICON = [
-    "................",
-    ".....######.....",
-    ".....#....#.....",
-    "...##########...",
-    "...#........#...",
-    "...#.#.##.#.#...",
-    "...#.#.##.#.#...",
-    "...#........#...",
-    "...##########...",
-    ".......##.......",
-    ".......##.......",
-    ".......##.......",
-    "......####......",
-    "................",
-    "................",
-    "................"
-]
 RATES = 40
-GRAPH = 56
-RECEIVED_GRAPH = 40
 FLOOR_RATE = 30
 FLOOR_BYTES = 1024
 
@@ -218,7 +168,7 @@ skill tick(base, card, meter) {
     @moment = uefi.now(base)
     @mark = moment.minute * 60 + moment.second
     @elapsed = (mark - netlog.number_at(base, log, MARK) + SECONDS_PER_HOUR) % SECONDS_PER_HOUR
-    (elapsed == 0) { out none }
+    (elapsed == 0) { out no }
     netlog.set_number(base, log, MARK, mark)
     netlog.set_number(base, log, RX_SPEED, card.received_bytes / elapsed)
     netlog.set_number(base, log, TX_SPEED, card.sent_bytes / elapsed)
@@ -227,7 +177,7 @@ skill tick(base, card, meter) {
     meter.received = received
     flush(base, card)
     (meter.rounds > 0) { record(meter, elapsed) }
-    out show(base, card, no, meter)
+    out yes
 }
 
 skill link_speed(status) {
@@ -245,21 +195,6 @@ skill cable_text(status) {
     out "подключён · {speed} · {duplex}"
 }
 
-skill gauge(screen, x, y, width, title, used_kb, total_kb) {
-    lettering.paint_text(screen, FACE, x, y, title, graphics.color(screen, 228, 228, 231))
-    @grey = graphics.color(screen, 161, 161, 170)
-    (total_kb < 1) {
-        lettering.paint_text(screen, FACE, x, y + ROW, "нет сведений", grey)
-        out y + ROW * 3
-    }
-    @share = sizes.percent(used_kb, total_kb)
-    graphics.fill(screen, x, y + ROW + 2, width, BAR, graphics.color(screen, 63, 63, 70))
-    graphics.fill(screen, x, y + ROW + 2, width * share / 100, BAR, graphics.color(screen, 251, 146, 60))
-    @used = sizes.kb_text(used_kb)
-    @total = sizes.kb_text(total_kb)
-    lettering.paint_text(screen, FACE, x, y + ROW + BAR + 8, "занято {used} из {total}, {share} %", grey)
-    out y + ROW * 4
-}
 
 skill signature(text) {
     @mark = 0
@@ -267,59 +202,9 @@ skill signature(text) {
     out mark
 }
 
-skill frames(screen, x, y, width, rates) {
-    @last = group.get(rates, group.count(rates) - 1)
-    lettering.paint_text(screen, FACE, x, y, "кадры: {last} в секунду", graphics.color(screen, 228, 228, 231))
-    @top = y + ROW + 4
-    @most = FLOOR_RATE
-    drum (group.count(rates)) {
-        @rate = group.get(rates, beat)
-        (rate > most) { most = rate }
-    }
-    graphics.fill(screen, x, top, width, GRAPH, graphics.color(screen, 39, 39, 42))
-    @bar = width / RATES
-    @first = RATES - group.count(rates)
-    @orange = graphics.color(screen, 251, 146, 60)
-    drum (group.count(rates)) {
-        @tall = group.get(rates, beat) * GRAPH / most
-        (tall > 0) { graphics.fill(screen, x + (first + beat) * bar, top + GRAPH - tall, bar - 1, tall, orange) }
-    }
-    lettering.paint_text(screen, FACE, x, top + GRAPH + 6, "за {RATES} с, шкала до {most}", graphics.color(screen, 161, 161, 170))
-    out none
-}
 
-skill received_graph(screen, x, y, width, received) {
-    @most = FLOOR_BYTES
-    drum (received) {
-        (beat > most) { most = beat }
-    }
-    graphics.fill(screen, x, y, width, RECEIVED_GRAPH, graphics.color(screen, 39, 39, 42))
-    @bar = width / RATES
-    @first = RATES - group.count(received)
-    @teal = graphics.color(screen, 45, 212, 191)
-    drum (group.count(received)) {
-        @tall = group.get(received, beat) * RECEIVED_GRAPH / most
-        (tall > 0) { graphics.fill(screen, x + (first + beat) * bar, y + RECEIVED_GRAPH - tall, bar - 1, tall, teal) }
-    }
-    @scale = sizes.speed_text(most)
-    lettering.paint_text(screen, FACE, x, y + RECEIVED_GRAPH + 6, "за {RATES} с, шкала до {scale}", graphics.color(screen, 161, 161, 170))
-    out y + RECEIVED_GRAPH + ROW + 10
-}
 
-skill icon(screen, x, y, picture, ink) {
-    drum (16) {
-        @line = group.get(picture, beat)
-        @row = beat
-        drum (16) {
-            (str.get(line, beat) == "#") { graphics.fill(screen, x + beat, y + row, 1, 1, ink) }
-        }
-    }
-    out none
-}
 
-skill draw(base, card) {
-    out show(base, card, yes, Meter {})
-}
 
 skill facts(base, card, meter) {
     @log = netlog.find(base)
@@ -330,62 +215,3 @@ skill facts(base, card, meter) {
     out Facts { memory_used = known.total_mb - known.free_mb, memory_total = known.total_mb, disk_used = disk_total - netlog.number_at(base, log, DISK_FREE), disk_total = disk_total, heap_used = mem.heap(0) / 1024, heap_total = mem.heap(2) / 1024, escapes = sizes.kb_text(mem.heap(1) / 1024), cable = cable_text(status), linked = rtl8111.has_bit(status, rtl8111.PHY_LINK), incoming = sizes.speed_text(netlog.number_at(base, log, RX_SPEED)), outgoing = sizes.speed_text(netlog.number_at(base, log, TX_SPEED)), received = sizes.kb_text(netlog.number_at(base, log, RX_KB)), sent = sizes.kb_text(netlog.number_at(base, log, TX_KB)), wifi_step = group.get(wifi, 0), wifi_text = group.get(wifi, 1), rates = meter.rates, heard = meter.received }
 }
 
-skill show(base, card, forced, meter) {
-    @rates = meter.rates
-    @log = netlog.find(base)
-    @told = facts(base, card, meter)
-    @memory_used = told.memory_used
-    @memory_total = told.memory_total
-    @heap_used = told.heap_used
-    @heap_total = told.heap_total
-    @escapes = told.escapes
-    @disk_total = told.disk_total
-    @disk_used = told.disk_used
-    @cable = told.cable
-    @incoming = told.incoming
-    @outgoing = told.outgoing
-    @received = told.received
-    @sent = told.sent
-    @wifi_step = told.wifi_step
-    @wifi_text = told.wifi_text
-    @shown = group.count(rates)
-    @latest = 0
-    (shown > 0) { latest = group.get(rates, shown - 1) }
-    @heard = group.count(meter.received)
-    @mark = signature("{heap_used}/{escapes}/{memory_used}/{memory_total}/{disk_used}/{disk_total}/{cable}/{incoming}/{outgoing}/{received}/{sent}/{shown}/{latest}/{heard}/{wifi_step}/{wifi_text}")
-    (forced == no) {
-        (mark == netlog.number_at(base, log, SIGNATURE)) { out none }
-    }
-    netlog.set_number(base, log, SIGNATURE, mark)
-    @whole = graphics.open_whole(base)
-    @side = graphics.side_width(whole.width)
-    @panel = netlog.canvas(base, RIGHT_CANVAS, side, whole)
-    @width = side - 2 * MARGIN
-    @grey = graphics.color(whole, 161, 161, 170)
-    graphics.fill(panel, 0, 0, side, whole.height, graphics.color(whole, 24, 24, 27))
-    graphics.fill(panel, 0, 0, 1, whole.height, graphics.color(whole, 63, 63, 70))
-    lettering.paint_text(panel, FACE, MARGIN, MARGIN, "система", graphics.color(whole, 113, 113, 122))
-    @wifi_ink = grey
-    (wifi_step == handoff.CONNECTED) { wifi_ink = graphics.color(whole, 45, 212, 191) }
-    @wifi_line = wifi_text
-    (str.bytes(wifi_line) == 0) { wifi_line = "выключен" }
-    icon(panel, MARGIN, MARGIN + ROW * 2, WIFI_ICON, wifi_ink)
-    lettering.paint_text(panel, FACE, MARGIN + 24, MARGIN + ROW * 2, "Wi-Fi", graphics.color(whole, 228, 228, 231))
-    lettering.paint_text(panel, FACE, MARGIN, MARGIN + ROW * 3, wifi_line, wifi_ink)
-    @y = gauge(panel, MARGIN, MARGIN + ROW * 5, width, "память", memory_used * 1024, memory_total * 1024)
-    y = gauge(panel, MARGIN, y, width, "диск Saltic", disk_used * 1024, disk_total * 1024)
-    y = gauge(panel, MARGIN, y, width, "куча программы · побеги {escapes}", heap_used, heap_total)
-    @cable_ink = grey
-    (told.linked == yes) { cable_ink = graphics.color(whole, 45, 212, 191) }
-    icon(panel, MARGIN, y, CABLE_ICON, cable_ink)
-    lettering.paint_text(panel, FACE, MARGIN + 24, y, "кабель", graphics.color(whole, 228, 228, 231))
-    lettering.paint_text(panel, FACE, MARGIN, y + ROW, cable, cable_ink)
-    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 2, "приём {incoming}", grey)
-    y = received_graph(panel, MARGIN, y + ROW * 3 + 4, width, meter.received)
-    lettering.paint_text(panel, FACE, MARGIN, y, "отправка {outgoing}", grey)
-    lettering.paint_text(panel, FACE, MARGIN, y + ROW, "принято всего {received}", grey)
-    lettering.paint_text(panel, FACE, MARGIN, y + ROW * 2, "отправлено всего {sent}", grey)
-    (shown > 0) { frames(panel, MARGIN, y + ROW * 4, width, rates) }
-    (meter.hidden == yes) { out none }
-    out graphics.put(base, panel, whole, whole.width - side)
-}
