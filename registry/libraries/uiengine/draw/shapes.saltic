@@ -18,7 +18,15 @@
 --     одну; center [] — свет из точки (60 %, 40 %) экрана, гаснет на 3/4 пути
 --     до дальнего угла; center [x, y] — фонарик: свет из этой точки, гаснет
 --     на TORCH долях суммы сторон экрана
--- Внутри: root — целый корень; corner(radius, row, height) — отступ ряда от
+-- circle(screen, [x, y, w, h], [border, start, sweep], fill, edge) — круг
+--     поперечником в меньшую сторону: заливка fill (сектор, если sweep < 360)
+--     и кольцо edge толщиной border; дуга — sweep градусов от start (−90 — 12
+--     часов, по часовой); цвет −1 — не рисовать; края по радиусу сглажены;
+--     места нет (сторона ≤ 0) — ничего
+-- Внутри: root — целый корень; sine(degrees) — синус × 1024 по таблице SINES
+--     (0…90 через 6°, между — по прямой); arc(dx, dy, start, sweep) -> yes,
+--     если точка в дуге; cover(distance, edge) -> доля 0…SUB точки внутри
+--     радиуса edge; corner(radius, row, height) — отступ ряда от
 --     края в скруглении в 1/SUB точки; span — отрезок строки с дробными краями
 
 use core.group
@@ -32,6 +40,7 @@ INSET_ALPHA = 60
 SHEEN_ALPHA = 6
 LIGHT_ALPHA = 11
 GRID_STEP = 24
+SINES = [0, 107, 213, 316, 416, 512, 602, 685, 761, 828, 887, 935, 974, 1002, 1018, 1024]
 TORCH = 4
 
 skill root(value) {
@@ -231,6 +240,96 @@ skill dots(screen, place, color, center) {
             (y + 1 > bottom) { inside = no }
             (inside == yes) {
                 (distance < reach) { graphics.blend(screen, x - 1, y - 1, 2, 2, color, OPAQUE * (reach - distance) / reach) }
+            }
+        }
+    }
+    out none
+}
+
+skill sine(degrees) {
+    @turn = degrees % 360
+    (turn < 0) { turn = turn + 360 }
+    @sign = 1
+    (turn >= 180) {
+        sign = -1
+        turn = turn - 180
+    }
+    (turn > 90) { turn = 180 - turn }
+    @slot = turn / 6
+    @low = group.get(SINES, slot)
+    (slot >= 15) { out sign * low }
+    @high = group.get(SINES, slot + 1)
+    out sign * (low + (high - low) * (turn - slot * 6) / 6)
+}
+
+skill arc(dx, dy, start, sweep) {
+    (sweep >= 360) { out yes }
+    (sweep <= 0) { out no }
+    @first_x = sine(start + 90)
+    @first_y = sine(start)
+    @last_x = sine(start + sweep + 90)
+    @last_y = sine(start + sweep)
+    @after_first = first_x * dy - first_y * dx >= 0
+    @before_last = dx * last_y - dy * last_x >= 0
+    (sweep <= 180) {
+        (after_first == yes) { out before_last }
+        out no
+    }
+    (after_first == yes) { out yes }
+    out before_last
+}
+
+skill cover(distance, edge) {
+    @inside = edge - distance + SUB / 2
+    (inside <= 0) { out 0 }
+    (inside >= SUB) { out SUB }
+    out inside
+}
+
+skill circle(screen, place, line, fill, edge) {
+    @x = group.get(place, 0)
+    @y = group.get(place, 1)
+    @size = group.get(place, 2)
+    (group.get(place, 3) < size) { size = group.get(place, 3) }
+    (size <= 0) { out none }
+    @border = group.get(line, 0)
+    @start = group.get(line, 1)
+    @sweep = group.get(line, 2)
+    @outer = size * SUB / 2
+    @inner = outer - border * SUB
+    @middle_x = x * SUB + group.get(place, 2) * SUB / 2
+    @middle_y = y * SUB + group.get(place, 3) * SUB / 2
+    @left = middle_x / SUB - size / 2 - 1
+    @top = middle_y / SUB - size / 2 - 1
+    drum (size + 2) {
+        @row = top + beat
+        @dy = row * SUB + SUB / 2 - middle_y
+        drum (size + 2) {
+            @column = left + beat
+            @dx = column * SUB + SUB / 2 - middle_x
+            @square = dx * dx + dy * dy
+            @far = outer + SUB
+            (square < far * far) {
+                (arc(dx, dy, start, sweep) == yes) {
+                    @body = SUB
+                    @hole = 0
+                    @near = outer - SUB
+                    (square >= near * near) { body = cover(root(square), outer) }
+                    (inner > 0) {
+                        @deep = inner - SUB
+                        @shore = inner + SUB
+                        hole = SUB
+                        (deep < 0) { hole = cover(root(square), inner) }
+                        (deep >= 0) {
+                            (square >= deep * deep) { hole = cover(root(square), inner) }
+                        }
+                        (square > shore * shore) { hole = 0 }
+                    }
+                    (fill >= 0) { graphics.blend(screen, column, row, 1, 1, fill, OPAQUE * body / SUB) }
+                    (edge >= 0) {
+                        (border > 0) { graphics.blend(screen, column, row, 1, 1, edge, OPAQUE * (body - hole) / SUB) }
+                    }
+                }
             }
         }
     }
