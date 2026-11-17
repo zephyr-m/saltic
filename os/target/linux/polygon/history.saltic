@@ -1,12 +1,15 @@
--- history — настоящая история коммитов для экрана «Сборки» Полигона: git log
--- репозитория за WEEKS недель (дата коммита — день, ГГГГ-ММ-ДД), сегодня — из
--- date +%F. Дни — номер от 1970-01-01 (days_from_civil), неделя — с
--- понедельника; сетка — WEEKS столбцов по 7 дней, последний столбец — с
--- сегодняшним днём. Нет git или репозитория — NoHistory, причина в лицо.
+-- history — настоящая история коммитов репозитория для экрана «Сборки»
+-- Полигона: субъект Commits сам читает git log за WEEKS недель (дата коммита —
+-- день, ГГГГ-ММ-ДД; сегодня — date +%F) и сам считает о себе итоги. Дни —
+-- номер от 1970-01-01, неделя — с понедельника; сетка — WEEKS столбцов по 7
+-- дней, последний — с сегодняшним днём. Не прочиталось — trouble словами.
 --
--- Activity { first, today, counts } — первый день сетки, сегодня, коммитов по
---     дням сетки (WEEKS × 7, дни после сегодня — ноль)
--- load() -> Activity; NoHistory
+-- Commits { first, today, counts, trouble } — первый день сетки, сегодня,
+--     коммитов по дням сетки (дни после сегодня — ноль), причина сбоя или ""
+--     refresh() — прочитать git log заново; total() / active() — коммитов и
+--     дней с коммитами; streak() — самая длинная серия дней подряд;
+--     best() -> [номер в сетке, коммитов] — лучший день; at(index) — день
+--     сетки номером от 1970-01-01; count(index) — коммитов в нём
 -- day_of(text) -> номер дня по "ГГГГ-ММ-ДД"; civil(day) -> [год, месяц, день]
 -- weekday(day) -> 0 — понедельник … 6 — воскресенье
 -- Внутри: number(text) -> целое из цифр
@@ -19,11 +22,6 @@ WEEKS = 53
 EPOCH_SHIFT = 719468
 ERA = 146097
 
-Activity = Box {
-    first = 0,
-    today = 0,
-    counts = []
-}
 
 skill number(text) {
     @value = 0
@@ -64,21 +62,84 @@ skill weekday(day) {
     out (day + 3) % 7
 }
 
-skill load() {
-    @asked = process.capture(["date", "+%F"], "", []) rescue |err| { out error.NoHistory }
-    @today = day_of(asked.output)
-    @first = today - (WEEKS - 1) * 7 - weekday(today)
-    @log = process.capture(["git", "log", "--since={WEEKS} weeks ago", "--format=%cd", "--date=short"], "", []) rescue |err| { out error.NoHistory }
-    ((log.code == 0) == no) { out error.NoHistory }
-    @counts = []
-    drum (WEEKS * 7) { counts = group.add(counts, 0) }
-    drum (str.lines(log.output)) {
-        (str.bytes(beat) >= 10) {
-            @at = day_of(beat) - first
-            (at >= 0) {
-                (at < WEEKS * 7) { counts = group.replaced(counts, at, group.get(counts, at) + 1) }
+Commits = Box {
+    first = 0,
+    today = 0,
+    counts = [],
+    trouble = ""
+
+    skill refresh() {
+        @asked = process.capture(["date", "+%F"], "", []) rescue |err| {
+            trouble = "date не ответил — {err}"
+            out none
+        }
+        today = day_of(asked.output)
+        first = today - (WEEKS - 1) * 7 - weekday(today)
+        @log = process.capture(["git", "log", "--since={WEEKS} weeks ago", "--format=%cd", "--date=short"], "", []) rescue |err| {
+            trouble = "git не запустился — {err}"
+            out none
+        }
+        ((log.code == 0) == no) {
+            trouble = "git log ответил кодом {log.code} — не репозиторий?"
+            out none
+        }
+        @made = []
+        drum (WEEKS * 7) { made = group.add(made, 0) }
+        drum (str.lines(log.output)) {
+            (str.bytes(beat) >= 10) {
+                @spot = day_of(beat) - first
+                (spot >= 0) {
+                    (spot < WEEKS * 7) { made = group.replaced(made, spot, group.get(made, spot) + 1) }
+                }
             }
         }
+        counts = made
+        trouble = ""
+        out none
     }
-    out Activity { first = first, today = today, counts = counts }
+
+    skill at(index) {
+        out first + index
+    }
+
+    skill count(index) {
+        out group.get(counts, index)
+    }
+
+    skill total() {
+        @sum = 0
+        drum (counts) { sum = sum + beat }
+        out sum
+    }
+
+    skill active() {
+        @days = 0
+        drum (counts) {
+            (beat > 0) { days = days + 1 }
+        }
+        out days
+    }
+
+    skill streak() {
+        @longest = 0
+        @run = 0
+        drum (today - first + 1) {
+            run = run + 1
+            (group.get(counts, beat) == 0) { run = 0 }
+            (run > longest) { longest = run }
+        }
+        out longest
+    }
+
+    skill best() {
+        @spot = 0
+        @most = 0
+        drum (group.count(counts)) {
+            (group.get(counts, beat) > most) {
+                most = group.get(counts, beat)
+                spot = beat
+            }
+        }
+        out [spot, most]
+    }
 }

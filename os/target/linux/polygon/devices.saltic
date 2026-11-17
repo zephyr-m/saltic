@@ -1,15 +1,17 @@
--- devices — живой опрос железа для экрана «Устройства» Полигона, каждый не
--- дольше секунды (закон автора об ответе): ноутбук — сам о себе (/proc:
--- память, ядра, нагрузка; /etc/hostname), Acer — один вопрос info агенту по
--- кабелю (mRPC, taskdesk/wire), телефон — adb devices, ESP32 — есть ли
--- /dev/ttyUSB0. Не ответил — так и сказано, с причиной: состояние «нет связи».
+-- devices — железо автора для экрана «Устройства» Полигона: каждое
+-- устройство — субъект Device, который сам себя опрашивает не дольше секунды
+-- (закон автора об ответе) и сам знает, как выглядит его карточка. Ноутбук —
+-- о себе (/proc: память, ядра, нагрузка; /etc/hostname), Acer — один вопрос
+-- info агенту по кабелю (mRPC, taskdesk/wire), телефон — adb devices, ESP32 —
+-- есть ли /dev/ttyUSB0. Не ответил — так и сказано: состояние «нет связи».
 --
--- Device { name, kind, state, tone, first, second, alive } — что показать
--- survey() -> [ноутбук, Acer, телефон, ESP32] — группа Device
--- laptop() / acer() / phone() / esp32() -> Device
--- Внутри: field(text, name) -> число из строки /proc/meminfo «name: N kB»;
---     number(text) -> целое из первых цифр
-
+-- Device { role, icon, name, kind, state, tone, first, second, alive } —
+--     role — laptop, acer, phone или board; ask() — опросить себя заново
+--     (остальные поля — что показать); card(index, x, y) -> JTML карточки,
+--     id — NODE и номер (щелчок по ней — опрос заново)
+-- Внутри: ask_laptop / ask_acer / ask_phone / ask_board — опрос по роли;
+--     number(text) -> целое из первых цифр; field(text, name) -> число из
+--     строки /proc/meminfo «name: N kB»
 use core.str
 use core.group
 use core.process
@@ -17,21 +19,14 @@ use io.file
 use craft.protocols.data.json.value
 use os.target.uefi_x86_64.network.mrpc
 use os.target.linux.taskdesk.wire
+use registry.libraries.uiengine.jtml.calls
 
 ACER = "10.0.0.2"
 ACER_PORT = 5555
 ADB = "/nix/store/f8idcxknf68aa5r584jrywgybfsw67gs-android-tools-35.0.2/bin/adb"
 SERIAL = "ttyUSB0"
+NODE = "node-"
 
-Device = Box {
-    name = "",
-    kind = "",
-    state = "",
-    tone = "quiet",
-    first = "",
-    second = "",
-    alive = no
-}
 
 skill number(text) {
     @result = 0
@@ -60,71 +55,111 @@ skill field(text, name) {
     out 0
 }
 
-skill laptop() {
-    @memory = file.read("/proc/meminfo")
-    @total = field(memory, "MemTotal") / 1048576
-    @free = field(memory, "MemAvailable") / 1048576
-    @cores = 0
-    drum (str.lines(file.read("/proc/cpuinfo"))) {
-        (str.starts_with(beat, "processor") == yes) { cores = cores + 1 }
-    }
-    @load = group.get(str.split(file.read("/proc/loadavg"), " "), 0)
-    @host = group.get(str.lines(file.read("/etc/hostname")), 0)
-    @used = total - free
-    out Device { name = "Ноутбук", kind = "x86-64 · Linux · {host}", state = "это я", tone = "accent", first = "память {used} из {total} ГБ", second = "ядер {cores} · нагрузка {load}", alive = yes }
-}
+Device = Box {
+    role = "",
+    icon = "",
+    name = "",
+    kind = "",
+    state = "",
+    tone = "quiet",
+    first = "",
+    second = "",
+    alive = no
 
-skill acer() {
-    @seen = Device { name = "Acer E5-575G", kind = "x86-64 · UEFI · агент Saltic", state = "нет связи", tone = "down", first = "{ACER}:{ACER_PORT} молчит", second = "кабель LAN · mRPC" }
-    @link = wire.open(ACER, ACER_PORT) rescue |err| { out seen }
-    @answer = wire.ask(link, "info", "")
-    (answer.ok == no) {
-        seen.first = "молчит дольше секунды"
-        out seen
+    skill ask() {
+        (role == "laptop") { out ask_laptop() }
+        (role == "acer") { out ask_acer() }
+        (role == "phone") { out ask_phone() }
+        out ask_board()
     }
-    @agent = value.get(answer.data, "agent")
-    @version = mrpc.plain(agent.value)
-    @heap = value.get(answer.data, "heap")
-    @used = value.get(heap.value, "used")
-    @kb = mrpc.plain(used.value)
-    seen.state = "в сети"
-    seen.tone = "up"
-    seen.kind = "x86-64 · UEFI · агент {version}"
-    seen.first = "агент {version} · куча {kb} КБ"
-    seen.second = "{ACER} · кабель LAN · mRPC"
-    seen.alive = yes
-    out seen
-}
 
-skill phone() {
-    @seen = Device { name = "POCO X6 Pro", kind = "arm64 · Android", state = "нет связи", tone = "down", first = "adb не видит телефон", second = "USB · отладка" }
-    @asked = process.capture([ADB, "devices"], "", []) rescue |err| {
-        seen.first = "adb не запустился"
-        out seen
-    }
-    drum (str.lines(asked.output)) {
-        (str.ends_with(beat, "device") == yes) {
-            @serial = group.get(str.split(beat, "\t"), 0)
-            seen.state = "в сети"
-            seen.tone = "up"
-            seen.first = "adb: {serial}"
-            seen.alive = yes
+    skill ask_laptop() {
+        @memory = file.read("/proc/meminfo")
+        @total = field(memory, "MemTotal") / 1048576
+        @free = field(memory, "MemAvailable") / 1048576
+        @cores = 0
+        drum (str.lines(file.read("/proc/cpuinfo"))) {
+            (str.starts_with(beat, "processor") == yes) { cores = cores + 1 }
         }
+        @load = group.get(str.split(file.read("/proc/loadavg"), " "), 0)
+        @host = group.get(str.lines(file.read("/etc/hostname")), 0)
+        @used = total - free
+        kind = "x86-64 · Linux · {host}"
+        state = "это я"
+        tone = "accent"
+        first = "память {used} из {total} ГБ"
+        second = "ядер {cores} · нагрузка {load}"
+        alive = yes
+        out none
     }
-    out seen
-}
 
-skill esp32() {
-    @seen = Device { name = "ESP32 DevKit", kind = "xtensa · LX6", state = "не подключена", tone = "quiet", first = "/dev/{SERIAL} нет", second = "USB · последовательный порт" }
-    (group.contains(file.list("/dev"), SERIAL) == yes) {
-        seen.state = "на проводе"
-        seen.tone = "up"
-        seen.first = "/dev/{SERIAL} на месте"
-        seen.alive = yes
+    skill ask_acer() {
+        kind = "x86-64 · UEFI · агент Saltic"
+        state = "нет связи"
+        tone = "down"
+        first = "{ACER}:{ACER_PORT} молчит"
+        second = "кабель LAN · mRPC"
+        alive = no
+        @link = wire.open(ACER, ACER_PORT) rescue |err| { out none }
+        @answer = wire.ask(link, "info", "")
+        (answer.ok == no) {
+            first = "молчит дольше секунды"
+            out none
+        }
+        @agent = value.get(answer.data, "agent")
+        @version = mrpc.plain(agent.value)
+        @heap = value.get(answer.data, "heap")
+        @used = value.get(heap.value, "used")
+        @kb = mrpc.plain(used.value)
+        state = "в сети"
+        tone = "up"
+        kind = "x86-64 · UEFI · агент {version}"
+        first = "агент {version} · куча {kb} КБ"
+        second = "{ACER} · кабель LAN · mRPC"
+        alive = yes
+        out none
     }
-    out seen
-}
 
-skill survey() {
-    out [laptop(), acer(), phone(), esp32()]
+    skill ask_phone() {
+        kind = "arm64 · Android"
+        state = "нет связи"
+        tone = "down"
+        first = "adb не видит телефон"
+        second = "USB · отладка"
+        alive = no
+        @asked = process.capture([ADB, "devices"], "", []) rescue |err| {
+            first = "adb не запустился"
+            out none
+        }
+        drum (str.lines(asked.output)) {
+            (str.ends_with(beat, "device") == yes) {
+                @serial = group.get(str.split(beat, "\t"), 0)
+                state = "в сети"
+                tone = "up"
+                first = "adb: {serial}"
+                alive = yes
+            }
+        }
+        out none
+    }
+
+    skill ask_board() {
+        kind = "xtensa · LX6"
+        state = "не подключена"
+        tone = "quiet"
+        first = "/dev/{SERIAL} нет"
+        second = "USB · последовательный порт"
+        alive = no
+        (group.contains(file.list("/dev"), SERIAL) == yes) {
+            state = "на проводе"
+            tone = "up"
+            first = "/dev/{SERIAL} на месте"
+            alive = yes
+        }
+        out none
+    }
+
+    skill card(index, x, y) {
+        out calls.call("device-node", [["id", calls.quoted("{NODE}{index}")], ["x", "{x}"], ["y", "{y}"], ["icon", calls.quoted(icon)], ["name", calls.quoted(name)], ["kind", calls.quoted(kind)], ["state", calls.quoted(state)], ["tone", calls.quoted(tone)], ["first", calls.quoted(first)], ["second", calls.quoted(second)]])
+    }
 }

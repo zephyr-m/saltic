@@ -1,19 +1,21 @@
 -- polygon — «Полигон Saltic» в окне Wayland: экран платформы из
--- docs/site/private/PLATFORM-DEMO.html, собранный жителями UIEngine (решение
--- автора 18.11.2026 — та же страница, но на JTML); экран — polygon/page.
--- Тёмная палитра (язык вида — docs/design/LANGUAGE.md), шрифты TTF из
--- os/fonts, значки os/icons. Щелчок по пункту меню — его раздел
--- (os/ui/gestures), щелчок по теме внизу меню — экран в этой теме
--- (themes.named), в «Устройствах» — живой опрос железа (devices) при входе и
--- по щелчку на карточку, наведение на день в «Сборках» — подсказка поверх готового
--- экрана (маленькое дерево, весь экран не пересобирается), «×» окна — выход. Свет сетки — фонарик за мышью (решение
--- автора 18.11.2026): мышь в окне — свет из-под неё, ушла — на своё место;
--- на движение экран не пересобирается, только перерисовывается готовый
--- runtime (так быстрее и без роста памяти).
+-- docs/site/private/PLATFORM-DEMO.html на жителях UIEngine (решение автора
+-- 18.11.2026 — та же страница, но на JTML). Окно — субъект Window: держит
+-- холст, шрифты, значки, палитру темы и экран (polygon/page — Polygon, его
+-- разделы — свои субъекты), step() — один оборот: ввод, щелчки, фонарик,
+-- опрос «Устройств», перерисовка. Щелчок по пункту меню — раздел, по теме —
+-- экран в этой теме (themes.named), по карточке устройства — опрос заново.
+-- Свет сетки — фонарик за мышью: на движение экран не пересобирается, только
+-- перерисовывается готовый runtime; наведение на день в «Сборках» —
+-- подсказка поверх маленьким деревом. «×» окна — выход.
 --
--- program() — вход; face(path) -> Typeface из файла; drawn(canvas, view,
---     palette) -> runtime нарисованного экрана (для попаданий щелчка)
-
+-- Window { canvas, link, regular, bold, mono, set, palette, runtime, view,
+--     reader, packet, hold, joined } — open() — окно, шрифты, история,
+--     первый кадр; NoWindow; step() -> no, когда окно закрыто
+-- program() — вход; face(path) -> Typeface из файла
+-- Внутри: dress() — палитра выбранной темы (фонарик сохраняется); build() —
+--     пересобрать экран; follow() -> yes, если свет сдвинулся; hover() —
+--     подсказка над наведённым
 use core.bytes
 use core.group
 use core.socket
@@ -23,9 +25,7 @@ use os.fonts.ttf
 use os.ui.gestures
 use os.target.linux.screen
 use os.target.linux.polygon.page
-use os.target.linux.polygon.history
-use os.target.linux.polygon.devices
-use io.clock
+use os.target.uefi_x86_64.screen.graphics
 use registry.libraries.uiengine.jtml
 use registry.libraries.uiengine.jtml.read
 use registry.libraries.uiengine.draw.atoms
@@ -45,48 +45,64 @@ skill face(path) {
     out typeface.from_bytes(file.read_bytes(path))
 }
 
-skill drawn(canvas, view, palette) {
-    @tree = atoms.fitted(read.page(view.jtml()), no, palette)
-    @runtime = jtml.mount(canvas, tree)
-    atoms.draw(canvas, runtime, palette)
-    out runtime
-}
+Window = Box {
+    canvas = graphics.Screen {},
+    link = screen.Link {},
+    regular = typeface.Typeface {},
+    bold = typeface.Typeface {},
+    mono = typeface.Typeface {},
+    set = icons.Icons {},
+    palette = atoms.Palette {},
+    runtime = jtml.Runtime {},
+    view = page.Polygon {},
+    reader = gestures.Reader {},
+    packet = bytes.new(8192),
+    hold = bytes.new(4096),
+    joined = bytes.new(12288)
 
-program() {
-    @host = screen.sized(TITLE, WIDE, HIGH)
-    (group.count(host) == 0) { out none }
-    @canvas = group.get(host, 0)
-    @link = group.get(host, 1)
-    @regular = face(REGULAR)
-    @bold = face(BOLD)
-    @mono = face(MONO)
-    @sheet = file.read_bytes(ICONS)
-    @set = icons.open(ttf.from_bytes(sheet), bytes.count(sheet))
-    @view = page.Polygon {}
-    view.activity = history.load() rescue |err| {
-        view.trouble = "нет истории git — {err}"
-        history.Activity {}
+    skill open() {
+        @host = screen.sized(TITLE, WIDE, HIGH)
+        (group.count(host) == 0) { out error.NoWindow }
+        canvas = group.get(host, 0)
+        link = group.get(host, 1)
+        regular = face(REGULAR)
+        bold = face(BOLD)
+        mono = face(MONO)
+        @sheet = file.read_bytes(ICONS)
+        set = icons.open(ttf.from_bytes(sheet), bytes.count(sheet))
+        view.refresh()
+        dress()
+        build()
+        out screen.present(link)
     }
-    @palette = atoms.with_icons(atoms.with_faces(themes.named(view.worn, canvas), regular, bold, mono), set)
-    @runtime = drawn(canvas, view, palette)
-    screen.present(link)
-    @reader = gestures.Reader {}
-    @packet = bytes.new(8192)
-    @hold = bytes.new(4096)
-    @joined = bytes.new(12288)
-    always {
-        (link.way_closed == yes) { leave }
-        (link.way_failed == yes) { leave }
-        screen.pump(link, packet, hold, joined)
-        @drained = reader.drain(link.way_events)
-        link.way_events = drained.core
-        @changed = no
-        drum (drained.gestures) {
-            (beat.kind == gestures.Kind.CLICK) {
-                @hit = jtml.hit(runtime, beat.x, beat.y)
-                (view.choose(hit.id) == yes) { changed = yes }
-            }
-        }
+
+    skill dress() {
+        view.worn = view.theme
+        @glow_x = palette.glow_x
+        @glow_y = palette.glow_y
+        palette = atoms.with_icons(atoms.with_faces(themes.named(view.worn, canvas), regular, bold, mono), set)
+        palette.glow_x = glow_x
+        palette.glow_y = glow_y
+        out none
+    }
+
+    skill build() {
+        @tree = atoms.fitted(read.page(view.jtml()), no, palette)
+        runtime = jtml.mount(canvas, tree)
+        out atoms.draw(canvas, runtime, palette)
+    }
+
+    skill hover() {
+        @under = jtml.hit(runtime, palette.glow_x, palette.glow_y)
+        @left = under.x - 24
+        (left + TIP_WIDE > WIDE) { left = WIDE - TIP_WIDE }
+        @bubble = view.tip(under.id, left, under.y - 62)
+        (bubble == "") { out none }
+        @tree = atoms.fitted(read.page(bubble), no, palette)
+        out atoms.paint(canvas, jtml.mount(canvas, tree), palette)
+    }
+
+    skill follow() {
         @glow_x = -1
         @glow_y = -1
         (link.way_inside == yes) {
@@ -98,36 +114,45 @@ program() {
         ((glow_y == palette.glow_y) == no) { moved = yes }
         palette.glow_x = glow_x
         palette.glow_y = glow_y
-        (view.asking == yes) {
-            @started = clock.local()
-            view.found = devices.survey()
-            view.took = clock.local() - started
-            view.asking = no
+        out moved
+    }
+
+    skill step() {
+        (link.way_closed == yes) { out no }
+        (link.way_failed == yes) { out no }
+        screen.pump(link, packet, hold, joined)
+        @drained = reader.drain(link.way_events)
+        link.way_events = drained.core
+        @changed = no
+        drum (drained.gestures) {
+            (beat.kind == gestures.Kind.CLICK) {
+                @hit = jtml.hit(runtime, beat.x, beat.y)
+                (view.choose(hit.id) == yes) { changed = yes }
+            }
         }
-        ((view.theme == view.worn) == no) {
-            view.worn = view.theme
-            palette = atoms.with_icons(atoms.with_faces(themes.named(view.worn, canvas), regular, bold, mono), set)
-        }
-        (changed == yes) { runtime = drawn(canvas, view, palette) }
+        @moved = follow()
+        (view.poll() == yes) { changed = yes }
+        ((view.theme == view.worn) == no) { dress() }
+        (changed == yes) { build() }
         (changed == no) {
             (moved == yes) { atoms.draw(canvas, runtime, palette) }
         }
         (moved == yes) {
-            (glow_x >= 0) {
-                @under = jtml.hit(runtime, glow_x, glow_y)
-                @left = under.x - 24
-                (left + TIP_WIDE > WIDE) { left = WIDE - TIP_WIDE }
-                @bubble = view.tip(under.id, left, under.y - 62)
-                ((bubble == "") == no) {
-                    @tree = atoms.fitted(read.page(bubble), no, palette)
-                    atoms.paint(canvas, jtml.mount(canvas, tree), palette)
-                }
-            }
+            (palette.glow_x >= 0) { hover() }
         }
         @shown = changed
         (moved == yes) { shown = yes }
         (shown == yes) { screen.present(link) }
         socket.sleep(16)
+        out yes
+    }
+}
+
+program() {
+    @window = Window {}
+    window.open() rescue |err| { out none }
+    always {
+        (window.step() == no) { leave }
     }
     out none
 }
