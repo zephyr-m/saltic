@@ -1,0 +1,140 @@
+-- catalog — реестр tarantul для экрана «Пакеты» Полигона: субъект Catalog сам
+-- читает оба каталога (CATALOGS: адаптеры и библиотеки — «имя путь» по
+-- строке, # — комментарий), каждый пакет — субъект Package со своим
+-- паспортом — субъектом Passport: тот сам читает <путь>.passport.json (JSON
+-- «поле → текст»); нет файла или он не JSON — так и записано в title. Нет
+-- каталога — trouble словами.
+--
+-- Passport { title, version, state, made_for, depends, does } — поля
+--     паспорта (title, own_version, state, architectures, depends_on,
+--     purpose или primitives); read(path) — прочитать паспорт пакета по пути
+--     без расширения; taken(document, key) -> поле JSON текстом или ""
+--
+-- Package { name, path, role, passport } — имя, путь без расширения, роль
+--     (adapter / library), паспорт; dress() — прочитать свой паспорт;
+--     matches(query) -> yes, если query (нижний
+--     регистр) есть в имени, заголовке или пути; details() -> JTML раскрытого
+--     паспорта; row(chevron, icon, tone, id) -> строка дерева
+-- Catalog { packages, trouble } — refresh() — прочитать реестр заново;
+--     count(role) -> пакетов этой роли
+
+use core.str
+use core.group
+use io.file
+use registry.libraries.uiengine.jtml.calls
+use craft.protocols.data.json
+use craft.protocols.data.json.value
+use craft.protocols.data.json.reader
+use os.target.uefi_x86_64.network.mrpc
+
+SUFFIX = ".passport.json"
+CATALOGS = [["adapter", "registry/adapters/adapters.txt"], ["library", "registry/libraries/libraries.txt"]]
+
+Passport = Box {
+    title = "",
+    version = "",
+    state = "",
+    made_for = "",
+    depends = "",
+    does = ""
+
+    skill taken(document, key) {
+        @found = value.get(document, key)
+        (found.found == no) { out "" }
+        out mrpc.plain(found.value)
+    }
+
+    skill read(path) {
+        @text = file.read("{path}{SUFFIX}") rescue |err| {
+            title = "паспорта нет — {err}"
+            out none
+        }
+        @parsed = reader.parse(text)
+        (parsed.ok == no) {
+            title = "паспорт не JSON — {parsed.message}"
+            out none
+        }
+        @document = parsed.value
+        title = taken(document, "title")
+        version = taken(document, "own_version")
+        state = taken(document, "state")
+        made_for = taken(document, "architectures")
+        depends = taken(document, "depends_on")
+        does = taken(document, "purpose")
+        (does == "") { does = taken(document, "primitives") }
+        out none
+    }
+}
+
+Package = Box {
+    name = "",
+    path = "",
+    role = "",
+    passport = Passport {}
+
+    skill dress() {
+        passport = Passport {}
+        out passport.read(path)
+    }
+
+    skill matches(query) {
+        (query == "") { out yes }
+        (str.contains(str.lower(name), query) == yes) { out yes }
+        (str.contains(str.lower(passport.title), query) == yes) { out yes }
+        out str.contains(str.lower(path), query)
+    }
+
+    skill row(chevron, icon, tone, id) {
+        out calls.call("tree-row", [["id", calls.quoted(id)], ["chevron", calls.quoted(chevron)], ["icon", calls.quoted(icon)], ["tone", calls.quoted(tone)], ["name", calls.quoted(name)], ["title", calls.quoted(passport.title)], ["version", calls.quoted("v{passport.version}")], ["state", calls.quoted(passport.state)]])
+    }
+
+    skill details() {
+        @rows = [calls.call("detail-row", [["label", calls.quoted("путь")], ["value", calls.quoted(path)]])]
+        rows = group.add(rows, calls.call("detail-row", [["label", calls.quoted("что умеет")], ["value", calls.quoted(passport.does)]]))
+        rows = group.add(rows, calls.call("detail-row", [["label", calls.quoted("для чего собирается")], ["value", calls.quoted(passport.made_for)]]))
+        rows = group.add(rows, calls.call("detail-row", [["label", calls.quoted("зависит от")], ["value", calls.quoted(passport.depends)]]))
+        rows = group.add(rows, calls.call("detail-row", [["label", calls.quoted("состояние")], ["value", calls.quoted(passport.state)]]))
+        @inside = calls.join(rows)
+        @body = "\{\"box\": \{\"padding\": [10, 14, 10, 14], \"gap\": 0, \"children\": [{inside}]\}\}"
+        @cell = calls.call("cell", [["fill", calls.quoted("well")], ["edge", calls.quoted("line")], ["children", calls.listed([body])]])
+        out "\{\"box\": \{\"padding\": [0, 8, 8, 46], \"gap\": 0, \"children\": [{cell}]\}\}"
+    }
+}
+
+Catalog = Box {
+    packages = [],
+    trouble = ""
+
+    skill refresh() {
+        @found = []
+        trouble = ""
+        drum (CATALOGS) {
+            @role = group.get(beat, 0)
+            @where = group.get(beat, 1)
+            @listed = file.read(where) rescue |err| {
+                trouble = "{where} не прочитался — {err}"
+                ""
+            }
+            drum (str.lines(listed)) {
+                (str.starts_with(beat, "#") == no) {
+                    @words = str.split(beat, " ")
+                    (group.count(words) >= 2) {
+                        @made = Package { name = group.get(words, 0), path = group.get(words, group.count(words) - 1), role = role }
+                        made.dress()
+                        found = group.add(found, made)
+                    }
+                }
+            }
+        }
+        packages = found
+        out none
+    }
+
+    skill count(role) {
+        @many = 0
+        drum (packages) {
+            (beat.role == role) { many = many + 1 }
+        }
+        out many
+    }
+}
