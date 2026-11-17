@@ -2,12 +2,23 @@
 -- registry/libraries/uiengine/library.saltic (списки NAMES, LEVELS, TEXTS — имя, уровень, текст). Уровень 1 — атомы,
 -- 5 — страница программы (решение автора 16.11.2026). Проверяет каждый файл:
 -- один {"component": {"name", "params", "body"}}, name — имя файла без .jtml,
--- тело зовёт только атомы и жителей уровнем ниже (так циклов нет). Печатает шаги;
--- ошибка — с именем файла, модуль тогда не пишется.
+-- этажность строгая, как в React (решение автора 17.11.2026): уровень 2 — только
+-- из атомов, 3 — только из жителей 2-го (ни одного голого атома), 4 — только из
+-- жителей 3-го; layer — не атом, а раскладка слоёв, можно везде. box-полка —
+-- без VISUAL (только flow, gap, justify, align, padding, grow, размеры, at,
+-- id, children, layers) — тоже раскладка, можно на любом этаже; box с видом —
+-- атом, как text, field и slider (решение автора 17.11.2026). Нарушения
+-- печатаются все сразу, списком «житель — что берёт не со своего этажа»; модуль
+-- при этом пишется (жителей пересобирают этаж за этажом), но сборка кончается
+-- ошибкой LevelBroken. Печатает шаги; прочие ошибки — с именем файла, модуль
+-- тогда не пишется.
 --
 -- program() — собрать и записать
 -- Внутри: escaped(text) — текст для строки Saltic; calls(node) -> имена
---     не-атомов в дереве (узлы — корень тела и элементы массивов свойств);
+--     всех узлов дерева, кроме layer и box-полки (узлы — корень тела и
+--     элементы массивов свойств); drawn(props) -> yes, если у box есть ключ
+--     из VISUAL; floor_of(names, levels, tag) -> этаж узла (атом — 1, житель —
+--     его уровень, нет такого — 0);
 --     body_of(read) -> тело компонента; level_of(names, levels, name) -> уровень или 0
 
 use io
@@ -18,7 +29,10 @@ use registry.libraries.uiengine.jtml.reader
 
 ROOT = "registry/libraries/uiengine/library"
 OUTPUT = "registry/libraries/uiengine/library.saltic"
-BUILT_IN = ["box", "text", "field", "slider", "layer"]
+ATOMS = ["box", "text", "field", "slider"]
+LAYER = "layer"
+BOX = "box"
+VISUAL = ["fill", "edge", "radius", "shadow", "inset", "icon", "ink", "tone", "border", "corners", "fade"]
 TAIL = ".jtml"
 
 skill escaped(text) {
@@ -34,8 +48,14 @@ skill calls(node) {
     ((node.kind == reader.Kind.JTML_OBJECT) == no) { out found }
     ((group.count(node.keys) == 1) == no) { out found }
     @tag = group.get(node.keys, 0)
-    (group.contains(BUILT_IN, tag) == no) { found = group.add(found, tag) }
     @props = group.get(node.items, 0)
+    @shelf = no
+    (tag == BOX) {
+        (drawn(props) == no) { shelf = yes }
+    }
+    ((tag == LAYER) == no) {
+        (shelf == no) { found = group.add(found, tag) }
+    }
     (props.kind == reader.Kind.JTML_OBJECT) {
         drum (props.items) {
             (beat.kind == reader.Kind.JTML_ARRAY) {
@@ -52,6 +72,20 @@ skill body_of(read) {
         (group.get(about.keys, beat) == "body") { out group.get(about.items, beat) }
     }
     out reader.Value {}
+}
+
+skill drawn(props) {
+    (props.kind == reader.Kind.JTML_OBJECT) {
+        drum (props.keys) {
+            (group.contains(VISUAL, beat) == yes) { out yes }
+        }
+    }
+    out no
+}
+
+skill floor_of(names, levels, tag) {
+    (group.contains(ATOMS, tag) == yes) { out 1 }
+    out level_of(names, levels, tag)
 }
 
 skill level_of(names, levels, name) {
@@ -104,20 +138,27 @@ program() {
             }
         }
     }
+    @broken = 0
     drum (group.count(names)) {
         @index = beat
         @name = group.get(names, index)
         @level = group.get(levels, index)
+        @wrong = []
         drum (calls(body_of(group.get(bodies, index)))) {
-            @below = level_of(names, levels, beat)
-            (below == 0) {
+            @floor = floor_of(names, levels, beat)
+            (floor == 0) {
                 io.show("  {name}: зовёт «{beat}», а его нет в библиотеке")
                 out error.UnknownComponent
             }
-            (below >= level) {
-                io.show("  {name} (уровень {level}) зовёт «{beat}» уровня {below} — можно только ниже")
-                out error.LevelUp
+            ((floor == level - 1) == no) {
+                (group.contains(wrong, "{beat} ({floor})") == no) { wrong = group.add(wrong, "{beat} ({floor})") }
             }
+        }
+        (group.count(wrong) > 0) {
+            @list = str.join(wrong, ", ")
+            @need = level - 1
+            io.show("  {name} (уровень {level}, можно только этаж {need}): {list}")
+            broken = broken + 1
         }
     }
     @quoted = []
@@ -137,6 +178,10 @@ program() {
     @module = "-- library — закрытая библиотека компонентов JTML (решение автора 16.11.2026):\n-- уровень 1 — атомы, 2–4 — жители из registry/libraries/uiengine/library/level-N/*.jtml, 5 — страница\n-- программы. Сгенерировано registry/libraries/uiengine/library/build.saltic — руками не править.\n--\n-- find(name) -> текст JTML компонента; UnknownComponent\n-- level(name) -> уровень; UnknownComponent\n\nuse core.group\n\nNAMES = [\n{name_list}\n]\nLEVELS = [\n{level_list}\n]\nTEXTS = [\n{text_list}\n]\n\nskill find(name) \{\n    drum (group.count(NAMES)) \{\n        (group.get(NAMES, beat) == name) \{ out group.get(TEXTS, beat) \}\n    \}\n    out error.UnknownComponent\n\}\n\nskill level(name) \{\n    drum (group.count(NAMES)) \{\n        (group.get(NAMES, beat) == name) \{ out group.get(LEVELS, beat) \}\n    \}\n    out error.UnknownComponent\n\}\n"
     file.write(OUTPUT, module)
     @total = group.count(names)
-    io.show("записано {OUTPUT}: жителей {total}, уровни проверены")
+    io.show("записано {OUTPUT}: жителей {total}")
+    (broken > 0) {
+        io.show("этажность нарушена: {broken} из {total} жителей")
+        out error.LevelBroken
+    }
     out none
 }

@@ -1,0 +1,47 @@
+-- modes — кусок для tools/snippet.py: все режимы экрана, что предлагает
+-- прошивка (GOP QueryMode), и какой включён сейчас.
+--
+-- snippet() -> текст: «режимов N, включён K» и по строке на режим — ширина ×
+--     высота, формат точки, ширина строки в точках
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+
+QUERY_MODE = 0
+MAX_MODE = 0
+CURRENT_MODE = 4
+
+skill snippet() {
+    @base = firmware.guest_base()
+    @guid_at = firmware.scratch(base, 128)
+    drum (16) { firmware.write8(guid_at, base, beat, group.get(graphics.GOP_GUID, beat)) }
+    @found_at = firmware.scratch(base, 160)
+    @services = uefi.boot_services(base)
+    @located = firmware.call(base, firmware.pointer(services, base, graphics.BOOT_LOCATE_PROTOCOL), [guid_at, firmware.number(0), found_at])
+    (located.failed == yes) { out "GOP не найден" }
+    @protocol = firmware.pointer(found_at, base, 0)
+    @mode = firmware.pointer(protocol, base, graphics.GOP_MODE)
+    @total = firmware.read32(mode, base, MAX_MODE)
+    @current = firmware.read32(mode, base, CURRENT_MODE)
+    @size_at = firmware.scratch(base, 192)
+    @info_at = firmware.scratch(base, 224)
+    @lines = ["режимов {total}, включён {current}"]
+    drum (total) {
+        @asked = firmware.call(base, firmware.pointer(protocol, base, QUERY_MODE), [protocol, firmware.number(beat), size_at, info_at])
+        @line = "#{beat}: не ответил"
+        (asked.failed == no) {
+            @info = firmware.pointer(info_at, base, 0)
+            @width = firmware.read32(info, base, graphics.INFO_WIDTH)
+            @height = firmware.read32(info, base, graphics.INFO_HEIGHT)
+            @format = firmware.read32(info, base, graphics.INFO_FORMAT)
+            @stride = firmware.read32(info, base, graphics.INFO_STRIDE)
+            line = "#{beat}: {width} × {height}, формат {format}, строка {stride}"
+            (beat == current) { line = "{line} ← сейчас" }
+        }
+        lines = group.add(lines, line)
+    }
+    out str.join(lines, "\n")
+}
