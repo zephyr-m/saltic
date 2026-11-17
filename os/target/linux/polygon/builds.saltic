@@ -1,0 +1,159 @@
+-- builds — экран «Сборки» Полигона: настоящий календарь коммитов репозитория
+-- за год (history, git log), клетка — день, яркость — сколько коммитов
+-- (LEVELS: ноль — well, дальше _rim, _mid и сам цвет); сверху числа — всего,
+-- дней с коммитами, самая длинная серия, лучший день; под календарём — по дням
+-- недели.
+-- Наведение на клетку — подсказка над ней (tip): дата и число коммитов.
+--
+-- screen(activity) -> список JTML содержимого экрана
+-- tip(activity, id, x, y) -> JTML подсказки для клетки id (DAY и номер) в
+--     месте x, y — или "" для чужого id
+-- Внутри: tone_of(count) -> тон клетки; said(count) -> «N коммитов»;
+--     date_text(day) -> «18 ноября 2026»; streak(activity) -> самая длинная
+--     серия дней подряд; best(activity) -> [номер в сетке, коммитов]
+
+use core.str
+use core.group
+use registry.libraries.uiengine.jtml.calls
+use os.target.linux.polygon.history
+
+DAY = "day-"
+LEVELS = [[25, "accent"], [10, "accent_mid"], [1, "accent_rim"]]
+MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
+GENITIVE = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+WEEKDAYS = ["пн", "", "ср", "", "пт", "", ""]
+SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+NAMES = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+STEP = 20
+
+skill tone_of(count) {
+    drum (LEVELS) {
+        (count >= group.get(beat, 0)) { out group.get(beat, 1) }
+    }
+    out "well"
+}
+
+skill said(count) {
+    @last = count % 10
+    @tens = count % 100
+    (tens >= 11) {
+        (tens <= 14) { out "{count} коммитов" }
+    }
+    (last == 1) { out "{count} коммит" }
+    (last >= 2) {
+        (last <= 4) { out "{count} коммита" }
+    }
+    out "{count} коммитов"
+}
+
+skill date_text(day) {
+    @date = history.civil(day)
+    @month = group.get(GENITIVE, group.get(date, 1) - 1)
+    @number = group.get(date, 2)
+    @year = group.get(date, 0)
+    out "{number} {month} {year}"
+}
+
+skill streak(activity) {
+    @longest = 0
+    @run = 0
+    drum (activity.today - activity.first + 1) {
+        @count = group.get(activity.counts, beat)
+        run = run + 1
+        (count == 0) { run = 0 }
+        (run > longest) { longest = run }
+    }
+    out longest
+}
+
+skill best(activity) {
+    @at = 0
+    @most = 0
+    drum (activity.counts) {
+        (beat > most) {
+            most = beat
+            at = -1
+        }
+    }
+    drum (group.count(activity.counts)) {
+        (at < 0) {
+            (group.get(activity.counts, beat) == most) { at = beat }
+        }
+    }
+    out [at, most]
+}
+
+skill shelf(flow, gap, items) {
+    @inside = calls.join(items)
+    out "\{\"box\": \{\"flow\": \"{flow}\", \"gap\": {gap}, \"children\": [{inside}]\}\}"
+}
+
+skill tip(activity, id, x, y) {
+    (str.starts_with(id, DAY) == no) { out "" }
+    @index = 0
+    @digits = str.slice(id, str.bytes(DAY), str.bytes(id))
+    drum (str.bytes(digits)) { index = index * 10 + str.byte(digits, beat) - 48 }
+    @day = activity.first + index
+    @weekday = group.get(NAMES, history.weekday(day))
+    @when = date_text(day)
+    @bubble = calls.call("tooltip", [["text", calls.quoted(said(group.get(activity.counts, index)))], ["note", calls.quoted("{weekday}, {when}")], ["x", "{x}"], ["y", "{y}"]])
+    out shelf("column", 0, [bubble])
+}
+
+skill screen(activity) {
+    @total = 0
+    @active = 0
+    drum (activity.counts) {
+        total = total + beat
+        (beat > 0) { active = active + 1 }
+    }
+    @top = best(activity)
+    @best_day = date_text(activity.first + group.get(top, 0))
+    @longest = streak(activity)
+    @most_day = group.get(top, 1)
+    @stats = shelf("row", 14, [calls.call("stat-panel", [["label", calls.quoted("коммитов за год")], ["value", calls.quoted("{total}")], ["tone", calls.quoted("accent")], ["size", "64"], ["note", calls.quoted("настоящие — из git log этого репозитория")], ["grow", "2"]]), calls.call("stat-panel", [["label", calls.quoted("дней с коммитами")], ["value", calls.quoted("{active}")], ["tone", calls.quoted("up")], ["size", "34"], ["note", calls.quoted("из 371 в сетке")], ["grow", "1"]]), calls.call("stat-panel", [["label", calls.quoted("самая длинная серия")], ["value", calls.quoted("{longest}")], ["tone", calls.quoted("mustard")], ["size", "34"], ["note", calls.quoted("дней подряд")], ["grow", "1"]]), calls.call("stat-panel", [["label", calls.quoted("лучший день")], ["value", calls.quoted("{most_day}")], ["tone", calls.quoted("info")], ["size", "34"], ["note", calls.quoted(best_day)], ["grow", "1"]])])
+    @months = [calls.call("tick-label", [["text", calls.quoted("")], ["width", "28"]])]
+    @weeks = []
+    @labels = []
+    drum (7) { labels = group.add(labels, calls.call("tick-label", [["text", calls.quoted(group.get(WEEKDAYS, beat))], ["width", "28"], ["height", "16"]])) }
+    weeks = group.add(weeks, shelf("column", 4, labels))
+    drum (history.WEEKS) {
+        @week = beat
+        @cells = []
+        @mark = ""
+        drum (7) {
+            @index = week * 7 + beat
+            @day = activity.first + index
+            @date = history.civil(day)
+            (group.get(date, 2) == 1) { mark = group.get(MONTHS, group.get(date, 1) - 1) }
+            @tone = tone_of(group.get(activity.counts, index))
+            (day > activity.today) { tone = "ground" }
+            cells = group.add(cells, calls.call("heat-cell", [["id", calls.quoted("{DAY}{index}")], ["tone", calls.quoted(tone)]]))
+        }
+        months = group.add(months, calls.call("tick-label", [["text", calls.quoted(mark)], ["width", "{STEP}"]]))
+        weeks = group.add(weeks, shelf("column", 4, cells))
+    }
+    @legend = [calls.call("tick-label", [["text", calls.quoted("меньше")], ["width", "52"]]), calls.call("heat-cell", [["id", calls.quoted("")], ["tone", calls.quoted("well")]])]
+    drum (3) { legend = group.add(legend, calls.call("heat-cell", [["id", calls.quoted("")], ["tone", calls.quoted(group.get(group.get(LEVELS, 2 - beat), 1))]])) }
+    legend = group.add(legend, calls.call("tick-label", [["text", calls.quoted("больше")], ["width", "52"]]))
+    @calendar = calls.call("console-panel", [["title", calls.quoted("календарь коммитов")], ["note", calls.quoted("53 недели · наведи на день")], ["radius", "16"], ["children", calls.listed([shelf("column", 6, [shelf("row", 0, months), shelf("row", 4, weeks)]), shelf("row", 4, legend)])]])
+    @per_day = [0, 0, 0, 0, 0, 0, 0]
+    drum (group.count(activity.counts)) {
+        @slot = history.weekday(activity.first + beat)
+        per_day = group.replaced(per_day, slot, group.get(per_day, slot) + group.get(activity.counts, beat))
+    }
+    @most = 1
+    drum (per_day) {
+        (beat > most) { most = beat }
+    }
+    @bars = []
+    drum (7) {
+        @height = group.get(per_day, beat) * 96 / most + 2
+        @bar = calls.call("bar", [["width", "36"], ["height", "{height}"], ["tone", calls.quoted("accent_mid")], ["radius", "4"]])
+        @column = "\{\"box\": \{\"height\": 100, \"justify\": \"end\", \"gap\": 0, \"children\": [{bar}]\}\}"
+        bars = group.add(bars, shelf("column", 6, [column, calls.call("tick-label", [["text", calls.quoted(group.get(SHORT, beat))], ["width", "36"], ["height", "16"]])]))
+    }
+    @weekdays = calls.call("console-panel", [["title", calls.quoted("по дням недели")], ["note", calls.quoted("все коммиты года")], ["radius", "16"], ["children", calls.listed([shelf("row", 10, bars)])]])
+    @head = calls.call("page-head", [["title", calls.quoted("Сборки")], ["note", calls.quoted("Коммиты репозитория Saltic за год")], ["badge", calls.quoted(said(total))], ["tone", calls.quoted("accent")]])
+    out calls.listed([head, stats, calendar, weekdays])
+}

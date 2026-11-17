@@ -1,0 +1,84 @@
+-- history — настоящая история коммитов для экрана «Сборки» Полигона: git log
+-- репозитория за WEEKS недель (дата коммита — день, ГГГГ-ММ-ДД), сегодня — из
+-- date +%F. Дни — номер от 1970-01-01 (days_from_civil), неделя — с
+-- понедельника; сетка — WEEKS столбцов по 7 дней, последний столбец — с
+-- сегодняшним днём. Нет git или репозитория — NoHistory, причина в лицо.
+--
+-- Activity { first, today, counts } — первый день сетки, сегодня, коммитов по
+--     дням сетки (WEEKS × 7, дни после сегодня — ноль)
+-- load() -> Activity; NoHistory
+-- day_of(text) -> номер дня по "ГГГГ-ММ-ДД"; civil(day) -> [год, месяц, день]
+-- weekday(day) -> 0 — понедельник … 6 — воскресенье
+-- Внутри: number(text) -> целое из цифр
+
+use core.str
+use core.group
+use core.process
+
+WEEKS = 53
+EPOCH_SHIFT = 719468
+ERA = 146097
+
+Activity = Box {
+    first = 0,
+    today = 0,
+    counts = []
+}
+
+skill number(text) {
+    @value = 0
+    drum (str.bytes(text)) { value = value * 10 + str.byte(text, beat) - 48 }
+    out value
+}
+
+skill day_of(text) {
+    @year = number(str.slice(text, 0, 4))
+    @month = number(str.slice(text, 5, 7))
+    @day = number(str.slice(text, 8, 10))
+    (month <= 2) { year = year - 1 }
+    @era = year / 400
+    @of_era = year - era * 400
+    @shifted = month + 9
+    (month > 2) { shifted = month - 3 }
+    @of_year = (153 * shifted + 2) / 5 + day - 1
+    @of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year
+    out era * ERA + of_cycle - EPOCH_SHIFT
+}
+
+skill civil(day) {
+    @shifted = day + EPOCH_SHIFT
+    @era = shifted / ERA
+    @of_cycle = shifted - era * ERA
+    @of_era = (of_cycle - of_cycle / 1460 + of_cycle / 36524 - of_cycle / 146096) / 365
+    @year = of_era + era * 400
+    @of_year = of_cycle - (365 * of_era + of_era / 4 - of_era / 100)
+    @spot = (5 * of_year + 2) / 153
+    @date = of_year - (153 * spot + 2) / 5 + 1
+    @month = spot + 3
+    (spot >= 10) { month = spot - 9 }
+    (month <= 2) { year = year + 1 }
+    out [year, month, date]
+}
+
+skill weekday(day) {
+    out (day + 3) % 7
+}
+
+skill load() {
+    @asked = process.capture(["date", "+%F"], "", []) rescue |err| { out error.NoHistory }
+    @today = day_of(asked.output)
+    @first = today - (WEEKS - 1) * 7 - weekday(today)
+    @log = process.capture(["git", "log", "--since={WEEKS} weeks ago", "--format=%cd", "--date=short"], "", []) rescue |err| { out error.NoHistory }
+    ((log.code == 0) == no) { out error.NoHistory }
+    @counts = []
+    drum (WEEKS * 7) { counts = group.add(counts, 0) }
+    drum (str.lines(log.output)) {
+        (str.bytes(beat) >= 10) {
+            @at = day_of(beat) - first
+            (at >= 0) {
+                (at < WEEKS * 7) { counts = group.replaced(counts, at, group.get(counts, at) + 1) }
+            }
+        }
+    }
+    out Activity { first = first, today = today, counts = counts }
+}
