@@ -1,0 +1,427 @@
+-- domik — игра «Домик»: комната сбоку-сверху, два жителя с нуждами
+-- (голод, сон, веселье), мебель (холодильник, кровать, телевизор),
+-- автономное поведение жителей и ручная расстановка мебели.
+-- Стрелки ← → — выбрать мебель, Enter — взять/поставить, Esc — выход.
+-- По сети каждый кадр: remote.serve / remote.tell с кратким состоянием.
+-- Только x86_64-uefi.
+--
+-- Resident { name, hunger, sleep, fun, x, y, target, target_x, target_y, mode, need, body }
+-- Furniture { kind, x, y, width, height }
+-- Game { width, height, residents, furniture, selected, held, second, frame, quit, frames_obj }
+-- clamp / need_of / set_need / choose_need / find_furniture / decay / update_resident
+-- update_residents / draw_furniture / draw_resident / draw_bar / draw_panel
+-- render / state_text / press / tick / program
+
+use core.num
+use core.group
+use core.str
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.remote
+use os.uiengine.canvas
+use os.uiengine.fonts
+
+STEP = 22
+PAUSE = 0
+SPEED = 4
+SCAN_UP = 1
+SCAN_DOWN = 2
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+SCAN_ESCAPE = 23
+ENTER = 13
+
+COLOR_BG = 0
+COLOR_FLOOR = 1
+
+Resident = Box {
+    name = "",
+    hunger = 80,
+    sleep = 80,
+    fun = 80,
+    x = 0,
+    y = 0,
+    target = -1,
+    target_x = 0,
+    target_y = 0,
+    mode = 0,
+    need = 0,
+    body = 0,
+    frame = 0
+}
+
+Furniture = Box {
+    kind = 0,
+    x = 0,
+    y = 0,
+    width = 52,
+    height = 46
+}
+
+Game = Box {
+    width = 0,
+    height = 0,
+    residents = [],
+    furniture = [],
+    selected = 0,
+    held = -1,
+    second = -1,
+    frame = 0,
+    quit = no,
+    frames_obj = graphics.Frames {}
+}
+
+skill clamp(v, lo, hi) {
+    (v < lo) { out lo }
+    (v > hi) { out hi }
+    out v
+}
+
+skill need_of(res, kind) {
+    (kind == 0) { out res.hunger }
+    (kind == 1) { out res.sleep }
+    out res.fun
+}
+
+skill set_need(res, kind, value) {
+    (kind == 0) { res.hunger = value }
+    (kind == 1) { res.sleep = value }
+    (kind == 2) { res.fun = value }
+    out none
+}
+
+skill choose_need(res) {
+    @h = res.hunger
+    @s = res.sleep
+    @f = res.fun
+    @need = 0
+    @val = h
+    (s < val) { need = 1
+        val = s }
+    (f < val) { need = 2
+        val = f }
+    res.need = need
+    out none
+}
+
+skill count_furniture(game, kind) {
+    @n = 0
+    drum (group.count(game.furniture)) {
+        @f = group.get(game.furniture, beat)
+        (f.kind == kind) { n = n + 1 }
+    }
+    out n
+}
+
+skill find_furniture(game, kind) {
+    drum (group.count(game.furniture)) {
+        @f = group.get(game.furniture, beat)
+        (f.kind == kind) { out beat }
+    }
+    out -1
+}
+
+skill decay(game) {
+    drum (group.count(game.residents)) {
+        @r = group.get(game.residents, beat)
+        r.hunger = clamp(r.hunger - 1, 0, 100)
+        r.sleep = clamp(r.sleep - 1, 0, 100)
+        r.fun = clamp(r.fun - 1, 0, 100)
+    }
+    out none
+}
+
+skill update_resident(game, index) {
+    @r = group.get(game.residents, index)
+    (r.mode == 0) {
+        choose_need(r)
+        @fi = find_furniture(game, r.need)
+        (fi >= 0) {
+            r.target = fi
+            @f = group.get(game.furniture, fi)
+            r.target_x = f.x + f.width / 2
+            r.target_y = f.y + f.height
+            r.mode = 1
+        }
+    }
+    (r.mode == 1) {
+        @f = group.get(game.furniture, r.target)
+        (r.target >= 0) {
+            r.target_x = f.x + f.width / 2
+            r.target_y = f.y + f.height
+        }
+        @dx = r.target_x - r.x
+        (dx > SPEED) { r.x = r.x + SPEED }
+        (dx < 0 - SPEED) { r.x = r.x - SPEED }
+        (dx >= (0 - SPEED)) {
+            (dx <= SPEED) {
+                r.x = r.target_x
+                r.mode = 2
+            }
+        }
+        (r.x < 20) { r.x = 20 }
+        (r.x > game.width - 60) { r.x = game.width - 60 }
+    }
+    (r.mode == 2) {
+        (r.target >= 0) {
+            @f = group.get(game.furniture, r.target)
+            r.x = f.x + f.width / 2 - 12
+            @need = r.need
+            @val = need_of(r, need) + 3
+            val = clamp(val, 0, 100)
+            set_need(r, need, val)
+            (val >= 100) { r.mode = 0 }
+        }
+    }
+    out none
+}
+
+skill update_residents(game) {
+    drum (group.count(game.residents)) {
+        update_resident(game, beat)
+    }
+    out none
+}
+
+skill color_pixel(screen, r, g, b) {
+    out graphics.color(screen, r, g, b)
+}
+
+skill draw_furniture(screen, f, index, selected, held) {
+    @x = f.x
+    @y = f.y
+    @w = f.width
+    @h = f.height
+    @r = 80
+    @g = 80
+    @bl = 80
+    (f.kind == 0) { r = 59
+        g = 130
+        bl = 246 }
+    (f.kind == 1) { r = 34
+        g = 197
+        bl = 94 }
+    (f.kind == 2) { r = 168
+        g = 85
+        bl = 247 }
+    @fill = graphics.color(screen, r, g, bl)
+    graphics.fill(screen, x, y, w, h, fill)
+    (index == selected) {
+        @hr = 250
+        @hg = 204
+        @hb = 21
+        (held >= 0) { hr = 249
+            hg = 115
+            hb = 22 }
+        @hl = graphics.color(screen, hr, hg, hb)
+        graphics.fill(screen, x, y, w, 3, hl)
+        graphics.fill(screen, x, y + h - 3, w, 3, hl)
+        graphics.fill(screen, x, y, 3, h, hl)
+        graphics.fill(screen, x + w - 3, y, 3, h, hl)
+    }
+    (index == held) {
+        @hl = graphics.color(screen, 249, 115, 22)
+        graphics.fill(screen, x, y, w, 3, hl)
+        graphics.fill(screen, x, y + h - 3, w, 3, hl)
+        graphics.fill(screen, x, y, 3, h, hl)
+        graphics.fill(screen, x + w - 3, y, 3, h, hl)
+    }
+    @letter = "?"
+    (f.kind == 0) { letter = "Х" }
+    (f.kind == 1) { letter = "К" }
+    (f.kind == 2) { letter = "Т" }
+    fonts.draw_text(screen, x + 16, y + 12, letter, canvas.Rgb { red = 255, green = 255, blue = 255 }, fonts.MEDIUM)
+    out none
+}
+
+skill draw_resident(screen, r) {
+    @x = r.x
+    @y = r.y
+    @r1 = 239
+    @g1 = 68
+    @b1 = 68
+    (r.body == 1) { r1 = 6
+        g1 = 182
+        b1 = 212 }
+    @col = graphics.color(screen, r1, g1, b1)
+    graphics.fill(screen, x, y, 24, 34, col)
+    @head = graphics.color(screen, 253, 230, 138)
+    graphics.fill(screen, x + 4, y - 8, 16, 12, head)
+    @ink = canvas.Rgb { red = 30, green = 30, blue = 30 }
+    fonts.draw_text(screen, x - 4, y - 24, r.name, ink, fonts.SMALL)
+    out none
+}
+
+skill draw_bar(screen, x, y, value, r, g, b) {
+    @w = 120
+    @bg = graphics.color(screen, 220, 220, 224)
+    graphics.fill(screen, x, y, w, 10, bg)
+    @fillw = value * w / 100
+    @fg = graphics.color(screen, r, g, b)
+    graphics.fill(screen, x, y, fillw, 10, fg)
+    out none
+}
+
+skill draw_panel(screen, game) {
+    @px = game.width - 210
+    @py = 20
+    @bg = graphics.color(screen, 244, 244, 245)
+    graphics.fill(screen, px - 10, 0, 220, game.height, bg)
+    @ink = canvas.Rgb { red = 24, green = 24, blue = 27 }
+    fonts.draw_text(screen, px, 12, "Домик", ink, fonts.HEADING)
+    @i = 0
+    drum (group.count(game.residents)) {
+        @r = group.get(game.residents, beat)
+        @basey = 60 + beat * 150
+        fonts.draw_text(screen, px, basey, r.name, ink, fonts.MEDIUM)
+        fonts.draw_text(screen, px, basey + 26, "голод", ink, fonts.SMALL)
+        draw_bar(screen, px + 60, basey + 28, r.hunger, 239, 68, 68)
+        fonts.draw_text(screen, px, basey + 46, "сон", ink, fonts.SMALL)
+        draw_bar(screen, px + 60, basey + 48, r.sleep, 59, 130, 246)
+        fonts.draw_text(screen, px, basey + 66, "веселье", ink, fonts.SMALL)
+        draw_bar(screen, px + 60, basey + 68, r.fun, 168, 85, 247)
+    }
+    @sel = game.selected
+    @fy = game.height - 120
+    fonts.draw_text(screen, px, fy, "выбор: {sel}", ink, fonts.SMALL)
+    (game.held >= 0) {
+        @h = game.held
+        fonts.draw_text(screen, px, fy + 20, "в руках: {h}", ink, fonts.SMALL)
+    }
+    fonts.draw_text(screen, px, fy + 44, "← → выбрать", ink, fonts.SMALL)
+    fonts.draw_text(screen, px, fy + 62, "Enter — взять/поставить", ink, fonts.SMALL)
+    fonts.draw_text(screen, px, fy + 80, "Esc — выход", ink, fonts.SMALL)
+    out none
+}
+
+skill render(game) {
+    @back = game.frames_obj.back
+    @w = back.width
+    @h = back.height
+    @bg = graphics.color(back, 30, 34, 44)
+    graphics.fill(back, 0, 0, w, h, bg)
+    @floorY = h * 2 / 3
+    @floor = graphics.color(back, 60, 64, 76)
+    graphics.fill(back, 0, floorY, w - 220, h - floorY, floor)
+    @i = 0
+    drum (group.count(game.furniture)) {
+        @f = group.get(game.furniture, beat)
+        @idx = beat
+        draw_furniture(back, f, idx, game.selected, game.held)
+    }
+    drum (group.count(game.residents)) {
+        @r = group.get(game.residents, beat)
+        @rr = r
+        (rr.y == 0) { rr.y = floorY - 34 }
+        draw_resident(back, rr)
+    }
+    draw_panel(back, game)
+    out none
+}
+
+skill state_text(game) {
+    @r0 = group.get(game.residents, 0)
+    @r1 = group.get(game.residents, 1)
+    @h0 = r0.hunger
+    @s0 = r0.sleep
+    @f0 = r0.fun
+    @h1 = r1.hunger
+    @s1 = r1.sleep
+    @f1 = r1.fun
+    @sel = game.selected
+    @held = game.held
+    @frames = game.frame
+    out "Домик: кадры {frames}; {r0.name} г{h0} с{s0} в{f0}; {r1.name} г{h1} с{s1} в{f1}; выбор {sel}, руки {held}"
+}
+
+skill press(base, game) {
+    drum (8) {
+        @key = uefi.poll_key(base, 0)
+        (key.ready == no) { leave }
+        (key.scan == SCAN_ESCAPE) { game.quit = yes }
+        @was_held = game.held >= 0
+        (key.char == ENTER) {
+            (was_held == no) { game.held = game.selected }
+            (was_held == yes) { game.held = -1 }
+        }
+        (game.held >= 0) {
+            @f = group.get(game.furniture, game.held)
+            (key.scan == SCAN_LEFT) { f.x = f.x - STEP
+                (f.x < 20) { f.x = 20 } }
+            (key.scan == SCAN_RIGHT) { f.x = f.x + STEP
+                (f.x > game.width - 250) { f.x = game.width - 250 } }
+            (key.scan == SCAN_UP) { f.y = f.y - STEP
+                (f.y < 20) { f.y = 20 } }
+            (key.scan == SCAN_DOWN) { f.y = f.y + STEP
+                (f.y > game.height - 120) { f.y = game.height - 120 } }
+        }
+        (game.held < 0) {
+            (key.scan == SCAN_LEFT) {
+                game.selected = game.selected - 1
+                (game.selected < 0) { game.selected = 0 }
+            }
+            (key.scan == SCAN_RIGHT) {
+                game.selected = game.selected + 1
+                (game.selected >= group.count(game.furniture)) { game.selected = group.count(game.furniture) - 1 }
+            }
+        }
+    }
+    out none
+}
+
+skill tick(base, link, game) {
+    press(base, game)
+    @moment = uefi.now(base)
+    ((moment.second == game.second) == no) {
+        ((game.second == -1) == no) { decay(game) }
+        game.second = moment.second
+    }
+    update_residents(game)
+    render(game)
+    game.frame = game.frame + 1
+    @painted = graphics.present(game.frames_obj)
+    ((link == none) == no) {
+        @served = remote.serve(link)
+        remote.tell(link, state_text(game))
+    }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    uefi.forget_keys(base)
+    @frames = graphics.open_frames(base)
+    @w = frames.front.width
+    @h = frames.front.height
+    @r0 = Resident { name = "Маша", body = 0 }
+    @r1 = Resident { name = "Петя", body = 1 }
+    @floorY = h * 2 / 3
+    r0.y = floorY - 34
+    r1.y = floorY - 34
+    r0.x = 80
+    r1.x = 160
+    @f0 = Furniture { kind = 0, x = 120, y = floorY - 46, width = 52, height = 46 }
+    @f1 = Furniture { kind = 1, x = 300, y = floorY - 46, width = 70, height = 46 }
+    @f2 = Furniture { kind = 2, x = 470, y = floorY - 46, width = 60, height = 46 }
+    @residents = [r0, r1]
+    @furniture = [f0, f1, f2]
+    @game = Game { width = w, height = h, residents = residents, furniture = furniture, frames_obj = frames }
+    @moment0 = uefi.now(base)
+    game.second = moment0.second
+    @link = remote.open_remote() rescue |err| { none }
+    ((link == none) == no) {
+        remote.own(link, frames.back.frame, frames.pages)
+        remote.own(link, frames.last.frame, frames.pages)
+    }
+    always {
+        tick(base, link, game)
+        (game.quit == yes) {
+            graphics.close_frames(frames)
+            reply.home("Домик: кадров {game.frame}")
+            out none
+        }
+    }
+    out none
+}

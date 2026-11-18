@@ -1,0 +1,799 @@
+commit 850732719ba15df2df55a324c3e3cd4c06a4049f
+Author: Zephyr <zephyr.muldash@gmail.com>
+Date:   Sat Nov 14 05:57:31 2026 +0500
+
+    feat(android): оболочка на ядре событий — лаунчер, задачи, Организм
+    
+    shell.saltic — лаунчер и приложения-задачи (Музыка, Часы, Настройки,
+    Диспетчер, Claude, Организм) на os/ui/events: касание по цели — счётчик,
+    ползунок — число, такт раз в секунду, задача просыпается только по подписке.
+    Интерфейс — JTML и шрифт Acer, «Назад» внизу справа и в шапке, Claude ходит
+    своим курсором. Организм — события, кадры, память кучи.
+    Платформа: буфер окна втрое меньше экрана (Android растягивает), нажатие,
+    ведение и отпускание пальца, firmware(7), окно ждёт, пока кадр не отдан.
+    Сборщик: широкая проверка для AArch64, пакет dev.saltic.<имя>.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/os/target/android/README.md b/os/target/android/README.md
+index fc0c32b..aa8f7f8 100644
+--- a/os/target/android/README.md
++++ b/os/target/android/README.md
+@@ -20,6 +20,11 @@
+ - **Пока нельзя:** `core.arena` — адрес арены идёт двумя 16-битными
+   половинками и на Android обрежется; клавиши; ведение пальцем (только
+   нажатие).
++- **Экран:** буфер окна — треть экрана по каждой стороне (на POCO 406×904),
++  растягивает Android; касания в тех же точках. `firmware(7)` — палец на экране.
++  Окно не убирается, пока программа держит кадр.
++- **Оболочка:** `just android shell` — лаунчер, приложения-задачи и Организм
++  на ядре событий (`os/ui/events`), интерфейс — JTML и шрифт Acer. Набросок.
+ - **Состояние:** 🟢 14.11.2026 — POCO X6 Pro (Android 16): `hello` —
+   вращающийся куб хранителя, «Привет, Зэф!», кнопка со счётом нажатий,
+   41 кадр/с при полной перерисовке 1220×2712.
+diff --git a/os/target/android/platform.saltic b/os/target/android/platform.saltic
+index 2493401..a467201 100644
+--- a/os/target/android/platform.saltic
++++ b/os/target/android/platform.saltic
+@@ -48,6 +48,8 @@ CREATE = "ANativeActivity_onCreate"
+ WINDOW_CREATED = "android_window_created"
+ GEOMETRY = "ANativeWindow_setBuffersGeometry"
+ LOCK = "ANativeWindow_lock"
++WIDTH_OF = "ANativeWindow_getWidth"
++HEIGHT_OF = "ANativeWindow_getHeight"
+ POST = "ANativeWindow_unlockAndPost"
+ LOG = "__android_log_print"
+ LOOPER = "ALooper_forThread"
+@@ -78,13 +80,21 @@ STARTED = "android_started"
+ TOUCH_X = "android_touch_x"
+ TOUCH_Y = "android_touch_y"
+ TOUCHES = "android_touches"
++PRESSED = "android_pressed"
++HOLDING = "android_holding"
++LOCKED = "android_locked"
++WINDOW_DESTROYED = "android_window_destroyed"
+ DESTROY_SLOT = 40
++WINDOW_DESTROYED_SLOT = 80
++NANOSLEEP = 101
++SLEEP_NS = 16000000
+ WINDOW_SLOT = 56
+ QUEUE_CREATED_SLOT = 88
+ QUEUE_DESTROYED_SLOT = 96
+ STACK_BYTES = 1048576
+ BUFFER_BYTES = 64
+-RGBA_8888 = 1
++RGBX_8888 = 2
++SCALE = 3
+ LOG_INFO = 4
+ SP = 31
+ IP0 = 16
+@@ -94,6 +104,10 @@ SAVE_BYTES = 96
+ QUEUE_KEEP = 19
+ FRAME_BYTES = 32
+ EVENT_AT = 16
++ACTION_AT = 24
++ACTION_DOWN = 0
++ACTION_UP = 1
++ACTION_MOVE = 2
+ HEAP_HINT = 268435456
+ FIXED_NOREPLACE = 1048576
+ HEAP_LAST = 4026531840
+@@ -105,7 +119,7 @@ skill library() {
+     out shared.Library {
+         name = "libmain.so",
+         needed = ["libandroid.so", "liblog.so", "libc.so"],
+-        imports = [GEOMETRY, LOCK, POST, LOG, LOOPER, ATTACH, DETACH, NEXT_EVENT, PRE_DISPATCH, FINISH, EVENT_TYPE, MOTION_ACTION, MOTION_X, MOTION_Y, THREAD_START],
++        imports = [GEOMETRY, WIDTH_OF, HEIGHT_OF, LOCK, POST, LOG, LOOPER, ATTACH, DETACH, NEXT_EVENT, PRE_DISPATCH, FINISH, EVENT_TYPE, MOTION_ACTION, MOTION_X, MOTION_Y, THREAD_START],
+         exports = [CREATE]
+     }
+ }
+@@ -162,6 +176,8 @@ skill coordinate(compiler, name, to) {
+     compiler = executor.load_immediate(compiler, backend.ERROR, 0)
+     compiler = direct(compiler, name)
+     compiler = ops.emit(compiler, encoder.encode(FCVTZS_SINGLE, 0, 0, 0, 0, 0))
++    compiler = executor.load_immediate(compiler, backend.SCRATCH0, SCALE)
++    compiler = executor.divide(compiler, backend.VALUE, backend.VALUE, backend.SCRATCH0)
+     compiler = executor.load_address(compiler, backend.SCRATCH0, to, 0)
+     out executor.store(compiler, backend.VALUE, backend.SCRATCH0, 0)
+ }
+@@ -206,9 +222,22 @@ skill emit_queue(compiler) {
+     compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 0, SP, EVENT_AT))
+     compiler = direct(compiler, MOTION_ACTION)
+     compiler = executor.and_immediate(compiler, backend.VALUE, backend.VALUE, ACTION_MASK)
+-    compiler = executor.branch_nonzero(compiler, backend.VALUE, ".L_android_drain_finish")
++    compiler = ops.emit(compiler, encoder.memory(encoder.X, no, 0, SP, ACTION_AT))
++    compiler = executor.load_immediate(compiler, backend.SCRATCH0, ACTION_MOVE)
++    compiler = executor.branch_greater_equal_unsigned(compiler, backend.SCRATCH0, backend.VALUE, ".L_android_drain_motion")
++    compiler = executor.jump(compiler, ".L_android_drain_finish")
++    compiler = executor.label(compiler, ".L_android_drain_motion")
+     compiler = coordinate(compiler, MOTION_X, TOUCH_X)
+     compiler = coordinate(compiler, MOTION_Y, TOUCH_Y)
++    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 0, SP, ACTION_AT))
++    compiler = executor.load_address(compiler, backend.SCRATCH0, PRESSED, 0)
++    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 1)
++    compiler = executor.load_immediate(compiler, backend.SCRATCH2, ACTION_UP)
++    compiler = executor.branch_not_equal(compiler, backend.VALUE, backend.SCRATCH2, ".L_android_drain_held")
++    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 0)
++    compiler = executor.label(compiler, ".L_android_drain_held")
++    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
++    compiler = executor.branch_nonzero(compiler, backend.VALUE, ".L_android_drain_finish")
+     compiler = notify(compiler)
+     compiler = executor.label(compiler, ".L_android_drain_finish")
+     compiler = ops.emit(compiler, encoder.add_immediate(0, QUEUE_KEEP, 0))
+@@ -245,6 +274,8 @@ skill emit_create(compiler) {
+     compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, QUEUE_DESTROYED_SLOT)
+     compiler = executor.load_address(compiler, backend.SCRATCH1, DESTROYED, 0)
+     compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, DESTROY_SLOT)
++    compiler = executor.load_address(compiler, backend.SCRATCH1, WINDOW_DESTROYED, 0)
++    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, WINDOW_DESTROYED_SLOT)
+     out executor.ret(compiler)
+ }
+ 
+@@ -261,10 +292,14 @@ skill emit_window(compiler) {
+     compiler = frame(compiler, yes)
+     compiler = executor.load_address(compiler, backend.SCRATCH0, WINDOW, 0)
+     compiler = executor.store(compiler, backend.ERROR, backend.SCRATCH0, 0)
+-    compiler = executor.move(compiler, backend.VALUE, backend.ERROR)
+-    compiler = executor.load_immediate(compiler, backend.ERROR, 0)
+-    compiler = executor.load_immediate(compiler, backend.ARG2, 0)
+-    compiler = executor.load_immediate(compiler, backend.ARG3, RGBA_8888)
++    compiler = ops.emit(compiler, encoder.add_immediate(QUEUE_KEEP, 1, 0))
++    compiler = scaled_side(compiler, WIDTH_OF)
++    compiler = ops.emit(compiler, encoder.memory(encoder.X, no, 0, SP, EVENT_AT))
++    compiler = scaled_side(compiler, HEIGHT_OF)
++    compiler = executor.move(compiler, backend.ARG2, backend.VALUE)
++    compiler = ops.emit(compiler, encoder.memory(encoder.X, yes, 1, SP, EVENT_AT))
++    compiler = ops.emit(compiler, encoder.add_immediate(0, QUEUE_KEEP, 0))
++    compiler = executor.load_immediate(compiler, backend.ARG3, RGBX_8888)
+     compiler = direct(compiler, GEOMETRY)
+     compiler = executor.load_address(compiler, backend.SCRATCH0, STARTED, 0)
+     compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
+@@ -280,14 +315,77 @@ skill emit_window(compiler) {
+     out frame(compiler, no)
+ }
+ 
++skill scaled_side(compiler, name) {
++    @executor = compiler.executor
++    compiler = ops.emit(compiler, encoder.add_immediate(0, QUEUE_KEEP, 0))
++    compiler = direct(compiler, name)
++    compiler = int_result(compiler)
++    compiler = executor.load_immediate(compiler, backend.SCRATCH0, SCALE)
++    out executor.divide(compiler, backend.VALUE, backend.VALUE, backend.SCRATCH0)
++}
++
+ skill lock(compiler) {
+     @executor = compiler.executor
+     compiler = window(compiler, backend.VALUE)
+-    compiler = executor.load_address(compiler, backend.ERROR, BUFFER, 0)
++    compiler = executor.load_address(compiler, backend.SCRATCH0, LOCKED, 0)
++    compiler = executor.store(compiler, backend.VALUE, backend.SCRATCH0, 0)
+     compiler = executor.load_immediate(compiler, backend.ARG2, 0)
++    compiler = executor.load_address(compiler, backend.ERROR, BUFFER, 0)
+     out c_call(compiler, LOCK)
+ }
+ 
++skill acquire(compiler, prefix) {
++    @executor = compiler.executor
++    compiler = executor.label(compiler, "{prefix}_try")
++    compiler = executor.load_address(compiler, backend.SCRATCH0, HOLDING, 0)
++    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 1)
++    compiler = executor.store(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
++    compiler = ops.emit(compiler, encoder.dmb())
++    compiler = window(compiler, backend.VALUE)
++    compiler = executor.branch_zero(compiler, backend.VALUE, "{prefix}_none")
++    compiler = lock(compiler)
++    compiler = executor.jump(compiler, "{prefix}_done")
++    compiler = executor.label(compiler, "{prefix}_none")
++    compiler = executor.load_address(compiler, backend.SCRATCH0, HOLDING, 0)
++    compiler = executor.store_zero(compiler, backend.SCRATCH0, 0)
++    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -16)
++    compiler = executor.store_zero(compiler, backend.STACK, 0)
++    compiler = executor.load_immediate(compiler, backend.SCRATCH0, SLEEP_NS)
++    compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, 8)
++    compiler = executor.move(compiler, backend.VALUE, backend.STACK)
++    compiler = executor.load_immediate(compiler, backend.ERROR, 0)
++    compiler = executor.syscall(compiler, NANOSLEEP)
++    compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, 16)
++    compiler = executor.jump(compiler, "{prefix}_try")
++    out executor.label(compiler, "{prefix}_done")
++}
++
++skill release(compiler, prefix) {
++    @executor = compiler.executor
++    compiler = executor.load_address(compiler, backend.SCRATCH0, HOLDING, 0)
++    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
++    compiler = executor.branch_zero(compiler, backend.SCRATCH1, "{prefix}_free")
++    compiler = stored(compiler, LOCKED)
++    compiler = c_call(compiler, POST)
++    compiler = ops.emit(compiler, encoder.dmb())
++    compiler = executor.load_address(compiler, backend.SCRATCH0, HOLDING, 0)
++    compiler = executor.store_zero(compiler, backend.SCRATCH0, 0)
++    out executor.label(compiler, "{prefix}_free")
++}
++
++skill emit_window_destroyed(compiler) {
++    @executor = compiler.executor
++    compiler = executor.label(compiler, WINDOW_DESTROYED)
++    compiler = executor.load_address(compiler, backend.SCRATCH0, WINDOW, 0)
++    compiler = executor.store_zero(compiler, backend.SCRATCH0, 0)
++    compiler = ops.emit(compiler, encoder.dmb())
++    compiler = executor.label(compiler, ".L_android_destroyed_wait")
++    compiler = executor.load_address(compiler, backend.SCRATCH0, HOLDING, 0)
++    compiler = executor.load(compiler, backend.SCRATCH1, backend.SCRATCH0, 0)
++    compiler = executor.branch_nonzero(compiler, backend.SCRATCH1, ".L_android_destroyed_wait")
++    out executor.ret(compiler)
++}
++
+ skill emit_program(compiler) {
+     @executor = compiler.executor
+     compiler = executor.label(compiler, PROGRAM)
+@@ -297,7 +395,7 @@ skill emit_program(compiler) {
+     compiler = executor.load_address(compiler, backend.SCRATCH1, SAVED, 0)
+     compiler = executor.store(compiler, backend.SCRATCH0, backend.SCRATCH1, 0)
+     compiler = executor.load_address(compiler, backend.STACK, STACK, STACK_BYTES)
+-    compiler = lock(compiler)
++    compiler = acquire(compiler, ".L_android_start")
+     compiler = executor.add_immediate(compiler, backend.STACK, backend.STACK, -32)
+     compiler = executor.load_immediate(compiler, backend.SCRATCH0, 1)
+     compiler = executor.store(compiler, backend.SCRATCH0, backend.STACK, 0)
+@@ -312,9 +410,8 @@ skill emit_wait(compiler) {
+     @executor = compiler.executor
+     compiler = executor.label(compiler, platform.WAIT)
+     compiler = executor.push(compiler, backend.ARG2)
+-    compiler = window(compiler, backend.VALUE)
+-    compiler = c_call(compiler, POST)
+-    compiler = lock(compiler)
++    compiler = release(compiler, ".L_android_wait")
++    compiler = acquire(compiler, ".L_android_wait")
+     compiler = ops.emit(compiler, encoder.dmb())
+     compiler = executor.pop(compiler, backend.ARG2)
+     out tails.ok(compiler)
+@@ -340,8 +437,7 @@ skill emit_write(compiler) {
+ skill emit_exit(compiler) {
+     @executor = compiler.executor
+     compiler = executor.label(compiler, platform.EXIT)
+-    compiler = window(compiler, backend.VALUE)
+-    compiler = c_call(compiler, POST)
++    compiler = release(compiler, ".L_android_exit")
+     compiler = executor.load_address(compiler, backend.SCRATCH0, SAVED, 0)
+     compiler = executor.load(compiler, backend.SCRATCH0, backend.SCRATCH0, 0)
+     compiler = ops.emit(compiler, encoder.add_immediate(SP, 9, 0))
+@@ -393,6 +489,8 @@ skill emit_firmware(compiler) {
+     compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_touch_y")
+     compiler = executor.load_immediate(compiler, backend.SCRATCH1, 6)
+     compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_touches")
++    compiler = executor.load_immediate(compiler, backend.SCRATCH1, 7)
++    compiler = executor.branch_equal(compiler, backend.VALUE, backend.SCRATCH1, ".L_android_pressed")
+     compiler = executor.load(compiler, backend.VALUE, backend.SCRATCH0, 16)
+     compiler = tails.ok(compiler)
+     compiler = executor.label(compiler, ".L_android_width")
+@@ -413,6 +511,9 @@ skill emit_firmware(compiler) {
+     compiler = executor.label(compiler, ".L_android_touches")
+     compiler = executor.load_address(compiler, backend.VALUE, TOUCHES, 0)
+     compiler = executor.load32(compiler, backend.VALUE, backend.VALUE, 0)
++    compiler = tails.ok(compiler)
++    compiler = executor.label(compiler, ".L_android_pressed")
++    compiler = stored(compiler, PRESSED)
+     out tails.ok(compiler)
+ }
+ 
+@@ -429,7 +530,7 @@ skill emit_data(compiler) {
+     compiler = shared.zeroes(compiler, backend.DATA, 8)
+     compiler = executor.data_label(compiler, backend.DATA, SAVED)
+     compiler = shared.zeroes(compiler, backend.DATA, 8)
+-    drum ([THREAD, STARTED, TOUCH_X, TOUCH_Y, TOUCHES]) {
++    drum ([THREAD, STARTED, TOUCH_X, TOUCH_Y, TOUCHES, PRESSED, HOLDING, LOCKED]) {
+         compiler = executor.data_label(compiler, backend.DATA, beat)
+         compiler = shared.zeroes(compiler, backend.DATA, 8)
+     }
+@@ -451,6 +552,7 @@ Platform = Box {
+         compiler = emit_program(compiler)
+         compiler = emit_wait(compiler)
+         compiler = emit_destroyed(compiler)
++        compiler = emit_window_destroyed(compiler)
+         compiler = emit_queue(compiler)
+         compiler = emit_write(compiler)
+         compiler = emit_exit(compiler)
+diff --git a/os/target/android/shell.saltic b/os/target/android/shell.saltic
+new file mode 100644
+index 0000000..8862a0f
+--- /dev/null
++++ b/os/target/android/shell.saltic
+@@ -0,0 +1,439 @@
++-- shell — оболочка ОС на телефоне поверх ядра событий (os/ui/events): лаунчер,
++-- приложения-задачи (Музыка, Часы, Настройки, Диспетчер, Claude) и Организм —
++-- экран самой ОС с настоящими счётчиками ядра. Интерфейс — JTML (атомы и шрифт
++-- Acer: screen/atoms), экран — буфер окна Android через cpu.firmware (0 адрес,
++-- 1 ширина, 2 высота, 3 шаг, 4 / 5 x / y пальца, 6 счёт касаний, 7 палец на
++-- экране). Ввод — изменения: касание по цели — счётчик её имени, ползунок —
++-- число, раз в секунду — такт. Задача просыпается, только если подписана на
++-- имя и не на паузе. Кадр рисуется, только когда что-то изменилось, — REDRAW
++-- раз подряд: у окна Android несколько буферов по кругу, обновиться должны все. Claude — агент со своим
++-- курсором: идёт к цели и жмёт её тем же каналом, что и палец. Раз в такт
++-- Организм снимает кучу (mem.heap): занято, пик, долгие поля — рост занятого у
++-- вечной программы — утечка.
++--
++-- Task { id, name, woke } — задача; World — всё состояние оболочки
++-- page(world) -> текст JTML текущего экрана; home / music / clock / settings /
++--     tasks / claude / organism(world) — экраны
++-- route(world, change) -> World — изменение к подписчикам; state_of(world, id)
++-- Переходы помнят путь: «< Назад» в шапке и внизу возвращает на прошлый экран
++-- (went / shell.back), с пустой памятью — домой.
++-- Внутри: text / mark / box / sized / slider / button / join — строители JTML;
++--     two, clock_text, index_of, name_of, frame_of, wake, logged, target_center
++
++use io
++use core.str
++use core.cpu
++use core.time
++use core.mem
++use core.group
++use os.ui.jtml
++use os.ui.jtml.read
++use os.ui.events
++use os.target.uefi_x86_64.screen.atoms
++use os.target.uefi_x86_64.screen.graphics
++
++REDRAW = 5
++TOP = 42
++BOTTOM = 48
++SECOND = 1000
++AGENT_FRAMES = 24
++LOG = 7
++APPS = ["music", "clock", "settings", "tasks", "claude", "organism"]
++NAMES = ["Музыка", "Часы", "Настройки", "Диспетчер", "Claude", "Организм"]
++GLYPHS = ["~", "o", "*", "=", "+", "@"]
++TONES = ["down", "info", "quiet", "accent", "keyword", "up"]
++
++World = Box {
++    app = "home",
++    back = [],
++    core = none,
++    playing = no,
++    volume = 40,
++    played = 0,
++    stopwatch = no,
++    lap = 0,
++    bright = 70,
++    seconds = 0,
++    events = 0,
++    frames = 0,
++    busy = 0,
++    heap = 0,
++    peak = 0,
++    quota = 0,
++    escapes = 0,
++    wakes = [0, 0, 0, 0, 0, 0],
++    log = [],
++    plan = [],
++    step = 0,
++    timer = 0,
++    agent_x = 360,
++    agent_y = 800
++}
++
++skill join(items) {
++    out str.join(items, ", ")
++}
++
++skill text(value, tone) {
++    out "\{\"text\": \{\"value\": \"{value}\", \"tone\": \"{tone}\"\}\}"
++}
++
++skill mark(id, value, tone) {
++    out "\{\"text\": \{\"id\": \"{id}\", \"value\": \"{value}\", \"align\": \"center\", \"grow\": 1, \"tone\": \"{tone}\"\}\}"
++}
++
++skill box(flow, padding, gap, grow, tone, items) {
++    @kids = join(items)
++    out "\{\"box\": \{\"flow\": \"{flow}\", \"padding\": {padding}, \"gap\": {gap}, \"grow\": {grow}, \"tone\": \"{tone}\", \"children\": [{kids}]\}\}"
++}
++
++skill sized(width, height, tone, items) {
++    @kids = join(items)
++    out "\{\"box\": \{\"flow\": \"column\", \"width\": {width}, \"height\": {height}, \"padding\": 8, \"tone\": \"{tone}\", \"children\": [{kids}]\}\}"
++}
++
++skill slider(id, value) {
++    out "\{\"slider\": \{\"id\": \"{id}\", \"value\": {value}, \"min\": 0, \"max\": 100\}\}"
++}
++
++skill button(id, value) {
++    out box("row", 10, 0, 0, "panel", [mark(id, value, "accent")])
++}
++
++skill two(value) {
++    (value < 10) { out "0{value}" }
++    out "{value}"
++}
++
++skill clock_text(seconds) {
++    @m = two(seconds / 60 % 60)
++    @s = two(seconds % 60)
++    out "{m}:{s}"
++}
++
++skill index_of(id) {
++    drum (group.count(APPS)) {
++        (group.get(APPS, beat) == id) { out beat }
++    }
++    out -1
++}
++
++skill name_of(id) {
++    @at = index_of(id)
++    (at < 0) { out "Домой" }
++    out group.get(NAMES, at)
++}
++
++skill state_of(world, id) {
++    (world.app == id) { out "активная" }
++    (id == "clock") { out "в фоне" }
++    (id == "claude") { out "в фоне" }
++    (id == "music") {
++        (world.playing == yes) { out "в фоне" }
++    }
++    out "на паузе"
++}
++
++skill frame_of(world, body) {
++    @title = name_of(world.app)
++    @now = clock_text(world.seconds)
++    @top_items = [text("# {title}", "ink"), box("row", 0, 0, 1, "", []), text(now, "quiet")]
++    @nav_items = [mark("shell.home", "———  Домой  ———", "quiet")]
++    ((world.app == "home") == no) {
++        top_items = group.add(top_items, mark("shell.back", "< Назад", "accent"))
++        nav_items = group.add(nav_items, mark("shell.back", "< Назад", "accent"))
++    }
++    @bar = box("row", 10, 12, 0, "panel", top_items)
++    @nav = box("row", 10, 0, 0, "panel", nav_items)
++    @top = "\{\"box\": \{\"height\": {TOP}, \"tone\": \"panel\"\}\}"
++    @bottom = "\{\"box\": \{\"height\": {BOTTOM}, \"tone\": \"panel\"\}\}"
++    out box("column", 0, 0, 1, "", [top, bar, box("column", 14, 12, 1, "", body), nav, bottom])
++}
++
++skill home(world) {
++    @rows = []
++    @row = []
++    drum (group.count(APPS)) {
++        @id = group.get(APPS, beat)
++        @glyph = group.get(GLYPHS, beat)
++        @name = group.get(NAMES, beat)
++        @tile = sized(72, 72, group.get(TONES, beat), [mark("open.{id}", glyph, "ground")])
++        row = group.add(row, box("column", 4, 6, 1, "", [tile, mark("open.{id}", name, "ink"), text(state_of(world, id), "quiet")]))
++        (group.count(row) == 3) {
++            rows = group.add(rows, box("row", 0, 10, 0, "", row))
++            row = []
++        }
++    }
++    @now = clock_text(world.seconds)
++    out group.concat([text("# {now}", "ink"), text("ядро спит, пока ничего не случилось", "quiet")], rows)
++}
++
++skill music(world) {
++    @label = "Играть"
++    (world.playing == yes) { label = "Пауза" }
++    @played = clock_text(world.played)
++    out [text("# Музыка", "ink"), text("Saltic - Тишина ядра   {played}", "ink"), button("music.play", label),
++        text("громкость {world.volume}", "quiet"), box("row", 0, 0, 0, "", [slider("music.volume", world.volume)]),
++        text("Играет — живёт в фоне по такту.", "quiet"), text("На паузе её никто не будит.", "quiet")]
++}
++
++skill clock(world) {
++    @now = clock_text(world.seconds)
++    @lap = clock_text(world.lap)
++    @label = "Старт"
++    (world.stopwatch == yes) { label = "Стоп" }
++    out [text("# {now}", "ink"), text("секундомер {lap}", "quiet"), button("clock.start", label)]
++}
++
++skill settings(world) {
++    out [text("# Настройки", "ink"), text("яркость {world.bright}", "quiet"), box("row", 0, 0, 0, "", [slider("settings.bright", world.bright)]),
++        text("Тянешь — в ядро идут изменения", "quiet"), text("settings.bright.", "quiet")]
++}
++
++skill tasks(world) {
++    @lines = [text("# Диспетчер", "ink")]
++    drum (5) {
++        @id = group.get(APPS, beat)
++        @name = group.get(NAMES, beat)
++        @woke = group.get(world.wakes, beat)
++        @state = state_of(world, id)
++        lines = group.add(lines, box("row", 0, 8, 0, "", [text(name, "ink"), box("row", 0, 0, 1, "", []), text("{state}, {woke}", "quiet")]))
++    }
++    out lines
++}
++
++skill claude(world) {
++    out [text("# Claude", "ink"), text("Агент — такой же житель:", "quiet"), text("свой курсор, тот же канал.", "quiet"),
++        button("agent.music", "Включи музыку погромче"), button("agent.clock", "Запусти секундомер")]
++}
++
++skill organism(world) {
++    @quiet = 100
++    (world.frames > 0) { quiet = 100 - world.busy * 100 / world.frames }
++    @used = world.heap / 1024
++    @peak = world.peak / 1024
++    @quota = world.quota / 1024
++    @lines = [text("# Организм", "ink"), text("событий {world.events}, кадров {world.frames}", "ink"),
++        text("кадров без работы {quiet}%", "up"), text("память: занято {used} КБ", "ink"),
++        text("пик {peak} КБ из {quota} КБ", "ink"), text("долгих полей в куче: {world.escapes}", "quiet"),
++        text("задачи — сколько раз просыпались:", "quiet")]
++    drum (5) {
++        @name = group.get(NAMES, beat)
++        @woke = group.get(world.wakes, beat)
++        @state = state_of(world, group.get(APPS, beat))
++        lines = group.add(lines, text("{name}: {woke}, {state}", "ink"))
++    }
++    lines = group.add(lines, text("ядро событий, свежие сверху:", "quiet"))
++    drum (world.log) { lines = group.add(lines, text(beat, "accent")) }
++    out lines
++}
++
++skill page(world) {
++    @body = home(world)
++    (world.app == "music") { body = music(world) }
++    (world.app == "clock") { body = clock(world) }
++    (world.app == "settings") { body = settings(world) }
++    (world.app == "tasks") { body = tasks(world) }
++    (world.app == "claude") { body = claude(world) }
++    (world.app == "organism") { body = organism(world) }
++    out frame_of(world, body)
++}
++
++skill wake(world, id) {
++    @at = index_of(id)
++    @list = []
++    drum (group.count(world.wakes)) {
++        @count = group.get(world.wakes, beat)
++        (beat == at) { count = count + 1 }
++        list = group.add(list, count)
++    }
++    world.wakes = list
++    out world
++}
++
++skill logged(world, line) {
++    @list = [line]
++    drum (group.count(world.log)) {
++        (beat < LOG - 1) { list = group.add(list, group.get(world.log, beat)) }
++    }
++    world.log = list
++    out world
++}
++
++skill went(world, next) {
++    (world.app == next) { out world }
++    world.back = group.add(world.back, world.app)
++    world.app = next
++    out world
++}
++
++skill route(world, change, who) {
++    @id = change.id
++    world.events = world.events + 1
++    @who_woke = "никого"
++    (str.starts_with(id, "open.")) {
++        world = went(world, str.slice(id, 5, str.bytes(id)))
++        who_woke = "оболочка ОС"
++    }
++    (id == "shell.home") {
++        world = went(world, "home")
++        who_woke = "оболочка ОС"
++    }
++    (id == "shell.back") {
++        @count = group.count(world.back)
++        world.app = "home"
++        (count > 0) {
++            world.app = group.get(world.back, count - 1)
++            @rest = []
++            drum (count - 1) { rest = group.add(rest, group.get(world.back, beat)) }
++            world.back = rest
++        }
++        who_woke = "оболочка ОС"
++    }
++    (id == events.TICK) {
++        world.seconds = world.seconds + 1
++        world.heap = mem.heap(0)
++        world.escapes = mem.heap(1)
++        world.quota = mem.heap(2)
++        (world.heap > world.peak) { world.peak = world.heap }
++        world = wake(world, "clock")
++        who_woke = "Часы"
++        (world.stopwatch == yes) { world.lap = world.lap + 1 }
++        (world.playing == yes) {
++            world.played = world.played + 1
++            world = wake(world, "music")
++            who_woke = "Часы, Музыка"
++        }
++        (world.app == "tasks") { world = wake(world, "tasks") }
++    }
++    (str.starts_with(id, "music.")) {
++        world = wake(world, "music")
++        who_woke = "Музыка"
++        (id == "music.play") { world.playing = world.playing == no }
++        (id == "music.volume") { world.volume = change.number }
++    }
++    (str.starts_with(id, "clock.")) {
++        world = wake(world, "clock")
++        who_woke = "Часы"
++        (id == "clock.start") { world.stopwatch = world.stopwatch == no }
++    }
++    (str.starts_with(id, "settings.")) {
++        world = wake(world, "settings")
++        who_woke = "Настройки"
++        world.bright = change.number
++    }
++    (str.starts_with(id, "agent.")) {
++        world = wake(world, "claude")
++        who_woke = "Claude"
++        (id == "agent.music") { world.plan = ["shell.home", "open.music", "music.play", "volume"] }
++        (id == "agent.clock") { world.plan = ["shell.home", "open.clock", "clock.start"] }
++        world.step = 0
++        world.timer = 0
++    }
++    (id == events.TICK) { out world }
++    out logged(world, "{id} = {change.number}, {who} -> {who_woke}")
++}
++
++skill target_center(runtime, id) {
++    drum (runtime.targets) {
++        (beat.id == id) { out [beat.x + beat.width / 2, beat.y + beat.height / 2] }
++    }
++    out []
++}
++
++skill slider_center(runtime) {
++    drum (runtime.sliders) { out [beat.x + beat.width * 3 / 4, beat.y + 6] }
++    out []
++}
++
++program() {
++    @world = World { core = events.Core {} }
++    @seen = cpu.firmware(6)
++    @held = no
++    @since = time.now()
++    @redraw = REDRAW
++    @runtime = none
++    io.show("оболочка: старт")
++    always {
++        @began = time.now()
++        @screen = graphics.Screen { width = cpu.firmware(1), height = cpu.firmware(2), stride = cpu.firmware(3), format = graphics.FORMAT_RGB, frame = 0, memory = cpu.firmware(0), accel = [], vsync = no }
++        @who = "палец"
++        @x = cpu.firmware(4)
++        @y = cpu.firmware(5)
++        @touches = cpu.firmware(6)
++        @pressed = cpu.firmware(7)
++        (group.count(world.plan) > 0) {
++            @goal = group.get(world.plan, world.step)
++            @spot = []
++            (runtime) |live| {
++                spot = target_center(live, goal)
++                (goal == "volume") { spot = slider_center(live) }
++            }
++            (group.count(spot) == 2) {
++                world.agent_x = world.agent_x + (group.get(spot, 0) - world.agent_x) / 3
++                world.agent_y = world.agent_y + (group.get(spot, 1) - world.agent_y) / 3
++                redraw = REDRAW
++                world.timer = world.timer + 1
++                (world.timer >= AGENT_FRAMES) {
++                    world.timer = 0
++                    who = "Claude"
++                    (goal == "volume") { world.core = events.change(world.core, "music.volume", world.volume + 35, "", began) }
++                    ((goal == "volume") == no) {
++                        world.core = events.bump(world.core, goal, began)
++                    }
++                    world.step = world.step + 1
++                    (world.step >= group.count(world.plan)) { world.plan = [] }
++                }
++            }
++        }
++        ((touches == seen) == no) {
++            seen = touches
++            (runtime) |live| {
++                @hit = jtml.hit(live, x, y)
++                (hit.found == yes) { world.core = events.bump(world.core, hit.id, began) }
++                held = yes
++            }
++        }
++        (pressed == 1) {
++            (held == yes) {
++                (runtime) |live| {
++                    @moved = jtml.focus_at(live, x, y)
++                    @slot = jtml.find_slider(moved, moved.focused)
++                    (slot.found == yes) {
++                        world.core = events.change(world.core, moved.focused, slot.slot.level, "", began)
++                    }
++                }
++            }
++        }
++        (pressed == 0) { held = no }
++        (time.elapsed(since, began) >= SECOND) {
++            since = began
++            world.core = events.tick(world.core, began)
++        }
++        @worked = no
++        always {
++            @taken = events.take(world.core)
++            (taken.found == no) { leave }
++            world.core = taken.core
++            world = route(world, taken.change, who)
++            worked = yes
++            redraw = REDRAW
++        }
++        world.frames = world.frames + 1
++        (redraw > 0) {
++            redraw = redraw - 1
++            @tree = atoms.measured(read.page(page(world)), no)
++            @live = jtml.mount(screen, tree)
++            atoms.draw(screen, live, atoms.palette_light(screen))
++            (group.count(world.plan) > 0) {
++                graphics.fill(screen, world.agent_x, world.agent_y, 10, 14, graphics.color(screen, 166, 107, 242))
++                graphics.fill(screen, world.agent_x, world.agent_y + 14, 4, 6, graphics.color(screen, 166, 107, 242))
++            }
++            runtime = live
++            worked = yes
++        }
++        (worked == yes) { world.busy = world.busy + 1 }
++        cpu.wait()
++    }
++    out none
++}
+diff --git a/os/target/android/toolchain.saltic b/os/target/android/toolchain.saltic
+index f446e26..3b99576 100644
+--- a/os/target/android/toolchain.saltic
++++ b/os/target/android/toolchain.saltic
+@@ -3,8 +3,12 @@
+ -- (compiler/linker/shared), двоичный манифест (formats/apk/manifest) и zip
+ -- (formats/apk/zip) — неподписанный APK. Подпись — apksigner (just android).
+ -- Запуск: toolchain <исходник> <выход.apk> <куча байт>; рядом пишет <выход>.so.
++-- Пакет — dev.saltic.<имя файла> (каждая программа ставится отдельным
++-- приложением), подпись — «Saltic», у не-hello — «Saltic <имя>». Проверка —
++-- широкая (check_wide): у AArch64 слово 8 байт.
+ --
+ -- program(source_path, output_path, heap_text) -> none; ParseFailed, CheckFailed
++-- Внутри: stem(path) — имя файла без папок и .saltic
+ 
+ use core.str
+ use core.group
+@@ -20,7 +24,7 @@ use formats.apk.zip
+ use formats.apk.manifest
+ use os.target.android.platform
+ 
+-PACKAGE = "dev.saltic.hello"
++PACKAGE = "dev.saltic"
+ LABEL = "Saltic"
+ LIBRARY = "main"
+ 
+@@ -40,7 +44,7 @@ program(source_path, output_path, heap_text) {
+         out error.ParseFailed
+     }
+     io.show("android: проверяю")
+-    @checked = checker.check_file(loaded.ast, source_path)
++    @checked = checker.check_wide(loaded.ast, source_path)
+     (group.count(checked.diagnostics) > 0) {
+         show_diagnostics(checked.diagnostics)
+         out error.CheckFailed
+@@ -53,7 +57,10 @@ program(source_path, output_path, heap_text) {
+     @library_path = "{output_path}.so"
+     shared.write(library_path, machine, executor.fixups, platform.library())
+     io.show("android: пакую {output_path}")
+-    @manifest_bytes = manifest.encode(manifest.native_activity(PACKAGE, LABEL, LIBRARY, 1))
++    @name = stem(source_path)
++    @label = LABEL
++    ((name == "hello") == no) { label = "{LABEL} {name}" }
++    @manifest_bytes = manifest.encode(manifest.native_activity("{PACKAGE}.{name}", label, LIBRARY, 1))
+     @entries = [
+         zip.Entry { name = "AndroidManifest.xml", data = manifest_bytes, align = 4 },
+         zip.Entry { name = "lib/arm64-v8a/lib{LIBRARY}.so", data = file.read_bytes(library_path), align = 16384 }
+@@ -61,3 +68,10 @@ program(source_path, output_path, heap_text) {
+     file.write_bytes(output_path, zip.archive(entries))
+     out none
+ }
++
++skill stem(path) {
++    @parts = str.split(path, "/")
++    @last = group.get(parts, group.count(parts) - 1)
++    (str.ends_with(last, ".saltic") == yes) { out str.slice(last, 0, str.bytes(last) - 7) }
++    out last
++}

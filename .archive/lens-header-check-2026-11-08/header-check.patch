@@ -1,0 +1,196 @@
+commit 5111d194de93c5bfcaf280ee3fdcfa07d82378b2
+Author: Zephyr <zephyr.muldash@gmail.com>
+Date:   Sun Nov 8 23:02:00 2026 +0500
+
+    feat: lens check сверяет шапку с кодом — skill и Box
+
+diff --git a/workbench/agent/lens/look.saltic b/workbench/agent/lens/look.saltic
+index 544e83f..efa5e22 100644
+--- a/workbench/agent/lens/look.saltic
++++ b/workbench/agent/lens/look.saltic
+@@ -3,14 +3,21 @@
+ -- родитель workbench/agent/lens.
+ -- Модуль — путь к файлу или имя через точки; корни core, io, selfhost — в
+ -- soul/seed, canonical — в soul, остальное — от корня репозитория.
++-- Сверка шапки: верхний skill и Box названы в ней целым словом (буквы, цифры
++-- и _; многоточие и русские буквы слово не продолжают). Имя перед скобкой
++-- есть среди них. program( — форма языка, не навык файла.
+ --
+ -- path_of(subject) -> путь файла модуля; NoModule
+ -- check(path) -> ["ok"] или строки «код|строка|столбец|текст»; файл без
+ --     program — модуль, missing_program у него не ошибка; лимиты канона
+---     (workbench/check/limits/canon) — строкой «limits|1|1|…»
++--     (workbench/check/limits/canon) — строкой «limits|1|1|…»; шапка —
++--     строками «header|строка|1|текст»
+ -- api(path) -> строки: файл, шапка, верхний уровень (skill, Box, константы)
+ -- find(name) -> строки: где определено и где встречается, по git ls-files
+--- Внутри: module(text), header(text), top_level / commented / definition / mention(line…)
++-- Внутри: module(text), header(text), top_level / commented / definition /
++--     mention(line…); name_byte(code), whole_at(text, at, size), named(text,
++--     name); leading_name(text), skill_name / box_name / top_name(line);
++--     name_ending(text, at), paren_names(text), header_gaps(path, text)
+ 
+ use io.file
+ use core.str
+@@ -22,6 +29,10 @@ use workbench.check.limits.canon
+ 
+ ROOTS = ["core", "io", "selfhost"]
+ LIMIT = 200
++SPACE = 32
++TAB = 9
++NEWLINE = 10
++PAREN = 40
+ 
+ skill path_of(subject) {
+     (str.ends_with(subject, ".saltic") == yes) { out subject }
+@@ -63,6 +74,7 @@ skill check(path) {
+     }
+     @said = canon.verdict(path, text, canon.known())
+     (str.bytes(said) > 0) { found = group.add(found, "limits|1|1|{path}: лимиты канона: {said}") }
++    drum (header_gaps(path, text)) { found = group.add(found, beat) }
+     (group.count(found) == 0) { out ["ok"] }
+     out found
+ }
+@@ -79,6 +91,142 @@ skill header(text) {
+     out made
+ }
+ 
++skill name_byte(code) {
++    (code == 95) { out yes }
++    (code >= 48) {
++        (code <= 57) { out yes }
++    }
++    (code >= 65) {
++        (code <= 90) { out yes }
++    }
++    (code >= 97) {
++        (code <= 122) { out yes }
++    }
++    out no
++}
++
++skill whole_at(text, at, size) {
++    (at > 0) {
++        (name_byte(str.byte(text, at - 1)) == yes) { out no }
++    }
++    @after = at + size
++    (after < str.bytes(text)) {
++        (name_byte(str.byte(text, after)) == yes) { out no }
++    }
++    out yes
++}
++
++skill named(text, name) {
++    @size = str.bytes(name)
++    (size == 0) { out no }
++    @total = str.bytes(text)
++    (total < size) { out no }
++    drum (total - size + 1) {
++        (str.starts_at(text, name, beat) == yes) {
++            (whole_at(text, beat, size) == yes) { out yes }
++        }
++    }
++    out no
++}
++
++skill leading_name(text) {
++    @end = 0
++    @size = str.bytes(text)
++    always {
++        (end == size) { leave }
++        (name_byte(str.byte(text, end)) == no) { leave }
++        end = end + 1
++    }
++    out str.slice(text, 0, end)
++}
++
++skill skill_name(line) {
++    (str.starts_with(line, "skill ") == no) { out "" }
++    @rest = str.slice(line, 6, str.bytes(line))
++    @called = leading_name(rest)
++    (str.bytes(called) == 0) { out "" }
++    @after = str.bytes(called)
++    (after < str.bytes(rest)) {
++        (str.byte(rest, after) == PAREN) { out called }
++    }
++    out ""
++}
++
++skill box_name(line) {
++    @called = leading_name(line)
++    (str.bytes(called) == 0) { out "" }
++    @mark = "{called} = Box"
++    (str.starts_with(line, mark) == no) { out "" }
++    @after = str.bytes(mark)
++    (after < str.bytes(line)) {
++        (name_byte(str.byte(line, after)) == yes) { out "" }
++    }
++    out called
++}
++
++skill top_name(line) {
++    (str.bytes(line) == 0) { out "" }
++    (str.byte(line, 0) == SPACE) { out "" }
++    (str.byte(line, 0) == TAB) { out "" }
++    (str.starts_with(line, "skill ") == yes) { out skill_name(line) }
++    out box_name(line)
++}
++
++skill name_ending(text, at) {
++    @start = at
++    always {
++        (start == 0) { leave }
++        (name_byte(str.byte(text, start - 1)) == no) { leave }
++        start = start - 1
++    }
++    out str.slice(text, start, at)
++}
++
++skill paren_names(text) {
++    @found = []
++    drum (str.bytes(text)) {
++        (str.byte(text, beat) == PAREN) {
++            @called = name_ending(text, beat)
++            (str.bytes(called) > 0) {
++                ((called == "program") == no) {
++                    (group.contains(found, called) == no) { found = group.add(found, called) }
++                }
++            }
++        }
++    }
++    out found
++}
++
++skill header_gaps(path, text) {
++    @face = str.join(header(text), "\n")
++    @have = []
++    @gaps = []
++    @body = text
++    (str.ends_with(text, "\n") == no) { body = str.concat(text, "\n") }
++    @start = 0
++    @number = 1
++    drum (str.bytes(body)) {
++        (str.byte(body, beat) == NEWLINE) {
++            @line = str.slice(body, start, beat)
++            @called = top_name(line)
++            (str.bytes(called) > 0) {
++                have = group.add(have, called)
++                (named(face, called) == no) {
++                    gaps = group.add(gaps, "header|{number}|1|{path}: skill {called} не назван в шапке")
++                }
++            }
++            start = beat + 1
++            number = number + 1
++        }
++    }
++    drum (paren_names(face)) {
++        (group.contains(have, beat) == no) {
++            gaps = group.add(gaps, "header|1|1|{path}: в шапке есть {beat}(…), а в коде такого skill нет")
++        }
++    }
++    out gaps
++}
++
+ skill top_level(line) {
+     (str.starts_with(line, "skill ") == yes) { out yes }
+     (str.starts_with(line, "program(") == yes) { out yes }

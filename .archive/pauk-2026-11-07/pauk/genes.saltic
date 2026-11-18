@@ -1,0 +1,139 @@
+-- pauk/genes — геном паука, случайность, скрещивание, мутация.
+--
+-- layout генома (33 числа): [freq, a0,p0,o0, ..., a7,p7,o7, i0, ..., i7] —
+--     i (с TUCK_AT) — насколько лапа подтянута к телу, 0…TUCK_HIGH
+-- make_manual() -> геном        преимущественно ручная походка для этапа 1
+-- make_random(seed) -> [seed, genome]
+-- crossover(a, b, seed) -> [seed, genome]
+-- mutate(genome, seed) -> [seed, genome]
+-- clamp_genome(genome) -> genome
+
+use core.group
+use core.num
+use os.target.uefi_x86_64.programs.pauk.body
+
+FREQ_LOW = 250
+FREQ_HIGH = 900
+AMP_LOW = 0
+AMP_HIGH = 70
+PHASE_TURN = 411775
+TUCK_AT = 25
+TUCK_HIGH = 64
+
+skill make_manual() {
+    @g = [520]
+    drum (8) {
+        @amp = 40
+        @phase = PHASE_TURN * beat / 8
+        (num.mod(beat, 2) == 1) { phase = phase + PHASE_TURN / 2 }
+        @off = 0
+        g = group.add(g, amp)
+        g = group.add(g, phase)
+        g = group.add(g, off)
+    }
+    drum (8) { g = group.add(g, TUCK_HIGH / 2) }
+    out g
+}
+
+skill rng(seed, limit) {
+    (limit <= 0) { out [seed, 0] }
+    @s = seed
+    s = num.mod(num.mod(s, 16777216) * 1103515 + 12345, 16777216)
+    @v = num.mod(s, limit)
+    (v < 0) { v = 0 - v }
+    out [s, v]
+}
+
+skill make_random(seed_in) {
+    @seed = seed_in
+    @g = []
+    @r = rng(seed, FREQ_HIGH - FREQ_LOW + 1)
+    seed = group.get(r, 0)
+    g = group.add(g, FREQ_LOW + group.get(r, 1))
+    drum (8) {
+        @r1 = rng(seed, AMP_HIGH - AMP_LOW + 1)
+        seed = group.get(r1, 0)
+        @r2 = rng(seed, PHASE_TURN)
+        seed = group.get(r2, 0)
+        @r3 = rng(seed, 61)
+        seed = group.get(r3, 0)
+        g = group.add(g, AMP_LOW + group.get(r1, 1))
+        g = group.add(g, group.get(r2, 1))
+        g = group.add(g, group.get(r3, 1) - 30)
+    }
+    drum (8) {
+        @r4 = rng(seed, TUCK_HIGH + 1)
+        seed = group.get(r4, 0)
+        g = group.add(g, group.get(r4, 1))
+    }
+    out [seed, g]
+}
+
+skill crossover(a, b, seed_in) {
+    @seed = seed_in
+    @g = []
+    g = group.add(g, group.get(a, 0))
+    @flip = 0
+    drum (8) {
+        flip = 1 - flip
+        @base = 1 + beat * 3
+        @src = a
+        (flip == 1) { src = b }
+        g = group.add(g, group.get(src, base))
+        g = group.add(g, group.get(src, base + 1))
+        g = group.add(g, group.get(src, base + 2))
+    }
+    drum (8) {
+        flip = 1 - flip
+        @src = a
+        (flip == 1) { src = b }
+        g = group.add(g, group.get(src, TUCK_AT + beat))
+    }
+    out [seed, g]
+}
+
+skill mutate(genome, seed_in) {
+    @seed = seed_in
+    @g = group.slice(genome, 0, group.count(genome))
+    @n = group.count(g)
+    @changes = 6
+    drum (changes) {
+        @r = rng(seed, n)
+        seed = group.get(r, 0)
+        @idx = group.get(r, 1)
+        (idx < 1) { idx = 1 }
+        @cur = group.get(g, idx)
+        @delta = 0
+        @r2 = rng(seed, 21)
+        seed = group.get(r2, 0)
+        delta = group.get(r2, 1) - 10
+        @nextv = cur + delta
+        (idx == 0) { nextv = body.clamp(nextv, FREQ_LOW, FREQ_HIGH) }
+        (num.mod(idx, 3) == 1) { nextv = body.clamp(nextv, AMP_LOW, AMP_HIGH) }
+        (num.mod(idx, 3) == 2) { 
+            nextv = num.mod(nextv + PHASE_TURN, PHASE_TURN)
+        }
+        (num.mod(idx, 3) == 0) {
+            (idx > 0) { nextv = body.clamp(nextv, 0 - 30, 30) }
+        }
+        (idx >= TUCK_AT) { nextv = body.clamp(cur + delta, 0, TUCK_HIGH) }
+        g = group.tree_replaced(g, idx, nextv)
+    }
+    out [seed, g]
+}
+
+skill clamp_genome(genome) {
+    @g = group.slice(genome, 0, group.count(genome))
+    g = group.tree_replaced(g, 0, body.clamp(group.get(g, 0), FREQ_LOW, FREQ_HIGH))
+    drum (8) {
+        @base = 1 + beat * 3
+        @a = body.clamp(group.get(g, base), AMP_LOW, AMP_HIGH)
+        @p = num.mod(group.get(g, base + 1) + PHASE_TURN, PHASE_TURN)
+        @o = body.clamp(group.get(g, base + 2), 0 - 30, 30)
+        g = group.tree_replaced(g, base, a)
+        g = group.tree_replaced(g, base + 1, p)
+        g = group.tree_replaced(g, base + 2, o)
+    }
+    drum (group.count(g) - TUCK_AT) { g = group.tree_replaced(g, TUCK_AT + beat, body.clamp(group.get(g, TUCK_AT + beat), 0, TUCK_HIGH)) }
+    out g
+}

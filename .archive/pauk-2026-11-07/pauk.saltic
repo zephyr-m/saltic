@@ -1,0 +1,152 @@
+-- pauk — эволюция ходьбы трёхмерного паука на Saltic.
+--
+-- program() — вход: поколения, показ лучшего, надписи, график, клавиши.
+-- Поколение — все пауки на экране: body.POPULATION синусоидных и столько же
+-- нейро (pauk/brain, бирюзовые). Оценка — их забег на виду, в фоне ничего не
+-- считается; забег кончается, когда первый пересёк черту body.FINISH или вышел
+-- запас body.STEPS шагов, — next_generation: отбор, потомство, новый забег.
+-- score(state) -> пройденное минус штраф за лежание.
+-- Лучший — на диске (pauk/best): при запуске эволюция продолжается с него,
+-- новый рекорд записывается сразу
+
+use core.group
+use core.num
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.network.reply
+use os.target.uefi_x86_64.network.remote
+use os.target.uefi_x86_64.screen.clay.stage
+use os.target.uefi_x86_64.screen.clay.mesh
+use os.target.uefi_x86_64.screen.clay.forms
+use os.target.uefi_x86_64.screen.clay.scene
+use os.uiengine.canvas
+use os.uiengine.fonts
+use os.target.uefi_x86_64.programs.pauk.body
+use os.target.uefi_x86_64.programs.pauk.physics
+use os.target.uefi_x86_64.programs.pauk.genes
+use os.target.uefi_x86_64.programs.pauk.evolution
+use os.target.uefi_x86_64.programs.pauk.view
+use os.target.uefi_x86_64.programs.pauk.best
+use os.target.uefi_x86_64.programs.pauk.brain
+
+PAUSE = 1000
+SCAN_ESCAPE = 23
+SCAN_LEFT = 4
+SCAN_RIGHT = 3
+SPACE = 32
+
+Session = Box {
+    history = [],
+    troop = [],
+    flag = 0,
+    thought = 0
+}
+
+skill score(state) {
+    out state.x - state.lying * physics.LIE_PENALTY
+}
+
+skill next_generation(base, evo, neuro, session) {
+    @sines = group.count(evo.population)
+    @scores = []
+    drum (session.troop) { scores = group.add(scores, score(beat)) }
+    evo.distances = group.slice(scores, 0, sines)
+    neuro.scores = group.slice(scores, sines, group.count(scores))
+    @record = evo.best_distance
+    session.flag = record
+    evolution.finish(evo)
+    (evo.best_distance > record) { best.save(base, evo.generation, evo.best_distance, evo.best_genome) }
+    session.history = group.add(session.history, evo.best_distance)
+    @thought = neuro.best_distance
+    session.thought = thought
+    brain.finish_neuro(neuro)
+    (neuro.best_distance > thought) { best.save_as(base, best.BRAIN, neuro.generation, neuro.best_distance, neuro.best_brain) }
+    session.troop = view.troop(evo.population, neuro.population)
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    @front = graphics.open(base)
+    uefi.forget_keys(base)
+    @link = remote.open_remote() rescue |err| { none }
+    @set = stage.open_stage(base, front)
+    @world = set.scene
+    world.ground = view.floor(front)
+    @kit = view.kit(set.back)
+    @pages = stage.pages(set)
+    ((link == none) == no) {
+        remote.own(link, set.sky.frame, pages)
+        remote.own(link, set.back.frame, pages)
+    }
+    @moment = uefi.now(base)
+    @seed = moment.minute * 60 + moment.second + 1
+    (seed <= 0) { seed = 1 }
+    @evo = evolution.init_state(seed)
+    @saved = best.load(base)
+    ((saved == none) == no) { evo = evolution.resume(seed, saved) }
+    @neuro = brain.init_neuro(seed + 1)
+    @mind = best.load_from(base, best.BRAIN)
+    ((mind == none) == no) {
+        (group.count(mind.genome) == brain.WEIGHTS) { neuro = brain.resume_neuro(seed + 1, mind) }
+    }
+    @session = Session { troop = view.troop(evo.population, neuro.population), flag = evo.best_distance, thought = neuro.best_distance }
+    @paused = no
+    @speed = 3
+    @quit = no
+    always {
+        ((link == none) == no) { remote.serve(link) }
+        @key = uefi.poll_key(base, PAUSE)
+        (key.ready == yes) {
+            (key.scan == SCAN_ESCAPE) { quit = yes }
+            (key.scan == SCAN_LEFT) {
+                speed = speed - 1
+                (speed < 1) { speed = 1 }
+            }
+            (key.scan == SCAN_RIGHT) {
+                speed = speed + 1
+                (speed > 12) { speed = 12 }
+            }
+            (key.char == SPACE) { paused = paused == no }
+        }
+        (quit == yes) {
+            stage.close_stage(base, set)
+            @top = evo.best_distance
+            @gen = evo.generation
+            reply.home("паук: поколений {gen}, рекорд {top}")
+            out none
+        }
+        (paused == no) {
+            @rep = speed
+            drum (rep) {
+                drum (session.troop) {
+                    (beat.t < body.STEPS) {
+                        (group.count(beat.brain) > 0) { beat.aims = brain.think(beat, beat.brain) }
+                        physics.step(beat)
+                    }
+                }
+            }
+            @running = no
+            @crossed = no
+            drum (session.troop) {
+                (beat.t < body.STEPS) { running = yes }
+                (beat.x >= body.FINISH) { crossed = yes }
+            }
+            (crossed == yes) { running = no }
+            (running == no) { next_generation(base, evo, neuro, session) }
+        }
+        view.render(set, session.troop, base, session.flag, session.thought, kit)
+        view.overlay(front, evo.generation, evo.best_distance, evo.average_distance, session.history)
+        @thinker_best = neuro.best_distance
+        fonts.draw_text(front, 12, 70, "нейро-паук {thinker_best}", canvas.Rgb { red = 13, green = 148, blue = 136 }, fonts.REGULAR)
+        ((link == none) == no) {
+            @g = evo.generation
+            @b = evo.best_distance
+            @a = evo.average_distance
+            @n = neuro.best_distance
+            remote.tell(link, "поколение {g}, рекорд {b}, среднее {a}, нейро {n}")
+        }
+    }
+    out none
+}

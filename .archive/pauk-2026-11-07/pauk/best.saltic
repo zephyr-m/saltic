@@ -1,0 +1,64 @@
+-- pauk/best — лучший паук на диске Acer: \SALTIC\PAUK\BEST5.BIN (гены
+-- синусоид) и \SALTIC\PAUK\BRAIN5.BIN (веса мозга нейро-паука), чтобы при
+-- следующем запуске эволюция шла дальше, а не с нуля. «5» — физика с массой,
+-- разгоном, равновесием и высотой от ног; паук рождается лёжа и сам решает,
+-- куда ставить лапы: файлы прежних физик (BEST…BEST4, BRAIN…BRAIN4)
+-- остаются на диске. Файл — 32-битные слова:
+-- поколение, рекорд, число генов, гены; к каждому слову прибавлен BIAS (гены
+-- бывают отрицательными). Пишется через участок scratch с PLACE.
+-- Чтение и запись — agent.programs (keep_file / load_file): если паук
+-- переедет в main, эти две функции стоит перенести в storage.
+--
+-- Saved { generation, distance, genome } — что лежит в файле
+-- save(base, generation, distance, genome) — записать; ошибки диска глотает
+-- load(base) -> Saved или none — нет файла или он битый
+-- save_as(base, file, …) / load_from(base, file) — то же для файла file
+--     (BRAIN — мозг)
+
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.agent.programs
+
+FOLDER = "PAUK"
+FILE = "BEST5.BIN"
+BRAIN = "BRAIN5.BIN"
+PLACE = 8192
+BIAS = 1073741824
+LIMIT = 8192
+
+Saved = Box {
+    generation = 0,
+    distance = 0,
+    genome = []
+}
+
+skill save(base, generation, distance, genome) {
+    out save_as(base, FILE, generation, distance, genome)
+}
+
+skill load(base) {
+    out load_from(base, FILE)
+}
+
+skill save_as(base, file, generation, distance, genome) {
+    @place = firmware.scratch(base, PLACE)
+    @words = group.concat([generation, distance, group.count(genome)], genome)
+    drum (group.count(words)) { firmware.write_phys32(place, base, beat * 4, group.get(words, beat) + BIAS) }
+    programs.keep_file(base, place, group.count(words) * 4, FOLDER, file) rescue |err| { none }
+    out none
+}
+
+skill word(base, place, index) {
+    out firmware.read32(place, base, index * 4) - BIAS
+}
+
+skill load_from(base, file) {
+    @place = firmware.scratch(base, PLACE)
+    @size = programs.load_file(base, "{FOLDER}\\{file}", place, LIMIT) rescue |err| { out none }
+    (size < 12) { out none }
+    @count = word(base, place, 2)
+    ((count * 4 + 12 == size) == no) { out none }
+    @genome = []
+    drum (count) { genome = group.add(genome, word(base, place, 3 + beat)) }
+    out Saved { generation = word(base, place, 0), distance = word(base, place, 1), genome = genome }
+}

@@ -1,0 +1,241 @@
+-- pauk/brain — нейро-паук: маленькая нейросеть на целых числах вместо
+-- синусоид и её эволюция (нейроэволюция). Сеть каждый шаг смотрит на тело и
+-- решает, куда тянуть каждую ногу и поднимать ли её; как ходить — не задано.
+--
+-- Сеть: INPUTS входов → HIDDEN нейронов → OUTPUTS выходов, у каждого нейрона
+-- свой сдвиг. Числа — в долях ONE (256 = 1,0). Нейрон: сумма вход · вес / ONE
+-- плюс сдвиг, зажатая в −ONE…ONE (жёсткий «tanh»).
+-- Входы: часы sin и cos (без них ритму не из чего взяться), высота тела,
+-- на ногу — стоит ли ступня и где она относительно покоя (вперёд-назад).
+-- Выходы: на ногу — вынос вперёд-назад (до REACH), подъём (до LIFT, только
+-- положительный) и подтяжка к телу (0…TUCK: куда ставить ступню — решает мозг).
+--
+-- WEIGHTS — сколько весов; NeuroState { population, generation,
+--     best_distance, best_brain, scores, seed, average_distance }
+-- senses(state) -> входы; think(state, weights) -> цели ног для physics
+-- evaluate(weights) -> пройденное по x минус штраф за лежание
+-- random_brain(seed) -> [seed, веса]; mutate / crossover(…, seed) -> [seed, веса]
+-- init_neuro(seed) -> NeuroState; evolve_neuro(state) -> NeuroState (разом)
+-- think_next(state) -> yes, когда оценены все; finish_neuro(state) — отбор
+--     по state.scores (по кусочку на кадр, как evolution.evaluate_next)
+-- resume_neuro(seed, saved) -> NeuroState — продолжить с сохранённого мозга
+--     (pauk/best.Saved): он сам, ELITE − 1 его мутантов, остальные случайные
+
+use core.group
+use core.num
+use os.target.uefi_x86_64.screen.geometry
+use os.target.uefi_x86_64.programs.pauk.body
+use os.target.uefi_x86_64.programs.pauk.genes
+use os.target.uefi_x86_64.programs.pauk.physics
+
+ONE = 256
+INPUTS = 19
+HIDDEN = 8
+OUTPUTS = 24
+WEIGHTS = 376
+TUCK = 256
+CLOCK = 4096
+REACH = 140
+LIFT = 70
+START = 256
+NUDGE = 128
+NUDGE_EVERY = 3
+LIE_PENALTY = 40
+
+NeuroState = Box {
+    population = [],
+    generation = 0,
+    best_distance = 0,
+    best_brain = [],
+    scores = [],
+    seed = 1,
+    average_distance = 0
+}
+
+skill squash(value) {
+    (value > ONE) { out ONE }
+    (value < 0 - ONE) { out 0 - ONE }
+    out value
+}
+
+skill senses(state) {
+    @angle = num.mod(state.t * CLOCK, geometry.TURN)
+    @inputs = [geometry.sine(angle) * ONE / geometry.ONE, geometry.cosine(angle) * ONE / geometry.ONE, (state.y - body.BODY_Y) * ONE / body.BODY_Y]
+    drum (body.LEG_COUNT) {
+        @foot = group.get(state.legs, beat)
+        @stand = 0 - ONE
+        (foot.planted == yes) { stand = ONE }
+        inputs = group.add(inputs, stand)
+    }
+    drum (body.LEG_COUNT) {
+        @foot = group.get(state.legs, beat)
+        inputs = group.add(inputs, squash((foot.x - state.x - body.rest_x(beat)) * ONE / body.REST_R))
+    }
+    out inputs
+}
+
+skill layer(values, weights, first, width) {
+    @size = group.count(values)
+    @out_values = []
+    drum (width) {
+        @at = first + beat * (size + 1)
+        @sum = group.get(weights, at + size)
+        drum (size) { sum = sum + group.get(values, beat) * group.get(weights, at + beat) / ONE }
+        out_values = group.add(out_values, squash(sum))
+    }
+    out out_values
+}
+
+skill think(state, weights) {
+    @hidden = layer(senses(state), weights, 0, HIDDEN)
+    @outputs = layer(hidden, weights, (INPUTS + 1) * HIDDEN, OUTPUTS)
+    @aims = []
+    drum (body.LEG_COUNT) {
+        @lift = group.get(outputs, beat * 3 + 1) * LIFT / ONE
+        (lift < 0) { lift = 0 }
+        aims = group.add(aims, [group.get(outputs, beat * 3) * REACH / ONE, lift, (group.get(outputs, beat * 3 + 2) + ONE) * TUCK / (2 * ONE)])
+    }
+    out aims
+}
+
+skill evaluate(weights) {
+    @state = physics.init_state([])
+    drum (body.STEPS) {
+        state.aims = think(state, weights)
+        physics.step(state)
+    }
+    out state.x - state.lying * LIE_PENALTY
+}
+
+skill random_brain(seed_in) {
+    @seed = seed_in
+    @weights = []
+    drum (WEIGHTS) {
+        @r = genes.rng(seed, START * 2 + 1)
+        seed = group.get(r, 0)
+        weights = group.add(weights, group.get(r, 1) - START)
+    }
+    out [seed, weights]
+}
+
+skill mutate(weights, seed_in) {
+    @seed = seed_in
+    @changed = []
+    drum (weights) {
+        @value = beat
+        @r = genes.rng(seed, NUDGE_EVERY)
+        seed = group.get(r, 0)
+        (group.get(r, 1) == 0) {
+            @n = genes.rng(seed, NUDGE * 2 + 1)
+            seed = group.get(n, 0)
+            value = value + group.get(n, 1) - NUDGE
+        }
+        changed = group.add(changed, value)
+    }
+    out [seed, changed]
+}
+
+skill crossover(a, b, seed_in) {
+    @seed = seed_in
+    @child = []
+    drum (group.count(a)) {
+        @r = genes.rng(seed, 2)
+        seed = group.get(r, 0)
+        pick {
+            (group.get(r, 1) == 0) { child = group.add(child, group.get(a, beat)) }
+            { child = group.add(child, group.get(b, beat)) }
+        }
+    }
+    out [seed, child]
+}
+
+skill init_neuro(seed_in) {
+    @seed = seed_in
+    @population = []
+    drum (body.POPULATION) {
+        @r = random_brain(seed)
+        seed = group.get(r, 0)
+        population = group.add(population, group.get(r, 1))
+    }
+    out NeuroState { population = population, seed = seed }
+}
+
+skill resume_neuro(seed_in, saved) {
+    @state = init_neuro(seed_in)
+    @seed = state.seed
+    @population = [saved.genome]
+    drum (body.ELITE - 1) {
+        @changed = mutate(saved.genome, seed)
+        seed = group.get(changed, 0)
+        population = group.add(population, group.get(changed, 1))
+    }
+    state.population = group.concat(population, group.slice(state.population, body.ELITE, group.count(state.population)))
+    state.seed = seed
+    state.generation = saved.generation
+    state.best_distance = saved.distance
+    state.best_brain = saved.genome
+    out state
+}
+
+skill think_next(state) {
+    @done = group.count(state.scores)
+    (done < group.count(state.population)) { state.scores = group.add(state.scores, evaluate(group.get(state.population, done))) }
+    out group.count(state.scores) >= group.count(state.population)
+}
+
+skill evolve_neuro(state) {
+    state.scores = []
+    drum (state.population) { think_next(state) }
+    out finish_neuro(state)
+}
+
+skill finish_neuro(state) {
+    @seed = state.seed
+    @scores = state.scores
+    @sum = 0
+    drum (scores) { sum = sum + beat }
+    @count = group.count(scores)
+    @elite = []
+    @used = []
+    drum (body.ELITE) {
+        @pick_at = -1
+        @pick_score = 0
+        drum (count) {
+            (group.contains(used, beat) == no) {
+                ((pick_at < 0) == yes) {
+                    pick_at = beat
+                    pick_score = group.get(scores, beat)
+                }
+                (group.get(scores, beat) > pick_score) {
+                    pick_at = beat
+                    pick_score = group.get(scores, beat)
+                }
+            }
+        }
+        used = group.add(used, pick_at)
+        elite = group.add(elite, group.get(state.population, pick_at))
+    }
+    @top = group.get(scores, group.get(used, 0))
+    (state.generation == 0) { state.best_distance = top - 1 }
+    (top > state.best_distance) {
+        state.best_distance = top
+        state.best_brain = group.get(elite, 0)
+    }
+    @next = elite
+    drum (count - body.ELITE) {
+        @r1 = genes.rng(seed, body.ELITE)
+        seed = group.get(r1, 0)
+        @r2 = genes.rng(seed, body.ELITE)
+        seed = group.get(r2, 0)
+        @mixed = crossover(group.get(elite, group.get(r1, 1)), group.get(elite, group.get(r2, 1)), seed)
+        seed = group.get(mixed, 0)
+        @changed = mutate(group.get(mixed, 1), seed)
+        seed = group.get(changed, 0)
+        next = group.add(next, group.get(changed, 1))
+    }
+    state.population = next
+    state.seed = seed
+    state.generation = state.generation + 1
+    state.average_distance = sum / count
+    out state
+}

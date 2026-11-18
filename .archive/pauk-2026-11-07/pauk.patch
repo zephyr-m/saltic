@@ -1,0 +1,3193 @@
+diff --git a/os/target/uefi_x86_64/programs/pauk.saltic b/os/target/uefi_x86_64/programs/pauk.saltic
+index 98b3a0b..9bec58d 100644
+--- a/os/target/uefi_x86_64/programs/pauk.saltic
++++ b/os/target/uefi_x86_64/programs/pauk.saltic
+@@ -1,11 +1,11 @@
+ -- pauk — эволюция ходьбы трёхмерного паука на Saltic.
+ --
+ -- program() — вход: поколения, показ лучшего, надписи, график, клавиши.
+--- Рядом с пятёркой синусоидных — нейро-паук (pauk/brain), бирюзовый: лучший
+--- мозг своей нейроэволюции; его веса тоже на диске (best.BRAIN).
+--- Поколение считается по кусочку на кадр (SINE_PER_FRAME синусоидных и
+--- NEURO_PER_FRAME нейро-пауков), а прошлые чемпионы тем временем ходят —
+--- картинка, клавиши и сеть не замирают.
++-- Поколение — все пауки на экране: body.POPULATION синусоидных и столько же
++-- нейро (pauk/brain, бирюзовые). Оценка — их забег на виду, в фоне ничего не
++-- считается; забег кончается, когда первый пересёк черту body.FINISH или вышел
++-- запас body.STEPS шагов, — next_generation: отбор, потомство, новый забег.
++-- score(state) -> пройденное минус штраф за лежание.
+ -- Лучший — на диске (pauk/best): при запуске эволюция продолжается с него,
+ -- новый рекорд записывается сразу
+ 
+@@ -35,13 +35,35 @@ SCAN_ESCAPE = 23
+ SCAN_LEFT = 4
+ SCAN_RIGHT = 3
+ SPACE = 32
+-SINE_PER_FRAME = 3
+-NEURO_PER_FRAME = 1
+ 
+ Session = Box {
+     history = [],
+     troop = [],
+-    counting = no
++    flag = 0,
++    thought = 0
++}
++
++skill score(state) {
++    out state.x - state.lying * physics.LIE_PENALTY
++}
++
++skill next_generation(base, evo, neuro, session) {
++    @sines = group.count(evo.population)
++    @scores = []
++    drum (session.troop) { scores = group.add(scores, score(beat)) }
++    evo.distances = group.slice(scores, 0, sines)
++    neuro.scores = group.slice(scores, sines, group.count(scores))
++    @record = evo.best_distance
++    session.flag = record
++    evolution.finish(evo)
++    (evo.best_distance > record) { best.save(base, evo.generation, evo.best_distance, evo.best_genome) }
++    session.history = group.add(session.history, evo.best_distance)
++    @thought = neuro.best_distance
++    session.thought = thought
++    brain.finish_neuro(neuro)
++    (neuro.best_distance > thought) { best.save_as(base, best.BRAIN, neuro.generation, neuro.best_distance, neuro.best_brain) }
++    session.troop = view.troop(evo.population, neuro.population)
++    out none
+ }
+ 
+ program() {
+@@ -50,6 +72,9 @@ program() {
+     uefi.forget_keys(base)
+     @link = remote.open_remote() rescue |err| { none }
+     @set = stage.open_stage(base, front)
++    @world = set.scene
++    world.ground = view.floor(front)
++    @kit = view.kit(set.back)
+     @pages = stage.pages(set)
+     ((link == none) == no) {
+         remote.own(link, set.sky.frame, pages)
+@@ -66,11 +91,9 @@ program() {
+     ((mind == none) == no) {
+         (group.count(mind.genome) == brain.WEIGHTS) { neuro = brain.resume_neuro(seed + 1, mind) }
+     }
+-    @session = Session { troop = [physics.init_state(genes.make_manual())] }
+-    @generation_frames = 0
++    @session = Session { troop = view.troop(evo.population, neuro.population), flag = evo.best_distance, thought = neuro.best_distance }
+     @paused = no
+     @speed = 3
+-    @show_frames = 300
+     @quit = no
+     always {
+         ((link == none) == no) { remote.serve(link) }
+@@ -95,32 +118,6 @@ program() {
+             out none
+         }
+         (paused == no) {
+-            (generation_frames == 0) {
+-                evo.distances = []
+-                neuro.scores = []
+-                session.counting = yes
+-                generation_frames = -1
+-            }
+-            (session.counting == yes) {
+-                drum (SINE_PER_FRAME) { evolution.evaluate_next(evo) }
+-                drum (NEURO_PER_FRAME) { brain.think_next(neuro) }
+-                @sine_done = group.count(evo.distances) >= group.count(evo.population)
+-                @neuro_done = group.count(neuro.scores) >= group.count(neuro.population)
+-                (sine_done == yes) {
+-                    (neuro_done == yes) {
+-                        @record = evo.best_distance
+-                        evo = evolution.finish(evo)
+-                        (evo.best_distance > record) { best.save(base, evo.generation, evo.best_distance, evo.best_genome) }
+-                        session.history = group.add(session.history, evo.best_distance)
+-                        @thought = neuro.best_distance
+-                        neuro = brain.finish_neuro(neuro)
+-                        (neuro.best_distance > thought) { best.save_as(base, best.BRAIN, neuro.generation, neuro.best_distance, neuro.best_brain) }
+-                        session.troop = group.add(view.troop(evo.population), view.thinker(neuro.best_brain))
+-                        session.counting = no
+-                        generation_frames = 1
+-                    }
+-                }
+-            }
+             @rep = speed
+             drum (rep) {
+                 drum (session.troop) {
+@@ -130,20 +127,19 @@ program() {
+                     }
+                 }
+             }
+-            (generation_frames > 0) {
+-                generation_frames = generation_frames + 1
+-                (generation_frames > show_frames) { generation_frames = 0 }
++            @running = no
++            @crossed = no
++            drum (session.troop) {
++                (beat.t < body.STEPS) { running = yes }
++                (beat.x >= body.FINISH) { crossed = yes }
+             }
++            (crossed == yes) { running = no }
++            (running == no) { next_generation(base, evo, neuro, session) }
+         }
+-        view.render(set, session.troop, base)
++        view.render(set, session.troop, base, session.flag, session.thought, kit)
+         view.overlay(front, evo.generation, evo.best_distance, evo.average_distance, session.history)
+         @thinker_best = neuro.best_distance
+         fonts.draw_text(front, 12, 70, "нейро-паук {thinker_best}", canvas.Rgb { red = 13, green = 148, blue = 136 }, fonts.REGULAR)
+-        (session.counting == yes) {
+-            @counted = group.count(evo.distances) + group.count(neuro.scores)
+-            @total = group.count(evo.population) + group.count(neuro.population)
+-            fonts.draw_text(front, 12, 92, "считаю поколение: {counted} из {total}", canvas.ZINC_500, fonts.SMALL)
+-        }
+         ((link == none) == no) {
+             @g = evo.generation
+             @b = evo.best_distance
+diff --git a/os/target/uefi_x86_64/programs/pauk/best.saltic b/os/target/uefi_x86_64/programs/pauk/best.saltic
+index 0351d52..bc3a134 100644
+--- a/os/target/uefi_x86_64/programs/pauk/best.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/best.saltic
+@@ -1,6 +1,9 @@
+--- pauk/best — лучший паук на диске Acer: \SALTIC\PAUK\BEST.BIN (гены
+--- синусоид) и \SALTIC\PAUK\BRAIN.BIN (веса мозга нейро-паука), чтобы при
+--- следующем запуске эволюция шла дальше, а не с нуля. Файл — 32-битные слова:
++-- pauk/best — лучший паук на диске Acer: \SALTIC\PAUK\BEST5.BIN (гены
++-- синусоид) и \SALTIC\PAUK\BRAIN5.BIN (веса мозга нейро-паука), чтобы при
++-- следующем запуске эволюция шла дальше, а не с нуля. «5» — физика с массой,
++-- разгоном, равновесием и высотой от ног; паук рождается лёжа и сам решает,
++-- куда ставить лапы: файлы прежних физик (BEST…BEST4, BRAIN…BRAIN4)
++-- остаются на диске. Файл — 32-битные слова:
+ -- поколение, рекорд, число генов, гены; к каждому слову прибавлен BIAS (гены
+ -- бывают отрицательными). Пишется через участок scratch с PLACE.
+ -- Чтение и запись — agent.programs (keep_file / load_file): если паук
+@@ -17,8 +20,8 @@ use os.target.uefi_x86_64.platform.firmware
+ use os.target.uefi_x86_64.agent.programs
+ 
+ FOLDER = "PAUK"
+-FILE = "BEST.BIN"
+-BRAIN = "BRAIN.BIN"
++FILE = "BEST5.BIN"
++BRAIN = "BRAIN5.BIN"
+ PLACE = 8192
+ BIAS = 1073741824
+ LIMIT = 8192
+diff --git a/os/target/uefi_x86_64/programs/pauk/body.saltic b/os/target/uefi_x86_64/programs/pauk/body.saltic
+index 44535d4..61f2b82 100644
+--- a/os/target/uefi_x86_64/programs/pauk/body.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/body.saltic
+@@ -1,9 +1,11 @@
+ -- pauk/body — тело паука, геометрия и константы физики.
+ --
+--- Константы: STEPS, UPPER, LOWER, BODY_R, REST_R, BODY_Y, LEG_COUNT,
++-- Константы: STEPS (запас шагов забега), FINISH (финишная черта по x), MASS
++--     (масса тела: при LEG_HOLD физики стоять — нужно 4 ступни), UPPER, LOWER, BODY_R, REST_R, BODY_Y, LEG_COUNT,
+ --     POPULATION, ELITE, MUTATIONS
+--- SpiderState { genes, legs, x, y, z, t, lying, aims, brain } — паук: тело,
+---     ступни (physics.Leg), гены, шаг, сколько шагов лежал; у нейро-паука —
++-- SpiderState { genes, legs, x, y, z, t, lying, vx, vy, vz, aims, brain } —
++--     паук: тело, ступни (physics.Leg), гены, шаг, сколько шагов лежал,
++--     скорость тела; у нейро-паука —
+ --     веса мозга и цели ног, которые мозг выдал на этот шаг
+ -- shoulder_x(leg) / shoulder_z(leg) -> смещение плеча от центра тела
+ -- rest_x(leg) / rest_z(leg) -> где стоит ступня в покое, от центра тела
+@@ -12,15 +14,17 @@
+ use core.group
+ use os.target.uefi_x86_64.screen.geometry
+ 
+-STEPS = 600
++STEPS = 1500
++FINISH = 3000
++MASS = 12
+ UPPER = 150
+ LOWER = 150
+ BODY_R = 90
+ REST_R = 200
+ BODY_Y = 300
+ LEG_COUNT = 8
+-POPULATION = 28
+-ELITE = 6
++POPULATION = 2
++ELITE = 1
+ MUTATIONS = 9
+ 
+ SpiderState = Box {
+@@ -31,6 +35,9 @@ SpiderState = Box {
+     z = 0,
+     t = 0,
+     lying = 0,
++    vx = 0,
++    vy = 0,
++    vz = 0,
+     aims = [],
+     brain = []
+ }
+diff --git a/os/target/uefi_x86_64/programs/pauk/brain.saltic b/os/target/uefi_x86_64/programs/pauk/brain.saltic
+index 5985664..abebba9 100644
+--- a/os/target/uefi_x86_64/programs/pauk/brain.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/brain.saltic
+@@ -7,8 +7,8 @@
+ -- плюс сдвиг, зажатая в −ONE…ONE (жёсткий «tanh»).
+ -- Входы: часы sin и cos (без них ритму не из чего взяться), высота тела,
+ -- на ногу — стоит ли ступня и где она относительно покоя (вперёд-назад).
+--- Выходы: на ногу — вынос вперёд-назад (до REACH) и подъём (до LIFT, только
+--- положительный).
++-- Выходы: на ногу — вынос вперёд-назад (до REACH), подъём (до LIFT, только
++-- положительный) и подтяжка к телу (0…TUCK: куда ставить ступню — решает мозг).
+ --
+ -- WEIGHTS — сколько весов; NeuroState { population, generation,
+ --     best_distance, best_brain, scores, seed, average_distance }
+@@ -31,8 +31,9 @@ use os.target.uefi_x86_64.programs.pauk.physics
+ ONE = 256
+ INPUTS = 19
+ HIDDEN = 8
+-OUTPUTS = 16
+-WEIGHTS = 304
++OUTPUTS = 24
++WEIGHTS = 376
++TUCK = 256
+ CLOCK = 4096
+ REACH = 140
+ LIFT = 70
+@@ -90,9 +91,9 @@ skill think(state, weights) {
+     @outputs = layer(hidden, weights, (INPUTS + 1) * HIDDEN, OUTPUTS)
+     @aims = []
+     drum (body.LEG_COUNT) {
+-        @lift = group.get(outputs, beat * 2 + 1) * LIFT / ONE
++        @lift = group.get(outputs, beat * 3 + 1) * LIFT / ONE
+         (lift < 0) { lift = 0 }
+-        aims = group.add(aims, [group.get(outputs, beat * 2) * REACH / ONE, lift])
++        aims = group.add(aims, [group.get(outputs, beat * 3) * REACH / ONE, lift, (group.get(outputs, beat * 3 + 2) + ONE) * TUCK / (2 * ONE)])
+     }
+     out aims
+ }
+diff --git a/os/target/uefi_x86_64/programs/pauk/genes.saltic b/os/target/uefi_x86_64/programs/pauk/genes.saltic
+index 6d5347e..91fc90f 100644
+--- a/os/target/uefi_x86_64/programs/pauk/genes.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/genes.saltic
+@@ -1,6 +1,7 @@
+ -- pauk/genes — геном паука, случайность, скрещивание, мутация.
+ --
+--- layout генома (25 чисел): [freq, a0,p0,o0, ..., a7,p7,o7]
++-- layout генома (33 числа): [freq, a0,p0,o0, ..., a7,p7,o7, i0, ..., i7] —
++--     i (с TUCK_AT) — насколько лапа подтянута к телу, 0…TUCK_HIGH
+ -- make_manual() -> геном        преимущественно ручная походка для этапа 1
+ -- make_random(seed) -> [seed, genome]
+ -- crossover(a, b, seed) -> [seed, genome]
+@@ -16,6 +17,8 @@ FREQ_HIGH = 900
+ AMP_LOW = 0
+ AMP_HIGH = 70
+ PHASE_TURN = 411775
++TUCK_AT = 25
++TUCK_HIGH = 64
+ 
+ skill make_manual() {
+     @g = [520]
+@@ -28,6 +31,7 @@ skill make_manual() {
+         g = group.add(g, phase)
+         g = group.add(g, off)
+     }
++    drum (8) { g = group.add(g, TUCK_HIGH / 2) }
+     out g
+ }
+ 
+@@ -57,6 +61,11 @@ skill make_random(seed_in) {
+         g = group.add(g, group.get(r2, 1))
+         g = group.add(g, group.get(r3, 1) - 30)
+     }
++    drum (8) {
++        @r4 = rng(seed, TUCK_HIGH + 1)
++        seed = group.get(r4, 0)
++        g = group.add(g, group.get(r4, 1))
++    }
+     out [seed, g]
+ }
+ 
+@@ -74,6 +83,12 @@ skill crossover(a, b, seed_in) {
+         g = group.add(g, group.get(src, base + 1))
+         g = group.add(g, group.get(src, base + 2))
+     }
++    drum (8) {
++        flip = 1 - flip
++        @src = a
++        (flip == 1) { src = b }
++        g = group.add(g, group.get(src, TUCK_AT + beat))
++    }
+     out [seed, g]
+ }
+ 
+@@ -101,6 +116,7 @@ skill mutate(genome, seed_in) {
+         (num.mod(idx, 3) == 0) {
+             (idx > 0) { nextv = body.clamp(nextv, 0 - 30, 30) }
+         }
++        (idx >= TUCK_AT) { nextv = body.clamp(cur + delta, 0, TUCK_HIGH) }
+         g = group.tree_replaced(g, idx, nextv)
+     }
+     out [seed, g]
+@@ -118,5 +134,6 @@ skill clamp_genome(genome) {
+         g = group.tree_replaced(g, base + 1, p)
+         g = group.tree_replaced(g, base + 2, o)
+     }
++    drum (group.count(g) - TUCK_AT) { g = group.tree_replaced(g, TUCK_AT + beat, body.clamp(group.get(g, TUCK_AT + beat), 0, TUCK_HIGH)) }
+     out g
+ }
+diff --git a/os/target/uefi_x86_64/programs/pauk/physics.saltic b/os/target/uefi_x86_64/programs/pauk/physics.saltic
+index 849ee4e..150b4a4 100644
+--- a/os/target/uefi_x86_64/programs/pauk/physics.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/physics.saltic
+@@ -1,10 +1,22 @@
+ -- pauk/physics — шагающая физика паука на целых числах. Тело не вращается;
+--- у каждой ноги — ступня. Ступня на земле держится трением и не скользит:
+--- тело сдвигается так, чтобы стоящие ступни остались на своих местах
+--- относительно желаемой походки, — так паук отталкивается. Ступня в
+--- воздухе переносится к своей цели. Меньше трёх ступней на земле — тело
+--- оседает; осело ниже LYING — паук лёг (штраф при оценке). Ступня, которую
+--- тело утащило дальше REACH, срывается и переносится заново.
++-- у каждой ноги — ступня. Ступня на земле приклеена: тело сдвигается так,
++-- чтобы стоящие ступни остались на своих местах относительно желаемой
++-- походки, — так паук отталкивается. Переставить ступню можно, только
++-- подняв её: в воздухе она переносится к цели и опускается. Ступня, которую
++-- тело утащило дальше REACH, срывается и лежит, не держа, пока её не поднимут.
++-- Вес и равновесие: тело весит body.MASS · GRAVITY, стоящая ступня держит
++-- LEG_HOLD — тело стоит, если ступни держат весь вес и центр над опорой
++-- (стоящие ступни есть спереди, сзади, слева и справа от него); не держат —
++-- оседает тем быстрее, чем меньше держат; центр не над опорой — падает с
++-- ускорением GRAVITY. Ниже LYING — лежит (штраф при оценке, тело тормозит
++-- о землю). Высоту дают ноги: нога длиной UPPER + LOWER, чем дальше ступня
++-- от плеча, тем ниже тело (reach_height — среднее по стоящим ступням, не
++-- выше BODY_Y); держат вес — тело поднимается к ней мышцами не быстрее RISE
++-- за шаг, выше неё — оседает. Рождается паук лёжа, лапы раскинуты на SPREAD:
++-- встать — значит переставить ступни под себя, не потеряв опоры.
++-- Разгон: ступни тянут тело к нужному месту силой PUSH, и чем тяжелее тело
++-- (MASS), тем медленнее оно разгоняется и тормозит; без опоры летит по
++-- инерции, гаснущей на 1/(DRAG + 1) за шаг.
+ --
+ -- Походка — гены (genes): на ногу размах, фаза и сдвиг подъёма; общая
+ -- частота. Угол ноги θ = фаза + t · частота · PACE; вынос вперёд-назад —
+@@ -12,12 +24,18 @@
+ -- Эволюции надо найти: поднимать ногу при выносе вперёд, ставить при
+ -- толчке назад, и чтобы на земле всегда стояло хотя бы три ноги.
+ --
+--- Leg { x, y, z, planted } — ступня в мире; planted — стоит на земле
++-- Leg { x, y, z, planted, airborne } — ступня в мире; planted — стоит и
++--     держит, airborne — поднята (переносится или опускается)
++-- balanced(state) -> yes, если центр тела над стоящими ступнями
++-- reach_height(state) -> на какую высоту ноги могут поднять тело
+ -- SpiderState — body.SpiderState: тело x, y, z, ноги, гены, t, сколько
+ --     шагов лежал
+--- init_state(genome) -> SpiderState — паук стоит, ступни под плечами
++-- init_state(genome) -> SpiderState — паук лежит, ступни раскинуты
+ -- init_lane(genome, lane) -> SpiderState — то же на дорожке z = lane
+--- target(state, leg) -> [вынос, подъём] — цель ноги на шаге t по генам
++-- target(state, leg) -> [вынос, подъём, подтяжка] — цель ноги на шаге t по
++--     генам; подтяжка — насколько ближе к телу, чем SPREAD, ставить ступню
++-- home_x / home_z(leg, inward) -> место ступни от центра тела: на SPREAD,
++--     подтянутое на inward (сама физика ступни под тело не ставит)
+ -- aim_of(state, leg) -> цель ноги: из state.aims, если их задал мозг
+ --     (pauk/brain), иначе target
+ -- step(state) — один шаг; тело за шаг сдвигается не больше STRIDE_MAX —
+@@ -30,6 +48,7 @@ use core.group
+ use core.num
+ use os.target.uefi_x86_64.screen.geometry
+ use os.target.uefi_x86_64.programs.pauk.body
++use os.target.uefi_x86_64.programs.pauk.genes
+ 
+ PACE = 8
+ STRIDE = 2
+@@ -37,26 +56,32 @@ LIFT = 70
+ LIFT_SHIFT = 64
+ CARRY = 3
+ DROP = 30
+-FALL = 18
+-RISE = 4
++RISE = 3
++SPREAD = 380
++TUCK_STEP = 4
+ REACH = 230
+ LYING = 140
+ LIE_PENALTY = 40
+ STRIDE_MAX = 10
++GRAVITY = 3
++LEG_HOLD = 9
++PUSH = 4
++DRAG = 15
+ 
+ Leg = Box {
+     x = 0,
+     y = 0,
+     z = 0,
+-    planted = yes
++    planted = yes,
++    airborne = no
+ }
+ 
+ skill init_state(genome) {
+     @legs = []
+     drum (body.LEG_COUNT) {
+-        legs = group.add(legs, Leg { x = body.rest_x(beat), y = 0, z = body.rest_z(beat) })
++        legs = group.add(legs, Leg { x = home_x(beat, 0), y = 0, z = home_z(beat, 0) })
+     }
+-    out body.SpiderState { genes = genome, legs = legs, x = 0, y = body.BODY_Y, z = 0 }
++    out body.SpiderState { genes = genome, legs = legs, x = 0, y = LYING, z = 0 }
+ }
+ 
+ skill init_lane(genome, lane) {
+@@ -76,7 +101,7 @@ skill target(state, leg) {
+     (lift_angle < 0) { lift_angle = lift_angle + geometry.TURN }
+     @lift = geometry.sine(lift_angle)
+     (lift < 0) { lift = 0 }
+-    out [forward, LIFT * lift / geometry.ONE]
++    out [forward, LIFT * lift / geometry.ONE, group.get(genome, genes.TUCK_AT + leg) * TUCK_STEP]
+ }
+ 
+ skill aim_of(state, leg) {
+@@ -91,30 +116,33 @@ skill move_legs(state) {
+     drum (body.LEG_COUNT) {
+         @foot = group.get(state.legs, beat)
+         @aim = aim_of(state, beat)
+-        @want_x = state.x + body.rest_x(beat) + group.get(aim, 0)
+-        @want_z = state.z + body.rest_z(beat)
++        @inward = group.get(aim, 2)
++        @want_x = state.x + home_x(beat, inward) + group.get(aim, 0)
++        @want_z = state.z + home_z(beat, inward)
+         @lift = group.get(aim, 1)
+         pick {
+             (lift > 0) {
+                 foot.planted = no
++                foot.airborne = yes
+                 foot.x = foot.x + (want_x - foot.x) / CARRY
+                 foot.z = foot.z + (want_z - foot.z) / CARRY
+                 foot.y = foot.y + (lift - foot.y) / CARRY
+             }
+             {
+-                (foot.planted == no) {
++                (foot.airborne == yes) {
+                     foot.x = foot.x + (want_x - foot.x) / CARRY
+                     foot.z = foot.z + (want_z - foot.z) / CARRY
+                     foot.y = foot.y - DROP
+                     (foot.y <= 0) {
+                         foot.y = 0
+                         foot.planted = yes
++                        foot.airborne = no
+                     }
+                 }
+                 (foot.planted == yes) {
+                     planted = planted + 1
+-                    sum_x = sum_x + foot.x - body.rest_x(beat) - group.get(aim, 0)
+-                    sum_z = sum_z + foot.z - body.rest_z(beat)
++                    sum_x = sum_x + foot.x - home_x(beat, inward) - group.get(aim, 0)
++                    sum_z = sum_z + foot.z - home_z(beat, inward)
+                 }
+             }
+         }
+@@ -134,6 +162,53 @@ skill slip_far(state) {
+     out none
+ }
+ 
++skill home_x(leg, inward) {
++    out body.rest_x(leg) * (SPREAD - inward) / body.REST_R
++}
++
++skill home_z(leg, inward) {
++    out body.rest_z(leg) * (SPREAD - inward) / body.REST_R
++}
++
++skill reach_height(state) {
++    @leg = body.UPPER + body.LOWER
++    @sum = 0
++    @count = 0
++    drum (body.LEG_COUNT) {
++        @foot = group.get(state.legs, beat)
++        (foot.planted == yes) {
++            @dx = foot.x - state.x - body.shoulder_x(beat)
++            @dz = foot.z - state.z - body.shoulder_z(beat)
++            @far = dx * dx + dz * dz
++            (far < leg * leg) { sum = sum + geometry.root(leg * leg - far) }
++            count = count + 1
++        }
++    }
++    (count == 0) { out 0 }
++    @top = sum / count
++    (top > body.BODY_Y) { top = body.BODY_Y }
++    out top
++}
++
++skill balanced(state) {
++    @ahead = no
++    @behind = no
++    @left = no
++    @right = no
++    drum (state.legs) {
++        (beat.planted == yes) {
++            (beat.x > state.x) { ahead = yes }
++            (beat.x < state.x) { behind = yes }
++            (beat.z > state.z) { right = yes }
++            (beat.z < state.z) { left = yes }
++        }
++    }
++    (ahead == no) { out no }
++    (behind == no) { out no }
++    (left == no) { out no }
++    out right
++}
++
+ skill limit(move) {
+     (move > STRIDE_MAX) { out STRIDE_MAX }
+     (move < 0 - STRIDE_MAX) { out 0 - STRIDE_MAX }
+@@ -143,16 +218,45 @@ skill limit(move) {
+ skill step(state) {
+     @moved = move_legs(state)
+     @planted = group.get(moved, 0)
+-    (planted > 0) {
+-        state.x = state.x + limit(group.get(moved, 1) / planted - state.x)
+-        state.z = state.z + limit(group.get(moved, 2) / planted - state.z)
++    pick {
++        (planted > 0) {
++            state.vx = state.vx + (limit(group.get(moved, 1) / planted - state.x) - state.vx) * PUSH / body.MASS
++            state.vz = state.vz + (limit(group.get(moved, 2) / planted - state.z) - state.vz) * PUSH / body.MASS
++        }
++        {
++            state.vx = state.vx * DRAG / (DRAG + 1)
++            state.vz = state.vz * DRAG / (DRAG + 1)
++        }
+     }
++    state.x = state.x + state.vx
++    state.z = state.z + state.vz
++    @hold = planted * LEG_HOLD
++    (balanced(state) == no) { hold = 0 }
+     pick {
+-        (planted >= 3) { state.y = state.y + (body.BODY_Y - state.y) / RISE }
+-        { state.y = state.y - FALL }
++        (hold >= body.MASS * GRAVITY) {
++            state.vy = 0
++            @top = reach_height(state)
++            pick {
++                (state.y > top) { state.y = state.y - (state.y - top) / 2 }
++                {
++                    @up = top - state.y
++                    (up > RISE) { up = RISE }
++                    state.y = state.y + up
++                }
++            }
++        }
++        {
++            state.vy = state.vy + GRAVITY - hold / body.MASS
++            state.y = state.y - state.vy
++        }
+     }
+     (state.y < LYING) {
+         state.y = LYING
++        state.vy = 0
++    }
++    (state.y <= LYING) {
++        state.vx = state.vx / 2
++        state.vz = state.vz / 2
+         state.lying = state.lying + 1
+     }
+     slip_far(state)
+diff --git a/os/target/uefi_x86_64/programs/pauk/view.saltic b/os/target/uefi_x86_64/programs/pauk/view.saltic
+index a8266ed..2b84901 100644
+--- a/os/target/uefi_x86_64/programs/pauk/view.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/view.saltic
+@@ -1,18 +1,26 @@
+ -- pauk/view — рисование лучшего паука пластилином и надписи.
+ --
+--- render(stage, troop, base) — кадр: земля полянки и пятёрка пауков поколения
+---     по дорожкам (лидер — золотой); рисуются относительно самого дальнего —
+---     он всегда в центре полянки (земля — кусок конечного размера)
+--- mini(state, offset) -> копия паука для рисования: сдвинута на offset по x
+---     и уменьшена в MINI раз; shoulder_x / shoulder_z(leg) — плечи копии
+--- build_spider(state, back, tint) -> тела паука (тело, голова, колени, ступни);
+---     ball(...) — шарик на высоте земли; knee_x / knee_z(state, leg) — колено
++-- render(stage, troop, base, record, thought, set) — кадр: длинный пол, все TROOP
++--     пауков поколения по дорожкам от линии START (нейро — бирюзовые) и
++--     флажки рекордов: красный — record обычных, бирюзовый — thought нейро;
++--     камера неподвижна — видно, кто сколько прошёл. Есть видеокарта — пол,
++--     ноги (collect_legs: полосы leg_quad) и шарики рисует её 3D-движок,
++--     иначе процессор
++-- mini(state) -> копия паука для рисования: уменьшена в MINI раз и
++--     поставлена от линии START; shoulder_x / shoulder_z(leg) — плечи копии
++-- floor(screen) -> ровный пол FLOOR_COLUMNS × FLOOR_ROWS клеток TILE в
++--     шахматку (физика паука считает землю ровной); flag(set, distance,
++--     neuro) -> флажок и метки поперёк дорожек на расстоянии distance;
++--     finish_line(set) -> белые метки финишной черты body.FINISH
++-- Kit { … } — пластилиновые шарики, слепленные один раз (kit(back)); кадр их
++--     только переставляет: moved(shape, x, y, z) -> копия, сдвинутая на x, y, z
++-- build_spider(state, set) -> тела паука из набора set (тело, голова, колени,
++--     ступни; нейро — бирюзовые); knee_x / knee_z(state, leg) — колено
+ -- draw_legs(back, camera, state) — ноги толстыми линиями по проекциям суставов;
+ --     line(screen, from, to, thick, ink); on_screen(camera, x, y, z) -> проекция
+ -- overlay(front, gen, best, avg, history) — текст и график
+--- troop(population) -> пятёрка TROOP первых в популяции по дорожкам через LANE
+---     (эволюция кладёт лучших прошлого поколения первыми; первый — лидер)
+--- thinker(weights) -> нейро-паук с мозгом weights на шестой дорожке
++-- troop(sines, brains) -> все пауки поколения по дорожкам lane(номер) через
++--     LANE: сначала синусоидные с генами sines, за ними нейро с мозгами brains
+ 
+ use core.group
+ use core.num
+@@ -23,6 +31,7 @@ use os.target.uefi_x86_64.screen.clay.mesh
+ use os.target.uefi_x86_64.screen.clay.forms
+ use os.target.uefi_x86_64.screen.clay.scene
+ use os.target.uefi_x86_64.screen.clay.stage
++use os.target.uefi_x86_64.drivers.intel_gpu.render
+ use os.uiengine.canvas
+ use os.uiengine.fonts
+ use os.target.uefi_x86_64.programs.pauk.body
+@@ -31,27 +40,119 @@ use os.target.uefi_x86_64.programs.pauk.physics
+ SPIDER_COLOR = canvas.Rgb { red = 124, green = 88, blue = 64 }
+ JOINT_COLOR = canvas.Rgb { red = 90, green = 60, blue = 40 }
+ GRAPH_COLOR = canvas.Rgb { red = 34, green = 197, blue = 94 }
+-LEADER_COLOR = canvas.Rgb { red = 234, green = 179, blue = 8 }
+ THINKER_COLOR = canvas.Rgb { red = 20, green = 184, blue = 166 }
+-TROOP = 5
++FLAG_COLOR = canvas.Rgb { red = 220, green = 60, blue = 60 }
++FLAG_POLE = canvas.Rgb { red = 250, green = 250, blue = 250 }
++TILE = 140
++FLOOR_COLUMNS = 32
++FLOOR_ROWS = 10
++START = -1940
++TILE_LIGHT = canvas.Rgb { red = 186, green = 206, blue = 160 }
++TILE_DARK = canvas.Rgb { red = 150, green = 178, blue = 128 }
++CAMERA_FROM = [-700, 3300, 1500]
++CAMERA_TO = [-700, 0, 0]
++LEG_PIXEL = 3941914
++TROOP = 4
+ LANE = 380
+ KNEE = 45
+ MINI = 2
+ 
+-skill ball(back, x, y, z, size, tint) {
+-    @lift = scene.height(x, z)
+-    out forms.ellipsoid(back, [x, y + lift, z], [size, size, size], tint, 3)
++skill floor(screen) {
++    @ground = mesh.Body { center = [0, 0, 0], flat = yes }
++    @points = []
++    drum (FLOOR_ROWS + 1) {
++        @z = beat * TILE - FLOOR_ROWS * TILE / 2
++        drum (FLOOR_COLUMNS + 1) { points = group.add(points, [beat * TILE - FLOOR_COLUMNS * TILE / 2, 0, z]) }
++    }
++    ground.points = points
++    @side = FLOOR_COLUMNS + 1
++    drum (FLOOR_ROWS) {
++        @row = beat
++        drum (FLOOR_COLUMNS) {
++            @a = row * side + beat
++            @tint = TILE_LIGHT
++            (num.mod(row + beat, 2) == 1) { tint = TILE_DARK }
++            ground = mesh.face(screen, ground, a, a + 1, a + side + 1, a + side, [0, mesh.UNIT, 0], tint)
++        }
++    }
++    out ground
++}
++
++Kit = Box {
++    sine_trunk = mesh.Body {},
++    sine_head = mesh.Body {},
++    neuro_trunk = mesh.Body {},
++    neuro_head = mesh.Body {},
++    knee = mesh.Body {},
++    foot = mesh.Body {},
++    pole = mesh.Body {},
++    red_cloth = mesh.Body {},
++    teal_cloth = mesh.Body {},
++    red_mark = mesh.Body {},
++    teal_mark = mesh.Body {},
++    finish_mark = mesh.Body {}
+ }
+ 
+-skill build_spider(state, back, tint) {
+-    @bodies = []
+-    @lift = scene.height(state.x, state.z)
+-    bodies = group.add(bodies, forms.ellipsoid(back, [state.x, state.y + lift, state.z], [35, 23, 31], tint, 5))
+-    bodies = group.add(bodies, forms.ellipsoid(back, [state.x + 42, state.y + lift + 5, state.z], [17, 15, 16], tint, 4))
++skill kit(back) {
++    @at = [0, 0, 0]
++    out Kit {
++        sine_trunk = forms.ellipsoid(back, at, [35, 23, 31], SPIDER_COLOR, 5),
++        sine_head = forms.ellipsoid(back, at, [17, 15, 16], SPIDER_COLOR, 4),
++        neuro_trunk = forms.ellipsoid(back, at, [35, 23, 31], THINKER_COLOR, 5),
++        neuro_head = forms.ellipsoid(back, at, [17, 15, 16], THINKER_COLOR, 4),
++        knee = forms.ellipsoid(back, at, [8, 8, 8], JOINT_COLOR, 3),
++        foot = forms.ellipsoid(back, at, [6, 6, 6], JOINT_COLOR, 3),
++        pole = forms.ellipsoid(back, at, [6, 90, 6], FLAG_POLE, 3),
++        red_cloth = forms.ellipsoid(back, at, [24, 16, 4], FLAG_COLOR, 3),
++        teal_cloth = forms.ellipsoid(back, at, [24, 16, 4], THINKER_COLOR, 3),
++        red_mark = forms.ellipsoid(back, at, [10, 4, 10], FLAG_COLOR, 3),
++        teal_mark = forms.ellipsoid(back, at, [10, 4, 10], THINKER_COLOR, 3),
++        finish_mark = forms.ellipsoid(back, at, [18, 4, 18], FLAG_POLE, 3)
++    }
++}
++
++skill moved(shape, x, y, z) {
++    @points = []
++    drum (shape.points) { points = group.add(points, [group.get(beat, 0) + x, group.get(beat, 1) + y, group.get(beat, 2) + z]) }
++    @quads = []
++    drum (shape.quads) { quads = group.add(quads, mesh.Quad { a = beat.a, b = beat.b, c = beat.c, d = beat.d, nx = beat.nx, ny = beat.ny, nz = beat.nz, cx = beat.cx + x, cy = beat.cy + y, cz = beat.cz + z, color = beat.color }) }
++    @center = shape.center
++    out mesh.Body { points = points, quads = quads, center = [group.get(center, 0) + x, group.get(center, 1) + y, group.get(center, 2) + z], flat = shape.flat }
++}
++
++skill flag(set, distance, neuro) {
++    @x = START + distance / MINI
++    @edge = 0 - TROOP * LANE / 2 / MINI
++    @cloth = set.red_cloth
++    @mark = set.red_mark
++    (neuro == yes) {
++        cloth = set.teal_cloth
++        mark = set.teal_mark
++    }
++    @marks = [moved(set.pole, x, 90, edge), moved(cloth, x + 24, 160, edge)]
++    drum (TROOP + 1) { marks = group.add(marks, moved(mark, x, 4, (2 * beat - TROOP) * LANE / 2 / MINI)) }
++    out marks
++}
++
++skill finish_line(set) {
++    @x = START + body.FINISH / MINI
++    @marks = []
++    drum (2 * TROOP + 1) { marks = group.add(marks, moved(set.finish_mark, x, 4, (beat - TROOP) * LANE / 2 / MINI)) }
++    out marks
++}
++
++skill build_spider(state, set) {
++    @trunk = set.sine_trunk
++    @head = set.sine_head
++    (group.count(state.brain) > 0) {
++        trunk = set.neuro_trunk
++        head = set.neuro_head
++    }
++    @bodies = [moved(trunk, state.x, state.y, state.z), moved(head, state.x + 42, state.y + 5, state.z)]
+     drum (body.LEG_COUNT) {
+         @foot = group.get(state.legs, beat)
+-        bodies = group.add(bodies, ball(back, knee_x(state, beat), state.y + KNEE, knee_z(state, beat), 8, JOINT_COLOR))
+-        bodies = group.add(bodies, ball(back, foot.x, foot.y + 4, foot.z, 6, JOINT_COLOR))
++        bodies = group.add(bodies, moved(set.knee, knee_x(state, beat), state.y + KNEE, knee_z(state, beat)))
++        bodies = group.add(bodies, moved(set.foot, foot.x, foot.y + 4, foot.z))
+     }
+     out bodies
+ }
+@@ -69,7 +170,7 @@ skill knee_z(state, leg) {
+ }
+ 
+ skill on_screen(camera, x, y, z) {
+-    out mesh.project(camera, [x, y + scene.height(x, z), z])
++    out mesh.project(camera, [x, y, z])
+ }
+ 
+ skill line(screen, from, to, thick, ink) {
+@@ -113,40 +214,68 @@ skill draw_legs(back, camera, state) {
+     out none
+ }
+ 
+-skill render(podium, troop, base) {
++skill render(podium, troop, base, record, thought, set) {
+     @back = podium.back
+-    drum (back.height) { graphics.copy_span(base, back, podium.sky, beat, 0, back.width) }
++    graphics.copy_rect(base, back, podium.sky, 0, 0, back.width, back.height)
+     @camera = podium.camera
+-    @lead = group.get(troop, 0)
+-    drum (troop) {
+-        (beat.x > lead.x) { lead = beat }
+-    }
+-    @offset = lead.x
+     @minis = []
+-    drum (troop) { minis = group.add(minis, mini(beat, offset)) }
+-    @from = [-520, 640, 980]
+-    mesh.look(camera, from, [-60, 30, 0])
++    drum (troop) { minis = group.add(minis, mini(beat)) }
++    mesh.look(camera, CAMERA_FROM, CAMERA_TO)
+     @world = podium.scene
+-    mesh.ground(back, camera, world.ground, scene.CELLS)
+-    @spider = []
+-    drum (group.count(minis)) {
+-        @one = group.get(minis, beat)
+-        draw_legs(back, camera, one)
+-        @tint = SPIDER_COLOR
+-        (beat == 0) { tint = LEADER_COLOR }
+-        (group.count(one.brain) > 0) { tint = THINKER_COLOR }
+-        spider = group.concat(spider, build_spider(one, back, tint))
+-    }
++    @spider = group.concat(group.concat(flag(set, record, no), flag(set, thought, yes)), finish_line(set))
++    drum (minis) { spider = group.concat(spider, build_spider(beat, set)) }
+     @sorted = mesh.order(camera, spider)
+-    drum (group.count(sorted)) { mesh.draw(back, camera, group.get(sorted, beat)) }
+-    drum (back.height) { graphics.copy_span(base, podium.front, back, beat, 0, back.width) }
++    @gpu_ok = no
++    (group.count(podium.painter) > 0) {
++        @candidate = group.get(podium.painter, 0)
++        gpu_ok = candidate.broken == no
++    }
++    (gpu_ok == yes) {
++        @painter = group.get(podium.painter, 0)
++        render.begin(painter)
++        mesh.collect(painter, camera, world.ground)
++        drum (minis) { collect_legs(painter, camera, beat) }
++        drum (sorted) { mesh.collect(painter, camera, beat) }
++        @drawn = render.triangles(painter, render.Surface { at = back.frame, pitch = back.stride * graphics.PIXEL_BYTES, width = back.width, height = back.height })
++        (drawn == yes) { out graphics.push(base, podium.front, back) }
++        graphics.copy_rect(base, back, podium.sky, 0, 0, back.width, back.height)
++    }
++    mesh.draw(back, camera, world.ground)
++    drum (minis) { draw_legs(back, camera, beat) }
++    drum (sorted) { mesh.draw(back, camera, beat) }
++    out graphics.push(base, podium.front, back)
++}
++
++skill leg_quad(painter, from, to, thick, width, height) {
++    (group.get(from, 2) < mesh.NEAR) { out none }
++    (group.get(to, 2) < mesh.NEAR) { out none }
++    @x0 = group.get(from, 0)
++    @y0 = group.get(from, 1)
++    @x1 = group.get(to, 0)
++    @y1 = group.get(to, 1)
++    @length = geometry.root((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0))
++    (length < 1) { out none }
++    @ox = (y0 - y1) * thick / (2 * length)
++    @oy = (x1 - x0) * thick / (2 * length)
++    out render.add_quad(painter, [[x0 + ox, y0 + oy], [x1 + ox, y1 + oy], [x1 - ox, y1 - oy], [x0 - ox, y0 - oy]], LEG_PIXEL, width, height)
++}
++
++skill collect_legs(painter, camera, state) {
++    drum (body.LEG_COUNT) {
++        @foot = group.get(state.legs, beat)
++        @shoulder = on_screen(camera, state.x + shoulder_x(beat), state.y, state.z + shoulder_z(beat))
++        @knee = on_screen(camera, knee_x(state, beat), state.y + KNEE, knee_z(state, beat))
++        @toe = on_screen(camera, foot.x, foot.y + 4, foot.z)
++        leg_quad(painter, shoulder, knee, 4, camera.width, camera.height)
++        leg_quad(painter, knee, toe, 3, camera.width, camera.height)
++    }
+     out none
+ }
+ 
+-skill mini(state, offset) {
++skill mini(state) {
+     @legs = []
+-    drum (state.legs) { legs = group.add(legs, physics.Leg { x = (beat.x - offset) / MINI, y = beat.y / MINI, z = beat.z / MINI }) }
+-    out body.SpiderState { legs = legs, x = (state.x - offset) / MINI, y = state.y / MINI, z = state.z / MINI, brain = state.brain }
++    drum (state.legs) { legs = group.add(legs, physics.Leg { x = beat.x / MINI + START, y = beat.y / MINI, z = beat.z / MINI }) }
++    out body.SpiderState { legs = legs, x = state.x / MINI + START, y = state.y / MINI, z = state.z / MINI, brain = state.brain }
+ }
+ 
+ skill shoulder_x(leg) {
+@@ -157,17 +286,17 @@ skill shoulder_z(leg) {
+     out body.shoulder_z(leg) / MINI
+ }
+ 
+-skill thinker(weights) {
+-    @spider = physics.init_lane([], (TROOP - TROOP / 2) * LANE)
+-    spider.brain = weights
+-    out spider
++skill lane(index) {
++    out (2 * index - TROOP + 1) * LANE / 2
+ }
+ 
+-skill troop(population) {
++skill troop(sines, brains) {
+     @team = []
+-    drum (TROOP) {
+-        @lane = (beat - TROOP / 2) * LANE
+-        team = group.add(team, physics.init_lane(group.get(population, beat), lane))
++    drum (group.count(sines)) { team = group.add(team, physics.init_lane(group.get(sines, beat), lane(beat))) }
++    drum (group.count(brains)) {
++        @spider = physics.init_lane([], lane(group.count(sines) + beat))
++        spider.brain = group.get(brains, beat)
++        team = group.add(team, spider)
+     }
+     out team
+ }
+diff --git a/os/target/uefi_x86_64/programs/pauk.saltic b/os/target/uefi_x86_64/programs/pauk.saltic
+index 4bc972c..98b3a0b 100644
+--- a/os/target/uefi_x86_64/programs/pauk.saltic
++++ b/os/target/uefi_x86_64/programs/pauk.saltic
+@@ -3,6 +3,9 @@
+ -- program() — вход: поколения, показ лучшего, надписи, график, клавиши.
+ -- Рядом с пятёркой синусоидных — нейро-паук (pauk/brain), бирюзовый: лучший
+ -- мозг своей нейроэволюции; его веса тоже на диске (best.BRAIN).
++-- Поколение считается по кусочку на кадр (SINE_PER_FRAME синусоидных и
++-- NEURO_PER_FRAME нейро-пауков), а прошлые чемпионы тем временем ходят —
++-- картинка, клавиши и сеть не замирают.
+ -- Лучший — на диске (pauk/best): при запуске эволюция продолжается с него,
+ -- новый рекорд записывается сразу
+ 
+@@ -32,10 +35,13 @@ SCAN_ESCAPE = 23
+ SCAN_LEFT = 4
+ SCAN_RIGHT = 3
+ SPACE = 32
++SINE_PER_FRAME = 3
++NEURO_PER_FRAME = 1
+ 
+ Session = Box {
+     history = [],
+-    troop = []
++    troop = [],
++    counting = no
+ }
+ 
+ program() {
+@@ -90,27 +96,41 @@ program() {
+         }
+         (paused == no) {
+             (generation_frames == 0) {
+-                @record = evo.best_distance
+-                evo = evolution.evolve_once(evo, base, link)
+-                (evo.best_distance > record) { best.save(base, evo.generation, evo.best_distance, evo.best_genome) }
+-                session.history = group.add(session.history, evo.best_distance)
+-                @thought = neuro.best_distance
+-                neuro = brain.evolve_neuro(neuro)
+-                (neuro.best_distance > thought) { best.save_as(base, best.BRAIN, neuro.generation, neuro.best_distance, neuro.best_brain) }
+-                session.troop = group.add(view.troop(evo.population), view.thinker(neuro.best_brain))
+-                generation_frames = 1
++                evo.distances = []
++                neuro.scores = []
++                session.counting = yes
++                generation_frames = -1
+             }
+-            @can_step = (generation_frames > 0)
+-            (can_step == yes) {
+-                @rep = speed
+-                drum (rep) {
+-                    drum (session.troop) {
+-                        (beat.t < body.STEPS) {
+-                            (group.count(beat.brain) > 0) { beat.aims = brain.think(beat, beat.brain) }
+-                            physics.step(beat)
+-                        }
++            (session.counting == yes) {
++                drum (SINE_PER_FRAME) { evolution.evaluate_next(evo) }
++                drum (NEURO_PER_FRAME) { brain.think_next(neuro) }
++                @sine_done = group.count(evo.distances) >= group.count(evo.population)
++                @neuro_done = group.count(neuro.scores) >= group.count(neuro.population)
++                (sine_done == yes) {
++                    (neuro_done == yes) {
++                        @record = evo.best_distance
++                        evo = evolution.finish(evo)
++                        (evo.best_distance > record) { best.save(base, evo.generation, evo.best_distance, evo.best_genome) }
++                        session.history = group.add(session.history, evo.best_distance)
++                        @thought = neuro.best_distance
++                        neuro = brain.finish_neuro(neuro)
++                        (neuro.best_distance > thought) { best.save_as(base, best.BRAIN, neuro.generation, neuro.best_distance, neuro.best_brain) }
++                        session.troop = group.add(view.troop(evo.population), view.thinker(neuro.best_brain))
++                        session.counting = no
++                        generation_frames = 1
+                     }
+                 }
++            }
++            @rep = speed
++            drum (rep) {
++                drum (session.troop) {
++                    (beat.t < body.STEPS) {
++                        (group.count(beat.brain) > 0) { beat.aims = brain.think(beat, beat.brain) }
++                        physics.step(beat)
++                    }
++                }
++            }
++            (generation_frames > 0) {
+                 generation_frames = generation_frames + 1
+                 (generation_frames > show_frames) { generation_frames = 0 }
+             }
+@@ -119,6 +139,11 @@ program() {
+         view.overlay(front, evo.generation, evo.best_distance, evo.average_distance, session.history)
+         @thinker_best = neuro.best_distance
+         fonts.draw_text(front, 12, 70, "нейро-паук {thinker_best}", canvas.Rgb { red = 13, green = 148, blue = 136 }, fonts.REGULAR)
++        (session.counting == yes) {
++            @counted = group.count(evo.distances) + group.count(neuro.scores)
++            @total = group.count(evo.population) + group.count(neuro.population)
++            fonts.draw_text(front, 12, 92, "считаю поколение: {counted} из {total}", canvas.ZINC_500, fonts.SMALL)
++        }
+         ((link == none) == no) {
+             @g = evo.generation
+             @b = evo.best_distance
+diff --git a/os/target/uefi_x86_64/programs/pauk/brain.saltic b/os/target/uefi_x86_64/programs/pauk/brain.saltic
+index ab6a92c..5985664 100644
+--- a/os/target/uefi_x86_64/programs/pauk/brain.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/brain.saltic
+@@ -11,11 +11,13 @@
+ -- положительный).
+ --
+ -- WEIGHTS — сколько весов; NeuroState { population, generation,
+---     best_distance, best_brain, seed, average_distance }
++--     best_distance, best_brain, scores, seed, average_distance }
+ -- senses(state) -> входы; think(state, weights) -> цели ног для physics
+ -- evaluate(weights) -> пройденное по x минус штраф за лежание
+ -- random_brain(seed) -> [seed, веса]; mutate / crossover(…, seed) -> [seed, веса]
+--- init_neuro(seed) -> NeuroState; evolve_neuro(state) -> NeuroState
++-- init_neuro(seed) -> NeuroState; evolve_neuro(state) -> NeuroState (разом)
++-- think_next(state) -> yes, когда оценены все; finish_neuro(state) — отбор
++--     по state.scores (по кусочку на кадр, как evolution.evaluate_next)
+ -- resume_neuro(seed, saved) -> NeuroState — продолжить с сохранённого мозга
+ --     (pauk/best.Saved): он сам, ELITE − 1 его мутантов, остальные случайные
+ 
+@@ -44,6 +46,7 @@ NeuroState = Box {
+     generation = 0,
+     best_distance = 0,
+     best_brain = [],
++    scores = [],
+     seed = 1,
+     average_distance = 0
+ }
+@@ -173,15 +176,23 @@ skill resume_neuro(seed_in, saved) {
+     out state
+ }
+ 
++skill think_next(state) {
++    @done = group.count(state.scores)
++    (done < group.count(state.population)) { state.scores = group.add(state.scores, evaluate(group.get(state.population, done))) }
++    out group.count(state.scores) >= group.count(state.population)
++}
++
+ skill evolve_neuro(state) {
++    state.scores = []
++    drum (state.population) { think_next(state) }
++    out finish_neuro(state)
++}
++
++skill finish_neuro(state) {
+     @seed = state.seed
+-    @scores = []
++    @scores = state.scores
+     @sum = 0
+-    drum (state.population) {
+-        @score = evaluate(beat)
+-        scores = group.add(scores, score)
+-        sum = sum + score
+-    }
++    drum (scores) { sum = sum + beat }
+     @count = group.count(scores)
+     @elite = []
+     @used = []
+diff --git a/os/target/uefi_x86_64/programs/pauk/evolution.saltic b/os/target/uefi_x86_64/programs/pauk/evolution.saltic
+index 6f80d8a..ee59b14 100644
+--- a/os/target/uefi_x86_64/programs/pauk/evolution.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/evolution.saltic
+@@ -4,7 +4,11 @@
+ -- EvolutionState { population, distances, generation, best_distance,
+ --     best_genome, seed, average_distance }
+ -- init_state(seed) -> EvolutionState
+--- evolve_once(state, base, link) -> EvolutionState
++-- evolve_once(state, base, link) -> EvolutionState — всё поколение разом
++-- evaluate_next(state) -> yes, когда оценены все: оценить следующего паука
++--     (в state.distances; перед поколением — пустой список); finish(state) ->
++--     EvolutionState — отбор и потомство по готовым оценкам. Так поколение
++--     считается по кусочку на кадр, и картинка не замирает
+ -- resume(seed, saved) -> EvolutionState — продолжить с сохранённого лучшего
+ --     (pauk/best): он сам, ELITE − 1 его мутантов, остальные — случайные;
+ --     номер поколения и рекорд — из файла
+@@ -67,19 +71,28 @@ skill resume(seed_in, saved) {
+     out state
+ }
+ 
++skill evaluate_next(state) {
++    @done = group.count(state.distances)
++    (done < group.count(state.population)) { state.distances = group.add(state.distances, physics.evaluate(group.get(state.population, done))) }
++    out group.count(state.distances) >= group.count(state.population)
++}
++
+ skill evolve_once(state, base, link) {
++    state.distances = []
++    drum (group.count(state.population)) {
++        ((link == none) == no) { remote.serve(link) }
++        evaluate_next(state)
++    }
++    out finish(state)
++}
++
++skill finish(state) {
+     @seed = state.seed
+     @pop = state.population
+     @n = group.count(pop)
+-    @dists = []
++    @dists = state.distances
+     @sum = 0
+-    drum (n) {
+-        ((link == none) == no) { remote.serve(link) }
+-        @g = group.get(pop, beat)
+-        @d = physics.evaluate(g)
+-        dists = group.add(dists, d)
+-        sum = sum + d
+-    }
++    drum (dists) { sum = sum + beat }
+     @bi = index_of_max(dists)
+     @best_d = group.get(dists, bi)
+     @best_g = group.get(pop, bi)
+diff --git a/os/target/uefi_x86_64/programs/pauk.saltic b/os/target/uefi_x86_64/programs/pauk.saltic
+index 8d7df2b..4bc972c 100644
+--- a/os/target/uefi_x86_64/programs/pauk.saltic
++++ b/os/target/uefi_x86_64/programs/pauk.saltic
+@@ -1,6 +1,8 @@
+ -- pauk — эволюция ходьбы трёхмерного паука на Saltic.
+ --
+ -- program() — вход: поколения, показ лучшего, надписи, график, клавиши.
++-- Рядом с пятёркой синусоидных — нейро-паук (pauk/brain), бирюзовый: лучший
++-- мозг своей нейроэволюции; его веса тоже на диске (best.BRAIN).
+ -- Лучший — на диске (pauk/best): при запуске эволюция продолжается с него,
+ -- новый рекорд записывается сразу
+ 
+@@ -23,6 +25,7 @@ use os.target.uefi_x86_64.programs.pauk.genes
+ use os.target.uefi_x86_64.programs.pauk.evolution
+ use os.target.uefi_x86_64.programs.pauk.view
+ use os.target.uefi_x86_64.programs.pauk.best
++use os.target.uefi_x86_64.programs.pauk.brain
+ 
+ PAUSE = 1000
+ SCAN_ESCAPE = 23
+@@ -31,7 +34,8 @@ SCAN_RIGHT = 3
+ SPACE = 32
+ 
+ Session = Box {
+-    history = []
++    history = [],
++    troop = []
+ }
+ 
+ program() {
+@@ -51,8 +55,12 @@ program() {
+     @evo = evolution.init_state(seed)
+     @saved = best.load(base)
+     ((saved == none) == no) { evo = evolution.resume(seed, saved) }
+-    @session = Session {}
+-    @troop = [physics.init_state(genes.make_manual())]
++    @neuro = brain.init_neuro(seed + 1)
++    @mind = best.load_from(base, best.BRAIN)
++    ((mind == none) == no) {
++        (group.count(mind.genome) == brain.WEIGHTS) { neuro = brain.resume_neuro(seed + 1, mind) }
++    }
++    @session = Session { troop = [physics.init_state(genes.make_manual())] }
+     @generation_frames = 0
+     @paused = no
+     @speed = 3
+@@ -86,28 +94,37 @@ program() {
+                 evo = evolution.evolve_once(evo, base, link)
+                 (evo.best_distance > record) { best.save(base, evo.generation, evo.best_distance, evo.best_genome) }
+                 session.history = group.add(session.history, evo.best_distance)
+-                troop = view.troop(evo.population)
++                @thought = neuro.best_distance
++                neuro = brain.evolve_neuro(neuro)
++                (neuro.best_distance > thought) { best.save_as(base, best.BRAIN, neuro.generation, neuro.best_distance, neuro.best_brain) }
++                session.troop = group.add(view.troop(evo.population), view.thinker(neuro.best_brain))
+                 generation_frames = 1
+             }
+             @can_step = (generation_frames > 0)
+             (can_step == yes) {
+                 @rep = speed
+                 drum (rep) {
+-                    drum (troop) {
+-                        (beat.t < body.STEPS) { physics.step(beat) }
++                    drum (session.troop) {
++                        (beat.t < body.STEPS) {
++                            (group.count(beat.brain) > 0) { beat.aims = brain.think(beat, beat.brain) }
++                            physics.step(beat)
++                        }
+                     }
+                 }
+                 generation_frames = generation_frames + 1
+                 (generation_frames > show_frames) { generation_frames = 0 }
+             }
+         }
+-        view.render(set, troop, base)
++        view.render(set, session.troop, base)
+         view.overlay(front, evo.generation, evo.best_distance, evo.average_distance, session.history)
++        @thinker_best = neuro.best_distance
++        fonts.draw_text(front, 12, 70, "нейро-паук {thinker_best}", canvas.Rgb { red = 13, green = 148, blue = 136 }, fonts.REGULAR)
+         ((link == none) == no) {
+             @g = evo.generation
+             @b = evo.best_distance
+             @a = evo.average_distance
+-            remote.tell(link, "поколение {g}, рекорд {b}, среднее {a}")
++            @n = neuro.best_distance
++            remote.tell(link, "поколение {g}, рекорд {b}, среднее {a}, нейро {n}")
+         }
+     }
+     out none
+diff --git a/os/target/uefi_x86_64/programs/pauk/best.saltic b/os/target/uefi_x86_64/programs/pauk/best.saltic
+index f91918b..0351d52 100644
+--- a/os/target/uefi_x86_64/programs/pauk/best.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/best.saltic
+@@ -1,4 +1,5 @@
+--- pauk/best — лучший паук на диске Acer: \SALTIC\PAUK\BEST.BIN, чтобы при
++-- pauk/best — лучший паук на диске Acer: \SALTIC\PAUK\BEST.BIN (гены
++-- синусоид) и \SALTIC\PAUK\BRAIN.BIN (веса мозга нейро-паука), чтобы при
+ -- следующем запуске эволюция шла дальше, а не с нуля. Файл — 32-битные слова:
+ -- поколение, рекорд, число генов, гены; к каждому слову прибавлен BIAS (гены
+ -- бывают отрицательными). Пишется через участок scratch с PLACE.
+@@ -8,6 +9,8 @@
+ -- Saved { generation, distance, genome } — что лежит в файле
+ -- save(base, generation, distance, genome) — записать; ошибки диска глотает
+ -- load(base) -> Saved или none — нет файла или он битый
++-- save_as(base, file, …) / load_from(base, file) — то же для файла file
++--     (BRAIN — мозг)
+ 
+ use core.group
+ use os.target.uefi_x86_64.platform.firmware
+@@ -15,9 +18,10 @@ use os.target.uefi_x86_64.agent.programs
+ 
+ FOLDER = "PAUK"
+ FILE = "BEST.BIN"
++BRAIN = "BRAIN.BIN"
+ PLACE = 8192
+ BIAS = 1073741824
+-LIMIT = 4096
++LIMIT = 8192
+ 
+ Saved = Box {
+     generation = 0,
+@@ -26,10 +30,18 @@ Saved = Box {
+ }
+ 
+ skill save(base, generation, distance, genome) {
++    out save_as(base, FILE, generation, distance, genome)
++}
++
++skill load(base) {
++    out load_from(base, FILE)
++}
++
++skill save_as(base, file, generation, distance, genome) {
+     @place = firmware.scratch(base, PLACE)
+     @words = group.concat([generation, distance, group.count(genome)], genome)
+     drum (group.count(words)) { firmware.write_phys32(place, base, beat * 4, group.get(words, beat) + BIAS) }
+-    programs.keep_file(base, place, group.count(words) * 4, FOLDER, FILE) rescue |err| { none }
++    programs.keep_file(base, place, group.count(words) * 4, FOLDER, file) rescue |err| { none }
+     out none
+ }
+ 
+@@ -37,9 +49,9 @@ skill word(base, place, index) {
+     out firmware.read32(place, base, index * 4) - BIAS
+ }
+ 
+-skill load(base) {
++skill load_from(base, file) {
+     @place = firmware.scratch(base, PLACE)
+-    @size = programs.load_file(base, "{FOLDER}\\{FILE}", place, LIMIT) rescue |err| { out none }
++    @size = programs.load_file(base, "{FOLDER}\\{file}", place, LIMIT) rescue |err| { out none }
+     (size < 12) { out none }
+     @count = word(base, place, 2)
+     ((count * 4 + 12 == size) == no) { out none }
+diff --git a/os/target/uefi_x86_64/programs/pauk/body.saltic b/os/target/uefi_x86_64/programs/pauk/body.saltic
+index 9c1687d..44535d4 100644
+--- a/os/target/uefi_x86_64/programs/pauk/body.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/body.saltic
+@@ -2,8 +2,9 @@
+ --
+ -- Константы: STEPS, UPPER, LOWER, BODY_R, REST_R, BODY_Y, LEG_COUNT,
+ --     POPULATION, ELITE, MUTATIONS
+--- SpiderState { genes, legs, x, y, z, t, lying } — паук: тело, ступни
+---     (physics.Leg), гены, шаг, сколько шагов лежал
++-- SpiderState { genes, legs, x, y, z, t, lying, aims, brain } — паук: тело,
++--     ступни (physics.Leg), гены, шаг, сколько шагов лежал; у нейро-паука —
++--     веса мозга и цели ног, которые мозг выдал на этот шаг
+ -- shoulder_x(leg) / shoulder_z(leg) -> смещение плеча от центра тела
+ -- rest_x(leg) / rest_z(leg) -> где стоит ступня в покое, от центра тела
+ -- clamp(value, low, high) -> value в диапазоне
+@@ -29,7 +30,9 @@ SpiderState = Box {
+     y = 0,
+     z = 0,
+     t = 0,
+-    lying = 0
++    lying = 0,
++    aims = [],
++    brain = []
+ }
+ 
+ skill clamp(value, low, high) {
+diff --git a/os/target/uefi_x86_64/programs/pauk/brain.saltic b/os/target/uefi_x86_64/programs/pauk/brain.saltic
+new file mode 100644
+index 0000000..ab6a92c
+--- /dev/null
++++ b/os/target/uefi_x86_64/programs/pauk/brain.saltic
+@@ -0,0 +1,229 @@
++-- pauk/brain — нейро-паук: маленькая нейросеть на целых числах вместо
++-- синусоид и её эволюция (нейроэволюция). Сеть каждый шаг смотрит на тело и
++-- решает, куда тянуть каждую ногу и поднимать ли её; как ходить — не задано.
++--
++-- Сеть: INPUTS входов → HIDDEN нейронов → OUTPUTS выходов, у каждого нейрона
++-- свой сдвиг. Числа — в долях ONE (256 = 1,0). Нейрон: сумма вход · вес / ONE
++-- плюс сдвиг, зажатая в −ONE…ONE (жёсткий «tanh»).
++-- Входы: часы sin и cos (без них ритму не из чего взяться), высота тела,
++-- на ногу — стоит ли ступня и где она относительно покоя (вперёд-назад).
++-- Выходы: на ногу — вынос вперёд-назад (до REACH) и подъём (до LIFT, только
++-- положительный).
++--
++-- WEIGHTS — сколько весов; NeuroState { population, generation,
++--     best_distance, best_brain, seed, average_distance }
++-- senses(state) -> входы; think(state, weights) -> цели ног для physics
++-- evaluate(weights) -> пройденное по x минус штраф за лежание
++-- random_brain(seed) -> [seed, веса]; mutate / crossover(…, seed) -> [seed, веса]
++-- init_neuro(seed) -> NeuroState; evolve_neuro(state) -> NeuroState
++-- resume_neuro(seed, saved) -> NeuroState — продолжить с сохранённого мозга
++--     (pauk/best.Saved): он сам, ELITE − 1 его мутантов, остальные случайные
++
++use core.group
++use core.num
++use os.target.uefi_x86_64.screen.geometry
++use os.target.uefi_x86_64.programs.pauk.body
++use os.target.uefi_x86_64.programs.pauk.genes
++use os.target.uefi_x86_64.programs.pauk.physics
++
++ONE = 256
++INPUTS = 19
++HIDDEN = 8
++OUTPUTS = 16
++WEIGHTS = 304
++CLOCK = 4096
++REACH = 140
++LIFT = 70
++START = 256
++NUDGE = 128
++NUDGE_EVERY = 3
++LIE_PENALTY = 40
++
++NeuroState = Box {
++    population = [],
++    generation = 0,
++    best_distance = 0,
++    best_brain = [],
++    seed = 1,
++    average_distance = 0
++}
++
++skill squash(value) {
++    (value > ONE) { out ONE }
++    (value < 0 - ONE) { out 0 - ONE }
++    out value
++}
++
++skill senses(state) {
++    @angle = num.mod(state.t * CLOCK, geometry.TURN)
++    @inputs = [geometry.sine(angle) * ONE / geometry.ONE, geometry.cosine(angle) * ONE / geometry.ONE, (state.y - body.BODY_Y) * ONE / body.BODY_Y]
++    drum (body.LEG_COUNT) {
++        @foot = group.get(state.legs, beat)
++        @stand = 0 - ONE
++        (foot.planted == yes) { stand = ONE }
++        inputs = group.add(inputs, stand)
++    }
++    drum (body.LEG_COUNT) {
++        @foot = group.get(state.legs, beat)
++        inputs = group.add(inputs, squash((foot.x - state.x - body.rest_x(beat)) * ONE / body.REST_R))
++    }
++    out inputs
++}
++
++skill layer(values, weights, first, width) {
++    @size = group.count(values)
++    @out_values = []
++    drum (width) {
++        @at = first + beat * (size + 1)
++        @sum = group.get(weights, at + size)
++        drum (size) { sum = sum + group.get(values, beat) * group.get(weights, at + beat) / ONE }
++        out_values = group.add(out_values, squash(sum))
++    }
++    out out_values
++}
++
++skill think(state, weights) {
++    @hidden = layer(senses(state), weights, 0, HIDDEN)
++    @outputs = layer(hidden, weights, (INPUTS + 1) * HIDDEN, OUTPUTS)
++    @aims = []
++    drum (body.LEG_COUNT) {
++        @lift = group.get(outputs, beat * 2 + 1) * LIFT / ONE
++        (lift < 0) { lift = 0 }
++        aims = group.add(aims, [group.get(outputs, beat * 2) * REACH / ONE, lift])
++    }
++    out aims
++}
++
++skill evaluate(weights) {
++    @state = physics.init_state([])
++    drum (body.STEPS) {
++        state.aims = think(state, weights)
++        physics.step(state)
++    }
++    out state.x - state.lying * LIE_PENALTY
++}
++
++skill random_brain(seed_in) {
++    @seed = seed_in
++    @weights = []
++    drum (WEIGHTS) {
++        @r = genes.rng(seed, START * 2 + 1)
++        seed = group.get(r, 0)
++        weights = group.add(weights, group.get(r, 1) - START)
++    }
++    out [seed, weights]
++}
++
++skill mutate(weights, seed_in) {
++    @seed = seed_in
++    @changed = []
++    drum (weights) {
++        @value = beat
++        @r = genes.rng(seed, NUDGE_EVERY)
++        seed = group.get(r, 0)
++        (group.get(r, 1) == 0) {
++            @n = genes.rng(seed, NUDGE * 2 + 1)
++            seed = group.get(n, 0)
++            value = value + group.get(n, 1) - NUDGE
++        }
++        changed = group.add(changed, value)
++    }
++    out [seed, changed]
++}
++
++skill crossover(a, b, seed_in) {
++    @seed = seed_in
++    @child = []
++    drum (group.count(a)) {
++        @r = genes.rng(seed, 2)
++        seed = group.get(r, 0)
++        pick {
++            (group.get(r, 1) == 0) { child = group.add(child, group.get(a, beat)) }
++            { child = group.add(child, group.get(b, beat)) }
++        }
++    }
++    out [seed, child]
++}
++
++skill init_neuro(seed_in) {
++    @seed = seed_in
++    @population = []
++    drum (body.POPULATION) {
++        @r = random_brain(seed)
++        seed = group.get(r, 0)
++        population = group.add(population, group.get(r, 1))
++    }
++    out NeuroState { population = population, seed = seed }
++}
++
++skill resume_neuro(seed_in, saved) {
++    @state = init_neuro(seed_in)
++    @seed = state.seed
++    @population = [saved.genome]
++    drum (body.ELITE - 1) {
++        @changed = mutate(saved.genome, seed)
++        seed = group.get(changed, 0)
++        population = group.add(population, group.get(changed, 1))
++    }
++    state.population = group.concat(population, group.slice(state.population, body.ELITE, group.count(state.population)))
++    state.seed = seed
++    state.generation = saved.generation
++    state.best_distance = saved.distance
++    state.best_brain = saved.genome
++    out state
++}
++
++skill evolve_neuro(state) {
++    @seed = state.seed
++    @scores = []
++    @sum = 0
++    drum (state.population) {
++        @score = evaluate(beat)
++        scores = group.add(scores, score)
++        sum = sum + score
++    }
++    @count = group.count(scores)
++    @elite = []
++    @used = []
++    drum (body.ELITE) {
++        @pick_at = -1
++        @pick_score = 0
++        drum (count) {
++            (group.contains(used, beat) == no) {
++                ((pick_at < 0) == yes) {
++                    pick_at = beat
++                    pick_score = group.get(scores, beat)
++                }
++                (group.get(scores, beat) > pick_score) {
++                    pick_at = beat
++                    pick_score = group.get(scores, beat)
++                }
++            }
++        }
++        used = group.add(used, pick_at)
++        elite = group.add(elite, group.get(state.population, pick_at))
++    }
++    @top = group.get(scores, group.get(used, 0))
++    (state.generation == 0) { state.best_distance = top - 1 }
++    (top > state.best_distance) {
++        state.best_distance = top
++        state.best_brain = group.get(elite, 0)
++    }
++    @next = elite
++    drum (count - body.ELITE) {
++        @r1 = genes.rng(seed, body.ELITE)
++        seed = group.get(r1, 0)
++        @r2 = genes.rng(seed, body.ELITE)
++        seed = group.get(r2, 0)
++        @mixed = crossover(group.get(elite, group.get(r1, 1)), group.get(elite, group.get(r2, 1)), seed)
++        seed = group.get(mixed, 0)
++        @changed = mutate(group.get(mixed, 1), seed)
++        seed = group.get(changed, 0)
++        next = group.add(next, group.get(changed, 1))
++    }
++    state.population = next
++    state.seed = seed
++    state.generation = state.generation + 1
++    state.average_distance = sum / count
++    out state
++}
+diff --git a/os/target/uefi_x86_64/programs/pauk/physics.saltic b/os/target/uefi_x86_64/programs/pauk/physics.saltic
+index 1c14307..849ee4e 100644
+--- a/os/target/uefi_x86_64/programs/pauk/physics.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/physics.saltic
+@@ -17,8 +17,12 @@
+ --     шагов лежал
+ -- init_state(genome) -> SpiderState — паук стоит, ступни под плечами
+ -- init_lane(genome, lane) -> SpiderState — то же на дорожке z = lane
+--- target(state, leg) -> [вынос, подъём] — цель ноги на шаге t
+--- step(state) — один шаг
++-- target(state, leg) -> [вынос, подъём] — цель ноги на шаге t по генам
++-- aim_of(state, leg) -> цель ноги: из state.aims, если их задал мозг
++--     (pauk/brain), иначе target
++-- step(state) — один шаг; тело за шаг сдвигается не больше STRIDE_MAX —
++--     сила мышц (иначе мозг дёргал цели ног и тело «телепортировалось»)
++-- limit(move) -> move, зажатый в ±STRIDE_MAX
+ -- body_x(state) -> x тела
+ -- evaluate(genome) -> пройденное по x минус штраф за лежание
+ 
+@@ -38,6 +42,7 @@ RISE = 4
+ REACH = 230
+ LYING = 140
+ LIE_PENALTY = 40
++STRIDE_MAX = 10
+ 
+ Leg = Box {
+     x = 0,
+@@ -74,13 +79,18 @@ skill target(state, leg) {
+     out [forward, LIFT * lift / geometry.ONE]
+ }
+ 
++skill aim_of(state, leg) {
++    (group.count(state.aims) > 0) { out group.get(state.aims, leg) }
++    out target(state, leg)
++}
++
+ skill move_legs(state) {
+     @planted = 0
+     @sum_x = 0
+     @sum_z = 0
+     drum (body.LEG_COUNT) {
+         @foot = group.get(state.legs, beat)
+-        @aim = target(state, beat)
++        @aim = aim_of(state, beat)
+         @want_x = state.x + body.rest_x(beat) + group.get(aim, 0)
+         @want_z = state.z + body.rest_z(beat)
+         @lift = group.get(aim, 1)
+@@ -124,12 +134,18 @@ skill slip_far(state) {
+     out none
+ }
+ 
++skill limit(move) {
++    (move > STRIDE_MAX) { out STRIDE_MAX }
++    (move < 0 - STRIDE_MAX) { out 0 - STRIDE_MAX }
++    out move
++}
++
+ skill step(state) {
+     @moved = move_legs(state)
+     @planted = group.get(moved, 0)
+     (planted > 0) {
+-        state.x = group.get(moved, 1) / planted
+-        state.z = group.get(moved, 2) / planted
++        state.x = state.x + limit(group.get(moved, 1) / planted - state.x)
++        state.z = state.z + limit(group.get(moved, 2) / planted - state.z)
+     }
+     pick {
+         (planted >= 3) { state.y = state.y + (body.BODY_Y - state.y) / RISE }
+diff --git a/os/target/uefi_x86_64/programs/pauk/view.saltic b/os/target/uefi_x86_64/programs/pauk/view.saltic
+index 20343ae..a8266ed 100644
+--- a/os/target/uefi_x86_64/programs/pauk/view.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/view.saltic
+@@ -12,6 +12,7 @@
+ -- overlay(front, gen, best, avg, history) — текст и график
+ -- troop(population) -> пятёрка TROOP первых в популяции по дорожкам через LANE
+ --     (эволюция кладёт лучших прошлого поколения первыми; первый — лидер)
++-- thinker(weights) -> нейро-паук с мозгом weights на шестой дорожке
+ 
+ use core.group
+ use core.num
+@@ -31,6 +32,7 @@ SPIDER_COLOR = canvas.Rgb { red = 124, green = 88, blue = 64 }
+ JOINT_COLOR = canvas.Rgb { red = 90, green = 60, blue = 40 }
+ GRAPH_COLOR = canvas.Rgb { red = 34, green = 197, blue = 94 }
+ LEADER_COLOR = canvas.Rgb { red = 234, green = 179, blue = 8 }
++THINKER_COLOR = canvas.Rgb { red = 20, green = 184, blue = 166 }
+ TROOP = 5
+ LANE = 380
+ KNEE = 45
+@@ -132,6 +134,7 @@ skill render(podium, troop, base) {
+         draw_legs(back, camera, one)
+         @tint = SPIDER_COLOR
+         (beat == 0) { tint = LEADER_COLOR }
++        (group.count(one.brain) > 0) { tint = THINKER_COLOR }
+         spider = group.concat(spider, build_spider(one, back, tint))
+     }
+     @sorted = mesh.order(camera, spider)
+@@ -143,7 +146,7 @@ skill render(podium, troop, base) {
+ skill mini(state, offset) {
+     @legs = []
+     drum (state.legs) { legs = group.add(legs, physics.Leg { x = (beat.x - offset) / MINI, y = beat.y / MINI, z = beat.z / MINI }) }
+-    out body.SpiderState { legs = legs, x = (state.x - offset) / MINI, y = state.y / MINI, z = state.z / MINI }
++    out body.SpiderState { legs = legs, x = (state.x - offset) / MINI, y = state.y / MINI, z = state.z / MINI, brain = state.brain }
+ }
+ 
+ skill shoulder_x(leg) {
+@@ -154,6 +157,12 @@ skill shoulder_z(leg) {
+     out body.shoulder_z(leg) / MINI
+ }
+ 
++skill thinker(weights) {
++    @spider = physics.init_lane([], (TROOP - TROOP / 2) * LANE)
++    spider.brain = weights
++    out spider
++}
++
+ skill troop(population) {
+     @team = []
+     drum (TROOP) {
+diff --git a/os/target/uefi_x86_64/programs/pauk.saltic b/os/target/uefi_x86_64/programs/pauk.saltic
+index 01df242..8d7df2b 100644
+--- a/os/target/uefi_x86_64/programs/pauk.saltic
++++ b/os/target/uefi_x86_64/programs/pauk.saltic
+@@ -1,6 +1,8 @@
+ -- pauk — эволюция ходьбы трёхмерного паука на Saltic.
+ --
+--- program() — вход: поколения, показ лучшего, надписи, график, клавиши
++-- program() — вход: поколения, показ лучшего, надписи, график, клавиши.
++-- Лучший — на диске (pauk/best): при запуске эволюция продолжается с него,
++-- новый рекорд записывается сразу
+ 
+ use core.group
+ use core.num
+@@ -20,6 +22,7 @@ use os.target.uefi_x86_64.programs.pauk.physics
+ use os.target.uefi_x86_64.programs.pauk.genes
+ use os.target.uefi_x86_64.programs.pauk.evolution
+ use os.target.uefi_x86_64.programs.pauk.view
++use os.target.uefi_x86_64.programs.pauk.best
+ 
+ PAUSE = 1000
+ SCAN_ESCAPE = 23
+@@ -46,6 +49,8 @@ program() {
+     @seed = moment.minute * 60 + moment.second + 1
+     (seed <= 0) { seed = 1 }
+     @evo = evolution.init_state(seed)
++    @saved = best.load(base)
++    ((saved == none) == no) { evo = evolution.resume(seed, saved) }
+     @session = Session {}
+     @troop = [physics.init_state(genes.make_manual())]
+     @generation_frames = 0
+@@ -70,14 +75,16 @@ program() {
+         }
+         (quit == yes) {
+             stage.close_stage(base, set)
+-            @best = evo.best_distance
++            @top = evo.best_distance
+             @gen = evo.generation
+-            reply.home("паук: поколений {gen}, рекорд {best}")
++            reply.home("паук: поколений {gen}, рекорд {top}")
+             out none
+         }
+         (paused == no) {
+             (generation_frames == 0) {
++                @record = evo.best_distance
+                 evo = evolution.evolve_once(evo, base, link)
++                (evo.best_distance > record) { best.save(base, evo.generation, evo.best_distance, evo.best_genome) }
+                 session.history = group.add(session.history, evo.best_distance)
+                 troop = view.troop(evo.population)
+                 generation_frames = 1
+diff --git a/os/target/uefi_x86_64/programs/pauk/best.saltic b/os/target/uefi_x86_64/programs/pauk/best.saltic
+new file mode 100644
+index 0000000..f91918b
+--- /dev/null
++++ b/os/target/uefi_x86_64/programs/pauk/best.saltic
+@@ -0,0 +1,49 @@
++-- pauk/best — лучший паук на диске Acer: \SALTIC\PAUK\BEST.BIN, чтобы при
++-- следующем запуске эволюция шла дальше, а не с нуля. Файл — 32-битные слова:
++-- поколение, рекорд, число генов, гены; к каждому слову прибавлен BIAS (гены
++-- бывают отрицательными). Пишется через участок scratch с PLACE.
++-- Чтение и запись — agent.programs (keep_file / load_file): если паук
++-- переедет в main, эти две функции стоит перенести в storage.
++--
++-- Saved { generation, distance, genome } — что лежит в файле
++-- save(base, generation, distance, genome) — записать; ошибки диска глотает
++-- load(base) -> Saved или none — нет файла или он битый
++
++use core.group
++use os.target.uefi_x86_64.platform.firmware
++use os.target.uefi_x86_64.agent.programs
++
++FOLDER = "PAUK"
++FILE = "BEST.BIN"
++PLACE = 8192
++BIAS = 1073741824
++LIMIT = 4096
++
++Saved = Box {
++    generation = 0,
++    distance = 0,
++    genome = []
++}
++
++skill save(base, generation, distance, genome) {
++    @place = firmware.scratch(base, PLACE)
++    @words = group.concat([generation, distance, group.count(genome)], genome)
++    drum (group.count(words)) { firmware.write_phys32(place, base, beat * 4, group.get(words, beat) + BIAS) }
++    programs.keep_file(base, place, group.count(words) * 4, FOLDER, FILE) rescue |err| { none }
++    out none
++}
++
++skill word(base, place, index) {
++    out firmware.read32(place, base, index * 4) - BIAS
++}
++
++skill load(base) {
++    @place = firmware.scratch(base, PLACE)
++    @size = programs.load_file(base, "{FOLDER}\\{FILE}", place, LIMIT) rescue |err| { out none }
++    (size < 12) { out none }
++    @count = word(base, place, 2)
++    ((count * 4 + 12 == size) == no) { out none }
++    @genome = []
++    drum (count) { genome = group.add(genome, word(base, place, 3 + beat)) }
++    out Saved { generation = word(base, place, 0), distance = word(base, place, 1), genome = genome }
++}
+diff --git a/os/target/uefi_x86_64/programs/pauk/evolution.saltic b/os/target/uefi_x86_64/programs/pauk/evolution.saltic
+index c11c915..6f80d8a 100644
+--- a/os/target/uefi_x86_64/programs/pauk/evolution.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/evolution.saltic
+@@ -5,6 +5,9 @@
+ --     best_genome, seed, average_distance }
+ -- init_state(seed) -> EvolutionState
+ -- evolve_once(state, base, link) -> EvolutionState
++-- resume(seed, saved) -> EvolutionState — продолжить с сохранённого лучшего
++--     (pauk/best): он сам, ELITE − 1 его мутантов, остальные — случайные;
++--     номер поколения и рекорд — из файла
+ 
+ use core.group
+ use core.num
+@@ -46,6 +49,24 @@ skill init_state(seed_in) {
+     out EvolutionState { population = pop, distances = [], generation = 0, best_distance = 0, best_genome = [], seed = seed, average_distance = 0 }
+ }
+ 
++skill resume(seed_in, saved) {
++    @state = init_state(seed_in)
++    @seed = state.seed
++    @pop = [saved.genome]
++    drum (body.ELITE - 1) {
++        @mut = genes.mutate(saved.genome, seed)
++        seed = group.get(mut, 0)
++        pop = group.add(pop, genes.clamp_genome(group.get(mut, 1)))
++    }
++    pop = group.concat(pop, group.slice(state.population, body.ELITE, group.count(state.population)))
++    state.population = pop
++    state.seed = seed
++    state.generation = saved.generation
++    state.best_distance = saved.distance
++    state.best_genome = saved.genome
++    out state
++}
++
+ skill evolve_once(state, base, link) {
+     @seed = state.seed
+     @pop = state.population
+diff --git a/os/target/uefi_x86_64/programs/pauk.saltic b/os/target/uefi_x86_64/programs/pauk.saltic
+index 9e960d8..01df242 100644
+--- a/os/target/uefi_x86_64/programs/pauk.saltic
++++ b/os/target/uefi_x86_64/programs/pauk.saltic
+@@ -47,7 +47,7 @@ program() {
+     (seed <= 0) { seed = 1 }
+     @evo = evolution.init_state(seed)
+     @session = Session {}
+-    @state = physics.init_state(genes.make_manual())
++    @troop = [physics.init_state(genes.make_manual())]
+     @generation_frames = 0
+     @paused = no
+     @speed = 3
+@@ -79,21 +79,22 @@ program() {
+             (generation_frames == 0) {
+                 evo = evolution.evolve_once(evo, base, link)
+                 session.history = group.add(session.history, evo.best_distance)
+-                state = physics.init_state(evo.best_genome)
++                troop = view.troop(evo.population)
+                 generation_frames = 1
+             }
+             @can_step = (generation_frames > 0)
+             (can_step == yes) {
+                 @rep = speed
+                 drum (rep) {
+-                    (state.t < body.STEPS) { physics.step(state) }
+-                    (state.t >= body.STEPS) { state = physics.init_state(evo.best_genome) }
++                    drum (troop) {
++                        (beat.t < body.STEPS) { physics.step(beat) }
++                    }
+                 }
+                 generation_frames = generation_frames + 1
+                 (generation_frames > show_frames) { generation_frames = 0 }
+             }
+         }
+-        view.render(set, state, base)
++        view.render(set, troop, base)
+         view.overlay(front, evo.generation, evo.best_distance, evo.average_distance, session.history)
+         ((link == none) == no) {
+             @g = evo.generation
+diff --git a/os/target/uefi_x86_64/programs/pauk/body.saltic b/os/target/uefi_x86_64/programs/pauk/body.saltic
+index 0be64d6..9c1687d 100644
+--- a/os/target/uefi_x86_64/programs/pauk/body.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/body.saltic
+@@ -1,31 +1,35 @@
+ -- pauk/body — тело паука, геометрия и константы физики.
+ --
+--- Константы: STEPS, GRAV, UPPER, LOWER, BODY_R, BODY_Y, LEG_COUNT,
+---     GENE_COUNT, WORLD_SCALE
+--- SpiderState { genes, points, prev, t } — состояние точки Верле
+--- shoulder_offsets(leg) -> [x,z] смещения плеча от центра тела
++-- Константы: STEPS, UPPER, LOWER, BODY_R, REST_R, BODY_Y, LEG_COUNT,
++--     POPULATION, ELITE, MUTATIONS
++-- SpiderState { genes, legs, x, y, z, t, lying } — паук: тело, ступни
++--     (physics.Leg), гены, шаг, сколько шагов лежал
++-- shoulder_x(leg) / shoulder_z(leg) -> смещение плеча от центра тела
++-- rest_x(leg) / rest_z(leg) -> где стоит ступня в покое, от центра тела
+ -- clamp(value, low, high) -> value в диапазоне
+ 
+ use core.group
+ use os.target.uefi_x86_64.screen.geometry
+ 
+ STEPS = 600
+-GRAV = 40
+ UPPER = 150
+ LOWER = 150
+ BODY_R = 90
++REST_R = 200
+ BODY_Y = 300
+ LEG_COUNT = 8
+ POPULATION = 28
+ ELITE = 6
+ MUTATIONS = 9
+-POINT_COUNT = 17
+ 
+ SpiderState = Box {
+     genes = [],
+-    points = [],
+-    prev = [],
+-    t = 0
++    legs = [],
++    x = 0,
++    y = 0,
++    z = 0,
++    t = 0,
++    lying = 0
+ }
+ 
+ skill clamp(value, low, high) {
+@@ -39,6 +43,16 @@ skill shoulder_x(leg) {
+     out geometry.cosine(angle) * BODY_R / geometry.ONE
+ }
+ 
++skill rest_x(leg) {
++    @angle = geometry.TURN * leg / LEG_COUNT
++    out geometry.cosine(angle) * REST_R / geometry.ONE
++}
++
++skill rest_z(leg) {
++    @angle = geometry.TURN * leg / LEG_COUNT
++    out geometry.sine(angle) * REST_R / geometry.ONE
++}
++
+ skill shoulder_z(leg) {
+     @angle = geometry.TURN * leg / LEG_COUNT
+     out geometry.sine(angle) * BODY_R / geometry.ONE
+diff --git a/os/target/uefi_x86_64/programs/pauk/genes.saltic b/os/target/uefi_x86_64/programs/pauk/genes.saltic
+index 6892c39..6d5347e 100644
+--- a/os/target/uefi_x86_64/programs/pauk/genes.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/genes.saltic
+@@ -34,7 +34,7 @@ skill make_manual() {
+ skill rng(seed, limit) {
+     (limit <= 0) { out [seed, 0] }
+     @s = seed
+-    s = num.mod(s * 1103515245 + 12345, 2147483648)
++    s = num.mod(num.mod(s, 16777216) * 1103515 + 12345, 16777216)
+     @v = num.mod(s, limit)
+     (v < 0) { v = 0 - v }
+     out [s, v]
+diff --git a/os/target/uefi_x86_64/programs/pauk/physics.saltic b/os/target/uefi_x86_64/programs/pauk/physics.saltic
+index 3a35f54..1c14307 100644
+--- a/os/target/uefi_x86_64/programs/pauk/physics.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/physics.saltic
+@@ -1,219 +1,155 @@
+--- pauk/physics — упрощённая физика: точки Верле, палки-ограничения, земля.
++-- pauk/physics — шагающая физика паука на целых числах. Тело не вращается;
++-- у каждой ноги — ступня. Ступня на земле держится трением и не скользит:
++-- тело сдвигается так, чтобы стоящие ступни остались на своих местах
++-- относительно желаемой походки, — так паук отталкивается. Ступня в
++-- воздухе переносится к своей цели. Меньше трёх ступней на земле — тело
++-- оседает; осело ниже LYING — паук лёг (штраф при оценке). Ступня, которую
++-- тело утащило дальше REACH, срывается и переносится заново.
+ --
+--- init_state(genome) -> SpiderState
+--- step(state) -> none (один шаг, использует state.genes и state.t)
+--- evaluate(genome) -> число (дистанция со штрафом)
+--- points getter helpers
++-- Походка — гены (genes): на ногу размах, фаза и сдвиг подъёма; общая
++-- частота. Угол ноги θ = фаза + t · частота · PACE; вынос вперёд-назад —
++-- размах · sin θ; нога в воздухе, когда cos(θ + сдвиг подъёма) > 0.
++-- Эволюции надо найти: поднимать ногу при выносе вперёд, ставить при
++-- толчке назад, и чтобы на земле всегда стояло хотя бы три ноги.
++--
++-- Leg { x, y, z, planted } — ступня в мире; planted — стоит на земле
++-- SpiderState — body.SpiderState: тело x, y, z, ноги, гены, t, сколько
++--     шагов лежал
++-- init_state(genome) -> SpiderState — паук стоит, ступни под плечами
++-- init_lane(genome, lane) -> SpiderState — то же на дорожке z = lane
++-- target(state, leg) -> [вынос, подъём] — цель ноги на шаге t
++-- step(state) — один шаг
++-- body_x(state) -> x тела
++-- evaluate(genome) -> пройденное по x минус штраф за лежание
+ 
+ use core.group
+ use core.num
+ use os.target.uefi_x86_64.screen.geometry
+ use os.target.uefi_x86_64.programs.pauk.body
+-use os.target.uefi_x86_64.programs.pauk.genes
+-
+-GRAV = body.GRAV
+ 
+-skill body_index() { out 0 }
+-skill knee_base() { out 1 }
+-skill foot_base() { out 9 }
++PACE = 8
++STRIDE = 2
++LIFT = 70
++LIFT_SHIFT = 64
++CARRY = 3
++DROP = 30
++FALL = 18
++RISE = 4
++REACH = 230
++LYING = 140
++LIE_PENALTY = 40
+ 
+-skill point_get(points, idx, axis) {
+-    out group.get(points, idx * 3 + axis)
++Leg = Box {
++    x = 0,
++    y = 0,
++    z = 0,
++    planted = yes
+ }
+ 
+-skill point_set(points, idx, x, y, z) {
+-    @p = group.tree_replaced(points, idx * 3, x)
+-    p = group.tree_replaced(p, idx * 3 + 1, y)
+-    p = group.tree_replaced(p, idx * 3 + 2, z)
+-    out p
+-}
+-
+-skill init_points() {
+-    @points = []
+-    points = group.add(points, 0)
+-    points = group.add(points, body.BODY_Y)
+-    points = group.add(points, 0)
+-    drum (body.LEG_COUNT) {
+-        @leg = beat
+-        @sx = body.shoulder_x(leg)
+-        @sz = body.shoulder_z(leg)
+-        points = group.add(points, sx)
+-        points = group.add(points, body.BODY_Y - body.UPPER)
+-        points = group.add(points, sz)
+-    }
++skill init_state(genome) {
++    @legs = []
+     drum (body.LEG_COUNT) {
+-        @leg = beat
+-        @sx = body.shoulder_x(leg)
+-        @sz = body.shoulder_z(leg)
+-        points = group.add(points, sx)
+-        points = group.add(points, 0)
+-        points = group.add(points, sz)
++        legs = group.add(legs, Leg { x = body.rest_x(beat), y = 0, z = body.rest_z(beat) })
+     }
+-    out points
++    out body.SpiderState { genes = genome, legs = legs, x = 0, y = body.BODY_Y, z = 0 }
+ }
+ 
+-skill init_state(genome) {
+-    @points = init_points()
+-    @state = body.SpiderState { genes = genome, points = points, prev = points, t = 0 }
++skill init_lane(genome, lane) {
++    @state = init_state(genome)
++    state.z = lane
++    drum (state.legs) { beat.z = beat.z + lane }
+     out state
+ }
+ 
+-skill enforce_legs(state, bodyx, bodyy, bodyz) {
+-    @points = state.points
+-    @leg_count = body.LEG_COUNT
+-    drum (3) {
+-        drum (leg_count) {
+-            @leg = beat
+-            @knee = 1 + leg
+-            @foot = 9 + leg
+-            @ax = bodyx + body.shoulder_x(leg)
+-            @ay = bodyy
+-            @az = bodyz + body.shoulder_z(leg)
+-            @kx = point_get(points, knee, 0)
+-            @ky = point_get(points, knee, 1)
+-            @kz = point_get(points, knee, 2)
+-            @dx = kx - ax
+-            @dy = ky - ay
+-            @dz = kz - az
+-            @dist = geometry.root(dx * dx + dy * dy + dz * dz)
+-            (dist <= 0) { dist = 1 }
+-            @nx = ax + dx * body.UPPER / dist
+-            @ny = ay + dy * body.UPPER / dist
+-            @nz = az + dz * body.UPPER / dist
+-            points = point_set(points, knee, nx, ny, nz)
+-            @fx = point_get(points, foot, 0)
+-            @fy = point_get(points, foot, 1)
+-            @fz = point_get(points, foot, 2)
+-            @kx2 = point_get(points, knee, 0)
+-            @ky2 = point_get(points, knee, 1)
+-            @kz2 = point_get(points, knee, 2)
+-            @dx2 = fx - kx2
+-            @dy2 = fy - ky2
+-            @dz2 = fz - kz2
+-            @dist2 = geometry.root(dx2 * dx2 + dy2 * dy2 + dz2 * dz2)
+-            (dist2 <= 0) { dist2 = 1 }
+-            @fxn = kx2 + dx2 * body.LOWER / dist2
+-            @fyn = ky2 + dy2 * body.LOWER / dist2
+-            @fzn = kz2 + dz2 * body.LOWER / dist2
+-            points = point_set(points, foot, fxn, fyn, fzn)
+-        }
+-    }
+-    state.points = points
+-    out none
++skill target(state, leg) {
++    @genome = state.genes
++    @base = 1 + leg * 3
++    @angle = group.get(genome, base + 1) + state.t * group.get(genome, 0) * PACE
++    @forward = group.get(genome, base) * STRIDE * geometry.sine(num.mod(angle, geometry.TURN)) / geometry.ONE
++    @shift = group.get(genome, base + 2) * geometry.TURN / LIFT_SHIFT
++    @lift_angle = num.mod(angle + shift + geometry.TURN / 4, geometry.TURN)
++    (lift_angle < 0) { lift_angle = lift_angle + geometry.TURN }
++    @lift = geometry.sine(lift_angle)
++    (lift < 0) { lift = 0 }
++    out [forward, LIFT * lift / geometry.ONE]
+ }
+ 
+-skill muscle_step(state) {
+-    @points = state.points
+-    @genome = state.genes
+-    @freq = group.get(genome, 0)
+-    @bodyx = point_get(points, 0, 0)
+-    @bodyy = point_get(points, 0, 1)
+-    @bodyz = point_get(points, 0, 2)
++skill move_legs(state) {
++    @planted = 0
++    @sum_x = 0
++    @sum_z = 0
+     drum (body.LEG_COUNT) {
+-        @leg = beat
+-        @baseg = 1 + leg * 3
+-        @amp = group.get(genome, baseg)
+-        @phase = group.get(genome, baseg + 1)
+-        @off = group.get(genome, baseg + 2)
+-        @angle = phase + state.t * freq
+-        @sinv = geometry.sine(num.mod(angle, geometry.TURN))
+-        @stride = amp * sinv / geometry.ONE + off
+-        @shoulderx = body.shoulder_x(leg)
+-        @shoulderz = body.shoulder_z(leg)
+-        @targetx = bodyx + shoulderx + stride
+-        @targetz = bodyz + shoulderz
+-        @targety = 0
+-        (sinv > geometry.ONE / 3) { targety = 40 }
+-        @foot = 9 + leg
+-        @fx = point_get(points, foot, 0)
+-        @fy = point_get(points, foot, 1)
+-        @fz = point_get(points, foot, 2)
+-        @nx = fx + (targetx - fx) / 8
+-        @ny = fy + (targety - fy) / 8
+-        @nz = fz + (targetz - fz) / 8
+-        points = point_set(points, foot, nx, ny, nz)
++        @foot = group.get(state.legs, beat)
++        @aim = target(state, beat)
++        @want_x = state.x + body.rest_x(beat) + group.get(aim, 0)
++        @want_z = state.z + body.rest_z(beat)
++        @lift = group.get(aim, 1)
++        pick {
++            (lift > 0) {
++                foot.planted = no
++                foot.x = foot.x + (want_x - foot.x) / CARRY
++                foot.z = foot.z + (want_z - foot.z) / CARRY
++                foot.y = foot.y + (lift - foot.y) / CARRY
++            }
++            {
++                (foot.planted == no) {
++                    foot.x = foot.x + (want_x - foot.x) / CARRY
++                    foot.z = foot.z + (want_z - foot.z) / CARRY
++                    foot.y = foot.y - DROP
++                    (foot.y <= 0) {
++                        foot.y = 0
++                        foot.planted = yes
++                    }
++                }
++                (foot.planted == yes) {
++                    planted = planted + 1
++                    sum_x = sum_x + foot.x - body.rest_x(beat) - group.get(aim, 0)
++                    sum_z = sum_z + foot.z - body.rest_z(beat)
++                }
++            }
++        }
+     }
+-    state.points = points
+-    out none
++    out [planted, sum_x, sum_z]
+ }
+ 
+-skill ground_collide(state) {
+-    @points = state.points
+-    @prev = state.prev
+-    @leg_count = body.LEG_COUNT
+-    drum (leg_count) {
+-        @foot = 9 + beat
+-        @y = point_get(points, foot, 1)
+-        (y < 0) {
+-            @x = point_get(points, foot, 0)
+-            @z = point_get(points, foot, 2)
+-            @px = point_get(prev, foot, 0)
+-            @py = point_get(prev, foot, 1)
+-            @pz = point_get(prev, foot, 2)
+-            points = point_set(points, foot, x, 0, z)
+-            @vx = x - px
+-            @vz = z - pz
+-            @npx = x - vx / 8
+-            @npz = z - vz / 8
+-            prev = point_set(prev, foot, npx, 0, npz)
++skill slip_far(state) {
++    drum (body.LEG_COUNT) {
++        @foot = group.get(state.legs, beat)
++        (foot.planted == yes) {
++            @dx = foot.x - state.x - body.rest_x(beat)
++            @dz = foot.z - state.z - body.rest_z(beat)
++            (dx * dx + dz * dz > REACH * REACH) { foot.planted = no }
+         }
+     }
+-    @by = point_get(points, 0, 1)
+-    (by < 120) {
+-        @bx = point_get(points, 0, 0)
+-        @bz = point_get(points, 0, 2)
+-        points = point_set(points, 0, bx, 120, bz)
+-        @px0 = point_get(prev, 0, 0)
+-        @pz0 = point_get(prev, 0, 2)
+-        @vx0 = bx - px0
+-        @vz0 = bz - pz0
+-        prev = point_set(prev, 0, bx - vx0 / 8, point_get(prev,0,1), bz - vz0 / 8)
+-    }
+-    state.points = points
+-    state.prev = prev
+     out none
+ }
+ 
+ skill step(state) {
+-    @points = state.points
+-    @prev = state.prev
+-    @old = points
+-    @newpoints = []
+-    drum (body.POINT_COUNT) {
+-        @idx = beat
+-        @x = point_get(old, idx, 0)
+-        @y = point_get(old, idx, 1)
+-        @z = point_get(old, idx, 2)
+-        @px = point_get(prev, idx, 0)
+-        @py = point_get(prev, idx, 1)
+-        @pz = point_get(prev, idx, 2)
+-        newpoints = group.add(newpoints, 2 * x - px)
+-        newpoints = group.add(newpoints, 2 * y - py - GRAV)
+-        newpoints = group.add(newpoints, 2 * z - pz)
++    @moved = move_legs(state)
++    @planted = group.get(moved, 0)
++    (planted > 0) {
++        state.x = group.get(moved, 1) / planted
++        state.z = group.get(moved, 2) / planted
++    }
++    pick {
++        (planted >= 3) { state.y = state.y + (body.BODY_Y - state.y) / RISE }
++        { state.y = state.y - FALL }
++    }
++    (state.y < LYING) {
++        state.y = LYING
++        state.lying = state.lying + 1
+     }
+-    state.prev = old
+-    state.points = newpoints
+-    muscle_step(state)
+-    @bx = point_get(state.points, 0, 0)
+-    @by = point_get(state.points, 0, 1)
+-    @bz = point_get(state.points, 0, 2)
+-    enforce_legs(state, bx, by, bz)
+-    ground_collide(state)
++    slip_far(state)
+     state.t = state.t + 1
+     out none
+ }
+ 
+ skill body_x(state) {
+-    out point_get(state.points, 0, 0)
++    out state.x
+ }
+ 
+ skill evaluate(genome) {
+     @state = init_state(genome)
+-    @initial_x = point_get(state.points, 0, 0)
+     drum (body.STEPS) { step(state) }
+-    @final_x = point_get(state.points, 0, 0)
+-    @final_y = point_get(state.points, 0, 1)
+-    @distance = final_x - initial_x
+-    (final_y < 120) { distance = distance - 100000 }
+-    out distance
++    out state.x - state.lying * LIE_PENALTY
+ }
+diff --git a/os/target/uefi_x86_64/programs/pauk/view.saltic b/os/target/uefi_x86_64/programs/pauk/view.saltic
+index ae3aa82..20343ae 100644
+--- a/os/target/uefi_x86_64/programs/pauk/view.saltic
++++ b/os/target/uefi_x86_64/programs/pauk/view.saltic
+@@ -1,7 +1,17 @@
+ -- pauk/view — рисование лучшего паука пластилином и надписи.
+ --
+--- render(stage, state, base) — кадр: земля, декорации, паук
++-- render(stage, troop, base) — кадр: земля полянки и пятёрка пауков поколения
++--     по дорожкам (лидер — золотой); рисуются относительно самого дальнего —
++--     он всегда в центре полянки (земля — кусок конечного размера)
++-- mini(state, offset) -> копия паука для рисования: сдвинута на offset по x
++--     и уменьшена в MINI раз; shoulder_x / shoulder_z(leg) — плечи копии
++-- build_spider(state, back, tint) -> тела паука (тело, голова, колени, ступни);
++--     ball(...) — шарик на высоте земли; knee_x / knee_z(state, leg) — колено
++-- draw_legs(back, camera, state) — ноги толстыми линиями по проекциям суставов;
++--     line(screen, from, to, thick, ink); on_screen(camera, x, y, z) -> проекция
+ -- overlay(front, gen, best, avg, history) — текст и график
++-- troop(population) -> пятёрка TROOP первых в популяции по дорожкам через LANE
++--     (эволюция кладёт лучших прошлого поколения первыми; первый — лидер)
+ 
+ use core.group
+ use core.num
+@@ -20,51 +30,139 @@ use os.target.uefi_x86_64.programs.pauk.physics
+ SPIDER_COLOR = canvas.Rgb { red = 124, green = 88, blue = 64 }
+ JOINT_COLOR = canvas.Rgb { red = 90, green = 60, blue = 40 }
+ GRAPH_COLOR = canvas.Rgb { red = 34, green = 197, blue = 94 }
++LEADER_COLOR = canvas.Rgb { red = 234, green = 179, blue = 8 }
++TROOP = 5
++LANE = 380
++KNEE = 45
++MINI = 2
+ 
+-skill add_item(list, item) {
+-    out group.add(list, item)
++skill ball(back, x, y, z, size, tint) {
++    @lift = scene.height(x, z)
++    out forms.ellipsoid(back, [x, y + lift, z], [size, size, size], tint, 3)
+ }
+ 
+-skill build_spider_points(state, back) {
++skill build_spider(state, back, tint) {
+     @bodies = []
+-    @pts = state.points
+-    @bx = physics.point_get(pts, 0, 0)
+-    @by = physics.point_get(pts, 0, 1)
+-    @bz = physics.point_get(pts, 0, 2)
+-    @bodypos = [bx, by, bz]
+-    bodies = group.add(bodies, forms.ellipsoid(back, bodypos, [44, 34, 44], SPIDER_COLOR, 4))
++    @lift = scene.height(state.x, state.z)
++    bodies = group.add(bodies, forms.ellipsoid(back, [state.x, state.y + lift, state.z], [35, 23, 31], tint, 5))
++    bodies = group.add(bodies, forms.ellipsoid(back, [state.x + 42, state.y + lift + 5, state.z], [17, 15, 16], tint, 4))
+     drum (body.LEG_COUNT) {
+-        @leg = beat
+-        @knee = 1 + leg
+-        @foot = 9 + leg
+-        @kp = [physics.point_get(pts, knee, 0), physics.point_get(pts, knee, 1), physics.point_get(pts, knee, 2)]
+-        @fp = [physics.point_get(pts, foot, 0), physics.point_get(pts, foot, 1), physics.point_get(pts, foot, 2)]
+-        bodies = group.add(bodies, forms.ellipsoid(back, kp, [14, 14, 14], JOINT_COLOR, 3))
+-        bodies = group.add(bodies, forms.ellipsoid(back, fp, [12, 8, 12], JOINT_COLOR, 3))
++        @foot = group.get(state.legs, beat)
++        bodies = group.add(bodies, ball(back, knee_x(state, beat), state.y + KNEE, knee_z(state, beat), 8, JOINT_COLOR))
++        bodies = group.add(bodies, ball(back, foot.x, foot.y + 4, foot.z, 6, JOINT_COLOR))
+     }
+     out bodies
+ }
+ 
+-skill render(podium, state, base) {
++skill knee_x(state, leg) {
++    @foot = group.get(state.legs, leg)
++    @sx = state.x + shoulder_x(leg)
++    out (sx + foot.x) / 2 + shoulder_x(leg) / 3
++}
++
++skill knee_z(state, leg) {
++    @foot = group.get(state.legs, leg)
++    @sz = state.z + shoulder_z(leg)
++    out (sz + foot.z) / 2 + shoulder_z(leg) / 3
++}
++
++skill on_screen(camera, x, y, z) {
++    out mesh.project(camera, [x, y + scene.height(x, z), z])
++}
++
++skill line(screen, from, to, thick, ink) {
++    (group.get(from, 2) < mesh.NEAR) { out none }
++    (group.get(to, 2) < mesh.NEAR) { out none }
++    @x0 = group.get(from, 0)
++    @y0 = group.get(from, 1)
++    @dx = group.get(to, 0) - x0
++    @dy = group.get(to, 1) - y0
++    @steps = dx
++    (steps < 0) { steps = 0 - steps }
++    @tall = dy
++    (tall < 0) { tall = 0 - tall }
++    (tall > steps) { steps = tall }
++    (steps < 1) { steps = 1 }
++    (steps > 600) { out none }
++    drum (steps + 1) {
++        @x = x0 + dx * beat / steps - thick / 2
++        @y = y0 + dy * beat / steps - thick / 2
++        (x >= 0) {
++            (y >= 0) {
++                (x + thick < screen.width) {
++                    (y + thick < screen.height) { graphics.fill(screen, x, y, thick, thick, ink) }
++                }
++            }
++        }
++    }
++    out none
++}
++
++skill draw_legs(back, camera, state) {
++    @ink = graphics.color(back, 60, 38, 26)
++    drum (body.LEG_COUNT) {
++        @foot = group.get(state.legs, beat)
++        @shoulder = on_screen(camera, state.x + shoulder_x(beat), state.y, state.z + shoulder_z(beat))
++        @knee = on_screen(camera, knee_x(state, beat), state.y + KNEE, knee_z(state, beat))
++        @toe = on_screen(camera, foot.x, foot.y + 4, foot.z)
++        line(back, shoulder, knee, 4, ink)
++        line(back, knee, toe, 3, ink)
++    }
++    out none
++}
++
++skill render(podium, troop, base) {
+     @back = podium.back
+     drum (back.height) { graphics.copy_span(base, back, podium.sky, beat, 0, back.width) }
+     @camera = podium.camera
+-    @pts = state.points
+-    @bx = physics.point_get(pts, 0, 0)
+-    @by = physics.point_get(pts, 0, 1)
+-    @bz = physics.point_get(pts, 0, 2)
+-    @from = [bx - 300, by + 320, bz + 700]
+-    mesh.look(camera, from, [bx, by, bz])
+-    mesh.ground(back, camera, podium.scene.ground, scene.CELLS)
+-    @decorations = mesh.order(camera, podium.scene.bodies)
+-    drum (group.count(decorations)) { mesh.draw(back, camera, group.get(decorations, beat)) }
+-    @spider = build_spider_points(state, back)
++    @lead = group.get(troop, 0)
++    drum (troop) {
++        (beat.x > lead.x) { lead = beat }
++    }
++    @offset = lead.x
++    @minis = []
++    drum (troop) { minis = group.add(minis, mini(beat, offset)) }
++    @from = [-520, 640, 980]
++    mesh.look(camera, from, [-60, 30, 0])
++    @world = podium.scene
++    mesh.ground(back, camera, world.ground, scene.CELLS)
++    @spider = []
++    drum (group.count(minis)) {
++        @one = group.get(minis, beat)
++        draw_legs(back, camera, one)
++        @tint = SPIDER_COLOR
++        (beat == 0) { tint = LEADER_COLOR }
++        spider = group.concat(spider, build_spider(one, back, tint))
++    }
+     @sorted = mesh.order(camera, spider)
+     drum (group.count(sorted)) { mesh.draw(back, camera, group.get(sorted, beat)) }
+     drum (back.height) { graphics.copy_span(base, podium.front, back, beat, 0, back.width) }
+     out none
+ }
+ 
++skill mini(state, offset) {
++    @legs = []
++    drum (state.legs) { legs = group.add(legs, physics.Leg { x = (beat.x - offset) / MINI, y = beat.y / MINI, z = beat.z / MINI }) }
++    out body.SpiderState { legs = legs, x = (state.x - offset) / MINI, y = state.y / MINI, z = state.z / MINI }
++}
++
++skill shoulder_x(leg) {
++    out body.shoulder_x(leg) / MINI
++}
++
++skill shoulder_z(leg) {
++    out body.shoulder_z(leg) / MINI
++}
++
++skill troop(population) {
++    @team = []
++    drum (TROOP) {
++        @lane = (beat - TROOP / 2) * LANE
++        team = group.add(team, physics.init_lane(group.get(population, beat), lane))
++    }
++    out team
++}
++
+ skill overlay(front, gen, best, avg, history) {
+     @ink = canvas.paint(front, canvas.INK)
+     @white = canvas.paint(front, canvas.PAPER)
+diff --git a/os/target/uefi_x86_64/programs/pauk.saltic b/os/target/uefi_x86_64/programs/pauk.saltic
+new file mode 100644
+index 0000000..9e960d8
+--- /dev/null
++++ b/os/target/uefi_x86_64/programs/pauk.saltic
+@@ -0,0 +1,106 @@
++-- pauk — эволюция ходьбы трёхмерного паука на Saltic.
++--
++-- program() — вход: поколения, показ лучшего, надписи, график, клавиши
++
++use core.group
++use core.num
++use os.target.uefi_x86_64.platform.firmware
++use os.target.uefi_x86_64.platform.uefi
++use os.target.uefi_x86_64.screen.graphics
++use os.target.uefi_x86_64.network.reply
++use os.target.uefi_x86_64.network.remote
++use os.target.uefi_x86_64.screen.clay.stage
++use os.target.uefi_x86_64.screen.clay.mesh
++use os.target.uefi_x86_64.screen.clay.forms
++use os.target.uefi_x86_64.screen.clay.scene
++use os.uiengine.canvas
++use os.uiengine.fonts
++use os.target.uefi_x86_64.programs.pauk.body
++use os.target.uefi_x86_64.programs.pauk.physics
++use os.target.uefi_x86_64.programs.pauk.genes
++use os.target.uefi_x86_64.programs.pauk.evolution
++use os.target.uefi_x86_64.programs.pauk.view
++
++PAUSE = 1000
++SCAN_ESCAPE = 23
++SCAN_LEFT = 4
++SCAN_RIGHT = 3
++SPACE = 32
++
++Session = Box {
++    history = []
++}
++
++program() {
++    @base = firmware.guest_base()
++    @front = graphics.open(base)
++    uefi.forget_keys(base)
++    @link = remote.open_remote() rescue |err| { none }
++    @set = stage.open_stage(base, front)
++    @pages = stage.pages(set)
++    ((link == none) == no) {
++        remote.own(link, set.sky.frame, pages)
++        remote.own(link, set.back.frame, pages)
++    }
++    @moment = uefi.now(base)
++    @seed = moment.minute * 60 + moment.second + 1
++    (seed <= 0) { seed = 1 }
++    @evo = evolution.init_state(seed)
++    @session = Session {}
++    @state = physics.init_state(genes.make_manual())
++    @generation_frames = 0
++    @paused = no
++    @speed = 3
++    @show_frames = 300
++    @quit = no
++    always {
++        ((link == none) == no) { remote.serve(link) }
++        @key = uefi.poll_key(base, PAUSE)
++        (key.ready == yes) {
++            (key.scan == SCAN_ESCAPE) { quit = yes }
++            (key.scan == SCAN_LEFT) {
++                speed = speed - 1
++                (speed < 1) { speed = 1 }
++            }
++            (key.scan == SCAN_RIGHT) {
++                speed = speed + 1
++                (speed > 12) { speed = 12 }
++            }
++            (key.char == SPACE) { paused = paused == no }
++        }
++        (quit == yes) {
++            stage.close_stage(base, set)
++            @best = evo.best_distance
++            @gen = evo.generation
++            reply.home("паук: поколений {gen}, рекорд {best}")
++            out none
++        }
++        (paused == no) {
++            (generation_frames == 0) {
++                evo = evolution.evolve_once(evo, base, link)
++                session.history = group.add(session.history, evo.best_distance)
++                state = physics.init_state(evo.best_genome)
++                generation_frames = 1
++            }
++            @can_step = (generation_frames > 0)
++            (can_step == yes) {
++                @rep = speed
++                drum (rep) {
++                    (state.t < body.STEPS) { physics.step(state) }
++                    (state.t >= body.STEPS) { state = physics.init_state(evo.best_genome) }
++                }
++                generation_frames = generation_frames + 1
++                (generation_frames > show_frames) { generation_frames = 0 }
++            }
++        }
++        view.render(set, state, base)
++        view.overlay(front, evo.generation, evo.best_distance, evo.average_distance, session.history)
++        ((link == none) == no) {
++            @g = evo.generation
++            @b = evo.best_distance
++            @a = evo.average_distance
++            remote.tell(link, "поколение {g}, рекорд {b}, среднее {a}")
++        }
++    }
++    out none
++}
+diff --git a/os/target/uefi_x86_64/programs/pauk/body.saltic b/os/target/uefi_x86_64/programs/pauk/body.saltic
+new file mode 100644
+index 0000000..0be64d6
+--- /dev/null
++++ b/os/target/uefi_x86_64/programs/pauk/body.saltic
+@@ -0,0 +1,45 @@
++-- pauk/body — тело паука, геометрия и константы физики.
++--
++-- Константы: STEPS, GRAV, UPPER, LOWER, BODY_R, BODY_Y, LEG_COUNT,
++--     GENE_COUNT, WORLD_SCALE
++-- SpiderState { genes, points, prev, t } — состояние точки Верле
++-- shoulder_offsets(leg) -> [x,z] смещения плеча от центра тела
++-- clamp(value, low, high) -> value в диапазоне
++
++use core.group
++use os.target.uefi_x86_64.screen.geometry
++
++STEPS = 600
++GRAV = 40
++UPPER = 150
++LOWER = 150
++BODY_R = 90
++BODY_Y = 300
++LEG_COUNT = 8
++POPULATION = 28
++ELITE = 6
++MUTATIONS = 9
++POINT_COUNT = 17
++
++SpiderState = Box {
++    genes = [],
++    points = [],
++    prev = [],
++    t = 0
++}
++
++skill clamp(value, low, high) {
++    (value < low) { out low }
++    (value > high) { out high }
++    out value
++}
++
++skill shoulder_x(leg) {
++    @angle = geometry.TURN * leg / LEG_COUNT
++    out geometry.cosine(angle) * BODY_R / geometry.ONE
++}
++
++skill shoulder_z(leg) {
++    @angle = geometry.TURN * leg / LEG_COUNT
++    out geometry.sine(angle) * BODY_R / geometry.ONE
++}
+diff --git a/os/target/uefi_x86_64/programs/pauk/evolution.saltic b/os/target/uefi_x86_64/programs/pauk/evolution.saltic
+new file mode 100644
+index 0000000..c11c915
+--- /dev/null
++++ b/os/target/uefi_x86_64/programs/pauk/evolution.saltic
+@@ -0,0 +1,122 @@
++-- pauk/evolution — генетический алгоритм: популяция, оценка (без рисования),
++--    отбор элиты, скрещивание и мутация.
++--
++-- EvolutionState { population, distances, generation, best_distance,
++--     best_genome, seed, average_distance }
++-- init_state(seed) -> EvolutionState
++-- evolve_once(state, base, link) -> EvolutionState
++
++use core.group
++use core.num
++use os.target.uefi_x86_64.programs.pauk.body
++use os.target.uefi_x86_64.programs.pauk.genes
++use os.target.uefi_x86_64.programs.pauk.physics
++use os.target.uefi_x86_64.network.remote
++
++EvolutionState = Box {
++    population = [],
++    distances = [],
++    generation = 0,
++    best_distance = 0,
++    best_genome = [],
++    seed = 1,
++    average_distance = 0
++}
++
++skill index_of_max(dists) {
++    @best = 0
++    @bestd = group.get(dists, 0)
++    drum (group.count(dists)) {
++        (group.get(dists, beat) > bestd) {
++            bestd = group.get(dists, beat)
++            best = beat
++        }
++    }
++    out best
++}
++
++skill init_state(seed_in) {
++    @seed = seed_in
++    @pop = []
++    drum (body.POPULATION) {
++        @r = genes.make_random(seed)
++        seed = group.get(r, 0)
++        pop = group.add(pop, group.get(r, 1))
++    }
++    out EvolutionState { population = pop, distances = [], generation = 0, best_distance = 0, best_genome = [], seed = seed, average_distance = 0 }
++}
++
++skill evolve_once(state, base, link) {
++    @seed = state.seed
++    @pop = state.population
++    @n = group.count(pop)
++    @dists = []
++    @sum = 0
++    drum (n) {
++        ((link == none) == no) { remote.serve(link) }
++        @g = group.get(pop, beat)
++        @d = physics.evaluate(g)
++        dists = group.add(dists, d)
++        sum = sum + d
++    }
++    @bi = index_of_max(dists)
++    @best_d = group.get(dists, bi)
++    @best_g = group.get(pop, bi)
++    @best_distance = state.best_distance
++    @best_genome = state.best_genome
++    (best_d > best_distance) {
++        best_distance = best_d
++        best_genome = genes.clamp_genome(best_g)
++    }
++    @avg = sum / n
++    @used = []
++    @elite = []
++    drum (body.ELITE) {
++        @besti = -1
++        @bestdd = 0 - 1000000000
++        drum (n) {
++            (group.contains(used, beat) == no) {
++                (group.get(dists, beat) > bestdd) {
++                    bestdd = group.get(dists, beat)
++                    besti = beat
++                }
++            }
++        }
++        (besti >= 0) {
++            used = group.add(used, besti)
++            elite = group.add(elite, group.get(pop, besti))
++        }
++    }
++    @nextpop = []
++    drum (group.count(elite)) {
++        nextpop = group.add(nextpop, group.get(elite, beat))
++    }
++    @elite_count = group.count(elite)
++    (elite_count < 1) { elite_count = 1 }
++    drum (n - group.count(nextpop)) {
++        @r1 = genes.rng(seed, elite_count)
++        seed = group.get(r1, 0)
++        @i1 = group.get(r1, 1)
++        @r2 = genes.rng(seed, elite_count)
++        seed = group.get(r2, 0)
++        @i2 = group.get(r2, 1)
++        @parent_a = group.get(elite, i1)
++        @parent_b = group.get(elite, i2)
++        @cross = genes.crossover(parent_a, parent_b, seed)
++        seed = group.get(cross, 0)
++        @child = group.get(cross, 1)
++        @mut = genes.mutate(child, seed)
++        seed = group.get(mut, 0)
++        child = group.get(mut, 1)
++        child = genes.clamp_genome(child)
++        nextpop = group.add(nextpop, child)
++    }
++    state.population = nextpop
++    state.distances = dists
++    state.generation = state.generation + 1
++    state.best_distance = best_distance
++    state.best_genome = best_genome
++    state.average_distance = avg
++    state.seed = seed
++    out state
++}
+diff --git a/os/target/uefi_x86_64/programs/pauk/genes.saltic b/os/target/uefi_x86_64/programs/pauk/genes.saltic
+new file mode 100644
+index 0000000..6892c39
+--- /dev/null
++++ b/os/target/uefi_x86_64/programs/pauk/genes.saltic
+@@ -0,0 +1,122 @@
++-- pauk/genes — геном паука, случайность, скрещивание, мутация.
++--
++-- layout генома (25 чисел): [freq, a0,p0,o0, ..., a7,p7,o7]
++-- make_manual() -> геном        преимущественно ручная походка для этапа 1
++-- make_random(seed) -> [seed, genome]
++-- crossover(a, b, seed) -> [seed, genome]
++-- mutate(genome, seed) -> [seed, genome]
++-- clamp_genome(genome) -> genome
++
++use core.group
++use core.num
++use os.target.uefi_x86_64.programs.pauk.body
++
++FREQ_LOW = 250
++FREQ_HIGH = 900
++AMP_LOW = 0
++AMP_HIGH = 70
++PHASE_TURN = 411775
++
++skill make_manual() {
++    @g = [520]
++    drum (8) {
++        @amp = 40
++        @phase = PHASE_TURN * beat / 8
++        (num.mod(beat, 2) == 1) { phase = phase + PHASE_TURN / 2 }
++        @off = 0
++        g = group.add(g, amp)
++        g = group.add(g, phase)
++        g = group.add(g, off)
++    }
++    out g
++}
++
++skill rng(seed, limit) {
++    (limit <= 0) { out [seed, 0] }
++    @s = seed
++    s = num.mod(s * 1103515245 + 12345, 2147483648)
++    @v = num.mod(s, limit)
++    (v < 0) { v = 0 - v }
++    out [s, v]
++}
++
++skill make_random(seed_in) {
++    @seed = seed_in
++    @g = []
++    @r = rng(seed, FREQ_HIGH - FREQ_LOW + 1)
++    seed = group.get(r, 0)
++    g = group.add(g, FREQ_LOW + group.get(r, 1))
++    drum (8) {
++        @r1 = rng(seed, AMP_HIGH - AMP_LOW + 1)
++        seed = group.get(r1, 0)
++        @r2 = rng(seed, PHASE_TURN)
++        seed = group.get(r2, 0)
++        @r3 = rng(seed, 61)
++        seed = group.get(r3, 0)
++        g = group.add(g, AMP_LOW + group.get(r1, 1))
++        g = group.add(g, group.get(r2, 1))
++        g = group.add(g, group.get(r3, 1) - 30)
++    }
++    out [seed, g]
++}
++
++skill crossover(a, b, seed_in) {
++    @seed = seed_in
++    @g = []
++    g = group.add(g, group.get(a, 0))
++    @flip = 0
++    drum (8) {
++        flip = 1 - flip
++        @base = 1 + beat * 3
++        @src = a
++        (flip == 1) { src = b }
++        g = group.add(g, group.get(src, base))
++        g = group.add(g, group.get(src, base + 1))
++        g = group.add(g, group.get(src, base + 2))
++    }
++    out [seed, g]
++}
++
++skill mutate(genome, seed_in) {
++    @seed = seed_in
++    @g = group.slice(genome, 0, group.count(genome))
++    @n = group.count(g)
++    @changes = 6
++    drum (changes) {
++        @r = rng(seed, n)
++        seed = group.get(r, 0)
++        @idx = group.get(r, 1)
++        (idx < 1) { idx = 1 }
++        @cur = group.get(g, idx)
++        @delta = 0
++        @r2 = rng(seed, 21)
++        seed = group.get(r2, 0)
++        delta = group.get(r2, 1) - 10
++        @nextv = cur + delta
++        (idx == 0) { nextv = body.clamp(nextv, FREQ_LOW, FREQ_HIGH) }
++        (num.mod(idx, 3) == 1) { nextv = body.clamp(nextv, AMP_LOW, AMP_HIGH) }
++        (num.mod(idx, 3) == 2) { 
++            nextv = num.mod(nextv + PHASE_TURN, PHASE_TURN)
++        }
++        (num.mod(idx, 3) == 0) {
++            (idx > 0) { nextv = body.clamp(nextv, 0 - 30, 30) }
++        }
++        g = group.tree_replaced(g, idx, nextv)
++    }
++    out [seed, g]
++}
++
++skill clamp_genome(genome) {
++    @g = group.slice(genome, 0, group.count(genome))
++    g = group.tree_replaced(g, 0, body.clamp(group.get(g, 0), FREQ_LOW, FREQ_HIGH))
++    drum (8) {
++        @base = 1 + beat * 3
++        @a = body.clamp(group.get(g, base), AMP_LOW, AMP_HIGH)
++        @p = num.mod(group.get(g, base + 1) + PHASE_TURN, PHASE_TURN)
++        @o = body.clamp(group.get(g, base + 2), 0 - 30, 30)
++        g = group.tree_replaced(g, base, a)
++        g = group.tree_replaced(g, base + 1, p)
++        g = group.tree_replaced(g, base + 2, o)
++    }
++    out g
++}
+diff --git a/os/target/uefi_x86_64/programs/pauk/physics.saltic b/os/target/uefi_x86_64/programs/pauk/physics.saltic
+new file mode 100644
+index 0000000..3a35f54
+--- /dev/null
++++ b/os/target/uefi_x86_64/programs/pauk/physics.saltic
+@@ -0,0 +1,219 @@
++-- pauk/physics — упрощённая физика: точки Верле, палки-ограничения, земля.
++--
++-- init_state(genome) -> SpiderState
++-- step(state) -> none (один шаг, использует state.genes и state.t)
++-- evaluate(genome) -> число (дистанция со штрафом)
++-- points getter helpers
++
++use core.group
++use core.num
++use os.target.uefi_x86_64.screen.geometry
++use os.target.uefi_x86_64.programs.pauk.body
++use os.target.uefi_x86_64.programs.pauk.genes
++
++GRAV = body.GRAV
++
++skill body_index() { out 0 }
++skill knee_base() { out 1 }
++skill foot_base() { out 9 }
++
++skill point_get(points, idx, axis) {
++    out group.get(points, idx * 3 + axis)
++}
++
++skill point_set(points, idx, x, y, z) {
++    @p = group.tree_replaced(points, idx * 3, x)
++    p = group.tree_replaced(p, idx * 3 + 1, y)
++    p = group.tree_replaced(p, idx * 3 + 2, z)
++    out p
++}
++
++skill init_points() {
++    @points = []
++    points = group.add(points, 0)
++    points = group.add(points, body.BODY_Y)
++    points = group.add(points, 0)
++    drum (body.LEG_COUNT) {
++        @leg = beat
++        @sx = body.shoulder_x(leg)
++        @sz = body.shoulder_z(leg)
++        points = group.add(points, sx)
++        points = group.add(points, body.BODY_Y - body.UPPER)
++        points = group.add(points, sz)
++    }
++    drum (body.LEG_COUNT) {
++        @leg = beat
++        @sx = body.shoulder_x(leg)
++        @sz = body.shoulder_z(leg)
++        points = group.add(points, sx)
++        points = group.add(points, 0)
++        points = group.add(points, sz)
++    }
++    out points
++}
++
++skill init_state(genome) {
++    @points = init_points()
++    @state = body.SpiderState { genes = genome, points = points, prev = points, t = 0 }
++    out state
++}
++
++skill enforce_legs(state, bodyx, bodyy, bodyz) {
++    @points = state.points
++    @leg_count = body.LEG_COUNT
++    drum (3) {
++        drum (leg_count) {
++            @leg = beat
++            @knee = 1 + leg
++            @foot = 9 + leg
++            @ax = bodyx + body.shoulder_x(leg)
++            @ay = bodyy
++            @az = bodyz + body.shoulder_z(leg)
++            @kx = point_get(points, knee, 0)
++            @ky = point_get(points, knee, 1)
++            @kz = point_get(points, knee, 2)
++            @dx = kx - ax
++            @dy = ky - ay
++            @dz = kz - az
++            @dist = geometry.root(dx * dx + dy * dy + dz * dz)
++            (dist <= 0) { dist = 1 }
++            @nx = ax + dx * body.UPPER / dist
++            @ny = ay + dy * body.UPPER / dist
++            @nz = az + dz * body.UPPER / dist
++            points = point_set(points, knee, nx, ny, nz)
++            @fx = point_get(points, foot, 0)
++            @fy = point_get(points, foot, 1)
++            @fz = point_get(points, foot, 2)
++            @kx2 = point_get(points, knee, 0)
++            @ky2 = point_get(points, knee, 1)
++            @kz2 = point_get(points, knee, 2)
++            @dx2 = fx - kx2
++            @dy2 = fy - ky2
++            @dz2 = fz - kz2
++            @dist2 = geometry.root(dx2 * dx2 + dy2 * dy2 + dz2 * dz2)
++            (dist2 <= 0) { dist2 = 1 }
++            @fxn = kx2 + dx2 * body.LOWER / dist2
++            @fyn = ky2 + dy2 * body.LOWER / dist2
++            @fzn = kz2 + dz2 * body.LOWER / dist2
++            points = point_set(points, foot, fxn, fyn, fzn)
++        }
++    }
++    state.points = points
++    out none
++}
++
++skill muscle_step(state) {
++    @points = state.points
++    @genome = state.genes
++    @freq = group.get(genome, 0)
++    @bodyx = point_get(points, 0, 0)
++    @bodyy = point_get(points, 0, 1)
++    @bodyz = point_get(points, 0, 2)
++    drum (body.LEG_COUNT) {
++        @leg = beat
++        @baseg = 1 + leg * 3
++        @amp = group.get(genome, baseg)
++        @phase = group.get(genome, baseg + 1)
++        @off = group.get(genome, baseg + 2)
++        @angle = phase + state.t * freq
++        @sinv = geometry.sine(num.mod(angle, geometry.TURN))
++        @stride = amp * sinv / geometry.ONE + off
++        @shoulderx = body.shoulder_x(leg)
++        @shoulderz = body.shoulder_z(leg)
++        @targetx = bodyx + shoulderx + stride
++        @targetz = bodyz + shoulderz
++        @targety = 0
++        (sinv > geometry.ONE / 3) { targety = 40 }
++        @foot = 9 + leg
++        @fx = point_get(points, foot, 0)
++        @fy = point_get(points, foot, 1)
++        @fz = point_get(points, foot, 2)
++        @nx = fx + (targetx - fx) / 8
++        @ny = fy + (targety - fy) / 8
++        @nz = fz + (targetz - fz) / 8
++        points = point_set(points, foot, nx, ny, nz)
++    }
++    state.points = points
++    out none
++}
++
++skill ground_collide(state) {
++    @points = state.points
++    @prev = state.prev
++    @leg_count = body.LEG_COUNT
++    drum (leg_count) {
++        @foot = 9 + beat
++        @y = point_get(points, foot, 1)
++        (y < 0) {
++            @x = point_get(points, foot, 0)
++            @z = point_get(points, foot, 2)
++            @px = point_get(prev, foot, 0)
++            @py = point_get(prev, foot, 1)
++            @pz = point_get(prev, foot, 2)
++            points = point_set(points, foot, x, 0, z)
++            @vx = x - px
++            @vz = z - pz
++            @npx = x - vx / 8
++            @npz = z - vz / 8
++            prev = point_set(prev, foot, npx, 0, npz)
++        }
++    }
++    @by = point_get(points, 0, 1)
++    (by < 120) {
++        @bx = point_get(points, 0, 0)
++        @bz = point_get(points, 0, 2)
++        points = point_set(points, 0, bx, 120, bz)
++        @px0 = point_get(prev, 0, 0)
++        @pz0 = point_get(prev, 0, 2)
++        @vx0 = bx - px0
++        @vz0 = bz - pz0
++        prev = point_set(prev, 0, bx - vx0 / 8, point_get(prev,0,1), bz - vz0 / 8)
++    }
++    state.points = points
++    state.prev = prev
++    out none
++}
++
++skill step(state) {
++    @points = state.points
++    @prev = state.prev
++    @old = points
++    @newpoints = []
++    drum (body.POINT_COUNT) {
++        @idx = beat
++        @x = point_get(old, idx, 0)
++        @y = point_get(old, idx, 1)
++        @z = point_get(old, idx, 2)
++        @px = point_get(prev, idx, 0)
++        @py = point_get(prev, idx, 1)
++        @pz = point_get(prev, idx, 2)
++        newpoints = group.add(newpoints, 2 * x - px)
++        newpoints = group.add(newpoints, 2 * y - py - GRAV)
++        newpoints = group.add(newpoints, 2 * z - pz)
++    }
++    state.prev = old
++    state.points = newpoints
++    muscle_step(state)
++    @bx = point_get(state.points, 0, 0)
++    @by = point_get(state.points, 0, 1)
++    @bz = point_get(state.points, 0, 2)
++    enforce_legs(state, bx, by, bz)
++    ground_collide(state)
++    state.t = state.t + 1
++    out none
++}
++
++skill body_x(state) {
++    out point_get(state.points, 0, 0)
++}
++
++skill evaluate(genome) {
++    @state = init_state(genome)
++    @initial_x = point_get(state.points, 0, 0)
++    drum (body.STEPS) { step(state) }
++    @final_x = point_get(state.points, 0, 0)
++    @final_y = point_get(state.points, 0, 1)
++    @distance = final_x - initial_x
++    (final_y < 120) { distance = distance - 100000 }
++    out distance
++}
+diff --git a/os/target/uefi_x86_64/programs/pauk/view.saltic b/os/target/uefi_x86_64/programs/pauk/view.saltic
+new file mode 100644
+index 0000000..ae3aa82
+--- /dev/null
++++ b/os/target/uefi_x86_64/programs/pauk/view.saltic
+@@ -0,0 +1,110 @@
++-- pauk/view — рисование лучшего паука пластилином и надписи.
++--
++-- render(stage, state, base) — кадр: земля, декорации, паук
++-- overlay(front, gen, best, avg, history) — текст и график
++
++use core.group
++use core.num
++use core.str
++use os.target.uefi_x86_64.screen.graphics
++use os.target.uefi_x86_64.screen.geometry
++use os.target.uefi_x86_64.screen.clay.mesh
++use os.target.uefi_x86_64.screen.clay.forms
++use os.target.uefi_x86_64.screen.clay.scene
++use os.target.uefi_x86_64.screen.clay.stage
++use os.uiengine.canvas
++use os.uiengine.fonts
++use os.target.uefi_x86_64.programs.pauk.body
++use os.target.uefi_x86_64.programs.pauk.physics
++
++SPIDER_COLOR = canvas.Rgb { red = 124, green = 88, blue = 64 }
++JOINT_COLOR = canvas.Rgb { red = 90, green = 60, blue = 40 }
++GRAPH_COLOR = canvas.Rgb { red = 34, green = 197, blue = 94 }
++
++skill add_item(list, item) {
++    out group.add(list, item)
++}
++
++skill build_spider_points(state, back) {
++    @bodies = []
++    @pts = state.points
++    @bx = physics.point_get(pts, 0, 0)
++    @by = physics.point_get(pts, 0, 1)
++    @bz = physics.point_get(pts, 0, 2)
++    @bodypos = [bx, by, bz]
++    bodies = group.add(bodies, forms.ellipsoid(back, bodypos, [44, 34, 44], SPIDER_COLOR, 4))
++    drum (body.LEG_COUNT) {
++        @leg = beat
++        @knee = 1 + leg
++        @foot = 9 + leg
++        @kp = [physics.point_get(pts, knee, 0), physics.point_get(pts, knee, 1), physics.point_get(pts, knee, 2)]
++        @fp = [physics.point_get(pts, foot, 0), physics.point_get(pts, foot, 1), physics.point_get(pts, foot, 2)]
++        bodies = group.add(bodies, forms.ellipsoid(back, kp, [14, 14, 14], JOINT_COLOR, 3))
++        bodies = group.add(bodies, forms.ellipsoid(back, fp, [12, 8, 12], JOINT_COLOR, 3))
++    }
++    out bodies
++}
++
++skill render(podium, state, base) {
++    @back = podium.back
++    drum (back.height) { graphics.copy_span(base, back, podium.sky, beat, 0, back.width) }
++    @camera = podium.camera
++    @pts = state.points
++    @bx = physics.point_get(pts, 0, 0)
++    @by = physics.point_get(pts, 0, 1)
++    @bz = physics.point_get(pts, 0, 2)
++    @from = [bx - 300, by + 320, bz + 700]
++    mesh.look(camera, from, [bx, by, bz])
++    mesh.ground(back, camera, podium.scene.ground, scene.CELLS)
++    @decorations = mesh.order(camera, podium.scene.bodies)
++    drum (group.count(decorations)) { mesh.draw(back, camera, group.get(decorations, beat)) }
++    @spider = build_spider_points(state, back)
++    @sorted = mesh.order(camera, spider)
++    drum (group.count(sorted)) { mesh.draw(back, camera, group.get(sorted, beat)) }
++    drum (back.height) { graphics.copy_span(base, podium.front, back, beat, 0, back.width) }
++    out none
++}
++
++skill overlay(front, gen, best, avg, history) {
++    @ink = canvas.paint(front, canvas.INK)
++    @white = canvas.paint(front, canvas.PAPER)
++    fonts.draw_text(front, 12, 8, "поколение {gen}", canvas.INK, fonts.HEADING)
++    fonts.draw_text(front, 12, 30, "рекорд {best}", canvas.INK, fonts.REGULAR)
++    fonts.draw_text(front, 12, 50, "среднее {avg}", canvas.ZINC_500, fonts.REGULAR)
++    @gw = 240
++    @gh = 80
++    @gx = front.width - gw - 8
++    @gy = front.height - gh - 8
++    graphics.fill(front, gx, gy, gw, gh, canvas.paint(front, canvas.WHITE))
++    @count = group.count(history)
++    (count < 2) { out none }
++    @start = 0
++    (count > gw) { start = count - gw }
++    @mn = group.get(history, start)
++    @mx = mn
++    drum (count - start) {
++        @v = group.get(history, start + beat)
++        (v < mn) { mn = v }
++        (v > mx) { mx = v }
++    }
++    @range = mx - mn
++    (range <= 0) { range = 1 }
++    drum (count - start - 1) {
++        @x0 = gx + beat
++        @x1 = gx + beat + 1
++        @v0 = group.get(history, start + beat)
++        @v1 = group.get(history, start + beat + 1)
++        @y0 = gy + gh - 1 - (v0 - mn) * (gh - 1) / range
++        @y1 = gy + gh - 1 - (v1 - mn) * (gh - 1) / range
++        (y0 < gy) { y0 = gy }
++        (y0 > gy + gh - 1) { y0 = gy + gh - 1 }
++        (y1 < gy) { y1 = gy }
++        (y1 > gy + gh - 1) { y1 = gy + gh - 1 }
++        @lo = y0
++        @hi = y1
++        (y1 < lo) { lo = y1
++            hi = y0 }
++        drum (hi - lo + 1) { graphics.fill(front, x0, lo + beat, 1, 1, canvas.paint(front, GRAPH_COLOR)) }
++    }
++    out none
++}

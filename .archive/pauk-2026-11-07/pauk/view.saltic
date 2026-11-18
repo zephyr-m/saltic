@@ -1,0 +1,346 @@
+-- pauk/view — рисование лучшего паука пластилином и надписи.
+--
+-- render(stage, troop, base, record, thought, set) — кадр: длинный пол, все TROOP
+--     пауков поколения по дорожкам от линии START (нейро — бирюзовые) и
+--     флажки рекордов: красный — record обычных, бирюзовый — thought нейро;
+--     камера неподвижна — видно, кто сколько прошёл. Есть видеокарта — пол,
+--     ноги (collect_legs: полосы leg_quad) и шарики рисует её 3D-движок,
+--     иначе процессор
+-- mini(state) -> копия паука для рисования: уменьшена в MINI раз и
+--     поставлена от линии START; shoulder_x / shoulder_z(leg) — плечи копии
+-- floor(screen) -> ровный пол FLOOR_COLUMNS × FLOOR_ROWS клеток TILE в
+--     шахматку (физика паука считает землю ровной); flag(set, distance,
+--     neuro) -> флажок и метки поперёк дорожек на расстоянии distance;
+--     finish_line(set) -> белые метки финишной черты body.FINISH
+-- Kit { … } — пластилиновые шарики, слепленные один раз (kit(back)); кадр их
+--     только переставляет: moved(shape, x, y, z) -> копия, сдвинутая на x, y, z
+-- build_spider(state, set) -> тела паука из набора set (тело, голова, колени,
+--     ступни; нейро — бирюзовые); knee_x / knee_z(state, leg) — колено
+-- draw_legs(back, camera, state) — ноги толстыми линиями по проекциям суставов;
+--     line(screen, from, to, thick, ink); on_screen(camera, x, y, z) -> проекция
+-- overlay(front, gen, best, avg, history) — текст и график
+-- troop(sines, brains) -> все пауки поколения по дорожкам lane(номер) через
+--     LANE: сначала синусоидные с генами sines, за ними нейро с мозгами brains
+
+use core.group
+use core.num
+use core.str
+use os.target.uefi_x86_64.screen.graphics
+use os.target.uefi_x86_64.screen.geometry
+use os.target.uefi_x86_64.screen.clay.mesh
+use os.target.uefi_x86_64.screen.clay.forms
+use os.target.uefi_x86_64.screen.clay.scene
+use os.target.uefi_x86_64.screen.clay.stage
+use os.target.uefi_x86_64.drivers.intel_gpu.render
+use os.uiengine.canvas
+use os.uiengine.fonts
+use os.target.uefi_x86_64.programs.pauk.body
+use os.target.uefi_x86_64.programs.pauk.physics
+
+SPIDER_COLOR = canvas.Rgb { red = 124, green = 88, blue = 64 }
+JOINT_COLOR = canvas.Rgb { red = 90, green = 60, blue = 40 }
+GRAPH_COLOR = canvas.Rgb { red = 34, green = 197, blue = 94 }
+THINKER_COLOR = canvas.Rgb { red = 20, green = 184, blue = 166 }
+FLAG_COLOR = canvas.Rgb { red = 220, green = 60, blue = 60 }
+FLAG_POLE = canvas.Rgb { red = 250, green = 250, blue = 250 }
+TILE = 140
+FLOOR_COLUMNS = 32
+FLOOR_ROWS = 10
+START = -1940
+TILE_LIGHT = canvas.Rgb { red = 186, green = 206, blue = 160 }
+TILE_DARK = canvas.Rgb { red = 150, green = 178, blue = 128 }
+CAMERA_FROM = [-700, 3300, 1500]
+CAMERA_TO = [-700, 0, 0]
+LEG_PIXEL = 3941914
+TROOP = 4
+LANE = 380
+KNEE = 45
+MINI = 2
+
+skill floor(screen) {
+    @ground = mesh.Body { center = [0, 0, 0], flat = yes }
+    @points = []
+    drum (FLOOR_ROWS + 1) {
+        @z = beat * TILE - FLOOR_ROWS * TILE / 2
+        drum (FLOOR_COLUMNS + 1) { points = group.add(points, [beat * TILE - FLOOR_COLUMNS * TILE / 2, 0, z]) }
+    }
+    ground.points = points
+    @side = FLOOR_COLUMNS + 1
+    drum (FLOOR_ROWS) {
+        @row = beat
+        drum (FLOOR_COLUMNS) {
+            @a = row * side + beat
+            @tint = TILE_LIGHT
+            (num.mod(row + beat, 2) == 1) { tint = TILE_DARK }
+            ground = mesh.face(screen, ground, a, a + 1, a + side + 1, a + side, [0, mesh.UNIT, 0], tint)
+        }
+    }
+    out ground
+}
+
+Kit = Box {
+    sine_trunk = mesh.Body {},
+    sine_head = mesh.Body {},
+    neuro_trunk = mesh.Body {},
+    neuro_head = mesh.Body {},
+    knee = mesh.Body {},
+    foot = mesh.Body {},
+    pole = mesh.Body {},
+    red_cloth = mesh.Body {},
+    teal_cloth = mesh.Body {},
+    red_mark = mesh.Body {},
+    teal_mark = mesh.Body {},
+    finish_mark = mesh.Body {}
+}
+
+skill kit(back) {
+    @at = [0, 0, 0]
+    out Kit {
+        sine_trunk = forms.ellipsoid(back, at, [35, 23, 31], SPIDER_COLOR, 5),
+        sine_head = forms.ellipsoid(back, at, [17, 15, 16], SPIDER_COLOR, 4),
+        neuro_trunk = forms.ellipsoid(back, at, [35, 23, 31], THINKER_COLOR, 5),
+        neuro_head = forms.ellipsoid(back, at, [17, 15, 16], THINKER_COLOR, 4),
+        knee = forms.ellipsoid(back, at, [8, 8, 8], JOINT_COLOR, 3),
+        foot = forms.ellipsoid(back, at, [6, 6, 6], JOINT_COLOR, 3),
+        pole = forms.ellipsoid(back, at, [6, 90, 6], FLAG_POLE, 3),
+        red_cloth = forms.ellipsoid(back, at, [24, 16, 4], FLAG_COLOR, 3),
+        teal_cloth = forms.ellipsoid(back, at, [24, 16, 4], THINKER_COLOR, 3),
+        red_mark = forms.ellipsoid(back, at, [10, 4, 10], FLAG_COLOR, 3),
+        teal_mark = forms.ellipsoid(back, at, [10, 4, 10], THINKER_COLOR, 3),
+        finish_mark = forms.ellipsoid(back, at, [18, 4, 18], FLAG_POLE, 3)
+    }
+}
+
+skill moved(shape, x, y, z) {
+    @points = []
+    drum (shape.points) { points = group.add(points, [group.get(beat, 0) + x, group.get(beat, 1) + y, group.get(beat, 2) + z]) }
+    @quads = []
+    drum (shape.quads) { quads = group.add(quads, mesh.Quad { a = beat.a, b = beat.b, c = beat.c, d = beat.d, nx = beat.nx, ny = beat.ny, nz = beat.nz, cx = beat.cx + x, cy = beat.cy + y, cz = beat.cz + z, color = beat.color }) }
+    @center = shape.center
+    out mesh.Body { points = points, quads = quads, center = [group.get(center, 0) + x, group.get(center, 1) + y, group.get(center, 2) + z], flat = shape.flat }
+}
+
+skill flag(set, distance, neuro) {
+    @x = START + distance / MINI
+    @edge = 0 - TROOP * LANE / 2 / MINI
+    @cloth = set.red_cloth
+    @mark = set.red_mark
+    (neuro == yes) {
+        cloth = set.teal_cloth
+        mark = set.teal_mark
+    }
+    @marks = [moved(set.pole, x, 90, edge), moved(cloth, x + 24, 160, edge)]
+    drum (TROOP + 1) { marks = group.add(marks, moved(mark, x, 4, (2 * beat - TROOP) * LANE / 2 / MINI)) }
+    out marks
+}
+
+skill finish_line(set) {
+    @x = START + body.FINISH / MINI
+    @marks = []
+    drum (2 * TROOP + 1) { marks = group.add(marks, moved(set.finish_mark, x, 4, (beat - TROOP) * LANE / 2 / MINI)) }
+    out marks
+}
+
+skill build_spider(state, set) {
+    @trunk = set.sine_trunk
+    @head = set.sine_head
+    (group.count(state.brain) > 0) {
+        trunk = set.neuro_trunk
+        head = set.neuro_head
+    }
+    @bodies = [moved(trunk, state.x, state.y, state.z), moved(head, state.x + 42, state.y + 5, state.z)]
+    drum (body.LEG_COUNT) {
+        @foot = group.get(state.legs, beat)
+        bodies = group.add(bodies, moved(set.knee, knee_x(state, beat), state.y + KNEE, knee_z(state, beat)))
+        bodies = group.add(bodies, moved(set.foot, foot.x, foot.y + 4, foot.z))
+    }
+    out bodies
+}
+
+skill knee_x(state, leg) {
+    @foot = group.get(state.legs, leg)
+    @sx = state.x + shoulder_x(leg)
+    out (sx + foot.x) / 2 + shoulder_x(leg) / 3
+}
+
+skill knee_z(state, leg) {
+    @foot = group.get(state.legs, leg)
+    @sz = state.z + shoulder_z(leg)
+    out (sz + foot.z) / 2 + shoulder_z(leg) / 3
+}
+
+skill on_screen(camera, x, y, z) {
+    out mesh.project(camera, [x, y, z])
+}
+
+skill line(screen, from, to, thick, ink) {
+    (group.get(from, 2) < mesh.NEAR) { out none }
+    (group.get(to, 2) < mesh.NEAR) { out none }
+    @x0 = group.get(from, 0)
+    @y0 = group.get(from, 1)
+    @dx = group.get(to, 0) - x0
+    @dy = group.get(to, 1) - y0
+    @steps = dx
+    (steps < 0) { steps = 0 - steps }
+    @tall = dy
+    (tall < 0) { tall = 0 - tall }
+    (tall > steps) { steps = tall }
+    (steps < 1) { steps = 1 }
+    (steps > 600) { out none }
+    drum (steps + 1) {
+        @x = x0 + dx * beat / steps - thick / 2
+        @y = y0 + dy * beat / steps - thick / 2
+        (x >= 0) {
+            (y >= 0) {
+                (x + thick < screen.width) {
+                    (y + thick < screen.height) { graphics.fill(screen, x, y, thick, thick, ink) }
+                }
+            }
+        }
+    }
+    out none
+}
+
+skill draw_legs(back, camera, state) {
+    @ink = graphics.color(back, 60, 38, 26)
+    drum (body.LEG_COUNT) {
+        @foot = group.get(state.legs, beat)
+        @shoulder = on_screen(camera, state.x + shoulder_x(beat), state.y, state.z + shoulder_z(beat))
+        @knee = on_screen(camera, knee_x(state, beat), state.y + KNEE, knee_z(state, beat))
+        @toe = on_screen(camera, foot.x, foot.y + 4, foot.z)
+        line(back, shoulder, knee, 4, ink)
+        line(back, knee, toe, 3, ink)
+    }
+    out none
+}
+
+skill render(podium, troop, base, record, thought, set) {
+    @back = podium.back
+    graphics.copy_rect(base, back, podium.sky, 0, 0, back.width, back.height)
+    @camera = podium.camera
+    @minis = []
+    drum (troop) { minis = group.add(minis, mini(beat)) }
+    mesh.look(camera, CAMERA_FROM, CAMERA_TO)
+    @world = podium.scene
+    @spider = group.concat(group.concat(flag(set, record, no), flag(set, thought, yes)), finish_line(set))
+    drum (minis) { spider = group.concat(spider, build_spider(beat, set)) }
+    @sorted = mesh.order(camera, spider)
+    @gpu_ok = no
+    (group.count(podium.painter) > 0) {
+        @candidate = group.get(podium.painter, 0)
+        gpu_ok = candidate.broken == no
+    }
+    (gpu_ok == yes) {
+        @painter = group.get(podium.painter, 0)
+        render.begin(painter)
+        mesh.collect(painter, camera, world.ground)
+        drum (minis) { collect_legs(painter, camera, beat) }
+        drum (sorted) { mesh.collect(painter, camera, beat) }
+        @drawn = render.triangles(painter, render.Surface { at = back.frame, pitch = back.stride * graphics.PIXEL_BYTES, width = back.width, height = back.height })
+        (drawn == yes) { out graphics.push(base, podium.front, back) }
+        graphics.copy_rect(base, back, podium.sky, 0, 0, back.width, back.height)
+    }
+    mesh.draw(back, camera, world.ground)
+    drum (minis) { draw_legs(back, camera, beat) }
+    drum (sorted) { mesh.draw(back, camera, beat) }
+    out graphics.push(base, podium.front, back)
+}
+
+skill leg_quad(painter, from, to, thick, width, height) {
+    (group.get(from, 2) < mesh.NEAR) { out none }
+    (group.get(to, 2) < mesh.NEAR) { out none }
+    @x0 = group.get(from, 0)
+    @y0 = group.get(from, 1)
+    @x1 = group.get(to, 0)
+    @y1 = group.get(to, 1)
+    @length = geometry.root((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0))
+    (length < 1) { out none }
+    @ox = (y0 - y1) * thick / (2 * length)
+    @oy = (x1 - x0) * thick / (2 * length)
+    out render.add_quad(painter, [[x0 + ox, y0 + oy], [x1 + ox, y1 + oy], [x1 - ox, y1 - oy], [x0 - ox, y0 - oy]], LEG_PIXEL, width, height)
+}
+
+skill collect_legs(painter, camera, state) {
+    drum (body.LEG_COUNT) {
+        @foot = group.get(state.legs, beat)
+        @shoulder = on_screen(camera, state.x + shoulder_x(beat), state.y, state.z + shoulder_z(beat))
+        @knee = on_screen(camera, knee_x(state, beat), state.y + KNEE, knee_z(state, beat))
+        @toe = on_screen(camera, foot.x, foot.y + 4, foot.z)
+        leg_quad(painter, shoulder, knee, 4, camera.width, camera.height)
+        leg_quad(painter, knee, toe, 3, camera.width, camera.height)
+    }
+    out none
+}
+
+skill mini(state) {
+    @legs = []
+    drum (state.legs) { legs = group.add(legs, physics.Leg { x = beat.x / MINI + START, y = beat.y / MINI, z = beat.z / MINI }) }
+    out body.SpiderState { legs = legs, x = state.x / MINI + START, y = state.y / MINI, z = state.z / MINI, brain = state.brain }
+}
+
+skill shoulder_x(leg) {
+    out body.shoulder_x(leg) / MINI
+}
+
+skill shoulder_z(leg) {
+    out body.shoulder_z(leg) / MINI
+}
+
+skill lane(index) {
+    out (2 * index - TROOP + 1) * LANE / 2
+}
+
+skill troop(sines, brains) {
+    @team = []
+    drum (group.count(sines)) { team = group.add(team, physics.init_lane(group.get(sines, beat), lane(beat))) }
+    drum (group.count(brains)) {
+        @spider = physics.init_lane([], lane(group.count(sines) + beat))
+        spider.brain = group.get(brains, beat)
+        team = group.add(team, spider)
+    }
+    out team
+}
+
+skill overlay(front, gen, best, avg, history) {
+    @ink = canvas.paint(front, canvas.INK)
+    @white = canvas.paint(front, canvas.PAPER)
+    fonts.draw_text(front, 12, 8, "поколение {gen}", canvas.INK, fonts.HEADING)
+    fonts.draw_text(front, 12, 30, "рекорд {best}", canvas.INK, fonts.REGULAR)
+    fonts.draw_text(front, 12, 50, "среднее {avg}", canvas.ZINC_500, fonts.REGULAR)
+    @gw = 240
+    @gh = 80
+    @gx = front.width - gw - 8
+    @gy = front.height - gh - 8
+    graphics.fill(front, gx, gy, gw, gh, canvas.paint(front, canvas.WHITE))
+    @count = group.count(history)
+    (count < 2) { out none }
+    @start = 0
+    (count > gw) { start = count - gw }
+    @mn = group.get(history, start)
+    @mx = mn
+    drum (count - start) {
+        @v = group.get(history, start + beat)
+        (v < mn) { mn = v }
+        (v > mx) { mx = v }
+    }
+    @range = mx - mn
+    (range <= 0) { range = 1 }
+    drum (count - start - 1) {
+        @x0 = gx + beat
+        @x1 = gx + beat + 1
+        @v0 = group.get(history, start + beat)
+        @v1 = group.get(history, start + beat + 1)
+        @y0 = gy + gh - 1 - (v0 - mn) * (gh - 1) / range
+        @y1 = gy + gh - 1 - (v1 - mn) * (gh - 1) / range
+        (y0 < gy) { y0 = gy }
+        (y0 > gy + gh - 1) { y0 = gy + gh - 1 }
+        (y1 < gy) { y1 = gy }
+        (y1 > gy + gh - 1) { y1 = gy + gh - 1 }
+        @lo = y0
+        @hi = y1
+        (y1 < lo) { lo = y1
+            hi = y0 }
+        drum (hi - lo + 1) { graphics.fill(front, x0, lo + beat, 1, 1, canvas.paint(front, GRAPH_COLOR)) }
+    }
+    out none
+}

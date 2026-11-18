@@ -1,0 +1,156 @@
+-- pauk/evolution — генетический алгоритм: популяция, оценка (без рисования),
+--    отбор элиты, скрещивание и мутация.
+--
+-- EvolutionState { population, distances, generation, best_distance,
+--     best_genome, seed, average_distance }
+-- init_state(seed) -> EvolutionState
+-- evolve_once(state, base, link) -> EvolutionState — всё поколение разом
+-- evaluate_next(state) -> yes, когда оценены все: оценить следующего паука
+--     (в state.distances; перед поколением — пустой список); finish(state) ->
+--     EvolutionState — отбор и потомство по готовым оценкам. Так поколение
+--     считается по кусочку на кадр, и картинка не замирает
+-- resume(seed, saved) -> EvolutionState — продолжить с сохранённого лучшего
+--     (pauk/best): он сам, ELITE − 1 его мутантов, остальные — случайные;
+--     номер поколения и рекорд — из файла
+
+use core.group
+use core.num
+use os.target.uefi_x86_64.programs.pauk.body
+use os.target.uefi_x86_64.programs.pauk.genes
+use os.target.uefi_x86_64.programs.pauk.physics
+use os.target.uefi_x86_64.network.remote
+
+EvolutionState = Box {
+    population = [],
+    distances = [],
+    generation = 0,
+    best_distance = 0,
+    best_genome = [],
+    seed = 1,
+    average_distance = 0
+}
+
+skill index_of_max(dists) {
+    @best = 0
+    @bestd = group.get(dists, 0)
+    drum (group.count(dists)) {
+        (group.get(dists, beat) > bestd) {
+            bestd = group.get(dists, beat)
+            best = beat
+        }
+    }
+    out best
+}
+
+skill init_state(seed_in) {
+    @seed = seed_in
+    @pop = []
+    drum (body.POPULATION) {
+        @r = genes.make_random(seed)
+        seed = group.get(r, 0)
+        pop = group.add(pop, group.get(r, 1))
+    }
+    out EvolutionState { population = pop, distances = [], generation = 0, best_distance = 0, best_genome = [], seed = seed, average_distance = 0 }
+}
+
+skill resume(seed_in, saved) {
+    @state = init_state(seed_in)
+    @seed = state.seed
+    @pop = [saved.genome]
+    drum (body.ELITE - 1) {
+        @mut = genes.mutate(saved.genome, seed)
+        seed = group.get(mut, 0)
+        pop = group.add(pop, genes.clamp_genome(group.get(mut, 1)))
+    }
+    pop = group.concat(pop, group.slice(state.population, body.ELITE, group.count(state.population)))
+    state.population = pop
+    state.seed = seed
+    state.generation = saved.generation
+    state.best_distance = saved.distance
+    state.best_genome = saved.genome
+    out state
+}
+
+skill evaluate_next(state) {
+    @done = group.count(state.distances)
+    (done < group.count(state.population)) { state.distances = group.add(state.distances, physics.evaluate(group.get(state.population, done))) }
+    out group.count(state.distances) >= group.count(state.population)
+}
+
+skill evolve_once(state, base, link) {
+    state.distances = []
+    drum (group.count(state.population)) {
+        ((link == none) == no) { remote.serve(link) }
+        evaluate_next(state)
+    }
+    out finish(state)
+}
+
+skill finish(state) {
+    @seed = state.seed
+    @pop = state.population
+    @n = group.count(pop)
+    @dists = state.distances
+    @sum = 0
+    drum (dists) { sum = sum + beat }
+    @bi = index_of_max(dists)
+    @best_d = group.get(dists, bi)
+    @best_g = group.get(pop, bi)
+    @best_distance = state.best_distance
+    @best_genome = state.best_genome
+    (best_d > best_distance) {
+        best_distance = best_d
+        best_genome = genes.clamp_genome(best_g)
+    }
+    @avg = sum / n
+    @used = []
+    @elite = []
+    drum (body.ELITE) {
+        @besti = -1
+        @bestdd = 0 - 1000000000
+        drum (n) {
+            (group.contains(used, beat) == no) {
+                (group.get(dists, beat) > bestdd) {
+                    bestdd = group.get(dists, beat)
+                    besti = beat
+                }
+            }
+        }
+        (besti >= 0) {
+            used = group.add(used, besti)
+            elite = group.add(elite, group.get(pop, besti))
+        }
+    }
+    @nextpop = []
+    drum (group.count(elite)) {
+        nextpop = group.add(nextpop, group.get(elite, beat))
+    }
+    @elite_count = group.count(elite)
+    (elite_count < 1) { elite_count = 1 }
+    drum (n - group.count(nextpop)) {
+        @r1 = genes.rng(seed, elite_count)
+        seed = group.get(r1, 0)
+        @i1 = group.get(r1, 1)
+        @r2 = genes.rng(seed, elite_count)
+        seed = group.get(r2, 0)
+        @i2 = group.get(r2, 1)
+        @parent_a = group.get(elite, i1)
+        @parent_b = group.get(elite, i2)
+        @cross = genes.crossover(parent_a, parent_b, seed)
+        seed = group.get(cross, 0)
+        @child = group.get(cross, 1)
+        @mut = genes.mutate(child, seed)
+        seed = group.get(mut, 0)
+        child = group.get(mut, 1)
+        child = genes.clamp_genome(child)
+        nextpop = group.add(nextpop, child)
+    }
+    state.population = nextpop
+    state.distances = dists
+    state.generation = state.generation + 1
+    state.best_distance = best_distance
+    state.best_genome = best_genome
+    state.average_distance = avg
+    state.seed = seed
+    out state
+}

@@ -1,0 +1,307 @@
+-- look — то, что lens видит в коде, строками: проверка без сборки (разбор и
+-- чекер, числа 61-битные), публичное лицо модуля, поиск имени. Печатает
+-- родитель workbench/agent/lens.
+-- Модуль — путь к файлу или имя через точки; корни core, io, selfhost — в
+-- soul/seed, canonical — в soul, остальное — от корня репозитория.
+-- Сверка шапки: верхний skill и Box названы в ней целым словом (буквы, цифры
+-- и _; многоточие и русские буквы слово не продолжают). Имя перед скобкой
+-- есть среди них. program( — форма языка, не навык файла.
+--
+-- path_of(subject) -> путь файла модуля; NoModule
+-- check(path) -> ["ok"] или строки «код|строка|столбец|текст»; файл без
+--     program — модуль, missing_program у него не ошибка; лимиты канона
+--     (workbench/check/limits/canon) — строкой «limits|1|1|…»; шапка —
+--     строками «header|строка|1|текст»
+-- api(path) -> строки: файл, шапка, верхний уровень (skill, Box, константы)
+-- find(name) -> строки: где определено и где встречается, по git ls-files
+-- Внутри: module(text), header(text), top_level / commented / definition /
+--     mention(line…); name_byte(code), whole_at(text, at, size), named(text,
+--     name); leading_name(text), skill_name / box_name / top_name(line);
+--     name_ending(text, at), paren_names(text), header_gaps(path, text)
+
+use io.file
+use core.str
+use core.group
+use core.process
+use selfhost.parser
+use selfhost.checker
+use workbench.check.limits.canon
+
+ROOTS = ["core", "io", "selfhost"]
+LIMIT = 200
+SPACE = 32
+TAB = 9
+NEWLINE = 10
+PAREN = 40
+
+skill path_of(subject) {
+    (str.ends_with(subject, ".saltic") == yes) { out subject }
+    @parts = str.split(subject, ".")
+    @tail = str.join(parts, "/")
+    @first = group.get(parts, 0)
+    @made = "{tail}.saltic"
+    (group.contains(ROOTS, first) == yes) { made = "soul/seed/{tail}.saltic" }
+    (first == "canonical") { made = "soul/{tail}.saltic" }
+    @text = file.read(made) rescue |err| { "" }
+    (str.bytes(text) > 0) { out made }
+    @last = group.get(parts, group.count(parts) - 1)
+    @folder = str.slice(made, 0, str.bytes(made) - 7)
+    @nested = "{folder}/{last}.saltic"
+    @inside = file.read(nested) rescue |err| { "" }
+    (str.bytes(inside) > 0) { out nested }
+    out error.NoModule
+}
+
+skill module(text) {
+    (str.starts_with(text, "program(") == yes) { out no }
+    out str.contains(text, "\nprogram(") == no
+}
+
+skill check(path) {
+    @text = file.read(path)
+    @loaded = parser.load_file_loc(path, ".")
+    @found = []
+    (group.count(loaded.diagnostics) > 0) {
+        drum (loaded.diagnostics) { found = group.add(found, "{beat.code}|{beat.line}|{beat.col}|{beat.message}") }
+        out found
+    }
+    @checked = checker.check_for(loaded.ast, path, yes)
+    @alone = module(text)
+    drum (checked.diagnostics) {
+        @skip = no
+        (beat.code == "missing_program") { skip = alone }
+        (skip == no) { found = group.add(found, "{beat.code}|{beat.line}|{beat.col}|{beat.message}") }
+    }
+    @said = canon.verdict(path, text, canon.known())
+    (str.bytes(said) > 0) { found = group.add(found, "limits|1|1|{path}: лимиты канона: {said}") }
+    drum (header_gaps(path, text)) { found = group.add(found, beat) }
+    (group.count(found) == 0) { out ["ok"] }
+    out found
+}
+
+skill header(text) {
+    @made = []
+    drum (str.lines(text)) {
+        @line = beat
+        @comment = str.starts_with(line, "--")
+        (str.bytes(line) == 0) { comment = yes }
+        (comment == no) { out made }
+        made = group.add(made, line)
+    }
+    out made
+}
+
+skill name_byte(code) {
+    (code == 95) { out yes }
+    (code >= 48) {
+        (code <= 57) { out yes }
+    }
+    (code >= 65) {
+        (code <= 90) { out yes }
+    }
+    (code >= 97) {
+        (code <= 122) { out yes }
+    }
+    out no
+}
+
+skill whole_at(text, at, size) {
+    (at > 0) {
+        (name_byte(str.byte(text, at - 1)) == yes) { out no }
+    }
+    @after = at + size
+    (after < str.bytes(text)) {
+        (name_byte(str.byte(text, after)) == yes) { out no }
+    }
+    out yes
+}
+
+skill named(text, name) {
+    @size = str.bytes(name)
+    (size == 0) { out no }
+    @total = str.bytes(text)
+    (total < size) { out no }
+    drum (total - size + 1) {
+        (str.starts_at(text, name, beat) == yes) {
+            (whole_at(text, beat, size) == yes) { out yes }
+        }
+    }
+    out no
+}
+
+skill leading_name(text) {
+    @end = 0
+    @size = str.bytes(text)
+    always {
+        (end == size) { leave }
+        (name_byte(str.byte(text, end)) == no) { leave }
+        end = end + 1
+    }
+    out str.slice(text, 0, end)
+}
+
+skill skill_name(line) {
+    (str.starts_with(line, "skill ") == no) { out "" }
+    @rest = str.slice(line, 6, str.bytes(line))
+    @called = leading_name(rest)
+    (str.bytes(called) == 0) { out "" }
+    @after = str.bytes(called)
+    (after < str.bytes(rest)) {
+        (str.byte(rest, after) == PAREN) { out called }
+    }
+    out ""
+}
+
+skill box_name(line) {
+    @called = leading_name(line)
+    (str.bytes(called) == 0) { out "" }
+    @mark = "{called} = Box"
+    (str.starts_with(line, mark) == no) { out "" }
+    @after = str.bytes(mark)
+    (after < str.bytes(line)) {
+        (name_byte(str.byte(line, after)) == yes) { out "" }
+    }
+    out called
+}
+
+skill top_name(line) {
+    (str.bytes(line) == 0) { out "" }
+    (str.byte(line, 0) == SPACE) { out "" }
+    (str.byte(line, 0) == TAB) { out "" }
+    (str.starts_with(line, "skill ") == yes) { out skill_name(line) }
+    out box_name(line)
+}
+
+skill name_ending(text, at) {
+    @start = at
+    always {
+        (start == 0) { leave }
+        (name_byte(str.byte(text, start - 1)) == no) { leave }
+        start = start - 1
+    }
+    out str.slice(text, start, at)
+}
+
+skill paren_names(text) {
+    @found = []
+    drum (str.bytes(text)) {
+        (str.byte(text, beat) == PAREN) {
+            @called = name_ending(text, beat)
+            (str.bytes(called) > 0) {
+                ((called == "program") == no) {
+                    (group.contains(found, called) == no) { found = group.add(found, called) }
+                }
+            }
+        }
+    }
+    out found
+}
+
+skill header_gaps(path, text) {
+    @face = str.join(header(text), "\n")
+    @have = []
+    @gaps = []
+    @body = text
+    (str.ends_with(text, "\n") == no) { body = str.concat(text, "\n") }
+    @start = 0
+    @number = 1
+    drum (str.bytes(body)) {
+        (str.byte(body, beat) == NEWLINE) {
+            @line = str.slice(body, start, beat)
+            @called = top_name(line)
+            (str.bytes(called) > 0) {
+                have = group.add(have, called)
+                (named(face, called) == no) {
+                    gaps = group.add(gaps, "header|{number}|1|{path}: skill {called} не назван в шапке")
+                }
+            }
+            start = beat + 1
+            number = number + 1
+        }
+    }
+    drum (paren_names(face)) {
+        (group.contains(have, beat) == no) {
+            gaps = group.add(gaps, "header|1|1|{path}: в шапке есть {beat}(…), а в коде такого skill нет")
+        }
+    }
+    out gaps
+}
+
+skill top_level(line) {
+    (str.starts_with(line, "skill ") == yes) { out yes }
+    (str.starts_with(line, "program(") == yes) { out yes }
+    (str.starts_with(line, " ") == yes) { out no }
+    (str.starts_with(line, "--") == yes) { out no }
+    (str.starts_with(line, "use ") == yes) { out no }
+    (str.contains(line, " = ") == yes) { out yes }
+    out no
+}
+
+skill api(path) {
+    @text = file.read(path)
+    @made = group.concat(["файл {path}"], header(text))
+    made = group.add(made, "-- верхний уровень:")
+    drum (str.lines(text)) {
+        @line = beat
+        (top_level(line) == yes) {
+            @shown = line
+            (str.ends_with(shown, " \{") == yes) { shown = str.slice(shown, 0, str.bytes(shown) - 2) }
+            made = group.add(made, shown)
+        }
+    }
+    out made
+}
+
+skill commented(line) {
+    drum (str.bytes(line)) {
+        @letter = str.get(line, beat)
+        ((letter == " ") == no) { out str.starts_with(str.slice(line, beat, str.bytes(line)), "--") }
+    }
+    out no
+}
+
+skill definition(line, name) {
+    (str.starts_with(line, "skill {name}(") == yes) { out yes }
+    (str.starts_with(line, "{name} = ") == yes) { out yes }
+    out no
+}
+
+skill mention(line, name) {
+    (str.contains(line, ".{name}(") == yes) { out yes }
+    (str.contains(line, " {name}(") == yes) { out yes }
+    (str.contains(line, "({name}(") == yes) { out yes }
+    (str.contains(line, ".{name} ") == yes) { out yes }
+    (str.contains(line, ".{name}.") == yes) { out yes }
+    out no
+}
+
+skill find(name) {
+    @listed = process.capture(["git", "ls-files", "*.saltic"], "", [])
+    @shown = 0
+    @defined = []
+    @used = []
+    drum (str.lines(listed.output)) {
+        @path = beat
+        (str.starts_with(path, ".archive/") == no) {
+            @text = file.read(path) rescue |err| { "" }
+            (str.contains(text, name) == yes) {
+                @number = 0
+                drum (str.lines(text)) {
+                    number = number + 1
+                    @line = beat
+                    (commented(line) == no) {
+                        (definition(line, name) == yes) { defined = group.add(defined, "{path}:{number}: {line}") }
+                        (definition(line, name) == no) {
+                            (mention(line, name) == yes) {
+                                (group.count(used) < LIMIT) { used = group.add(used, "{path}:{number}: {line}") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    @limit = LIMIT
+    out group.concat(group.concat(["-- определено:"], defined), group.concat(["-- встречается ({limit} первых):"], used))
+}
+

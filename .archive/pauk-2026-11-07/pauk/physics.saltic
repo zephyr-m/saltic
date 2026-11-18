@@ -1,0 +1,275 @@
+-- pauk/physics — шагающая физика паука на целых числах. Тело не вращается;
+-- у каждой ноги — ступня. Ступня на земле приклеена: тело сдвигается так,
+-- чтобы стоящие ступни остались на своих местах относительно желаемой
+-- походки, — так паук отталкивается. Переставить ступню можно, только
+-- подняв её: в воздухе она переносится к цели и опускается. Ступня, которую
+-- тело утащило дальше REACH, срывается и лежит, не держа, пока её не поднимут.
+-- Вес и равновесие: тело весит body.MASS · GRAVITY, стоящая ступня держит
+-- LEG_HOLD — тело стоит, если ступни держат весь вес и центр над опорой
+-- (стоящие ступни есть спереди, сзади, слева и справа от него); не держат —
+-- оседает тем быстрее, чем меньше держат; центр не над опорой — падает с
+-- ускорением GRAVITY. Ниже LYING — лежит (штраф при оценке, тело тормозит
+-- о землю). Высоту дают ноги: нога длиной UPPER + LOWER, чем дальше ступня
+-- от плеча, тем ниже тело (reach_height — среднее по стоящим ступням, не
+-- выше BODY_Y); держат вес — тело поднимается к ней мышцами не быстрее RISE
+-- за шаг, выше неё — оседает. Рождается паук лёжа, лапы раскинуты на SPREAD:
+-- встать — значит переставить ступни под себя, не потеряв опоры.
+-- Разгон: ступни тянут тело к нужному месту силой PUSH, и чем тяжелее тело
+-- (MASS), тем медленнее оно разгоняется и тормозит; без опоры летит по
+-- инерции, гаснущей на 1/(DRAG + 1) за шаг.
+--
+-- Походка — гены (genes): на ногу размах, фаза и сдвиг подъёма; общая
+-- частота. Угол ноги θ = фаза + t · частота · PACE; вынос вперёд-назад —
+-- размах · sin θ; нога в воздухе, когда cos(θ + сдвиг подъёма) > 0.
+-- Эволюции надо найти: поднимать ногу при выносе вперёд, ставить при
+-- толчке назад, и чтобы на земле всегда стояло хотя бы три ноги.
+--
+-- Leg { x, y, z, planted, airborne } — ступня в мире; planted — стоит и
+--     держит, airborne — поднята (переносится или опускается)
+-- balanced(state) -> yes, если центр тела над стоящими ступнями
+-- reach_height(state) -> на какую высоту ноги могут поднять тело
+-- SpiderState — body.SpiderState: тело x, y, z, ноги, гены, t, сколько
+--     шагов лежал
+-- init_state(genome) -> SpiderState — паук лежит, ступни раскинуты
+-- init_lane(genome, lane) -> SpiderState — то же на дорожке z = lane
+-- target(state, leg) -> [вынос, подъём, подтяжка] — цель ноги на шаге t по
+--     генам; подтяжка — насколько ближе к телу, чем SPREAD, ставить ступню
+-- home_x / home_z(leg, inward) -> место ступни от центра тела: на SPREAD,
+--     подтянутое на inward (сама физика ступни под тело не ставит)
+-- aim_of(state, leg) -> цель ноги: из state.aims, если их задал мозг
+--     (pauk/brain), иначе target
+-- step(state) — один шаг; тело за шаг сдвигается не больше STRIDE_MAX —
+--     сила мышц (иначе мозг дёргал цели ног и тело «телепортировалось»)
+-- limit(move) -> move, зажатый в ±STRIDE_MAX
+-- body_x(state) -> x тела
+-- evaluate(genome) -> пройденное по x минус штраф за лежание
+
+use core.group
+use core.num
+use os.target.uefi_x86_64.screen.geometry
+use os.target.uefi_x86_64.programs.pauk.body
+use os.target.uefi_x86_64.programs.pauk.genes
+
+PACE = 8
+STRIDE = 2
+LIFT = 70
+LIFT_SHIFT = 64
+CARRY = 3
+DROP = 30
+RISE = 3
+SPREAD = 380
+TUCK_STEP = 4
+REACH = 230
+LYING = 140
+LIE_PENALTY = 40
+STRIDE_MAX = 10
+GRAVITY = 3
+LEG_HOLD = 9
+PUSH = 4
+DRAG = 15
+
+Leg = Box {
+    x = 0,
+    y = 0,
+    z = 0,
+    planted = yes,
+    airborne = no
+}
+
+skill init_state(genome) {
+    @legs = []
+    drum (body.LEG_COUNT) {
+        legs = group.add(legs, Leg { x = home_x(beat, 0), y = 0, z = home_z(beat, 0) })
+    }
+    out body.SpiderState { genes = genome, legs = legs, x = 0, y = LYING, z = 0 }
+}
+
+skill init_lane(genome, lane) {
+    @state = init_state(genome)
+    state.z = lane
+    drum (state.legs) { beat.z = beat.z + lane }
+    out state
+}
+
+skill target(state, leg) {
+    @genome = state.genes
+    @base = 1 + leg * 3
+    @angle = group.get(genome, base + 1) + state.t * group.get(genome, 0) * PACE
+    @forward = group.get(genome, base) * STRIDE * geometry.sine(num.mod(angle, geometry.TURN)) / geometry.ONE
+    @shift = group.get(genome, base + 2) * geometry.TURN / LIFT_SHIFT
+    @lift_angle = num.mod(angle + shift + geometry.TURN / 4, geometry.TURN)
+    (lift_angle < 0) { lift_angle = lift_angle + geometry.TURN }
+    @lift = geometry.sine(lift_angle)
+    (lift < 0) { lift = 0 }
+    out [forward, LIFT * lift / geometry.ONE, group.get(genome, genes.TUCK_AT + leg) * TUCK_STEP]
+}
+
+skill aim_of(state, leg) {
+    (group.count(state.aims) > 0) { out group.get(state.aims, leg) }
+    out target(state, leg)
+}
+
+skill move_legs(state) {
+    @planted = 0
+    @sum_x = 0
+    @sum_z = 0
+    drum (body.LEG_COUNT) {
+        @foot = group.get(state.legs, beat)
+        @aim = aim_of(state, beat)
+        @inward = group.get(aim, 2)
+        @want_x = state.x + home_x(beat, inward) + group.get(aim, 0)
+        @want_z = state.z + home_z(beat, inward)
+        @lift = group.get(aim, 1)
+        pick {
+            (lift > 0) {
+                foot.planted = no
+                foot.airborne = yes
+                foot.x = foot.x + (want_x - foot.x) / CARRY
+                foot.z = foot.z + (want_z - foot.z) / CARRY
+                foot.y = foot.y + (lift - foot.y) / CARRY
+            }
+            {
+                (foot.airborne == yes) {
+                    foot.x = foot.x + (want_x - foot.x) / CARRY
+                    foot.z = foot.z + (want_z - foot.z) / CARRY
+                    foot.y = foot.y - DROP
+                    (foot.y <= 0) {
+                        foot.y = 0
+                        foot.planted = yes
+                        foot.airborne = no
+                    }
+                }
+                (foot.planted == yes) {
+                    planted = planted + 1
+                    sum_x = sum_x + foot.x - home_x(beat, inward) - group.get(aim, 0)
+                    sum_z = sum_z + foot.z - home_z(beat, inward)
+                }
+            }
+        }
+    }
+    out [planted, sum_x, sum_z]
+}
+
+skill slip_far(state) {
+    drum (body.LEG_COUNT) {
+        @foot = group.get(state.legs, beat)
+        (foot.planted == yes) {
+            @dx = foot.x - state.x - body.rest_x(beat)
+            @dz = foot.z - state.z - body.rest_z(beat)
+            (dx * dx + dz * dz > REACH * REACH) { foot.planted = no }
+        }
+    }
+    out none
+}
+
+skill home_x(leg, inward) {
+    out body.rest_x(leg) * (SPREAD - inward) / body.REST_R
+}
+
+skill home_z(leg, inward) {
+    out body.rest_z(leg) * (SPREAD - inward) / body.REST_R
+}
+
+skill reach_height(state) {
+    @leg = body.UPPER + body.LOWER
+    @sum = 0
+    @count = 0
+    drum (body.LEG_COUNT) {
+        @foot = group.get(state.legs, beat)
+        (foot.planted == yes) {
+            @dx = foot.x - state.x - body.shoulder_x(beat)
+            @dz = foot.z - state.z - body.shoulder_z(beat)
+            @far = dx * dx + dz * dz
+            (far < leg * leg) { sum = sum + geometry.root(leg * leg - far) }
+            count = count + 1
+        }
+    }
+    (count == 0) { out 0 }
+    @top = sum / count
+    (top > body.BODY_Y) { top = body.BODY_Y }
+    out top
+}
+
+skill balanced(state) {
+    @ahead = no
+    @behind = no
+    @left = no
+    @right = no
+    drum (state.legs) {
+        (beat.planted == yes) {
+            (beat.x > state.x) { ahead = yes }
+            (beat.x < state.x) { behind = yes }
+            (beat.z > state.z) { right = yes }
+            (beat.z < state.z) { left = yes }
+        }
+    }
+    (ahead == no) { out no }
+    (behind == no) { out no }
+    (left == no) { out no }
+    out right
+}
+
+skill limit(move) {
+    (move > STRIDE_MAX) { out STRIDE_MAX }
+    (move < 0 - STRIDE_MAX) { out 0 - STRIDE_MAX }
+    out move
+}
+
+skill step(state) {
+    @moved = move_legs(state)
+    @planted = group.get(moved, 0)
+    pick {
+        (planted > 0) {
+            state.vx = state.vx + (limit(group.get(moved, 1) / planted - state.x) - state.vx) * PUSH / body.MASS
+            state.vz = state.vz + (limit(group.get(moved, 2) / planted - state.z) - state.vz) * PUSH / body.MASS
+        }
+        {
+            state.vx = state.vx * DRAG / (DRAG + 1)
+            state.vz = state.vz * DRAG / (DRAG + 1)
+        }
+    }
+    state.x = state.x + state.vx
+    state.z = state.z + state.vz
+    @hold = planted * LEG_HOLD
+    (balanced(state) == no) { hold = 0 }
+    pick {
+        (hold >= body.MASS * GRAVITY) {
+            state.vy = 0
+            @top = reach_height(state)
+            pick {
+                (state.y > top) { state.y = state.y - (state.y - top) / 2 }
+                {
+                    @up = top - state.y
+                    (up > RISE) { up = RISE }
+                    state.y = state.y + up
+                }
+            }
+        }
+        {
+            state.vy = state.vy + GRAVITY - hold / body.MASS
+            state.y = state.y - state.vy
+        }
+    }
+    (state.y < LYING) {
+        state.y = LYING
+        state.vy = 0
+    }
+    (state.y <= LYING) {
+        state.vx = state.vx / 2
+        state.vz = state.vz / 2
+        state.lying = state.lying + 1
+    }
+    slip_far(state)
+    state.t = state.t + 1
+    out none
+}
+
+skill body_x(state) {
+    out state.x
+}
+
+skill evaluate(genome) {
+    @state = init_state(genome)
+    drum (body.STEPS) { step(state) }
+    out state.x - state.lying * LIE_PENALTY
+}
