@@ -7,6 +7,8 @@
 -- «имя путь»), версия пакета — own_version паспорта (workbench/passport).
 -- Привезённое — в tarantul/<имя>/ (в git не хранится: строку IGNORED tarantul
 -- сам дописывает в .gitignore), программы пишут `use tarantul.<имя>.<модуль>`.
+-- Каталог — рядом с языком или из своего git-репозитория ("catalog" в MANIFEST
+-- и LOCK, копия в ~/.cache/tarantul/ — ребёнок tarantul/catalog).
 -- Внутри пакета пути реестра (registry.… и registry/…) переписываются на
 -- tarantul.<имя>; пакеты, которые он зовёт через use, привозятся тоже.
 -- Отпечаток — CRC32 (formats/apk/zip) привезённых файлов по порядку имён:
@@ -20,10 +22,12 @@
 --     паспорт рядом с папкой (библиотека)
 -- Locked { name, version, source, print, asker } — строка замка
 -- program(command) — get, update, list или check
--- Внутри: catalog / find — каталог; manifest / project_name — MANIFEST;
+-- Внутри: shelf() -> Catalog из MANIFEST и LOCK; source(path) — путь в каталоге;
+--     listed / find — пакеты каталога; manifest / project_name — MANIFEST;
 --     locks / locked — замок; install(package, packages, asker, old) ->
 --     Locked; fingerprint(folder) -> «crc32 XXXXXXXX»; closure(names,
---     packages) -> [[имя, кто попросил]]; save_lock / save_manifest — JSON;
+--     packages) -> [[имя, кто попросил]]; save_lock / save_manifest — JSON,
+--     pinned(place) — строка каталога в замке;
 --     rewritten — пути реестра на tarantul; copy — файл, тексты переписанными
 
 use io
@@ -41,6 +45,7 @@ use selfhost.parser.loader
 use os.network.mrpc
 use os.text.utf8
 use workbench.passport
+use workbench.tarantul.catalog
 
 MANIFEST = "tarantul.json"
 LOCK = "tarantul.lock"
@@ -86,10 +91,15 @@ skill parent(path) {
     out str.slice(path, 0, str.bytes(path) - str.bytes(last(path)) - 1)
 }
 
+skill shelf() {
+    @made = catalog.Catalog {}
+    made.read(json_of(MANIFEST, value.object([])), json_of(LOCK, value.object([])))
+    out made
+}
+
 skill source(path) {
-    @home = loader.home()
-    (str.bytes(home) == 0) { out path }
-    out "{home}/{path}"
+    @place = shelf()
+    out place.where(path)
 }
 
 skill dots(path) {
@@ -108,7 +118,7 @@ skill must(code, what) {
     out none
 }
 
-skill catalog() {
+skill listed() {
     @found = []
     drum (CATALOGS) {
         @where = source(beat)
@@ -203,7 +213,14 @@ skill quoted(text) {
     out utf8.decode(made, 0, group.count(made))
 }
 
-skill save_lock(entries) {
+skill pinned(place) {
+    (place.from == "") { out "" }
+    @from = quoted(place.from)
+    @commit = quoted(place.commit)
+    out "  \"catalog\": \{\"from\": {from}, \"commit\": {commit}\},\n"
+}
+
+skill save_lock(entries, place) {
     @rows = []
     drum (entries) {
         @name = quoted(beat.name)
@@ -214,10 +231,11 @@ skill save_lock(entries) {
         rows = group.add(rows, "    {name}: \{\"version\": {version}, \"source\": {from}, \"fingerprint\": {print}, \"required_by\": {asker}\}")
     }
     @inside = str.join(rows, ",\n")
-    out file.write(LOCK, "\{\n  \"packages\": \{\n{inside}\n  \}\n\}\n")
+    @head = pinned(place)
+    out file.write(LOCK, "\{\n{head}  \"packages\": \{\n{inside}\n  \}\n\}\n")
 }
 
-skill save_manifest(wanted) {
+skill save_manifest(wanted, place) {
     @rows = []
     drum (wanted) {
         @name = quoted(group.get(beat, 0))
@@ -226,7 +244,12 @@ skill save_manifest(wanted) {
     }
     @inside = str.join(rows, ",\n")
     @title = quoted(project_name())
-    out file.write(MANIFEST, "\{\n  \"project\": {title},\n  \"packages\": \{\n{inside}\n  \}\n\}\n")
+    @from = ""
+    ((place.from == "") == no) {
+        @address = quoted(place.from)
+        from = "  \"catalog\": \{\"from\": {address}\},\n"
+    }
+    out file.write(MANIFEST, "\{\n  \"project\": {title},\n{from}  \"packages\": \{\n{inside}\n  \}\n\}\n")
 }
 
 skill rewritten(text, packages) {
@@ -415,7 +438,9 @@ skill ignored() {
 }
 
 skill fetch(fresh) {
-    @packages = catalog()
+    @place = shelf()
+    place.bring(fresh)
+    @packages = listed()
     @wanted = manifest()
     @previous = locks()
     (fresh == yes) { previous = [] }
@@ -450,9 +475,9 @@ skill fetch(fresh) {
         io.show("tarantul: {number}/{total} {name} {package.version} ← {package.root}")
         made = group.add(made, install(package, packages, group.get(group.get(queue, beat), 1), locked(previous, name)))
     }
-    save_lock(made)
+    save_lock(made, place)
     (fresh == yes) {
-        save_manifest(kept)
+        save_manifest(kept, place)
         io.show("tarantul: {MANIFEST} — версии каталога")
     }
     ignored()
@@ -475,6 +500,18 @@ skill list() {
 skill check() {
     @entries = locks()
     @problems = 0
+    @place = shelf()
+    ((place.from == "") == no) {
+        @copied = process.capture(["git", "-C", place.folder, "rev-parse", "HEAD"], "", []) rescue |err| { process.Capture { code = 1 } }
+        @have = str.join(str.split(copied.output, "\n"), "")
+        pick {
+            ((have == place.commit) == no) {
+                io.show("  каталог {place.from}: в замке {place.commit}, в копии {place.folder} — {have}; just tarantul")
+                problems = problems + 1
+            }
+            { io.show("  каталог {place.from} — коммит {have}") }
+        }
+    }
     drum (manifest()) {
         @name = group.get(beat, 0)
         @version = group.get(beat, 1)

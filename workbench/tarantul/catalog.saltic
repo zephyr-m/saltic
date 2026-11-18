@@ -1,0 +1,132 @@
+-- catalog — откуда tarantul берёт каталог пакетов (решение автора 19.11.2026):
+-- рядом с языком (registry/ в проекте или в доме Saltic, как загрузчик) или из
+-- своего git-репозитория. Адрес — "catalog": {"from": …} в tarantul.json,
+-- копия — ~/.cache/tarantul/<имя репозитория>/, версия — коммит в tarantul.lock
+-- ("catalog": {"from", "commit"}): get держится его, update берёт последний.
+-- Пути каталога начинаются с registry/ — в копии это её корень. Каждый шаг
+-- git печатается; нет сети и нет нужного коммита в копии — ошибка с причиной.
+--
+-- Catalog { from, commit, folder } — адрес репозитория ("" — каталог рядом),
+--     коммит, папка копии
+-- read(manifest, lock) — адрес из MANIFEST и коммит из LOCK (значения JSON)
+-- bring(fresh) — копия на нужном коммите: нет копии — git clone, нет коммита
+--     или fresh — git fetch; fresh или коммита нет в замке — последний коммит
+--     ветки по умолчанию; NoCatalog
+-- where(path) -> путь файла каталога: в копии или рядом
+-- Внутри: git(words, what) — шаг git с проверкой кода; has(commit) -> yes,
+--     если коммит есть в копии; newest() -> последний коммит origin
+
+use io
+use core.str
+use core.group
+use core.process
+use selfhost.parser.loader
+use craft.protocols.data.json.value
+use workbench.passport
+
+PREFIX = "registry/"
+SHELF = ".cache/tarantul"
+KEY = "catalog"
+
+Catalog = Box {
+    from = "",
+    commit = "",
+    folder = ""
+
+    skill read(manifest, lock) {
+        @asked = value.get(manifest, KEY)
+        (asked.found == yes) { from = passport.field(asked.value, "from") }
+        (from == "") { out none }
+        @held = value.get(lock, KEY)
+        (held.found == yes) {
+            (passport.field(held.value, "from") == from) { commit = passport.field(held.value, "commit") }
+        }
+        @home = ""
+        drum (process.environment()) {
+            (str.starts_with(beat, "HOME=") == yes) { home = str.slice(beat, 5, str.bytes(beat)) }
+        }
+        @parts = str.split(from, "/")
+        @name = group.get(parts, group.count(parts) - 1)
+        (str.ends_with(name, ".git") == yes) { name = str.slice(name, 0, str.bytes(name) - 4) }
+        folder = "{home}/{SHELF}/{name}"
+        out none
+    }
+
+    skill git(words, what) {
+        io.show("tarantul: каталог — {what}")
+        @code = process.run(group.concat(["git"], words), "", []) rescue |err| {
+            io.show("tarantul: git не запустился ({err}) — нужен git в PATH")
+            out error.NoCatalog
+        }
+        ((code == 0) == no) {
+            io.show("tarantul: каталог — не вышло: {what}, git вернул {code}")
+            out error.NoCatalog
+        }
+        out none
+    }
+
+    skill has(wanted) {
+        @asked = process.capture(["git", "-C", folder, "cat-file", "-e", "{wanted}^\{commit\}"], "", []) rescue |err| { out no }
+        out asked.code == 0
+    }
+
+    skill newest() {
+        @asked = process.capture(["git", "-C", folder, "rev-parse", "origin/HEAD"], "", []) rescue |err| { out error.NoCatalog }
+        ((asked.code == 0) == no) {
+            io.show("tarantul: каталог — в копии {folder} нет origin/HEAD")
+            out error.NoCatalog
+        }
+        @line = asked.output
+        (str.ends_with(line, "\n") == yes) { line = str.slice(line, 0, str.bytes(line) - 1) }
+        out line
+    }
+
+    skill bring(fresh) {
+        (from == "") { out none }
+        @there = process.run(["test", "-d", "{folder}/.git"], "", [])
+        @cloned = no
+        ((there == 0) == no) {
+            git(["clone", "--progress", from, folder], "копирую {from} в {folder}")
+            cloned = yes
+        }
+        @wanted = commit
+        (fresh == yes) { wanted = "" }
+        @fetch = wanted == ""
+        ((wanted == "") == no) {
+            (has(wanted) == no) { fetch = yes }
+        }
+        (cloned == yes) { fetch = no }
+        (fetch == yes) {
+            git(["-C", folder, "fetch", "--progress", "origin"], "докачиваю новое из {from}") rescue |err| {
+                ((wanted == "") == no) {
+                    (has(wanted) == no) {
+                        io.show("tarantul: каталог — нет сети, а коммита {wanted} в копии {folder} нет")
+                        out error.NoCatalog
+                    }
+                }
+                (wanted == "") { out err }
+            }
+        }
+        (wanted == "") { wanted = newest() }
+        (has(wanted) == no) {
+            io.show("tarantul: каталог — коммита {wanted} нет и в {from}")
+            out error.NoCatalog
+        }
+        git(["-C", folder, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", wanted], "коммит {wanted}")
+        commit = wanted
+        out none
+    }
+
+    skill where(path) {
+        (from == "") {
+            @home = loader.home()
+            (str.bytes(home) == 0) { out path }
+            out "{home}/{path}"
+        }
+        (str.starts_with(path, PREFIX) == yes) {
+            @rest = str.slice(path, str.bytes(PREFIX), str.bytes(path))
+            out "{folder}/{rest}"
+        }
+        out path
+    }
+}

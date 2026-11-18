@@ -10,26 +10,26 @@ _dirs:
 playground:
     node os/ui/playground/server.mjs
 
-compile file="soul/canonical/main.saltic" output="/tmp/saltic.elf":
+compile file="soul/canonical/main.saltic" output="/tmp/saltic.elf": (tarantul "get")
     bootstrap/saltic "$1" "$2" 536870912 rv32i
 
-run file="soul/canonical/main.saltic" output="/tmp/saltic.elf" *args:
+run file="soul/canonical/main.saltic" output="/tmp/saltic.elf" *args: (tarantul "get")
     bootstrap/saltic "$1" "$2" 536870912 rv32i
     nix --extra-experimental-features "nix-command flakes" develop --command qemu-riscv32 -B 0x100000000 "$2" "${@:3}"
 
-native file="soul/canonical/main.saltic" output="/tmp/saltic-native" *args:
+native file="soul/canonical/main.saltic" output="/tmp/saltic-native" *args: (tarantul "get")
     bootstrap/saltic "$1" "$2" 536870912 x86_64
     "$2" "${@:3}"
 
-qemu file="os/target/qemu_virt/smoke.saltic":
+qemu file="os/target/qemu_virt/smoke.saltic": (tarantul "get")
     mkdir -p .cache/build/qemu_virt
     bootstrap/saltic "$1" .cache/build/qemu_virt/program.elf 536870912 rv32i
 
-qemu-graphics: _dirs
+qemu-graphics: _dirs (tarantul "get")
     bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
     nix --extra-experimental-features "nix-command flakes" develop --command bash -c '.cache/build/workbench/build-graphics "" && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -device virtio-tablet-device -audiodev pipewire,id=saltic_audio -device virtio-sound-device,audiodev=saltic_audio -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
 
-os port="46321": _dirs
+os port="46321": _dirs (tarantul "get")
     bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
     nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/build-graphics ""
 
@@ -44,7 +44,7 @@ os-send command port="46321":
     fi
     printf '%s\n' "$response"
 
-qemu-graphics-check: _dirs
+qemu-graphics-check: _dirs (tarantul "get")
     bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
     nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/build-graphics --check
 
@@ -52,7 +52,7 @@ bootstrap-refresh source="soul/seed/selfhost/toolchain.saltic": _dirs
     bootstrap/saltic bootstrap/refresh.saltic .cache/build/workbench/refresh 536870912 x86_64
     .cache/build/workbench/refresh "$1"
 
-global-check: _dirs
+global-check: _dirs (tarantul "get")
     bootstrap/saltic workbench/check/global-check.saltic .cache/build/workbench/global-check 536870912 x86_64
     .cache/build/workbench/global-check
 
@@ -79,7 +79,7 @@ registry: _dirs
 
 # Поставить программу Saltic на ноут: бинарник в ~/.local/bin, иконка, визитка
 # в меню приложений и ярлык на рабочем столе (workbench/install.saltic).
-install name: _dirs
+install name: _dirs (tarantul "get")
     bootstrap/saltic workbench/install.saltic .cache/build/workbench/install 268435456 x86_64
     .cache/build/workbench/install "$1"
 
@@ -90,7 +90,7 @@ limits: _dirs
 # Быстрая проверка на родном x86-64 (global-check — редко): лимиты канона, случаи
 # языка без машинных эталонов и чужих процессоров (machine, rva23, rv64, arm64 —
 # в global-check) и весь набор ОС. Тестовые программы — x86-64 на этом ноутбуке.
-quick: _dirs
+quick: _dirs (tarantul "get")
     bootstrap/saltic workbench/check/limits.saltic .cache/build/workbench/limits 536870912 x86_64
     .cache/build/workbench/limits
     bootstrap/saltic tests/run.saltic .cache/build/workbench/tests 536870912 x86_64
@@ -108,7 +108,7 @@ release-draft base="": _dirs
     bootstrap/saltic workbench/release-draft.saltic .cache/build/workbench/release-draft 536870912 x86_64
     .cache/build/workbench/release-draft "$1"
 
-same-source: _dirs
+same-source: _dirs (tarantul "get")
     bootstrap/saltic workbench/check/same-source.saltic .cache/build/workbench/same-source-check 536870912 x86_64
     .cache/build/workbench/same-source-check
 
@@ -123,7 +123,7 @@ tarantul command="get": _dirs
     bootstrap/saltic workbench/tarantul.saltic .cache/build/workbench/tarantul 268435456 x86_64
     .cache/build/workbench/tarantul "$1"
 
-esp32: _dirs
+esp32: _dirs (tarantul "get")
     bootstrap/saltic os/target/esp32/toolchain.saltic .cache/build/workbench/esp32-toolchain 536870912 x86_64
     bootstrap/saltic workbench/check/esp32.saltic .cache/build/workbench/esp32 536870912 x86_64
     .cache/build/workbench/esp32
@@ -154,7 +154,7 @@ same *sources: _dirs
     bootstrap/saltic workbench/check/same.saltic .cache/build/workbench/same-check 536870912 x86_64
     .cache/build/workbench/same-check "$*"
 
-test case="all" host="x86_64": _dirs
+test case="all" host="x86_64": _dirs (tarantul "get")
     bootstrap/saltic tests/run.saltic .cache/build/workbench/tests 536870912 x86_64
     SALTIC_TEST_HOST="$2" nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/tests "$1"
 
