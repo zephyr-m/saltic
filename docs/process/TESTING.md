@@ -13,7 +13,7 @@
 4. **Канон — первый тест языка.** Новая возможность попадает в
    `soul/canonical/main.saltic`, новое правило чекера — в свой случай
    `soul/canonical/errors/<тема>.saltic`; ожидаемый вывод — в `expected/`.
-5. **Один вход.** Все проверки запускает `tests/run.sh`, все идут в каждом
+5. **Один вход.** Все проверки запускает `tests/run.saltic`, все идут в каждом
    прогоне `global-check`. Тест, который не запускается, удаляется.
 6. **Тишина при успехе.** Прошедший тест печатает одну строку итога.
    Упавший говорит, что ожидалось и что пришло.
@@ -22,16 +22,20 @@
 
 ## Группы
 
-`tests/run.sh <группа>` (или `just test <группа>`) запускает одну группу;
-без имени — `all`. Хост тестовых программ — `SALTIC_TEST_HOST`: `rv32i`
-(по умолчанию, под `qemu-riscv32`), `x86_64` или `rv64` (под `qemu-riscv64`).
+`just test <набор>` (программа `tests/run.saltic`, собирается полкой)
+запускает набор или случаи по именам через пробел; без имени — `all`. Хост
+тестовых программ — `SALTIC_TEST_HOST`: `x86_64` (по умолчанию в `just test`),
+`rv32i` (под `qemu-riscv32`), `rv64` (под `qemu-riscv64`); запускать из
+проектного Nix shell (нужны qemu, в том числе aarch64).
 
-`all` — её гоняет `just global-check` разом на rv32i, x86_64 и rv64:
+`all` — её гоняет `just global-check` разом на rv32i, x86_64, rv64 и arm64:
 
 - `checker` — случаи `soul/canonical/errors/` против `expected/errors/`;
   `errors/parser/` — по файлу на ошибку лексера и парсера, каждый обязан
   упасть с `ParseFailed`;
 - `fixed-types` — `u8…usize`, `bits32`, `address` и их ошибки чекера;
+- `fraction`, `wide` — дробные и канон 64 бит `soul/canonical/wide.saltic`
+  на x86-64, rv64 и arm64;
 - `modules` — вложенные модули и ошибки загрузчика;
 - `json-rpc` — `craft.protocols.data.json` и `json_rpc`;
 - `diagnostics` — форма диагностик лексера, парсера, загрузчика и чекера;
@@ -41,7 +45,14 @@
 - `platform` — договор платформы на Linux (rv32i и x86_64): `NotSupported`
   по имени, непойманная ошибка, программа без аргументов;
 - `x86-encoder` — байты команд кодировщика x86-64 (эталоны GNU `as`,
-  `workbench/check/x86-encoder-golden.sh`);
+  `workbench/check/x86-encoder-golden.saltic`);
+- `arm64-encoder`, `xtensa-encoder` — байты команд AArch64 и Xtensa LX6
+  против эталонов GNU `as`;
+- `arm64` — канон, `edges`, `always`, большие числа и большая куча, собранные
+  под ARM64, под `qemu-aarch64`: тот же вывод, что у rv64;
+- `crypto` — `craft.protocols.security.crypto` (сравнение секретов за
+  постоянное время);
+- `apk` — части APK из `formats/apk`: CRC32, zip, подпись;
 - `edges` — канон граничных случаев `soul/canonical/edges.saltic` (из `tests/`
   12.11.2026): ошибки рантайма через `rescue`, дерево Box, строки, злые значения
   каждого типа через параметр, out, группу, поле Box, `"{x}"` и `==`; одинаково
@@ -60,12 +71,16 @@
 - `seed-contract` — контракт ядра (`soul/seed/tests/contract.saltic`);
 - `machine` — машинный слой RV32I и провал набора `craft.testing`;
 - `abi` — теги значений, пространство ошибок, упаковка;
-- `memory` — модель памяти и `MemoryExhausted`;
+- `memory` — модель памяти и `MemoryExhausted`; пытки памяти
+  (`tests/memory/*`: forever, depth, width, fragment, tangle, breaks, quota,
+  impostor, cycles) — отдельный набор `memory`, в `all` не входят;
 - `native` — канон, память, переполнение стека, нажатия, импорт и большие
   числа на родном x86-64;
 `os` — модули ОС, не язык; в `just global-check` (под x86_64):
 
 - `jtml`, `tasks` — `registry.libraries.uiengine.jtml` и `os.apps.tasks`;
+- `ttf` — шрифты TTF (`os/fonts/ttf`, `os/fonts/raster`) на Inter;
+- `events` — ядро событий и жесты (`os/input/events`, `os/input/gestures`);
 - `panels`, `mrpc` — системная панель и mRPC агента (`mrpc` — всегда под
   x86_64: модули ОС UEFI — 61-битный мир).
 

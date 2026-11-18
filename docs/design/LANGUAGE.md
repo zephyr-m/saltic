@@ -169,7 +169,7 @@
 (`registry/libraries/uiengine/draw/atoms.saltic`, `shapes.sheen`, `shapes.dots`).
 Жителей для этого трогать не надо: панель — это `box` с `fill: panel`.
 Темы — по файлу в `registry/libraries/uiengine/themes/`, программа выбирает
-одну словом: `themes.named("soft" | "light" | "site" | "alchemy" | "armor" | "forest", screen)`.
+одну словом: `themes.named("soft" | "light" | "site" | "alchemy" | "armor" | "forest" | "cream" | "cocoa", screen)`.
 
 Чтобы наследовалось автоматически, нужны три шага:
 

@@ -67,15 +67,16 @@ Saltic.
 
 ## Где живёт
 
-- `os/ui/events.saltic` — ядро: `Change`, `Core`, `change`, `pair`, `bump`,
+- `os/input/events.saltic` — ядро: `Change`, `Core`, `change`, `pair`, `bump`,
   `tick`, `current`, `take`.
-- `os/ui/gestures.saltic` — ядро жестов, словарь первой версии (решение
+- `os/input/gestures.saltic` — ядро жестов, словарь первой версии (решение
   автора 17.11.2026): клик, двойной клик, колесо, набор текста. Имена нижнего
   ядра — `pointer.x`, `pointer.y`, `pointer.left`, `pointer.wheel`,
   `keyboard.typed`; `Reader.drain(core)` — жесты по порядку.
 - Сырой ввод → изменения: окно Wayland (`os/target/linux/screen.saltic`,
-  `way_events`), время — из событий Wayland. Первая программа на жестах —
-  SalticIDE в Linux.
+  `way_events`; байты протокола — `os/target/linux/wire.saltic`), время — из
+  событий Wayland. Первая программа на жестах — SalticIDE в Linux (общая часть —
+  `soft/development/salticide/`); на жестах и Полигон.
 - Проверка — `tests/events.saltic` (набор `os`): ядро и жесты.
 
 Ещё не сделано: ввод Acer и телефона в ядро событий; попадание по раскладке
