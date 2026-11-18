@@ -1,7 +1,7 @@
 """Порция команд Gen9 «прямоугольник с текстурой» по igt rendercopy_gen9.c.
 
 Запуск: python3 tools/gen9/gen9_batch.py <папка>/gen90.xml [rect|tris|blend|overlay] >
-drivers/intel_gpu/generated/rect.saltic, где в папке — описания Mesa
+registry/adapters/uefi_x86_64/intel_gpu/intel_gpu/generated/rect.saltic, где в папке — описания Mesa
 src/intel/genxml: gen90.xml и всё, что он подключает (gen80, gen75, gen70,
 gen60, gen50, gen45, gen40). Шейдер — ps_kernel_gen9 из igt (выборка из
 текстуры). MOCS везде 0: таблицу MOCS без i915 никто не заполнял.

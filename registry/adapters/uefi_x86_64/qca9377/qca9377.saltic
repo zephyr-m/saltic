@@ -1,0 +1,154 @@
+-- qca9377 — драйвер Wi-Fi Qualcomm Atheros QCA9377 (Acer E5-575G), по ath10k.
+-- Сейчас умеет: поднять карту, залить прошивку, открыть канал WMI и прочитать
+-- паспорт (SERVICE_READY), отдать WMI_INIT и получить READY с MAC-адресом.
+-- Порядок вызова: open → start → load → talk → ready → look → quiet.
+-- Каждый шаг печатает ход на экран ("wifi: …"). Карта после работы — quiet,
+-- иначе она может писать в нашу память по DMA. Данные — посылка
+-- tools/wifi_pack.py, приложенная к программе (snippet.py, SNIPPET_DATA).
+--
+-- Card — состояние карты (из card)
+-- open() -> Card; DeviceNotFound; страницы колец — ниже 4 ГБ (rings.MEMORY_PAGES)
+-- start(chip) -> текст — холодный и тёплый сброс, init_config, BMI открыт
+-- load(chip, data) -> текст — настройки, плата, OTP, прошивка, READY
+-- talk(chip) -> текст — канал WMI, события, разбор SERVICE_READY
+-- ready(chip) -> текст — WMI_INIT, событие READY, MAC карты (wmi)
+-- look(chip) -> текст — пассивный поиск сетей 2,4 ГГц, список (scan)
+-- bring_up(chip, data, name) -> текст — всё от сброса до адреса по DHCP в
+--     открытой сети name; сеть — в chip.point, адрес — chip.ip; дальше кадры —
+--     traffic.poll и traffic.send(chip, chip.point, кадр)
+-- STEPS — имена шагов подъёма; bring_step(chip, data, name, step) -> текст —
+--     один шаг (с 0): сброс, прошивка, связь с прошивкой, поиск сети,
+--     подключение, адрес; не вышло — ошибка (NetworkNotFound, NotAssociated,
+--     NoAddress). Шагами агент рисует ход на панели системы
+-- alive(chip) -> yes/no — прошивка отвечает на барьер WMI (карту не сбросили)
+-- join(chip, name) -> текст — поиск и подключение к открытой сети name (join),
+--     затем пробный DHCPDISCOVER (traffic)
+-- quiet(chip) — прерывания и bus master карты выключить
+--
+-- Внутри: card (регистры), rings (кольца CE), reset, diag (память карты через
+-- CE7), bmi (команды загрузчика), boot (загрузка), htc (каналы), passport,
+-- wmi (команды прошивки), htt (приём и отправка), scan (поиск сетей), join
+-- (подключение), traffic (кадры данных).
+
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use registry.adapters.uefi_x86_64.qca9377.qca9377.card
+use registry.adapters.uefi_x86_64.qca9377.qca9377.rings
+use registry.adapters.uefi_x86_64.qca9377.qca9377.reset
+use registry.adapters.uefi_x86_64.qca9377.qca9377.diag
+use registry.adapters.uefi_x86_64.qca9377.qca9377.boot
+use registry.adapters.uefi_x86_64.qca9377.qca9377.htc
+use registry.adapters.uefi_x86_64.qca9377.qca9377.passport
+use registry.adapters.uefi_x86_64.qca9377.qca9377.wmi
+use registry.adapters.uefi_x86_64.qca9377.qca9377.scan
+use registry.adapters.uefi_x86_64.qca9377.qca9377.join
+use registry.adapters.uefi_x86_64.qca9377.qca9377.traffic
+
+VENDOR_QUALCOMM = 5772
+STEPS = ["сброс карты", "прошивка", "связь с прошивкой", "ищу сеть", "подключаюсь", "получаю адрес"]
+MODEL_QCA9377 = 66
+CORE_CTRL = 237568
+CPU_INTR = 8192
+
+skill open() {
+    @base = firmware.guest_base()
+    @config = firmware.find_device(base, firmware.ecam(base), VENDOR_QUALCOMM, MODEL_QCA9377)
+    @bar = firmware.read32(config, base, 16)
+    bar = bar - bar % 16
+    @memory = uefi.pages_below_4g(base, rings.MEMORY_PAGES)
+    out card.Card { base = base, config = config, bar = bar, memory = memory }
+}
+
+skill start(chip) {
+    card.say(chip, "A. cold reset: the card restarts, its ROM loader wakes up")
+    @loader = reset.cold(chip)
+    card.say(chip, "   loader ready, indicator {loader}")
+    card.say(chip, "B. warm reset + rings: CE0 sends to the card, CE1 receives, CE7 reaches its memory")
+    @warm = reset.warm(chip)
+    card.say(chip, "   {warm}")
+    card.say(chip, "C. init_config: tell the loader our ring layout, set EARLY_CFG_DONE")
+    @configured = diag.configure(chip)
+    card.say(chip, "   {configured}")
+    rings.prepare(chip)
+    @control = firmware.read32(chip.bar, chip.base, CORE_CTRL)
+    card.change_low(chip, CORE_CTRL, card.with_bit(control % firmware.PAGE, CPU_INTR))
+    card.say(chip, "D. poke the card CPU: BMI is open")
+    out "сброс: {loader}; тёплый: {warm}; {configured}"
+}
+
+skill load(chip, data) {
+    @settled = boot.settle(chip, data)
+    @launched = boot.launch(chip, data)
+    out "{settled}\n{launched}"
+}
+
+skill talk(chip) {
+    @channel = htc.connect(chip)
+    @listed = htc.events(chip)
+    @told = ""
+    drum (rings.EVENT_SLOTS) {
+        @event = htc.event_at(chip, beat)
+        (firmware.read16(event, chip.base, 8) == 1) {
+            card.say(chip, "S. reading SERVICE_READY field by field")
+            told = passport.describe(chip, event, htc.event_bytes(chip, beat))
+        }
+    }
+    out "{channel}\n{listed}\nSERVICE_READY:{told}"
+}
+
+skill ready(chip) {
+    out wmi.init(chip)
+}
+
+skill look(chip) {
+    out scan.run(chip)
+}
+
+skill bring_up(chip, data, name) {
+    @told = ""
+    drum (group.count(STEPS)) { told = bring_step(chip, data, name, beat) }
+    out told
+}
+
+skill bring_step(chip, data, name, step) {
+    (step == 0) { out start(chip) }
+    (step == 1) { out load(chip, data) }
+    (step == 2) {
+        talk(chip)
+        out ready(chip)
+    }
+    (step == 3) {
+        @tally = scan.search(chip)
+        @network = join.named(tally.networks, name)
+        (network == none) { out error.NetworkNotFound }
+        chip.point = network
+        out "нашла «{name}»"
+    }
+    (step == 4) {
+        @network = chip.point
+        @joined = join.enter(chip, network)
+        (chip.station == 0) { out error.NotAssociated }
+        out joined
+    }
+    @leased = traffic.lease(chip, chip.point)
+    (group.count(chip.ip) == 0) { out error.NoAddress }
+    out leased
+}
+
+skill alive(chip) {
+    wmi.barrier(chip) rescue |err| { out no }
+    out yes
+}
+
+skill join(chip, name) {
+    @network = join.run(chip, name)
+    (network == none) { out chip.journal }
+    @probed = traffic.probe(chip, network)
+    out "{chip.journal}\n{probed}"
+}
+
+skill quiet(chip) {
+    card.quiet(chip)
+    out card.say(chip, "card is quiet again (interrupts off, bus master off)")
+}

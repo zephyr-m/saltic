@@ -54,7 +54,7 @@ def program(snippet, constants=""):
             header.append(line)
         else:
             (uses if line.startswith("use ") else body).append(line)
-    head = header + ["use os.target.uefi_x86_64.network.reply"] + uses + ([constants] if constants else [])
+    head = header + ["use os.network.reply"] + uses + ([constants] if constants else [])
     if any(line.startswith("skill snippet()") for line in body):
         inner = "\n".join(body)
         return "\n".join(head) + f"\n\n{inner}\n\nprogram() {{\n    @said = snippet() rescue |err| {{ \"ошибка куска: {{err}}\" }}\n    reply.finish(said)\n    out none\n}}\n"

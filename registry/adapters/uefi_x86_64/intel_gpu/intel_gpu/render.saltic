@@ -1,0 +1,317 @@
+-- intel_gpu/render — 3D-движок Intel Gen9. Порции команд — шаблоны, собранные
+-- tools/gen9 по igt rendercopy_gen9 и Mesa genxml: generated/rect —
+-- прямоугольник с текстурой; generated/tris — треугольники с цветом по вершинам
+-- (свой шейдер: PLN по RGBA); generated/blend — они же, смешанные с целью по
+-- альфе вершины; generated/overlay — rect, смешанный по альфе текстуры.
+-- Порция лежит в своём буфере (размечен «один в один»), драйвер вписывает в
+-- неё адреса, размеры и число вершин; кольцо рендера переходит в неё
+-- (MI_BATCH_BUFFER_START) после сброса кэшей (PIPE_CONTROL), а сброс цели с
+-- записью отметки ставит intel_gpu.submit_render.
+-- Вершина треугольника — 2 слова: x | y·65536 (int16) и цвет RGBA8.
+--
+-- Surface { at, pitch, width, height } — поверхность: адрес GGTT, шаг строки
+--     в байтах, размеры в пикселях (32 бита на пиксель, BGRA)
+-- Painter { gpu, batch, strip, vertices, memory, count, broken, misses,
+--     missed, dropped } — буферы порций и вершин (memory — для core.mem:
+--     вершины пишутся прямо в память), count — вершин; misses — сбоев подряд,
+--     missed — всего; broken — GIVE_UP подряд: рисовать процессором; dropped —
+--     фигур, не влезших в буфер
+-- painter(gpu, base) -> Painter — буферы; MemoryExhausted
+-- draw(painter, target, texture, x, y, width, height) -> yes, если движок
+--     дочитал кольцо: прямоугольник цели с x, y, растянутая на него текстура
+-- draw_over(painter, target, texture, x, y, width, height) -> yes — то же, но
+--     текстура ложится поверх цели по своей альфе (старший байт пикселя)
+-- begin(painter) — пустой список треугольников
+-- add_quad(painter, corners, pixel, width, height) — четырёхугольник [x, y, …]
+--     цвета pixel (0xRRGGBB) веером треугольников, обрезанный по экрану с
+--     запасом MARGIN (за пределом координат растеризатора движок зависал)
+-- add_shape(painter, points, pixel, alpha, width, height) — то же для выпуклого
+--     многоугольника любого числа углов с альфой alpha (0…255)
+-- add_smooth(painter, corners, pixels, width, height) — свой цвет в каждом
+--     углу, видеокарта плавно смешивает; целиком на экране с запасом
+--     (on_screen) — два треугольника без обрезки
+-- clip(points, edge, limit, keep_below) -> многоугольник, обрезанный по
+--     прямой x = limit (edge 0) или y = limit (edge 1) — Сазерленд — Ходжман;
+--     остальные числа точки (цвет, глубина) на срезе делятся в той же доле
+-- triangles(painter, target) -> yes — нарисовать накопленные треугольники;
+--     не дождались — сброс движка (intel_gpu.reset_render), misses и missed + 1
+-- blended(painter, target) -> yes — то же, но смешать с целью по альфе
+-- Внутри: put / load(…) — слово в буфер, шаблон в буфер с адресами;
+--     draw_list(painter, target, place, words) — общий ход triangles и blended;
+--     draw_rect(…, words) — общий ход draw и draw_over;
+--     ONE — 1.0 в битах float; VERTEX_LIMIT — вершин в буфере
+
+use core.group
+use core.mem
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use registry.adapters.uefi_x86_64.intel_gpu.intel_gpu
+use registry.adapters.uefi_x86_64.intel_gpu.intel_gpu.generated.rect
+use registry.adapters.uefi_x86_64.intel_gpu.intel_gpu.generated.tris
+use registry.adapters.uefi_x86_64.intel_gpu.intel_gpu.generated.blend
+use registry.adapters.uefi_x86_64.intel_gpu.intel_gpu.generated.overlay
+use core.usize
+use core.address
+use core.u32
+
+BATCH_PAGES = 2
+VERTEX_PAGES = 256
+VERTEX_LIMIT = 131070
+VERTEX_BYTES = 8
+ONE = 1065353216
+HALF_WORD = 65536
+MARGIN = 1000
+GIVE_UP = 3
+KIND_BATCH = 1
+KIND_TARGET = 2
+KIND_TEXTURE = 3
+KIND_VERTICES = 4
+
+Surface = Box {
+    at = 0,
+    pitch = 0,
+    width = 0,
+    height = 0
+}
+
+Painter = Box {
+    gpu = intel_gpu.Gpu {},
+    batch = 0,
+    strip = 0,
+    vertices = 0,
+    memory = 0,
+    count = 0,
+    broken = no,
+    misses = 0,
+    missed = 0,
+    dropped = 0
+}
+
+skill painter(gpu, base) {
+    @batch = uefi.pages_in_window(base, BATCH_PAGES)
+    intel_gpu.map_identity(gpu, batch, BATCH_PAGES)
+    @strip = uefi.pages_in_window(base, BATCH_PAGES)
+    intel_gpu.map_identity(gpu, strip, BATCH_PAGES)
+    @vertices = uefi.pages_in_window(base, VERTEX_PAGES)
+    intel_gpu.map_identity(gpu, vertices, VERTEX_PAGES)
+    out Painter { gpu = gpu, batch = batch, strip = strip, vertices = vertices, memory = firmware.guest(vertices, base) }
+}
+
+skill put(painter, place, index, value) {
+    out firmware.write_phys32(place, painter.gpu.base, index * 4, value)
+}
+
+skill load(painter, place, words, relocs, target, extra) {
+    drum (group.count(words)) { put(painter, place, beat, group.get(words, beat)) }
+    drum (relocs) {
+        @index = group.get(beat, 0)
+        @kind = group.get(beat, 1)
+        @add = place
+        (kind == KIND_TARGET) { add = target.at }
+        (kind == KIND_TEXTURE) { add = extra }
+        (kind == KIND_VERTICES) { add = extra }
+        put(painter, place, index, group.get(words, index) + add)
+    }
+    out none
+}
+
+skill surface(painter, place, at, words, area) {
+    @size = at / 4 + rect.SIZE_WORD
+    @pitch = at / 4 + rect.PITCH_WORD
+    put(painter, place, size, group.get(words, size) + (area.height - 1) * HALF_WORD + area.width - 1)
+    out put(painter, place, pitch, group.get(words, pitch) + area.pitch - 1)
+}
+
+skill run(painter, place) {
+    (painter.broken == yes) { out no }
+    @gpu = painter.gpu
+    intel_gpu.submit_render(gpu, group.concat(rect.BEFORE, [rect.START, place, 0]))
+    (intel_gpu.wait_render(gpu) == yes) {
+        painter.misses = 0
+        out yes
+    }
+    painter.misses = painter.misses + 1
+    painter.missed = painter.missed + 1
+    (painter.misses >= GIVE_UP) { painter.broken = yes }
+    intel_gpu.reset_render(gpu)
+    out no
+}
+
+skill draw(painter, target, texture, x, y, width, height) {
+    out draw_rect(painter, target, texture, x, y, width, height, rect.BATCH)
+}
+
+skill draw_over(painter, target, texture, x, y, width, height) {
+    out draw_rect(painter, target, texture, x, y, width, height, overlay.BATCH)
+}
+
+skill draw_rect(painter, target, texture, x, y, width, height, words) {
+    @place = painter.batch
+    load(painter, place, words, rect.RELOCS, target, texture.at)
+    surface(painter, place, rect.DESTINATION, words, target)
+    surface(painter, place, rect.SOURCE, words, texture)
+    put(painter, place, rect.DRAWING_WORD, (target.height - 1) * HALF_WORD + target.width - 1)
+    @corners = [(x + width) + (y + height) * HALF_WORD, ONE, ONE, x + (y + height) * HALF_WORD, 0, ONE, x + y * HALF_WORD, 0, 0]
+    drum (9) { put(painter, place, rect.VERTICES / 4 + beat, group.get(corners, beat)) }
+    out run(painter, place)
+}
+
+skill begin(painter) {
+    painter.count = 0
+    out none
+}
+
+skill vertex(painter, point, rgba) {
+    @x = group.get(point, 0)
+    @y = group.get(point, 1)
+    @at = painter.count * VERTEX_BYTES
+    mem.store32(address.from(painter.memory), usize.from(at), u32.from((x + HALF_WORD) % HALF_WORD + (y + HALF_WORD) % HALF_WORD * HALF_WORD))
+    mem.store32(address.from(painter.memory), usize.from(at + 4), u32.from(rgba))
+    painter.count = painter.count + 1
+    out none
+}
+
+skill inside(point, edge, limit, keep_below) {
+    @value = group.get(point, edge)
+    (keep_below == yes) { out value <= limit }
+    out value >= limit
+}
+
+skill crossing(a, b, edge, limit) {
+    @other = 1 - edge
+    @av = group.get(a, edge)
+    @bv = group.get(b, edge)
+    @ao = group.get(a, other)
+    @bo = group.get(b, other)
+    @cut = ao + (bo - ao) * (limit - av) / (bv - av)
+    @made = [cut, limit]
+    (edge == 0) { made = [limit, cut] }
+    drum (group.count(a) - 2) {
+        @from = group.get(a, beat + 2)
+        made = group.add(made, from + (group.get(b, beat + 2) - from) * (limit - av) / (bv - av))
+    }
+    out made
+}
+
+skill clip(points, edge, limit, keep_below) {
+    @kept = []
+    @count = group.count(points)
+    drum (count) {
+        @a = group.get(points, beat)
+        @b = group.get(points, (beat + 1) % count)
+        @a_in = inside(a, edge, limit, keep_below)
+        @b_in = inside(b, edge, limit, keep_below)
+        (a_in == yes) { kept = group.add(kept, a) }
+        ((a_in == b_in) == no) { kept = group.add(kept, crossing(a, b, edge, limit)) }
+    }
+    out kept
+}
+
+skill add_quad(painter, corners, pixel, width, height) {
+    out add_shape(painter, corners, pixel, 255, width, height)
+}
+
+skill add_shape(painter, points, pixel, alpha, width, height) {
+    @shape = clip(points, 0, -MARGIN, no)
+    shape = clip(shape, 0, width + MARGIN, yes)
+    shape = clip(shape, 1, -MARGIN, no)
+    shape = clip(shape, 1, height + MARGIN, yes)
+    @count = group.count(shape)
+    (count < 3) { out none }
+    (painter.count + (count - 2) * 3 > VERTEX_LIMIT) {
+        painter.dropped = painter.dropped + 1
+        out none
+    }
+    @red = pixel / 65536 % 256
+    @green = pixel / 256 % 256
+    @blue = pixel % 256
+    @rgba = red + green * 256 + blue * 65536 + alpha * 16777216
+    @first = group.get(shape, 0)
+    drum (count - 2) {
+        vertex(painter, first, rgba)
+        vertex(painter, group.get(shape, beat + 1), rgba)
+        vertex(painter, group.get(shape, beat + 2), rgba)
+    }
+    out none
+}
+
+skill rgba_of(pixel) {
+    out pixel / 65536 % 256 + pixel / 256 % 256 * 256 + pixel % 256 * 65536 + 4278190080
+}
+
+skill on_screen(corners, width, height) {
+    drum (4) {
+        @corner = group.get(corners, beat)
+        @x = group.get(corner, 0)
+        @y = group.get(corner, 1)
+        (x < -MARGIN) { out no }
+        (x > width + MARGIN) { out no }
+        (y < -MARGIN) { out no }
+        (y > height + MARGIN) { out no }
+    }
+    out yes
+}
+
+skill add_smooth(painter, corners, pixels, width, height) {
+    (on_screen(corners, width, height) == yes) {
+        (painter.count + 6 > VERTEX_LIMIT) {
+            painter.dropped = painter.dropped + 1
+            out none
+        }
+        @a = group.get(corners, 0)
+        @c = group.get(corners, 2)
+        @ca = rgba_of(group.get(pixels, 0))
+        @cc = rgba_of(group.get(pixels, 2))
+        vertex(painter, a, ca)
+        vertex(painter, group.get(corners, 1), rgba_of(group.get(pixels, 1)))
+        vertex(painter, c, cc)
+        vertex(painter, a, ca)
+        vertex(painter, c, cc)
+        out vertex(painter, group.get(corners, 3), rgba_of(group.get(pixels, 3)))
+    }
+    @points = []
+    drum (4) {
+        @corner = group.get(corners, beat)
+        @pixel = group.get(pixels, beat)
+        points = group.add(points, [group.get(corner, 0), group.get(corner, 1), pixel / 65536 % 256, pixel / 256 % 256, pixel % 256])
+    }
+    @shape = clip(points, 0, -MARGIN, no)
+    shape = clip(shape, 0, width + MARGIN, yes)
+    shape = clip(shape, 1, -MARGIN, no)
+    shape = clip(shape, 1, height + MARGIN, yes)
+    @count = group.count(shape)
+    (count < 3) { out none }
+    (painter.count + (count - 2) * 3 > VERTEX_LIMIT) {
+        painter.dropped = painter.dropped + 1
+        out none
+    }
+    @rgba = []
+    drum (count) {
+        @point = group.get(shape, beat)
+        rgba = group.add(rgba, group.get(point, 2) + group.get(point, 3) * 256 + group.get(point, 4) * 65536 + 4278190080)
+    }
+    drum (count - 2) {
+        vertex(painter, group.get(shape, 0), group.get(rgba, 0))
+        vertex(painter, group.get(shape, beat + 1), group.get(rgba, beat + 1))
+        vertex(painter, group.get(shape, beat + 2), group.get(rgba, beat + 2))
+    }
+    out none
+}
+
+skill triangles(painter, target) {
+    out draw_list(painter, target, painter.strip, tris.BATCH)
+}
+
+skill blended(painter, target) {
+    out draw_list(painter, target, painter.strip, blend.BATCH)
+}
+
+skill draw_list(painter, target, place, words) {
+    (painter.count == 0) { out yes }
+    load(painter, place, words, tris.RELOCS, target, painter.vertices)
+    surface(painter, place, tris.DESTINATION, words, target)
+    put(painter, place, tris.DRAWING_WORD, (target.height - 1) * HALF_WORD + target.width - 1)
+    put(painter, place, tris.VERTEX_SIZE_WORD, painter.count * VERTEX_BYTES)
+    put(painter, place, tris.COUNT_WORD, painter.count)
+    out run(painter, place)
+}

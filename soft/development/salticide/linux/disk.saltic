@@ -1,0 +1,116 @@
+-- disk — файлы проекта для SalticIDE в Linux: дерево от папки, где запущена
+-- IDE (ярлык ставит её в корень проекта), строками project.Row — папки
+-- сверху, потом файлы, по алфавиту байтов; скрытые (с точки) не видны.
+-- Раскрытые папки — opened, щелчок переключает. Файл читается текстом, если
+-- его окончание из TEXTS; иначе и при ошибке чтения — одна строка с причиной.
+-- Длинный файл — первые LIMIT строк и строка, сколько не показано.
+--
+-- Disk { opened } — пути раскрытых папок
+-- rows() -> [project.Row] — дерево сверху вниз
+-- toggle(path) — раскрыть или свернуть папку
+-- read(path) -> строки файла
+-- Внутри: walk(folder, depth) -> строки поддерева; folder(path) -> yes, если
+--     папка; sorted(names) — по алфавиту байтов; before(a, b) -> yes/no
+
+use io.file
+use core.str
+use core.group
+use soft.development.salticide.components.project
+
+TEXTS = [".saltic", ".md", ".txt", ".json", ".jtml", ".js", ".html", ".css", ".py", ".nix", ".toml", ".yml", ".sh", "justfile", ".gitignore", ".lock", ".log", "LICENSE", "LICENSE.ru", "NOTICE", "VERSION"]
+LIMIT = 4000
+HIDDEN = 46
+
+skill before(left, right) {
+    @count = str.bytes(left)
+    (str.bytes(right) < count) { count = str.bytes(right) }
+    drum (count) {
+        @a = str.byte(left, beat)
+        @b = str.byte(right, beat)
+        (a < b) { out yes }
+        (a > b) { out no }
+    }
+    out str.bytes(left) < str.bytes(right)
+}
+
+skill sorted(names) {
+    @made = []
+    drum (names) {
+        @item = beat
+        @at = 0
+        drum (group.count(made)) {
+            (before(group.get(made, beat), item) == yes) { at = beat + 1 }
+        }
+        made = group.concat(group.add(group.slice(made, 0, at), item), group.slice(made, at, group.count(made)))
+    }
+    out made
+}
+
+skill folder(path) {
+    file.list(path) rescue |err| { out no }
+    out yes
+}
+
+Disk = Box {
+    opened = []
+
+    skill walk(place, depth) {
+        @names = file.list(place) rescue |err| { out [] }
+        @folders = []
+        @files = []
+        drum (sorted(names)) {
+            ((str.byte(beat, 0) == HIDDEN) == no) {
+                @path = beat
+                ((place == ".") == no) { path = "{place}/{beat}" }
+                pick {
+                    (folder(path) == yes) { folders = group.add(folders, path) }
+                    { files = group.add(files, path) }
+                }
+            }
+        }
+        @made = []
+        drum (folders) {
+            @path = beat
+            @open = group.contains(opened, path)
+            @parts = str.split(path, "/")
+            made = group.add(made, project.Row { kind = project.FOLDER, name = group.get(parts, group.count(parts) - 1), path = path, depth = depth, open = open })
+            (open == yes) { made = group.concat(made, walk(path, depth + 1)) }
+        }
+        drum (files) {
+            @parts = str.split(beat, "/")
+            made = group.add(made, project.Row { kind = project.FILE, name = group.get(parts, group.count(parts) - 1), path = beat, depth = depth })
+        }
+        out made
+    }
+
+    skill rows() {
+        out walk(".", 0)
+    }
+
+    skill toggle(path) {
+        (group.contains(opened, path) == no) {
+            opened = group.add(opened, path)
+            out none
+        }
+        @left = []
+        drum (opened) {
+            ((beat == path) == no) { left = group.add(left, beat) }
+        }
+        opened = left
+        out none
+    }
+
+    skill read(path) {
+        @known = no
+        drum (TEXTS) {
+            (str.ends_with(path, beat) == yes) { known = yes }
+        }
+        (known == no) { out ["-- {path}: не текст — IDE показывает файлы с окончаниями из disk.TEXTS"] }
+        @text = file.read(path) rescue |err| { out ["-- {path}: не прочитан ({err})"] }
+        @lines = str.lines(text)
+        @count = group.count(lines)
+        (count <= LIMIT) { out lines }
+        @rest = count - LIMIT
+        out group.add(group.slice(lines, 0, LIMIT), "-- ещё {rest} строк не показано (disk.LIMIT)")
+    }
+}

@@ -1,0 +1,261 @@
+-- traffic — кадры данных через точку доступа: Ethernet ↔ 802.11 (как
+-- ath10k_htt_tx_32 в режиме Native Wi-Fi и ath10k_htt_rx_h_undecap_nwifi).
+-- Наружу: заголовок 802.11 24 байта (данные, ToDS: точка, мы, получатель),
+-- затем LLC/SNAP AA AA 03 00 00 00 и тип Ethernet, затем тело. Письмо HTT
+-- TX_FRM: вид Native Wi-Fi, TID 16 (без QoS), адрес — на список кусков
+-- (адрес, длина; пустой кусок в конце) в хвосте участка wifi_htt_command.
+-- Внутрь: карта кладёт кадр в том же виде (FromDS: нам, точка, отправитель),
+-- из него собираем Ethernet: получатель, отправитель, тип из LLC, тело.
+--
+-- send(chip, network, ethernet) — кадр Ethernet (группа байтов) в эфир
+-- receive(chip) -> кадр Ethernet или none — первый готовый целый кадр данных
+--     из приёма HTT; кадры управления и испорченные (htt.intact) по пути
+--     отпускаются, испорченные считаются в chip.frames_damaged
+-- answer_arp(chip, network, bytes) -> yes/no — ответить на ARP-запрос о
+--     нашем адресе (chip.ip)
+-- wait_dhcp(chip, network, kinds) -> dhcp.Offer или none — ответ сервера
+--     одного из видов kinds (не дольше WAITS), ARP по пути отвечаем
+-- lease(chip, network) -> текст — DISCOVER → OFFER → REQUEST → ACK; адрес и
+--     шлюз — в chip.ip и chip.router
+-- find_router(chip, network) -> текст — ARP-запрос шлюза, MAC в chip.router_mac
+-- listen(chip, network, rounds) -> текст — слушать: отвечать на ARP и на UDP
+--     в порт PORT (эхом), до ECHOES ответов
+-- probe(chip, network) -> текст — lease, find_router, listen
+-- poll(chip) -> кадр Ethernet или none — без ожидания: письма CE1, события
+--     WMI отпустить, один кадр данных; для цикла агента. Точка нас выгнала —
+--     chip.lost = yes: кадр Deauthentication или Disassociation от неё в
+--     приёме, событие прошивки PEER_STA_KICKOUT или ROAM (пропали маяки)
+-- expelled(chip, place) -> yes/no — кадр «уходи» от нашей точки
+
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.network.net
+use os.network.dhcp
+use registry.adapters.uefi_x86_64.qca9377.qca9377.card
+use registry.adapters.uefi_x86_64.qca9377.qca9377.rings
+use registry.adapters.uefi_x86_64.qca9377.qca9377.htt
+use registry.adapters.uefi_x86_64.qca9377.qca9377.wmi
+use registry.adapters.uefi_x86_64.qca9377.qca9377.join
+
+DATA_TO_POINT = [8, 1, 0, 0]
+SNAP = [170, 170, 3, 0, 0, 0]
+NATIVE_WIFI_FLAGS = 33
+TID_PLAIN = 16
+PIECES = 192
+HEADER = 24
+BODY = 32
+DATA_MASK = 12
+DATA = 8
+DEAUTH = 192
+DISASSOC = 160
+KICKOUT = 24577
+ROAM = 45057
+XID = [83, 65, 76, 84]
+WAITS = 400
+PAUSE = 10000
+PORT = 5555
+ECHOES = 3
+LISTEN = 6000
+
+skill send(chip, network, ethernet) {
+    @at = join.bytes(chip, 0, DATA_TO_POINT)
+    at = join.bytes(chip, at, network.address)
+    at = join.bytes(chip, at, net.slice_bytes(ethernet, 6, 6))
+    at = join.bytes(chip, at, net.slice_bytes(ethernet, 0, 6))
+    at = join.bytes(chip, at, [0, 0])
+    at = join.bytes(chip, at, SNAP)
+    at = join.bytes(chip, at, net.slice_bytes(ethernet, 12, group.count(ethernet) - 12))
+    @place = join.frame(chip)
+    @letter = htt.letter(chip)
+    @pieces = firmware.add(letter, PIECES)
+    firmware.write_phys32(pieces, chip.base, 0, place)
+    firmware.write_phys32(pieces, chip.base, 4, at)
+    firmware.write_phys32(pieces, chip.base, 8, 0)
+    firmware.write_phys32(pieces, chip.base, 12, 0)
+    @fetch = at
+    (fetch > join.PREFETCH) { fetch = join.PREFETCH }
+    fetch = fetch + (4 - fetch % 4) % 4
+    firmware.write_phys32(letter, chip.base, 8, join.TX_FRM + NATIVE_WIFI_FLAGS * 256 + (TID_PLAIN * 64 + join.POSTPONED) * firmware.PAGE)
+    firmware.write_phys32(letter, chip.base, 12, at + firmware.PAGE)
+    firmware.write_phys32(letter, chip.base, 16, pieces)
+    firmware.write_phys32(letter, chip.base, 20, join.NO_PEER)
+    drum (fetch / 4) { firmware.write_phys32(letter, chip.base, 24 + beat * 4, firmware.read32(place, chip.base, beat * 4)) }
+    out htt.send(chip, 16 + fetch)
+}
+
+skill read_bytes(chip, place, first, count) {
+    @bytes = []
+    drum (count) { bytes = group.add(bytes, firmware.read8(place, chip.base, first + beat)) }
+    out bytes
+}
+
+skill ethernet(chip, place, length) {
+    @bytes = group.concat(read_bytes(chip, place, 4, 6), read_bytes(chip, place, 16, 6))
+    bytes = group.concat(bytes, read_bytes(chip, place, HEADER + 6, 2))
+    out group.concat(bytes, read_bytes(chip, place, BODY, length - BODY))
+}
+
+skill receive(chip) {
+    drum (16) {
+        @got = htt.next_frame(chip)
+        (got == none) { out none }
+        @place = group.get(got, 0)
+        @length = group.get(got, 1)
+        @found = none
+        (group.get(got, 3) == no) { chip.frames_damaged = chip.frames_damaged + 1 }
+        (group.get(got, 3) == yes) {
+            (expelled(chip, place) == yes) { chip.lost = yes }
+            (firmware.read8(place, chip.base, 0) % 16 == DATA) {
+                (length > BODY) { found = ethernet(chip, place, length) }
+            }
+        }
+        htt.recycle(chip)
+        (found) |found| { out found }
+    }
+    out none
+}
+
+skill answer_arp(chip, network, bytes) {
+    (group.count(chip.ip) == 0) { out no }
+    (net.is_arp_request_for(bytes, chip.ip) == no) { out no }
+    send(chip, network, net.arp_reply(chip.mac, chip.ip, bytes))
+    chip.arp_answered = chip.arp_answered + 1
+    out yes
+}
+
+skill settle(chip) {
+    drum (16) {
+        (rings.held(chip) == 0) { leave }
+        rings.release(chip)
+    }
+    out card.stall(chip, PAUSE)
+}
+
+skill wait_dhcp(chip, network, kinds) {
+    drum (WAITS) {
+        rings.drain_letters(chip)
+        drum (16) {
+            @bytes = receive(chip)
+            (bytes == none) { leave }
+            chip.frames_in = chip.frames_in + 1
+            answer_arp(chip, network, bytes)
+            (net.is_udp_to(bytes, dhcp.CLIENT_PORT) == yes) {
+                @packet = net.udp(bytes)
+                @offer = dhcp.offer(packet.payload)
+                (offer) |offer| {
+                    (group.contains(kinds, offer.kind) == yes) { out offer }
+                }
+            }
+        }
+        settle(chip)
+    }
+    out none
+}
+
+skill lease(chip, network) {
+    card.say(chip, "K1. DHCPDISCOVER: broadcast UDP 68 -> 67 through the access point")
+    send(chip, network, dhcp.frame(chip.mac, XID))
+    @offer = wait_dhcp(chip, network, [dhcp.OFFER])
+    (offer == none) { out "DHCP: на DISCOVER ответа нет (кадров данных {chip.frames_in})" }
+    @offered = net.ip_text(offer.address)
+    @server = net.ip_text(offer.server)
+    card.say(chip, "K2. DHCPREQUEST: taking {offered} from {server}")
+    send(chip, network, dhcp.request_frame(chip.mac, XID, offer))
+    @ack = wait_dhcp(chip, network, [dhcp.ACK, dhcp.NAK])
+    (ack == none) { out "DHCP: предложен {offered} от {server}, на REQUEST ответа нет" }
+    (ack.kind == dhcp.NAK) { out "DHCP: предложен {offered}, сервер отказал (NAK)" }
+    chip.ip = ack.address
+    chip.router = ack.router
+    @address = net.ip_text(ack.address)
+    @router = net.ip_text(ack.router)
+    @mask = net.ip_text(ack.mask)
+    card.say(chip, "   DHCPACK: address {address}, mask {mask}, gateway {router}")
+    out "DHCP: адрес {address}, маска {mask}, шлюз {router}"
+}
+
+skill find_router(chip, network) {
+    (group.count(chip.router) == 0) { out "ARP: шлюза нет" }
+    @router = net.ip_text(chip.router)
+    card.say(chip, "K3. ARP: who has {router}?")
+    send(chip, network, net.arp_request(chip.mac, chip.ip, chip.router))
+    drum (WAITS) {
+        rings.drain_letters(chip)
+        drum (16) {
+            @bytes = receive(chip)
+            (bytes == none) { leave }
+            chip.frames_in = chip.frames_in + 1
+            answer_arp(chip, network, bytes)
+            @found = net.arp_answer_from(bytes, chip.router)
+            (found) |found| {
+                chip.router_mac = found
+                @shown = net.mac_text(found)
+                card.say(chip, "   {router} is at {shown}")
+                out "ARP: шлюз {router} — {shown}"
+            }
+        }
+        settle(chip)
+    }
+    out "ARP: шлюз {router} не ответил"
+}
+
+skill echo(chip, network, bytes) {
+    @packet = net.udp(bytes)
+    @from = net.ip_text(packet.from_ip)
+    card.say(chip, "   UDP from {from}:{packet.from_port}: {packet.text}")
+    chip.heard_udp = "{chip.heard_udp} [{from}: {packet.text}]"
+    @reply = "Saltic по Wi-Fi слышит: {packet.text}"
+    send(chip, network, net.udp_frame(chip.mac, chip.ip, packet.from_mac, packet.from_ip, PORT, packet.from_port, reply))
+    chip.echoes = chip.echoes + 1
+    out chip.echoes
+}
+
+skill listen(chip, network, rounds) {
+    @address = net.ip_text(chip.ip)
+    card.say(chip, "K4. listening on {address}:{PORT}: ARP and UDP echo")
+    drum (rounds) {
+        rings.drain_letters(chip)
+        drum (16) {
+            @bytes = receive(chip)
+            (bytes == none) { leave }
+            chip.frames_in = chip.frames_in + 1
+            answer_arp(chip, network, bytes)
+            (net.is_udp_to(bytes, PORT) == yes) { echo(chip, network, bytes) }
+        }
+        (chip.echoes >= ECHOES) { leave }
+        settle(chip)
+    }
+    out "слушали: кадров данных {chip.frames_in}, ответов ARP {chip.arp_answered}, UDP:{chip.heard_udp}"
+}
+
+skill poll(chip) {
+    rings.drain_letters(chip)
+    drum (16) {
+        (rings.held(chip) == 0) { leave }
+        @event = wmi.event_id(chip, rings.held_buffer(chip))
+        (event == KICKOUT) { chip.lost = yes }
+        (event == ROAM) { chip.lost = yes }
+        rings.release(chip)
+    }
+    out receive(chip)
+}
+
+skill expelled(chip, place) {
+    @kind = firmware.read8(place, chip.base, 0)
+    @leave_now = no
+    (kind == DEAUTH) { leave_now = yes }
+    (kind == DISASSOC) { leave_now = yes }
+    (leave_now == no) { out no }
+    @network = chip.point
+    drum (6) {
+        ((firmware.read8(place, chip.base, 10 + beat) == group.get(network.address, beat)) == no) { out no }
+    }
+    out yes
+}
+
+skill probe(chip, network) {
+    @leased = lease(chip, network)
+    (group.count(chip.ip) == 0) { out leased }
+    @found = find_router(chip, network)
+    @heard = listen(chip, network, LISTEN)
+    out "{leased}\n{found}\n{heard}"
+}

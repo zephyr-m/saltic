@@ -1,0 +1,170 @@
+-- page — страница SalticIDE, уровень 5: Box Page держит компоненты — заголовок
+-- (head), левую панель проекта (tree), редактор (pane), правую панель сборки
+-- (side) и полосу режимов (foot), каждый — Box в своём файле
+-- salticide/components, — и ставит их по местам: заголовок сверху, панели и
+-- редактор в ряд с линиями между ними, режимы внизу. Своего вида у страницы
+-- нет; тема — светлая 1 с сайта (docs/site/public/IDE.html). Открытые файлы —
+-- docs: у каждого свои прокрутка и курсор; диск — у хозяина окна (Linux —
+-- soft/development/salticide/linux/disk), страница получает строки дерева и
+-- текст.
+--
+-- Doc { path, lines, info, first, light } — открытый файл
+-- Page { head, tree, pane, side, foot, docs }
+-- files(rows) — строки дерева проекта (project.Row)
+-- open(path, lines) — открыть файл (уже открыт — переключиться)
+-- close(path) — закрыть файл; был активным — активен последний, не осталось
+--     ни одного — приветствие
+-- show(path) — сделать открытый файл активным: редактор, вкладки, заголовок,
+--     место в дереве, сводка сборки
+-- opened(lines) -> Page — страница для файла lines (разбор подсветки — один на всех)
+-- jtml() -> текст страницы
+-- fit(height) — экран высотой height: строк кода — сколько влезет между
+--     заголовком, вкладками и полосой режимов (CHROME точек на них), дереву —
+--     всё между заголовком и режимами (FRAME точек на них)
+-- wheel(steps, x) — колесо в точке x: левее project.WIDTH — прокрутка дерева,
+--     иначе кода; click(hit, y) -> yes, если щелчок
+--     что-то поменял: hit — jtml.hit под точкой высоты y; строка кода — курсор
+--     и место в полосе режимов, полоса прокрутки — код туда же, вкладка —
+--     её файл, крестик на вкладке — закрыть её файл
+
+use core.str
+use core.group
+use registry.libraries.uiengine.jtml.calls
+use soft.development.salticide.code
+use soft.development.salticide.syntax
+use soft.development.salticide.components.title
+use soft.development.salticide.components.project
+use soft.development.salticide.components.editor
+use soft.development.salticide.components.build
+use soft.development.salticide.components.modes
+
+CHROME = 147
+FRAME = 90
+
+Doc = Box {
+    path = "",
+    lines = [],
+    info = syntax.Info {},
+    first = 1,
+    light = 1
+}
+
+Page = Box {
+    head = title.TitleBar {},
+    tree = project.Project {},
+    pane = editor.Editor {},
+    side = build.Build {},
+    foot = modes.Modes {},
+    docs = []
+
+    skill files(rows) {
+        tree.rows = rows
+        out tree.scroll(0)
+    }
+
+    skill open(path, lines) {
+        @known = no
+        drum (docs) {
+            (beat.path == path) { known = yes }
+        }
+        (known == no) { docs = group.add(docs, Doc { path = path, lines = lines, info = syntax.scan(lines) }) }
+        out show(path)
+    }
+
+    skill close(path) {
+        @left = []
+        @paths = []
+        drum (docs) {
+            ((beat.path == path) == no) {
+                left = group.add(left, beat)
+                paths = group.add(paths, beat.path)
+            }
+        }
+        docs = left
+        pane.tabs = paths
+        ((pane.active == path) == no) { out none }
+        (group.count(docs) > 0) { out show(group.get(paths, group.count(paths) - 1)) }
+        pane.lines = []
+        pane.info = syntax.Info {}
+        pane.active = ""
+        pane.first = 1
+        tree.current = ""
+        side.lines = []
+        side.info = syntax.Info {}
+        head.path = ""
+        foot.place = "1:1"
+        out tree.scroll(0)
+    }
+
+    skill show(path) {
+        @made = []
+        @paths = []
+        @chosen = Doc {}
+        drum (docs) {
+            @doc = beat
+            (doc.path == pane.active) {
+                doc.first = pane.first
+                doc.light = pane.light
+            }
+            (doc.path == path) { chosen = doc }
+            made = group.add(made, doc)
+            paths = group.add(paths, doc.path)
+        }
+        docs = made
+        pane.lines = chosen.lines
+        pane.info = chosen.info
+        pane.first = chosen.first
+        pane.light = chosen.light
+        pane.tabs = paths
+        pane.active = path
+        tree.current = path
+        side.lines = chosen.lines
+        side.info = chosen.info
+        head.path = path
+        foot.place = "{chosen.light}:1"
+        out none
+    }
+
+    skill fit(height) {
+        pane.shown = (height - CHROME) / editor.ROW
+        tree.fit(height - FRAME)
+        out pane.scroll(0)
+    }
+
+    skill wheel(steps, x) {
+        (x < project.WIDTH) { out tree.scroll(steps) }
+        out pane.scroll(steps)
+    }
+
+    skill click(hit, y) {
+        (str.starts_with(hit.id, editor.CLOSE) == yes) {
+            close(str.slice(hit.id, str.bytes(editor.CLOSE), str.bytes(hit.id)))
+            out yes
+        }
+        (str.starts_with(hit.id, editor.TAB) == yes) {
+            show(str.slice(hit.id, str.bytes(editor.TAB), str.bytes(hit.id)))
+            out yes
+        }
+        (hit.id == editor.TRACK) {
+            pane.jump(y - hit.y, hit.height)
+            out yes
+        }
+        (pane.point(hit.id) == no) { out no }
+        foot.place = "{pane.light}:1"
+        out yes
+    }
+
+    skill jtml() {
+        @line = calls.call("bar", [["height", "1"], ["tone", calls.quoted("line")]])
+        @upright = calls.call("bar", [["width", "1"], ["tone", calls.quoted("line")]])
+        @middle = calls.join([tree.jtml(), upright, pane.jtml(), upright, side.jtml()])
+        @top = head.jtml()
+        @bottom = foot.jtml()
+        out "\{\"box\": \{\"fill\": \"ground\", \"gap\": 0, \"children\": [{top}, {line}, \{\"box\": \{\"flow\": \"row\", \"grow\": 1, \"gap\": 0, \"children\": [{middle}]\}\}, {line}, {bottom}]\}\}"
+    }
+}
+
+skill opened(lines) {
+    @info = syntax.scan(lines)
+    out Page { head = title.TitleBar { path = code.PATH }, pane = editor.Editor { lines = lines, info = info }, side = build.Build { lines = lines, info = info } }
+}
