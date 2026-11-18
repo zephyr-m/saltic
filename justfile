@@ -72,10 +72,12 @@ bench: _dirs
 
 # Реестр адаптеров (registry/adapters/adapters.txt): паспорт, код через lens,
 # эффекты и идентификаторы против кода; индекс — registry/adapters/index.json.
-registry: _dirs
+# Реестр — свой репозиторий (git@github.com:zephyr-m/saltic-registry.git):
+# сверяется его рабочая копия, по умолчанию ../saltic-registry.
+registry folder="../saltic-registry": _dirs
     bootstrap/saltic workbench/agent/lens.saltic .cache/build/workbench/lens.part 1073741824 x86_64  && mv .cache/build/workbench/lens.part .cache/build/workbench/lens
     bootstrap/saltic workbench/registry.saltic .cache/build/workbench/registry 268435456 x86_64
-    .cache/build/workbench/registry
+    cd "$1" && SALTIC_HOME="{{justfile_directory()}}" "{{justfile_directory()}}/.cache/build/workbench/registry"
 
 # Поставить программу Saltic на ноут: бинарник в ~/.local/bin, иконка, визитка
 # в меню приложений и ярлык на рабочем столе (workbench/install.saltic).

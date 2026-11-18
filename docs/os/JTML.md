@@ -68,6 +68,10 @@ Saltic строится по атомарному дизайну: в JTML ров
 
 ## Где живёт
 
+UIEngine — библиотека реестра (`git@github.com:zephyr-m/saltic-registry.git`,
+пути ниже — внутри него); в Saltic приезжает пакетом tarantul, программы пишут
+`use tarantul.uiengine.…`.
+
 - `registry/libraries/uiengine/jtml.saltic` — лицо: раскладка, Runtime (значения полей и
   ползунков, фокус, цели щелчков), рисование. Tab — следующий в фокус,
   стрелки двигают ползунок, щелчок ставит его положение.

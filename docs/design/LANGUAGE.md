@@ -166,7 +166,8 @@
 Уже перенесено (17.11.2026): тёмная тема UIEngine (`themes/soft.saltic`) сверена с языком
 (цвета смысла одной светлоты, `panel` `#111723`, `raise` `#18202c`), а рисовальщик сам кладёт рамку
 панели `rim`, свет сверху и сетку точек — у палитры с `lit`
-(`registry/libraries/uiengine/draw/atoms.saltic`, `shapes.sheen`, `shapes.dots`).
+(`registry/libraries/uiengine/draw/atoms.saltic` в репозитории реестра
+`saltic-registry`, в Saltic — пакет `tarantul.uiengine`; `shapes.sheen`, `shapes.dots`).
 Жителей для этого трогать не надо: панель — это `box` с `fill: panel`.
 Темы — по файлу в `registry/libraries/uiengine/themes/`, программа выбирает
 одну словом: `themes.named("soft" | "light" | "site" | "alchemy" | "armor" | "forest" | "cream" | "cocoa", screen)`.

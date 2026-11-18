@@ -1,6 +1,8 @@
 -- catalog — реестр tarantul для экрана «Пакеты» Полигона: субъект Catalog сам
 -- читает оба каталога (CATALOGS: адаптеры и библиотеки — «имя путь» по
--- строке, # — комментарий), каждый пакет — субъект Package со своим
+-- строке, # — комментарий) там, где их держит tarantul: копия реестра по
+-- tarantul.json (workbench/tarantul/catalog) или папка рядом; каждый пакет —
+-- субъект Package со своим
 -- паспортом — субъектом Passport: тот сам читает <путь>.passport.json (JSON
 -- «поле → текст»); нет файла или он не JSON — так и записано в title. Нет
 -- каталога — trouble словами.
@@ -10,12 +12,14 @@
 --     purpose или primitives); read(path) — прочитать паспорт пакета по пути
 --     без расширения; taken(document, key) -> поле JSON текстом или ""
 --
--- Package { name, path, role, passport } — имя, путь без расширения, роль
+-- Package { name, path, source, role, passport } — имя, путь без
+--     расширения, тот же путь на диске (в копии реестра), роль
 --     (adapter / library), паспорт; dress() — прочитать свой паспорт;
 --     matches(query) -> yes, если query (нижний
 --     регистр) есть в имени, заголовке или пути; details() -> JTML раскрытого
 --     паспорта; row(chevron, icon, tone, id) -> строка дерева
 -- Catalog { packages, trouble } — refresh() — прочитать реестр заново;
+--     document(path) -> JSON файла или пустой объект;
 --     count(role) -> пакетов этой роли
 
 use core.str
@@ -26,8 +30,11 @@ use craft.protocols.data.json
 use craft.protocols.data.json.value
 use craft.protocols.data.json.reader
 use os.network.mrpc
+use workbench.tarantul.catalog
 
 SUFFIX = ".passport.json"
+MANIFEST = "tarantul.json"
+LOCK = "tarantul.lock"
 CATALOGS = [["adapter", "registry/adapters/adapters.txt"], ["library", "registry/libraries/libraries.txt"]]
 
 Passport = Box {
@@ -69,12 +76,13 @@ Passport = Box {
 Package = Box {
     name = "",
     path = "",
+    source = "",
     role = "",
     passport = Passport {}
 
     skill dress() {
         passport = Passport {}
-        out passport.read(path)
+        out passport.read(source)
     }
 
     skill matches(query) {
@@ -105,12 +113,21 @@ Catalog = Box {
     packages = [],
     trouble = ""
 
+    skill document(path) {
+        @text = file.read(path) rescue |err| { out value.object([]) }
+        @parsed = reader.parse(text)
+        (parsed.ok == no) { out value.object([]) }
+        out parsed.value
+    }
+
     skill refresh() {
         @found = []
         trouble = ""
+        @place = catalog.Catalog {}
+        place.settle(document(MANIFEST), document(LOCK))
         drum (CATALOGS) {
             @role = group.get(beat, 0)
-            @where = group.get(beat, 1)
+            @where = place.where(group.get(beat, 1))
             @listed = file.read(where) rescue |err| {
                 trouble = "{where} не прочитался — {err}"
                 ""
@@ -119,7 +136,8 @@ Catalog = Box {
                 (str.starts_with(beat, "#") == no) {
                     @words = str.split(beat, " ")
                     (group.count(words) >= 2) {
-                        @made = Package { name = group.get(words, 0), path = group.get(words, group.count(words) - 1), role = role }
+                        @path = group.get(words, group.count(words) - 1)
+                        @made = Package { name = group.get(words, 0), path = path, source = place.where(path), role = role }
                         made.dress()
                         found = group.add(found, made)
                     }
