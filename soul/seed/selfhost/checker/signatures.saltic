@@ -5,7 +5,9 @@
 -- параметр фиксированный, только если все вызовы передают один фиксированный
 -- тип, иначе обычный (MIXED), и фиксированное в вызове упаковывается в число
 -- (пометка PACK у аргумента); результат — тип out. Лежит в globals под
--- names.param_key / result_key. Поле Box и группа — числом (Q-035); методы — без вывода.
+-- names.param_key / result_key. Поле Box и группа — числом (Q-035). Навык субъекта
+-- выводится так же под именем «Box.навык», если вызов прямой (types.method_key);
+-- при выборе во время работы фиксированное и дробное в него не уходят.
 --
 -- Signature = Box { found, name, minimum, maximum }
 -- exact(name, count) / range(name, minimum, maximum) -> Signature
@@ -20,11 +22,13 @@
 --     делает параметр обычным; changed — что-то сменилось
 -- argument_mark(node, index, full, fixed_call, scope, globals) -> пометка аргумента:
 --     тип, "pack:тип" (кодоген упакует) или "" — без пометки
--- owner_name(owner, subject, module) -> полное имя навыка или "" (program, метод)
+-- owner_name(owner, subject, module) -> полное имя навыка, «Box.навык» у навыка
+--     субъекта или "" (program)
 -- param_type(globals, owner, params, name) -> тип параметра или "unknown"
 -- OUT_MARKER — имя в области: тип результата навыка
--- check_call(node, full, scope, globals, diagnostics) -> diagnostics — в метод Box
---     и прочее не-навык фиксированный не уходит; навыки дробных — только на 64 битах
+-- check_call(node, full, scope, globals, diagnostics) -> diagnostics — в навык с
+--     выбором во время работы и прочее не-навык фиксированное и дробное не уходят;
+--     навыки дробных — только на 64 битах
 -- check_out(node, value, scope, globals, diagnostics) -> diagnostics
 -- check_ending(owner, full, body, globals, diagnostics) -> diagnostics — навык с
 --     фиксированным результатом кончается out
@@ -122,7 +126,11 @@ Observed = Box {
 }
 
 skill owner_name(owner, subject, module) {
-    (str.bytes(subject) > 0) { out "" }
+    (str.bytes(subject) > 0) {
+        @skill_name = ast.part(owner, 1)
+        (ast.tag(owner) == "subject-skill") { out "{subject}.{skill_name}" }
+        out ""
+    }
     (ast.tag(owner) == "skill") { out ast.qualified(module, ast.part(owner, 1)) }
     out ""
 }
@@ -141,6 +149,8 @@ skill argument_mark(node, index, full, fixed_call, scope, globals) {
     @type = types.value_type(ast.call_argument(node, index), scope, globals)
     @fixed = contract.is_fixed_type(type)
     @callee = names.table_find(globals, names.resolve_path(ast.call_callee(node), scope, globals))
+    @method = types.method_key(ast.call_callee(node), scope, globals)
+    (str.bytes(method) > 0) { callee = names.Name { name = method, kind = "skill" } }
     (callee.kind == "skill") {
         @param = names.table_find(globals, names.param_key(callee.name, index))
         (fixed == yes) { ((param.type == type) == no) { out str.concat(PACK, type) } }
@@ -213,8 +223,10 @@ skill observe_node(seen, node, owner, module) {
     (tag == "call") {
         @callee = names.resolve_path(group.get(plain, 1), names.Scope { module = module }, seen.globals)
         @global = names.table_find(seen.globals, callee)
+        @method = types.method_key(group.get(plain, 1), names.Scope { module = module }, seen.globals)
+        (str.bytes(method) > 0) { global = names.Name { name = method, kind = "skill" } }
         (global.kind == "skill") {
-            drum (ast.call_argument_count(node)) { seen = passed(seen, names.param_key(callee, beat), ast.call_argument(node, beat)) }
+            drum (ast.call_argument_count(node)) { seen = passed(seen, names.param_key(global.name, beat), ast.call_argument(node, beat)) }
         }
     }
     drum (ast.children(node)) { seen = observe_node(seen, beat, owner, module) }
@@ -232,7 +244,7 @@ skill observe(tree, globals, strict) {
         (tag == "box") {
             drum (group.count(ast.plain(item)) - 2) {
                 @member = ast.part(item, beat + 2)
-                (ast.tag(member) == "subject-skill") { seen = observe_node(seen, ast.part(member, 3), "", module) }
+                (ast.tag(member) == "subject-skill") { seen = observe_node(seen, ast.part(member, 3), owner_name(member, ast.qualified(module, ast.part(item, 1)), module), module) }
             }
         }
     }
@@ -245,6 +257,7 @@ skill observe(tree, globals, strict) {
 skill check_call(node, full, scope, globals, diagnostics) {
     @callee = names.table_find(globals, names.resolve_path(ast.call_callee(node), scope, globals))
     (callee.kind == "skill") { out diagnostics }
+    (str.bytes(types.method_key(ast.call_callee(node), scope, globals)) > 0) { out diagnostics }
     (callee.kind == "native") {
         @seed = contract.find(full)
         @fraction = contract.result(seed, "unknown") == "fraction"
@@ -255,7 +268,9 @@ skill check_call(node, full, scope, globals, diagnostics) {
         out diagnostics
     }
     drum (ast.call_argument_count(node)) {
-        diagnostics = lookup.check_fixed_escape(node, ast.call_argument(node, beat), "передать в '{full}'", scope, globals, diagnostics)
+        @argument = ast.call_argument(node, beat)
+        diagnostics = lookup.check_fixed_escape(node, argument, "передать в '{full}'", scope, globals, diagnostics)
+        (types.value_type(argument, scope, globals) == "fraction") { diagnostics = lookup.add_diagnostic(diagnostics, lookup.placed(node, errors.fraction_escape(full))) }
     }
     out diagnostics
 }

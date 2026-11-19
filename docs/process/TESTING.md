@@ -12,7 +12,7 @@
    падала до исправления.
 4. **Канон — первый тест языка.** Новая возможность попадает в
    `soul/canonical/main.saltic`, новое правило чекера — в свой случай
-   `soul/canonical/errors/<тема>.saltic`; ожидаемый вывод — в `expected/`.
+   `soul/canonical/checks/errors/<тема>.saltic`; ожидаемый вывод — в `expected/`.
 5. **Один вход.** Все проверки запускает `tests/run.saltic`, все идут в каждом
    прогоне `global-check`. Тест, который не запускается, удаляется.
 6. **Тишина при успехе.** Прошедший тест печатает одну строку итога.
@@ -30,11 +30,11 @@
 
 `all` — её гоняет `just global-check` разом на rv32i, x86_64, rv64 и arm64:
 
-- `checker` — случаи `soul/canonical/errors/` против `expected/errors/`;
+- `checker` — случаи `soul/canonical/checks/errors/` против `expected/errors/`;
   `errors/parser/` — по файлу на ошибку лексера и парсера, каждый обязан
   упасть с `ParseFailed`;
 - `fixed-types` — `u8…usize`, `bits32`, `address` и их ошибки чекера;
-- `fraction`, `wide` — дробные и канон 64 бит `soul/canonical/wide.saltic`
+- `fraction`, `wide` — дробные и канон 64 бит `soul/canonical/wide/main.saltic`
   на x86-64, rv64 и arm64;
 - `modules` — вложенные модули и ошибки загрузчика;
 - `json-rpc` — `craft.protocols.data.json` и `json_rpc`;
@@ -53,7 +53,7 @@
 - `crypto` — `craft.protocols.security.crypto` (сравнение секретов за
   постоянное время);
 - `apk` — части APK из `formats/apk`: CRC32, zip, подпись;
-- `edges` — канон граничных случаев `soul/canonical/edges.saltic` (из `tests/`
+- `edges` — канон граничных случаев `soul/canonical/edges/main.saltic` (из `tests/`
   12.11.2026): ошибки рантайма через `rescue`, дерево Box, строки, злые значения
   каждого типа через параметр, out, группу, поле Box, `"{x}"` и `==`; одинаково
   под rv32i и x86_64;

@@ -146,7 +146,7 @@ saltic_heap_start                                                конец кв
 - чекер (`checker/walk.saltic`, `check_cycles`) — на видимое в теле: `x.f = y`,
   где `x` достижим из `y` по литералам Box и групп, присваиваниям, чтению полей
   и прежним записям, — `cycle_reference`, текст «храни номер, а не объект»
-  (канон `soul/canonical/errors/cycles.saltic`);
+  (канон `soul/canonical/checks/errors/cycles.saltic`);
 - рантайм — при записи в хранилище: указатель на сам Box внутри перевозимого и
   цикл внутри перевезённого (Кан) — `CycleForbidden`; если у Box уже есть
   рёбра из хранилища — обход от нового значения (`memory/cycles.saltic`,
