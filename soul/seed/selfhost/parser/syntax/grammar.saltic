@@ -13,8 +13,10 @@
 -- names(parser, start, end_kind, item_message) / params(parser, start) -> Read списка имён
 -- subject_skill(parser, start) -> Read "subject-skill" (skill внутри Box)
 -- box_declaration(parser, start) -> Read "box" — Имя = Box { поля, навыки, вложенные
---     Box } (вложенный — часть объекта, решение автора 19.11.2026)
--- field_follows(parser, at) -> yes, если с at начинается поле, а не вложенный Box
+--     Box и enum } (вложенный — часть объекта, решение автора 19.11.2026)
+-- enum_declaration(parser, start) -> Read "enum" — Имя = enum { ВАРИАНТ, … }; внутри
+--     Box — состояния субъекта для его конечного автомата
+-- cursor.field_follows(parser, at) -> yes, если с at начинается поле, а не вложенный Box или enum
 
 use core.str
 use core.group
@@ -48,7 +50,14 @@ skill sequence_item(parser, start, item_kind, item_message) {
     (item_kind == "field") { out field_item(parser, start, item_message) }
     (item_kind == "member") {
         (cursor.is(parser, start, lexer.TokenKind.IDENT) == yes) {
-            (field_follows(parser, start) == no) {
+            (cursor.field_follows(parser, start) == no) {
+                (cursor.is(parser, start + 2, lexer.TokenKind.ENUM) == yes) {
+                    @states = enum_declaration(parser, start)
+                    (diagnostic.has(states.diagnostics) == yes) {
+                        out states
+                    }
+                    out cursor.ok("member", states.node.datum, states.next)
+                }
                 @inner = box_declaration(parser, start)
                 (diagnostic.has(inner.diagnostics) == yes) { out inner }
                 out cursor.ok("member", inner.node.datum, inner.next)
@@ -69,10 +78,18 @@ skill sequence_item(parser, start, item_kind, item_message) {
     out cursor.fail(parser, start, item_message)
 }
 
-skill field_follows(parser, at) {
-    (cursor.is(parser, at, lexer.TokenKind.IDENT) == no) { out no }
-    (cursor.is(parser, at + 1, lexer.TokenKind.ASSIGN) == no) { out yes }
-    out cursor.is(parser, at + 2, lexer.TokenKind.BOX) == no
+skill enum_declaration(parser, start) {
+    @token = cursor.at(parser, start)
+    @open = cursor.expect(parser, start + 3, lexer.TokenKind.LBRACE, "expected_open_brace")
+    (diagnostic.has(open.diagnostics) == yes) {
+        out open
+    }
+    @variants = names(parser, open.next, lexer.TokenKind.RBRACE, "expected_enum_variant")
+    (diagnostic.has(variants.diagnostics) == yes) {
+        out variants
+    }
+    @datum = cursor.append_tail(["enum", token.value], variants.node.datum, 0)
+    out cursor.ok("enum", cursor.loc(datum, token, parser.locations), variants.next)
 }
 
 skill box_declaration(parser, start) {
@@ -83,12 +100,6 @@ skill box_declaration(parser, start) {
     (diagnostic.has(members.diagnostics) == yes) { out members }
     @datum = cursor.append_tail(["box", token.value], members.node.datum, 0)
     out cursor.ok("box", cursor.loc(datum, token, parser.locations), members.next)
-}
-
-skill field_comma_message(comma, next_is_field) {
-    (comma == next_is_field) { out "" }
-    (comma == yes) { out "field_trailing_comma" }
-    out "missing_field_comma"
 }
 
 skill sequence(parser, start, end_kind, item_kind, item_message, eof_message, require_separator, allow_comma) {
@@ -126,7 +137,7 @@ skill sequence(parser, start, end_kind, item_kind, item_message, eof_message, re
         next = cursor.skip_lines(parser, next)
         (next > before_lines) { separated = yes }
         (item.node.tag == "field") {
-            @comma_message = field_comma_message(comma, field_follows(parser, next))
+            @comma_message = cursor.field_comma_message(comma, cursor.field_follows(parser, next))
             (str.bytes(comma_message) > 0) {
                 @comma_failure = cursor.fail(parser, next, comma_message)
                 diagnostics = comma_failure.diagnostics
