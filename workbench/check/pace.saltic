@@ -1,0 +1,143 @@
+-- pace — темп языка до и после правки (решение автора 19.11.2026: правки языка
+-- малыми шагами, с замером до и после, и только потом самосборка). Одна и та же
+-- полка собирает разбор (pace/parse) и чекер (tests/checker) из последнего
+-- коммита (копия git worktree в WORK/head) и из рабочего дерева, потом меряет
+-- GNU time: разбор GRAMMAR ×20 и чекер по всему компилятору (TOOLCHAIN).
+-- Печатает «было / стало / разница» по времени и памяти. Долгие шаги подают
+-- голос каждые 10 с (kit.watched). Вызывается `just pace`.
+--
+-- Pace { root, timer, rows } — корень репозитория, путь GNU time, строки итога
+--     [что, было_сотых, стало_сотых, было_КБ, стало_КБ]
+-- run() — всё целиком; Внутри: prepare() — копия HEAD; built(side, folder) —
+--     сборка двух замеров стороны; timed(binary, target, what) -> [сотые, КБ];
+--     hundredths(text) — «0.45» -> 45; seconds(value) — 45 -> «0.45 с»;
+--     megabytes(kb) -> «3.0 МБ»; change(was, now) -> «−20 %»; shown()
+-- WORK, HEAP, GRAMMAR, TOOLCHAIN, PARSE, CHECKER
+
+use io
+use io.file
+use core.str
+use core.group
+use core.process
+use workbench.kit
+use workbench.check.limits.canon
+
+WORK = ".cache/build/pace"
+HEAP = "536870912"
+GRAMMAR = "soul/seed/selfhost/parser/syntax/grammar.saltic"
+TOOLCHAIN = "soul/seed/selfhost/toolchain.saltic"
+PARSE = "workbench/check/pace/parse.saltic"
+CHECKER = "tests/checker.saltic"
+
+Pace = Box {
+    root = "",
+    timer = "",
+    rows = []
+
+    skill prepare() {
+        @top = process.capture(["git", "rev-parse", "--show-toplevel"], "", [])
+        root = group.get(str.lines(top.output), 0)
+        timer = process.locate("time")
+        kit.shell("rm -rf \"$0\" && mkdir -p \"$0\" && git worktree prune", [WORK], "")
+        io.show("темп: копия последнего коммита — {WORK}/head")
+        kit.watched("git worktree add --detach \"$0/head\" HEAD", [WORK], "", "копия коммита")
+        kit.shell("mkdir -p \"$0/head/workbench/check/pace\" && cp \"$1\" \"$0/head/$1\"", [WORK, PARSE], "")
+        out none
+    }
+
+    skill built(side, folder) {
+        @shelf = "{root}/bootstrap/saltic"
+        @parse = "{root}/{WORK}/{side}-parse"
+        @check = "{root}/{WORK}/{side}-checker"
+        io.show("темп: {side} — собираю разбор и чекер")
+        kit.watched("\"$0\" \"$1\" \"$2\" \"$3\" x86_64 > \"$2.log\" 2>&1", [shelf, PARSE, parse, HEAP], folder, "{side}: сборка разбора")
+        kit.watched("\"$0\" \"$1\" \"$2\" \"$3\" x86_64 > \"$2.log\" 2>&1", [shelf, CHECKER, check, HEAP], folder, "{side}: сборка чекера")
+        out none
+    }
+
+    skill hundredths(text) {
+        @parts = str.split(text, ".")
+        @whole = canon.number(group.get(parts, 0))
+        (group.count(parts) < 2) {
+            out whole * 100
+        }
+        @part = group.get(parts, 1)
+        @fraction = canon.number(part)
+        (str.bytes(part) == 1) {
+            fraction = fraction * 10
+        }
+        out whole * 100 + fraction
+    }
+
+    skill timed(binary, target, what) {
+        @times = "{binary}.time"
+        kit.watched("\"$0\" -q -o \"$1\" -f '%e %M' \"$2\" \"$3\" > \"$2.out\" 2>&1", [timer, times, binary, target], "", what)
+        @numbers = str.split(group.get(str.lines(file.read(times)), 0), " ")
+        out [hundredths(group.get(numbers, 0)), canon.number(group.get(numbers, 1))]
+    }
+
+    skill seconds(value) {
+        @whole = value / 100
+        @part = value - whole * 100
+        (part < 10) {
+            out "{whole}.0{part} с"
+        }
+        out "{whole}.{part} с"
+    }
+
+    skill megabytes(kb) {
+        @tenths = kb * 10 / 1024
+        @whole = tenths / 10
+        @part = tenths - whole * 10
+        out "{whole}.{part} МБ"
+    }
+
+    skill change(was, now) {
+        (was == 0) {
+            out "—"
+        }
+        @percent = (now - was) * 100 / was
+        (percent > 0) {
+            out "+{percent} %"
+        }
+        out "{percent} %"
+    }
+
+    skill shown() {
+        io.show("темп: что                       было        стало       разница")
+        drum (rows) {
+            @what = group.get(beat, 0)
+            @was = seconds(group.get(beat, 1))
+            @now = seconds(group.get(beat, 2))
+            @speed = change(group.get(beat, 1), group.get(beat, 2))
+            @was_memory = megabytes(group.get(beat, 3))
+            @now_memory = megabytes(group.get(beat, 4))
+            @memory = change(group.get(beat, 3), group.get(beat, 4))
+            io.show("темп: {what}  время {was} → {now} ({speed}), память {was_memory} → {now_memory} ({memory})")
+        }
+        out none
+    }
+
+    skill run() {
+        prepare()
+        built("head", "{WORK}/head")
+        built("now", "")
+        @parse_was = timed("{root}/{WORK}/head-parse", "{root}/{GRAMMAR}", "было: разбор")
+        @parse_now = timed("{root}/{WORK}/now-parse", "{root}/{GRAMMAR}", "стало: разбор")
+        @check_was = timed("{root}/{WORK}/head-checker", "{root}/{TOOLCHAIN}", "было: чекер")
+        @check_now = timed("{root}/{WORK}/now-checker", "{root}/{TOOLCHAIN}", "стало: чекер")
+        rows = [
+            ["разбор grammar ×20  ", group.get(parse_was, 0), group.get(parse_now, 0), group.get(parse_was, 1), group.get(parse_now, 1)],
+            ["чекер по компилятору", group.get(check_was, 0), group.get(check_now, 0), group.get(check_was, 1), group.get(check_now, 1)]
+        ]
+        shown()
+        kit.shell("git worktree remove --force \"$0/head\"", [WORK], "")
+        out none
+    }
+}
+
+program() {
+    @tempo = Pace {}
+    tempo.run()
+    out none
+}

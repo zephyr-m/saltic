@@ -85,6 +85,10 @@ install name: _dirs (tarantul "get")
     bootstrap/saltic workbench/install.saltic .cache/build/workbench/install 268435456 x86_64
     .cache/build/workbench/install "$1"
 
+pace: _dirs
+    bootstrap/saltic workbench/check/pace.saltic .cache/build/workbench/pace 536870912 x86_64
+    .cache/build/workbench/pace
+
 limits: _dirs
     bootstrap/saltic workbench/check/limits.saltic .cache/build/workbench/limits 536870912 x86_64
     .cache/build/workbench/limits

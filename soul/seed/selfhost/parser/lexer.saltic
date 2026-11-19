@@ -1,5 +1,5 @@
 -- lexer — текст исходника -> поток токенов с местом (строка, столбец).
--- Токены лежат в TokenBuffer кусками по 256 (читать через token_buffer_at).
+-- Токены лежат в TokenBuffer кусками по CHUNK = 256 (читать через at).
 -- Строка "{…}" становится TEMPLATE с parts = [текст, имя, текст, …].
 -- "…" — строго одна строка. Текст в несколько строк — блок #: открывающий #
 -- в конце строки, закрывающий # один на своей строке; его отступ снимается со
@@ -12,13 +12,12 @@
 --
 -- TokenKind = enum { INVALID, IDENT, NUMBER, STRING, NEWLINE, EOF, ключевые
 --     слова, знаки, TEMPLATE, NEAR (~=) }
--- Token = Box { kind, value, parts, line, col }
--- TokenBuffer = Box { chunks, tail, length }; Scan = Box { tokens, diagnostics }
+-- Token = Box { kind, value, parts, line, col }: describe() -> текст для сообщений парсера
+-- TokenBuffer = Box { chunks, tail, length }: keep(item) -> новый буфер на токен длиннее
+--     (не пишет в свои поля: запись хвоста в поле в 3,6 раза медленнее), at(index), count()
+-- Scan = Box { tokens, diagnostics }
 -- Lexeme = Box { token, next, line, col, diagnostics }; Placeholder = Box { name, next, found }
 -- Lexer = Box { source, path } с методом scan() -> Scan
--- lex(source, path) -> Scan
--- describe(token) -> текст для сообщений парсера
--- token_buffer_add(buffer, item) / token_buffer_at(buffer, index) / token_buffer_count(buffer)
 
 use core.str
 use core.group
@@ -38,6 +37,7 @@ TokenKind = enum {
 NEWLINE = "\n"
 TAB = "\t"
 QUOTE = "\""
+CHUNK = 256
 ESCAPE = "\\"
 ESCAPE_NEWLINE = "n"
 ESCAPE_TAB = "t"
@@ -67,14 +67,22 @@ Token = Box {
     parts = [],
     line = 1,
     col = 1
-}
 
-skill describe(token) {
-    (token.kind == TokenKind.NEWLINE) { out "конец строки" }
-    (token.kind == TokenKind.EOF) { out "конец файла" }
-    (token.kind == TokenKind.STRING) { out "строка" }
-    (token.kind == TokenKind.TEMPLATE) { out "строка" }
-    out "'{token.value}'"
+    skill describe() {
+        (kind == TokenKind.NEWLINE) {
+            out "конец строки"
+        }
+        (kind == TokenKind.EOF) {
+            out "конец файла"
+        }
+        (kind == TokenKind.STRING) {
+            out "строка"
+        }
+        (kind == TokenKind.TEMPLATE) {
+            out "строка"
+        }
+        out "'{value}'"
+    }
 }
 
 Placeholder = Box {
@@ -87,29 +95,33 @@ TokenBuffer = Box {
     chunks = [],
     tail = [],
     length = 0
-}
 
-skill token_buffer_add(buffer, item) {
-    @next_chunks = buffer.chunks
-    @next_tail = group.add(buffer.tail, item)
-    (group.count(next_tail) == 256) {
-        next_chunks = group.add(next_chunks, next_tail)
-        next_tail = []
+    skill keep(item) {
+        @next_chunks = chunks
+        @next_tail = group.add(tail, item)
+        (group.count(next_tail) == CHUNK) {
+            next_chunks = group.add(next_chunks, next_tail)
+            next_tail = []
+        }
+        out TokenBuffer {
+            chunks = next_chunks,
+            tail = next_tail,
+            length = length + 1
+        }
     }
-    out TokenBuffer { chunks = next_chunks, tail = next_tail, length = buffer.length + 1 }
-}
 
-skill token_buffer_at(buffer, index) {
-    @chunk_index = index / 256
-    @item_index = index - chunk_index * 256
-    (chunk_index < group.count(buffer.chunks)) {
-        out group.get(group.get(buffer.chunks, chunk_index), item_index)
+    skill at(index) {
+        @chunk_index = index / CHUNK
+        @item_index = index - chunk_index * CHUNK
+        (chunk_index < group.count(chunks)) {
+            out group.get(group.get(chunks, chunk_index), item_index)
+        }
+        out group.get(tail, item_index)
     }
-    out group.get(buffer.tail, item_index)
-}
 
-skill token_buffer_count(buffer) {
-    out buffer.length
+    skill count() {
+        out length
+    }
 }
 
 Scan = Box {
@@ -398,8 +410,8 @@ Lexer = Box {
     }
 
     skill has_code(tokens) {
-        drum (token_buffer_count(tokens)) {
-            @item = token_buffer_at(tokens, beat)
+        drum (tokens.count()) {
+            @item = tokens.at(beat)
             ((item.kind == TokenKind.NEWLINE) == no) { out yes }
         }
         out no
@@ -433,21 +445,21 @@ Lexer = Box {
                     col = col + 1
                 }
                 (ch == NEWLINE) {
-                    tokens = token_buffer_add(tokens, token(TokenKind.NEWLINE, NEWLINE, line, col))
+                    tokens = tokens.keep(token(TokenKind.NEWLINE, NEWLINE, line, col))
                     index = index + 1
                     line = line + 1
                     col = 1
                 }
                 (ident_start(ch) == yes) {
                     @lexeme = word(index, line, col)
-                    tokens = token_buffer_add(tokens, lexeme.token)
+                    tokens = tokens.keep(lexeme.token)
                     index = lexeme.next
                     line = lexeme.line
                     col = lexeme.col
                 }
                 (str.is_digit(ch) == yes) {
                     @lexeme = number(index, line, col)
-                    tokens = token_buffer_add(tokens, lexeme.token)
+                    tokens = tokens.keep(lexeme.token)
                     index = lexeme.next
                     line = lexeme.line
                     col = lexeme.col
@@ -459,7 +471,7 @@ Lexer = Box {
                     col = lexeme.col
                     diagnostics = lexeme.diagnostics
                     (diagnostic.has(diagnostics) == yes) { leave }
-                    tokens = token_buffer_add(tokens, lexeme.token)
+                    tokens = tokens.keep(lexeme.token)
                 }
                 (pair_at(index) == "--") {
                     (has_code(tokens) == yes) {
@@ -471,27 +483,27 @@ Lexer = Box {
                     index = end
                 }
                 (pair_at(index) == "==") {
-                    tokens = token_buffer_add(tokens, token(TokenKind.EQ, "==", line, col))
+                    tokens = tokens.keep(token(TokenKind.EQ, "==", line, col))
                     index = index + 2
                     col = col + 2
                 }
                 (pair_at(index) == ">=") {
-                    tokens = token_buffer_add(tokens, token(TokenKind.GE, ">=", line, col))
+                    tokens = tokens.keep(token(TokenKind.GE, ">=", line, col))
                     index = index + 2
                     col = col + 2
                 }
                 (pair_at(index) == "<=") {
-                    tokens = token_buffer_add(tokens, token(TokenKind.LE, "<=", line, col))
+                    tokens = tokens.keep(token(TokenKind.LE, "<=", line, col))
                     index = index + 2
                     col = col + 2
                 }
                 (pair_at(index) == "~=") {
-                    tokens = token_buffer_add(tokens, token(TokenKind.NEAR, "~=", line, col))
+                    tokens = tokens.keep(token(TokenKind.NEAR, "~=", line, col))
                     index = index + 2
                     col = col + 2
                 }
                 (pair_at(index) == "=>") {
-                    tokens = token_buffer_add(tokens, token(TokenKind.ARROW, "=>", line, col))
+                    tokens = tokens.keep(token(TokenKind.ARROW, "=>", line, col))
                     index = index + 2
                     col = col + 2
                 }
@@ -500,21 +512,13 @@ Lexer = Box {
                     leave
                 }
                 {
-                    tokens = token_buffer_add(tokens, token(sign_kind(ch), ch, line, col))
+                    tokens = tokens.keep(token(sign_kind(ch), ch, line, col))
                     index = index + 1
                     col = col + 1
                 }
             }
         }
-        tokens = token_buffer_add(tokens, token(TokenKind.EOF, "", line, col))
+        tokens = tokens.keep(token(TokenKind.EOF, "", line, col))
         out Scan { tokens = tokens, diagnostics = diagnostics }
     }
-}
-
-
-skill lex(source, path) {
-    @lexer = Lexer()
-    lexer.source = source
-    lexer.path = path
-    out lexer.scan()
 }
