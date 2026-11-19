@@ -1,0 +1,224 @@
+-- columns — «пиши столбиком» (решения автора 19.11.2026): литерал Box с полями —
+-- поле на своей строке, запятые остаются (в строку — только аргументы навыка и
+-- пустой Box {}); тело цикла drum и always — всегда на своих строках, даже одно
+-- выражение; out — всегда с новой строки, не после «{». Известные — в KNOWN
+-- («путь литералов циклов выходов»): им можно не расти, новое или выросшее —
+-- нарушение. Строки `--` не в счёт.
+--
+-- Columns { known, literals, loops, exits } — строки KNOWN и замер файла
+-- load() -> known; measure(text) — literals, loops и exits по тексту;
+--     verdict(path, text) -> "" или «новое …» / «выросло …»
+-- Внутри: literal(line) — в строке Имя { поле = … }; loop(line) — после drum (…)
+--     или always на той же строке есть тело; named(line, at) — перед «{» на
+--     месте at имя с заглавной (можно с точками); closing(line, from) -> «}» или -1;
+--     word(ch) — буква, цифра, «_» или «.»; opened(line, at) — после «{» от at
+--     на строке есть не пробел
+-- KNOWN, ADVICE, EXIT («{ out »), LOOPS; OPEN, CLOSE, SPACE, DOT, UNDER — байты
+
+use io.file
+use core.str
+use core.group
+use workbench.check.limits.canon
+
+KNOWN = "workbench/check/limits-columns.txt"
+ADVICE = "пиши столбиком: поле литерала, тело цикла и out — на своих строках"
+EXIT = "\{ out "
+OPEN = 123
+CLOSE = 125
+SPACE = 32
+DOT = 46
+UNDER = 95
+LOOPS = ["drum (", "always \{"]
+
+Columns = Box {
+    known = [],
+    literals = 0,
+    loops = 0,
+    exits = 0
+
+    skill load() {
+        known = []
+        drum (str.lines(file.read(KNOWN))) {
+            (str.starts_with(beat, "#") == no) {
+                known = group.add(known, beat)
+            }
+        }
+        out known
+    }
+
+    skill word(ch) {
+        (ch == DOT) {
+            out yes
+        }
+        (ch == UNDER) {
+            out yes
+        }
+        (ch >= 48) {
+            (ch <= 57) {
+                out yes
+            }
+        }
+        (ch >= 65) {
+            (ch <= 90) {
+                out yes
+            }
+        }
+        (ch >= 97) {
+            out ch <= 122
+        }
+        out no
+    }
+
+    skill named(line, at) {
+        @end = at - 1
+        @start = end
+        always {
+            (start == 0) {
+                leave
+            }
+            (word(str.byte(line, start - 1)) == no) {
+                leave
+            }
+            start = start - 1
+        }
+        (start == end) {
+            out no
+        }
+        @first = str.byte(line, start)
+        (first < 65) {
+            out no
+        }
+        out first <= 90
+    }
+
+    skill closing(line, from) {
+        @size = str.bytes(line)
+        drum (size - from) {
+            (str.byte(line, from + beat) == CLOSE) {
+                out from + beat
+            }
+        }
+        out -1
+    }
+
+    skill opened(line, at) {
+        @size = str.bytes(line)
+        @brace = -1
+        drum (size - at) {
+            (brace < 0) {
+                (str.byte(line, at + beat) == OPEN) {
+                    brace = at + beat
+                }
+            }
+        }
+        (brace < 0) {
+            out no
+        }
+        drum (size - brace - 1) {
+            ((str.byte(line, brace + 1 + beat) == SPACE) == no) {
+                out yes
+            }
+        }
+        out no
+    }
+
+    skill literal(line) {
+        (str.contains(line, " \{") == no) {
+            out no
+        }
+        (str.contains(line, " = ") == no) {
+            out no
+        }
+        drum (str.bytes(line)) {
+            (beat > 1) {
+                (str.byte(line, beat) == OPEN) {
+                    (str.byte(line, beat - 1) == SPACE) {
+                        (named(line, beat) == yes) {
+                            @close = closing(line, beat + 1)
+                            (close > beat + 1) {
+                                (str.contains(str.slice(line, beat + 1, close), " = ") == yes) {
+                                    out yes
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out no
+    }
+
+    skill loop(line) {
+        drum (LOOPS) {
+            @mark = beat
+            @size = str.bytes(line)
+            @width = str.bytes(mark)
+            @room = size - width + 1
+            (room < 0) {
+                room = 0
+            }
+            drum (room) {
+                (str.slice(line, beat, beat + width) == mark) {
+                    @alone = yes
+                    (beat > 0) {
+                        alone = word(str.byte(line, beat - 1)) == no
+                    }
+                    (alone == yes) {
+                        (opened(line, beat) == yes) {
+                            out yes
+                        }
+                    }
+                }
+            }
+        }
+        out no
+    }
+
+    skill measure(text) {
+        literals = 0
+        loops = 0
+        exits = 0
+        drum (str.lines(text)) {
+            (str.starts_with(beat, "--") == no) {
+                (literal(beat) == yes) {
+                    literals = literals + 1
+                }
+                (loop(beat) == yes) {
+                    loops = loops + 1
+                }
+                (str.contains(beat, EXIT) == yes) {
+                    exits = exits + 1
+                }
+            }
+        }
+        out none
+    }
+
+    skill verdict(path, text) {
+        measure(text)
+        (literals + loops + exits == 0) {
+            out ""
+        }
+        drum (known) {
+            @parts = str.split(beat, " ")
+            (group.count(parts) == 4) {
+                (group.get(parts, 0) == path) {
+                    @was_literals = canon.number(group.get(parts, 1))
+                    @was_loops = canon.number(group.get(parts, 2))
+                    @was_exits = canon.number(group.get(parts, 3))
+                    (literals > was_literals) {
+                        out "выросло — литералов в строку {was_literals} → {literals}: {ADVICE}"
+                    }
+                    (loops > was_loops) {
+                        out "выросло — циклов в строку {was_loops} → {loops}: {ADVICE}"
+                    }
+                    (exits > was_exits) {
+                        out "выросло — out после «\{» {was_exits} → {exits}: {ADVICE}"
+                    }
+                    out ""
+                }
+            }
+        }
+        out "новое нарушение — литералов в строку {literals}, циклов {loops}, out после «\{» {exits}: {ADVICE}"
+    }
+}

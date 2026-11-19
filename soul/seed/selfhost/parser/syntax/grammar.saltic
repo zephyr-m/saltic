@@ -12,6 +12,9 @@
 --     expression, field, member, statement
 -- names(parser, start, end_kind, item_message) / params(parser, start) -> Read списка имён
 -- subject_skill(parser, start) -> Read "subject-skill" (skill внутри Box)
+-- box_declaration(parser, start) -> Read "box" — Имя = Box { поля, навыки, вложенные
+--     Box } (вложенный — часть объекта, решение автора 19.11.2026)
+-- field_follows(parser, at) -> yes, если с at начинается поле, а не вложенный Box
 
 use core.str
 use core.group
@@ -44,6 +47,13 @@ skill sequence_item(parser, start, item_kind, item_message) {
     }
     (item_kind == "field") { out field_item(parser, start, item_message) }
     (item_kind == "member") {
+        (cursor.is(parser, start, lexer.TokenKind.IDENT) == yes) {
+            (field_follows(parser, start) == no) {
+                @inner = box_declaration(parser, start)
+                (diagnostic.has(inner.diagnostics) == yes) { out inner }
+                out cursor.ok("member", inner.node.datum, inner.next)
+            }
+        }
         (cursor.is(parser, start, lexer.TokenKind.SKILL) == yes) {
             @member_skill = subject_skill(parser, start)
             (diagnostic.has(member_skill.diagnostics) == yes) { out member_skill }
@@ -57,6 +67,22 @@ skill sequence_item(parser, start, item_kind, item_message) {
         out cursor.ok("statement", value.node.datum, value.next)
     }
     out cursor.fail(parser, start, item_message)
+}
+
+skill field_follows(parser, at) {
+    (cursor.is(parser, at, lexer.TokenKind.IDENT) == no) { out no }
+    (cursor.is(parser, at + 1, lexer.TokenKind.ASSIGN) == no) { out yes }
+    out cursor.is(parser, at + 2, lexer.TokenKind.BOX) == no
+}
+
+skill box_declaration(parser, start) {
+    @token = cursor.at(parser, start)
+    @open = cursor.expect(parser, start + 3, lexer.TokenKind.LBRACE, "expected_open_brace")
+    (diagnostic.has(open.diagnostics) == yes) { out open }
+    @members = sequence(parser, open.next, lexer.TokenKind.RBRACE, "member", "expected_field_or_skill", "expected_close_brace", no, yes)
+    (diagnostic.has(members.diagnostics) == yes) { out members }
+    @datum = cursor.append_tail(["box", token.value], members.node.datum, 0)
+    out cursor.ok("box", cursor.loc(datum, token, parser.locations), members.next)
 }
 
 skill field_comma_message(comma, next_is_field) {
@@ -99,7 +125,7 @@ skill sequence(parser, start, end_kind, item_kind, item_message, eof_message, re
         next = cursor.skip_lines(parser, next)
         (next > before_lines) { separated = yes }
         (item.node.tag == "field") {
-            @comma_message = field_comma_message(comma, cursor.is(parser, next, lexer.TokenKind.IDENT))
+            @comma_message = field_comma_message(comma, field_follows(parser, next))
             (str.bytes(comma_message) > 0) {
                 @comma_failure = cursor.fail(parser, next, comma_message)
                 diagnostics = comma_failure.diagnostics

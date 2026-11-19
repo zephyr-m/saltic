@@ -16,6 +16,12 @@
 -- bucket_of(name) -> номер корзины
 -- visible(globals, module, name) / find_visible(…) — видно ли имя из модуля
 -- module_alias(globals, module, name) -> путь модуля за псевдонимом или ""
+-- reaches(alias) -> yes у псевдонима модуля и у короткого имени вложенного Box
+--     (ключ ast.alias_key, kind "nest", type — полное имя Car.Engine; два
+--     одинаковых в модуле — AMBIGUOUS, пиши Car.Engine)
+-- lead_name(globals, module, head) -> полное имя главного субъекта модуля или "":
+--     use …agent даёт Agent без заикания agent.Agent — имя субъекта строчными
+--     совпадает с псевдонимом модуля (решение автора 19.11.2026)
 -- resolve_name(name, module, globals) / resolve_path(node, scope, globals) -> полное имя или ""
 -- call_name(callee, scope, globals) -> имя для поиска навыка
 -- path_from_text(text) -> узел ["path", …]
@@ -127,6 +133,19 @@ skill module_alias(globals, module, name) {
     out ""
 }
 
+skill reaches(alias) {
+    (alias.kind == "import") { out yes }
+    out alias.kind == "nest"
+}
+
+skill lead_name(globals, module, head) {
+    @import = table_find(globals, ast.alias_key(module, str.lower(head)))
+    ((import.kind == "import") == no) { out "" }
+    @candidate = "{import.type}.{head}"
+    (table_has(globals, candidate) == yes) { out candidate }
+    out ""
+}
+
 skill put(names, name, kind, type) {
     out group.add(names, Name { name = name, kind = kind, type = type })
 }
@@ -156,9 +175,14 @@ skill resolve_name(name, module, globals) {
     (table_has(globals, local) == yes) { out local }
     @head = ast.name_head(name)
     @import = table_find(globals, ast.alias_key(module, head))
-    (import.kind == "import") {
+    (reaches(import) == yes) {
         @candidate = str.concat(import.type, ast.name_tail(name))
         (table_has(globals, candidate) == yes) { out candidate }
+    }
+    @lead = lead_name(globals, module, head)
+    (str.bytes(lead) > 0) {
+        @led = str.concat(lead, ast.name_tail(name))
+        (table_has(globals, led) == yes) { out led }
     }
     out ""
 }
@@ -177,12 +201,20 @@ skill resolve_path(node, scope, globals) {
         (table_has(globals, local) == yes) { out local }
     }
     @import = table_find(globals, ast.alias_key(scope.module, head))
-    (import.kind == "import") {
+    (reaches(import) == yes) {
         @candidate = import.type
         drum (count - 2) {
             candidate = str.concat(candidate, str.concat(".", group.get(plain, beat + 2)))
         }
         (table_has(globals, candidate) == yes) { out candidate }
+    }
+    @lead = lead_name(globals, scope.module, head)
+    (str.bytes(lead) > 0) {
+        @led = lead
+        drum (count - 2) {
+            led = str.concat(led, str.concat(".", group.get(plain, beat + 2)))
+        }
+        (table_has(globals, led) == yes) { out led }
     }
     out ""
 }
