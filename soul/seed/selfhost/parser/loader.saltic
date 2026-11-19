@@ -5,17 +5,22 @@
 -- HOME_VARIABLE (core, io, os, registry…); модуля нет в проекте — берётся из
 -- дома; без переменной — один root, как прежде. Узлы модуля обёрнуты ast.in_module;
 -- entry (program) берётся только из корневого файла; повторный use
--- пропускается, цикл — ошибка; вложенные Box поднимаются наверх (parser.nest).
+-- пропускается, цикл — ошибка; вложенные Box и enum поднимаются наверх (parser.nest).
+-- Модуль из нескольких файлов — папка со входом main.saltic (решение автора
+-- 20.11.2026): use a.b ищет a/b.saltic, а если его нет — a/b/main.saltic.
 --
--- Load = Box { ast, included, diagnostics }
--- join_path(base, relative) -> путь
--- resolve_module(source_path, parts, root) -> путь к файлу модуля
--- home() -> дом Saltic из HOME_VARIABLE или ""; located(path, parts, root) ->
---     путь модуля: в проекте, а если там нет и дом задан — в доме
--- load_error(path, problem, included, place) -> Load с одной ошибкой на месте place
--- expand_file(path, root, locations, included, stack, module_name, place) -> Load;
---     place = [строка, столбец] узла use, которым файл подключён ([0, 0] у корня)
--- load_file / load_file_loc(path, root) -> Load; load_modules(path, root) — то же
+-- Loader = Box { root, locations, eyes } — корень проекта, ставить ли узлам
+--     место, eyes — Reader для склейки групп:
+--     Load — Box { ast, included, diagnostics } — итог
+--     gather(path) -> Load — программа из файла и всех его use
+--     expand(path, included, stack, module_name, place) -> Load; place =
+--         [строка, столбец] узла use, которым файл подключён ([0, 0] у корня)
+--     join_path(base, relative) -> путь; module_path(parts, under) -> путь к
+--         файлу модуля от корня under; home() -> дом Saltic из HOME_VARIABLE или "";
+--         located(parts) -> путь модуля: в проекте, а если там нет и дом задан —
+--         в доме; entrance(parts, under) -> файл модуля или main.saltic его папки;
+--         found(path) -> yes, если файл читается; failure(path, problem,
+--         included, place) -> Load с одной ошибкой; MAIN — имя входа папки
 
 use io.file
 use core.str
@@ -25,109 +30,183 @@ use selfhost.ast
 use selfhost.diagnostic
 use selfhost.errors
 use selfhost.parser.syntax
+use selfhost.parser.syntax.reader
 use selfhost.parser.nest
 
 HOME_VARIABLE = "SALTIC_HOME"
+MAIN = "main"
 
-Load = Box {
-    ast = [],
-    included = [],
-    diagnostics = []
-}
+Loader = Box {
+    root = "",
+    locations = no,
+    eyes = Reader {}
 
-skill join_path(base, relative) {
-    (str.ends_with(base, "/") == yes) { out str.concat(base, relative) }
-    out "{base}/{relative}"
-}
-
-skill resolve_module(source_path, parts, root) {
-    @base = root
-    @first = group.get(parts, 0)
-    (first == "seed") { base = join_path(root, "soul") }
-    (first == "craft") { base = join_path(root, "soul") }
-    (first == "canonical") { base = join_path(root, "soul") }
-    (first == "core") { base = join_path(root, "soul/seed") }
-    (first == "io") { base = join_path(root, "soul/seed") }
-    (first == "selfhost") { base = join_path(root, "soul/seed") }
-    out join_path(base, str.concat(str.join(parts, "/"), ".saltic"))
-}
-
-skill home() {
-    @head = "{HOME_VARIABLE}="
-    drum (process.environment()) {
-        (str.starts_with(beat, head) == yes) { out str.slice(beat, str.bytes(head), str.bytes(beat)) }
+    Load = Box {
+        ast = [],
+        included = [],
+        diagnostics = []
     }
-    out ""
-}
 
-skill located(path, parts, root) {
-    @here = resolve_module(path, parts, root)
-    @other = home()
-    (str.bytes(other) == 0) { out here }
-    (other == root) { out here }
-    file.read(here) rescue |err| { out resolve_module(path, parts, other) }
-    out here
-}
-
-skill load_error(path, problem, included, place) {
-    out Load { ast = ["program"], included = included, diagnostics = [diagnostic.place(problem, path, group.get(place, 0), group.get(place, 1))] }
-}
-
-skill expand_file(path, root, locations, included, stack, module_name, place) {
-    @name = path
-    (str.bytes(module_name) > 0) { name = "{module_name} ({path})" }
-    @importer = path
-    (group.count(stack) > 0) { importer = group.get(stack, group.count(stack) - 1) }
-    (group.contains(stack, path) == yes) { out load_error(importer, errors.import_cycle(name), included, place) }
-    (group.contains(included, path) == yes) { out Load { ast = ["program"], included = included, diagnostics = [] } }
-    @next_included = group.add(included, path)
-    @source = file.read(path) rescue |error| {
-        out load_error(importer, errors.module_not_found(name), next_included, place)
-    }
-    @parsed = syntax.parse_string(source, path)
-    (locations == yes) { parsed = syntax.parse_string_loc(source, path) }
-    (diagnostic.has(parsed.diagnostics) == yes) { out Load { ast = ["program"], included = next_included, diagnostics = parsed.diagnostics } }
-    @output = ["program"]
-    @next_stack = group.add(stack, path)
-    @diagnostics = []
-    drum (group.count(parsed.ast) - 1) {
-        @item = group.get(parsed.ast, beat + 1)
-        @plain = ast.plain(item)
-        @include_item = yes
-        (group.get(plain, 0) == "entry") {
-            (group.count(stack) > 0) { include_item = no }
+    skill join_path(base, relative) {
+        (str.ends_with(base, "/") == yes) {
+            out str.concat(base, relative)
         }
-        (include_item == yes) {
-            @folded = nest.Nest {}
-            drum (folded.lift(item, "")) {
-                @output_item = beat
-                (str.bytes(module_name) > 0) { output_item = ast.in_module(module_name, beat) }
-                output = group.add(output, output_item)
+        out "{base}/{relative}"
+    }
+
+    skill module_path(parts, under) {
+        @base = under
+        @first = group.get(parts, 0)
+        (first == "seed") {
+            base = join_path(under, "soul")
+        }
+        (first == "craft") {
+            base = join_path(under, "soul")
+        }
+        (first == "canonical") {
+            base = join_path(under, "soul")
+        }
+        (first == "core") {
+            base = join_path(under, "soul/seed")
+        }
+        (first == "io") {
+            base = join_path(under, "soul/seed")
+        }
+        (first == "selfhost") {
+            base = join_path(under, "soul/seed")
+        }
+        out join_path(base, str.concat(str.join(parts, "/"), ".saltic"))
+    }
+
+    skill home() {
+        @head = "{HOME_VARIABLE}="
+        drum (process.environment()) {
+            (str.starts_with(beat, head) == yes) {
+                out str.slice(beat, str.bytes(head), str.bytes(beat))
             }
         }
-        (group.get(plain, 0) == "use") {
-            @parts = syntax.append_tail([], plain, 1)
-            @module_path = located(path, parts, root)
-            @loaded = expand_file(module_path, root, locations, next_included, next_stack, str.join(parts, "."), ast.location(item))
-            next_included = loaded.included
-            (diagnostic.has(loaded.diagnostics) == yes) {
-                diagnostics = loaded.diagnostics
-                leave
-            }
-            output = syntax.append_tail(output, loaded.ast, 1)
+        out ""
+    }
+
+    skill found(path) {
+        file.read(path) rescue |err| {
+            out no
+        }
+        out yes
+    }
+
+    skill entrance(parts, under) {
+        @single = module_path(parts, under)
+        (found(single) == yes) {
+            out single
+        }
+        @inside = module_path(group.add(parts, MAIN), under)
+        (found(inside) == yes) {
+            out inside
+        }
+        out single
+    }
+
+    skill located(parts) {
+        @here = entrance(parts, root)
+        @other = home()
+        (str.bytes(other) == 0) {
+            out here
+        }
+        (other == root) {
+            out here
+        }
+        (found(here) == yes) {
+            out here
+        }
+        out entrance(parts, other)
+    }
+
+    skill failure(path, problem, included, place) {
+        out Load {
+            ast = ["program"],
+            included = included,
+            diagnostics = [diagnostic.place(problem, path, group.get(place, 0), group.get(place, 1))]
         }
     }
-    out Load { ast = output, included = next_included, diagnostics = diagnostics }
-}
 
-skill load_file(path, root) {
-    out expand_file(path, root, no, [], [], "", [0, 0])
-}
+    skill expand(path, included, stack, module_name, place) {
+        @name = path
+        (str.bytes(module_name) > 0) {
+            name = "{module_name} ({path})"
+        }
+        @importer = path
+        (group.count(stack) > 0) {
+            importer = group.get(stack, group.count(stack) - 1)
+        }
+        (group.contains(stack, path) == yes) {
+            out failure(importer, errors.import_cycle(name), included, place)
+        }
+        (group.contains(included, path) == yes) {
+            out Load {
+                ast = ["program"],
+                included = included,
+                diagnostics = []
+            }
+        }
+        @next_included = group.add(included, path)
+        @source = file.read(path) rescue |error| {
+            out failure(importer, errors.module_not_found(name), next_included, place)
+        }
+        @reading = Syntax {
+            path = path,
+            locations = locations
+        }
+        @parsed = reading.parse(source)
+        (group.count(parsed.diagnostics) > 0) {
+            out Load {
+                ast = ["program"],
+                included = next_included,
+                diagnostics = parsed.diagnostics
+            }
+        }
+        @output = ["program"]
+        @next_stack = group.add(stack, path)
+        @diagnostics = []
+        drum (group.count(parsed.ast) - 1) {
+            @item = group.get(parsed.ast, beat + 1)
+            @plain = ast.plain(item)
+            @include_item = yes
+            (group.get(plain, 0) == "entry") {
+                (group.count(stack) > 0) {
+                    include_item = no
+                }
+            }
+            (include_item == yes) {
+                @folded = Nest {}
+                drum (folded.lift(item, "")) {
+                    @output_item = beat
+                    (str.bytes(module_name) > 0) {
+                        output_item = ast.in_module(module_name, beat)
+                    }
+                    output = group.add(output, output_item)
+                }
+            }
+            (group.get(plain, 0) == "use") {
+                @parts = eyes.append_tail([], plain, 1)
+                @module_file = located(parts)
+                @loaded = expand(module_file, next_included, next_stack, str.join(parts, "."), ast.location(item))
+                next_included = loaded.included
+                (group.count(loaded.diagnostics) > 0) {
+                    diagnostics = loaded.diagnostics
+                    leave
+                }
+                output = eyes.append_tail(output, loaded.ast, 1)
+            }
+        }
+        out Load {
+            ast = output,
+            included = next_included,
+            diagnostics = diagnostics
+        }
+    }
 
-skill load_file_loc(path, root) {
-    out expand_file(path, root, yes, [], [], "", [0, 0])
-}
-
-skill load_modules(path, root) {
-    out load_file(path, root)
+    skill gather(path) {
+        out expand(path, [], [], "", [0, 0])
+    }
 }

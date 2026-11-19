@@ -2,8 +2,9 @@
 -- Составные выражения (вызов, Box, бинарные, rescue) рекурсивны вместе с
 -- инструкциями и живут в grammar; здесь — то, что не зовёт разбор снова.
 --
--- number_literal(parser, token, sign, digits, next) -> Read number / wide-number / fraction-number
--- template(parser, token, start) -> Read template; ошибка bad_template_name
+-- Literals = Box { look } — look — Reader; навыки:
+-- number_literal(token, sign, digits, next) -> Read number / wide-number / fraction-number
+-- template(token, start) -> Read template; ошибка bad_template_name
 -- precedence(kind) -> 1 сравнение (и ~=), 2 + -, 3 * / %, 0 не оператор
 -- placeholder_path(name) -> ["path", …] или [] для плохого имени в "{…}"
 -- number_value(text) -> число; number_is_wide(text) -> answer (не влезает в 29 бит)
@@ -15,78 +16,82 @@ use selfhost.errors
 use selfhost.abi
 use selfhost.abi.fixed
 use selfhost.parser.token
-use selfhost.parser.syntax.cursor
+use selfhost.parser.syntax.reader
 
-skill number_literal(parser, word, sign, digits, next) {
-    @text = str.concat(sign, digits)
-    (str.contains(digits, ".") == yes) { out cursor.ok("fraction-number", cursor.loc(["fraction-number", text], word, parser.locations), next) }
-    (number_is_wide(digits) == yes) { out cursor.ok("wide-number", cursor.loc(["wide-number", text], word, parser.locations), next) }
-    @value = number_value(digits)
-    (sign == "-") { value = -value }
-    out cursor.ok("number", cursor.loc(["number", value], word, parser.locations), next)
-}
+Literals = Box {
+    look = Reader {}
 
-skill template(parser, word, start) {
-    @datum = ["template"]
-    drum (group.count(word.parts)) {
-        @part = group.get(word.parts, beat)
-        pick {
-            (beat % 2 == 0) { datum = group.add(datum, part) }
-            {
-                @segments = placeholder_path(part)
-                (group.count(segments) == 0) { out cursor.fail_with(parser, start, errors.bad_template_name(part)) }
-                datum = group.add(datum, cursor.loc(segments, word, parser.locations))
-            }
-        }
+    skill number_literal(word, sign, digits, next) {
+        @text = str.concat(sign, digits)
+        (str.contains(digits, ".") == yes) { out look.ok("fraction-number", look.loc(["fraction-number", text], word, look.locations), next) }
+        (number_is_wide(digits) == yes) { out look.ok("wide-number", look.loc(["wide-number", text], word, look.locations), next) }
+        @value = number_value(digits)
+        (sign == "-") { value = -value }
+        out look.ok("number", look.loc(["number", value], word, look.locations), next)
     }
-    out cursor.ok("template", cursor.loc(datum, word, parser.locations), start + 1)
-}
 
-skill precedence(kind) {
-    (kind == Token.Kind.EQ) { out 1 }
-    (kind == Token.Kind.NEAR) { out 1 }
-    (kind == Token.Kind.GT) { out 1 }
-    (kind == Token.Kind.LT) { out 1 }
-    (kind == Token.Kind.GE) { out 1 }
-    (kind == Token.Kind.LE) { out 1 }
-    (kind == Token.Kind.PLUS) { out 2 }
-    (kind == Token.Kind.MINUS) { out 2 }
-    (kind == Token.Kind.STAR) { out 3 }
-    (kind == Token.Kind.SLASH) { out 3 }
-    (kind == Token.Kind.PERCENT) { out 3 }
-    out 0
-}
-
-skill placeholder_path(name) {
-    (str.bytes(name) == 0) { out [] }
-    (str.starts_with(name, ".") == yes) { out [] }
-    (str.ends_with(name, ".") == yes) { out [] }
-    (str.contains(name, "..") == yes) { out [] }
-    out group.concat(["path"], str.split(name, "."))
-}
-
-skill number_value(text) {
-    @whole = 0
-    @fraction = 0
-    @scale = 1
-    @after_dot = no
-    drum (str.bytes(text)) {
-        @ch = str.get(text, beat)
-        (ch == ".") { after_dot = yes }
-        (str.is_digit(ch) == yes) {
+    skill template(word, start) {
+        @datum = ["template"]
+        drum (group.count(word.parts)) {
+            @part = group.get(word.parts, beat)
             pick {
-                (after_dot == no) { whole = whole * 10 + num.digit_value(ch) }
+                (beat % 2 == 0) { datum = group.add(datum, part) }
                 {
-                    fraction = fraction * 10 + num.digit_value(ch)
-                    scale = scale * 10
+                    @segments = placeholder_path(part)
+                    (group.count(segments) == 0) { out look.fail_with(start, errors.bad_template_name(part)) }
+                    datum = group.add(datum, look.loc(segments, word, look.locations))
                 }
             }
         }
+        out look.ok("template", look.loc(datum, word, look.locations), start + 1)
     }
-    out whole + fraction / scale
-}
 
-skill number_is_wide(text) {
-    (str.contains(text, ".") == yes) { out no }
-    out fixed.unsigned_greater(text, num.MAXIMUM_TEXT)
+    skill precedence(kind) {
+        (kind == Token.Kind.EQ) { out 1 }
+        (kind == Token.Kind.NEAR) { out 1 }
+        (kind == Token.Kind.GT) { out 1 }
+        (kind == Token.Kind.LT) { out 1 }
+        (kind == Token.Kind.GE) { out 1 }
+        (kind == Token.Kind.LE) { out 1 }
+        (kind == Token.Kind.PLUS) { out 2 }
+        (kind == Token.Kind.MINUS) { out 2 }
+        (kind == Token.Kind.STAR) { out 3 }
+        (kind == Token.Kind.SLASH) { out 3 }
+        (kind == Token.Kind.PERCENT) { out 3 }
+        out 0
+    }
+
+    skill placeholder_path(name) {
+        (str.bytes(name) == 0) { out [] }
+        (str.starts_with(name, ".") == yes) { out [] }
+        (str.ends_with(name, ".") == yes) { out [] }
+        (str.contains(name, "..") == yes) { out [] }
+        out group.concat(["path"], str.split(name, "."))
+    }
+
+    skill number_value(text) {
+        @whole = 0
+        @fraction = 0
+        @scale = 1
+        @after_dot = no
+        drum (str.bytes(text)) {
+            @ch = str.get(text, beat)
+            (ch == ".") { after_dot = yes }
+            (str.is_digit(ch) == yes) {
+                pick {
+                    (after_dot == no) { whole = whole * 10 + num.digit_value(ch) }
+                    {
+                        fraction = fraction * 10 + num.digit_value(ch)
+                        scale = scale * 10
+                    }
+                }
+            }
+        }
+        out whole + fraction / scale
+    }
+
+    skill number_is_wide(text) {
+        (str.contains(text, ".") == yes) { out no }
+        out fixed.unsigned_greater(text, num.MAXIMUM_TEXT)
+    }
 }

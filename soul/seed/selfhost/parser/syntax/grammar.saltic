@@ -4,549 +4,555 @@
 -- Списки (поля, аргументы, группа, параметры, тело Box) идут через sequence;
 -- запятая в конце — trailing_comma, поле у результата вызова — call_field.
 --
--- block(parser, start) -> Read "block"; statement(parser, start) -> Read узла тела;
---     case_body(parser, start) -> Read "block" — ветка => : инструкция или { … } (Q-048)
--- expression(parser, start) -> Read выражения (binary, call, box-new, rescue…)
--- sequence(parser, start, end_kind, item_kind, item_message, eof_message,
+-- Grammar = Box { look, leaves } — look — Reader, leaves — Literals; навыки:
+-- block(start) -> Read "block"; statement(start) -> Read узла тела;
+--     case_body(start) -> Read "block" — ветка => : инструкция или { … } (Q-048)
+-- expression(start) -> Read выражения (binary, call, box-new, rescue…)
+-- sequence(start, end_kind, item_kind, item_message, eof_message,
 --     require_separator, allow_comma) -> Read "sequence"; item_kind — name,
 --     expression, field, member, statement
--- names(parser, start, end_kind, item_message) / params(parser, start) -> Read списка имён
--- subject_skill(parser, start) -> Read "subject-skill" (skill внутри Box)
--- box_declaration(parser, start) -> Read "box" — Имя = Box { поля, навыки, вложенные
+-- names(start, end_kind, item_message) / params(start) -> Read списка имён
+-- subject_skill(start) -> Read "subject-skill" (skill внутри Box)
+-- box_declaration(start) -> Read "box" — Имя = Box { поля, навыки, вложенные
 --     Box и enum } (вложенный — часть объекта, решение автора 19.11.2026)
--- enum_declaration(parser, start) -> Read "enum" — Имя = enum { ВАРИАНТ, … }; внутри
+-- enum_declaration(start) -> Read "enum" — Имя = enum { ВАРИАНТ, … }; внутри
 --     Box — состояния субъекта для его конечного автомата
--- cursor.field_follows(parser, at) -> yes, если с at начинается поле, а не вложенный Box или enum
+-- parser.field_follows(at) -> yes, если с at начинается поле, а не вложенный Box или enum
 
 use core.str
 use core.group
 use selfhost.diagnostic
 use selfhost.errors
 use selfhost.parser.token
-use selfhost.parser.syntax.cursor
+use selfhost.parser.syntax.reader
 use selfhost.parser.syntax.literals
 
-skill field_item(parser, start, item_message) {
-    (cursor.is(parser, start, Token.Kind.IDENT) == no) { out cursor.fail(parser, start, item_message) }
-    @name_token = cursor.at(parser, start)
-    @eq = cursor.expect(parser, start + 1, Token.Kind.ASSIGN, "expected_field_equals")
-    (diagnostic.has(eq.diagnostics) == yes) { out eq }
-    @value = expression(parser, eq.next)
-    (diagnostic.has(value.diagnostics) == yes) { out value }
-    out cursor.ok("field", ["field", name_token.value, value.node.datum], value.next)
-}
+Grammar = Box {
+    look = Reader {},
+    leaves = Literals {}
 
-skill sequence_item(parser, start, item_kind, item_message) {
-    (item_kind == "name") {
-        (cursor.is(parser, start, Token.Kind.IDENT) == no) { out cursor.fail(parser, start, item_message) }
-        @word = cursor.at(parser, start)
-        out cursor.ok("name", word.value, start + 1)
+    skill field_item(start, item_message) {
+        (look.is(start, Token.Kind.IDENT) == no) { out look.fail(start, item_message) }
+        @name_token = look.at(start)
+        @eq = look.expect(start + 1, Token.Kind.ASSIGN, "expected_field_equals")
+        (eq.broken() == yes) { out eq }
+        @value = expression(eq.next)
+        (value.broken() == yes) { out value }
+        out look.ok("field", ["field", name_token.value, value.datum()], value.next)
     }
-    (item_kind == "expression") {
-        @value = expression(parser, start)
-        (diagnostic.has(value.diagnostics) == yes) { out value }
-        out cursor.ok("expression", value.node.datum, value.next)
-    }
-    (item_kind == "field") { out field_item(parser, start, item_message) }
-    (item_kind == "member") {
-        (cursor.is(parser, start, Token.Kind.IDENT) == yes) {
-            (cursor.field_follows(parser, start) == no) {
-                (cursor.is(parser, start + 2, Token.Kind.ENUM) == yes) {
-                    @states = enum_declaration(parser, start)
-                    (diagnostic.has(states.diagnostics) == yes) {
-                        out states
-                    }
-                    out cursor.ok("member", states.node.datum, states.next)
-                }
-                @inner = box_declaration(parser, start)
-                (diagnostic.has(inner.diagnostics) == yes) { out inner }
-                out cursor.ok("member", inner.node.datum, inner.next)
-            }
-        }
-        (cursor.is(parser, start, Token.Kind.SKILL) == yes) {
-            @member_skill = subject_skill(parser, start)
-            (diagnostic.has(member_skill.diagnostics) == yes) { out member_skill }
-            out cursor.ok("member", member_skill.node.datum, member_skill.next)
-        }
-        out field_item(parser, start, item_message)
-    }
-    (item_kind == "statement") {
-        @value = statement(parser, start)
-        (diagnostic.has(value.diagnostics) == yes) { out value }
-        out cursor.ok("statement", value.node.datum, value.next)
-    }
-    out cursor.fail(parser, start, item_message)
-}
 
-skill enum_declaration(parser, start) {
-    @word = cursor.at(parser, start)
-    @open = cursor.expect(parser, start + 3, Token.Kind.LBRACE, "expected_open_brace")
-    (diagnostic.has(open.diagnostics) == yes) {
-        out open
-    }
-    @variants = names(parser, open.next, Token.Kind.RBRACE, "expected_enum_variant")
-    (diagnostic.has(variants.diagnostics) == yes) {
-        out variants
-    }
-    @datum = cursor.append_tail(["enum", word.value], variants.node.datum, 0)
-    out cursor.ok("enum", cursor.loc(datum, word, parser.locations), variants.next)
-}
-
-skill box_declaration(parser, start) {
-    @word = cursor.at(parser, start)
-    @open = cursor.expect(parser, start + 3, Token.Kind.LBRACE, "expected_open_brace")
-    (diagnostic.has(open.diagnostics) == yes) { out open }
-    @members = sequence(parser, open.next, Token.Kind.RBRACE, "member", "expected_field_or_skill", "expected_close_brace", no, yes)
-    (diagnostic.has(members.diagnostics) == yes) { out members }
-    @datum = cursor.append_tail(["box", word.value], members.node.datum, 0)
-    out cursor.ok("box", cursor.loc(datum, word, parser.locations), members.next)
-}
-
-skill sequence(parser, start, end_kind, item_kind, item_message, eof_message, require_separator, allow_comma) {
-    @items = []
-    @next = cursor.skip_lines(parser, start)
-    @diagnostics = []
-    @stream = parser.tokens
-    drum (stream.count()) {
-        (cursor.is(parser, next, end_kind) == yes) {
-            next = next + 1
-            leave
+    skill sequence_item(start, item_kind, item_message) {
+        (item_kind == "name") {
+            (look.is(start, Token.Kind.IDENT) == no) { out look.fail(start, item_message) }
+            @word = look.at(start)
+            out look.ok("name", word.value, start + 1)
         }
-        (cursor.is(parser, next, Token.Kind.EOF) == yes) {
-            @failure = cursor.fail(parser, next, eof_message)
-            diagnostics = failure.diagnostics
-            leave
+        (item_kind == "expression") {
+            @value = expression(start)
+            (value.broken() == yes) { out value }
+            out look.ok("expression", value.datum(), value.next)
         }
-        @item = sequence_item(parser, next, item_kind, item_message)
-        (diagnostic.has(item.diagnostics) == yes) {
-            diagnostics = item.diagnostics
-            leave
-        }
-        items = group.add(items, item.node.datum)
-        next = item.next
-        @separated = no
-        @comma = no
-        (allow_comma == yes) {
-            (cursor.is(parser, next, Token.Kind.COMMA) == yes) {
-                next = next + 1
-                separated = yes
-                comma = yes
-            }
-        }
-        @before_lines = next
-        next = cursor.skip_lines(parser, next)
-        (next > before_lines) { separated = yes }
-        (item.node.tag == "field") {
-            @comma_message = cursor.field_comma_message(comma, cursor.field_follows(parser, next))
-            (str.bytes(comma_message) > 0) {
-                @comma_failure = cursor.fail(parser, next, comma_message)
-                diagnostics = comma_failure.diagnostics
-                leave
-            }
-        }
-        (comma == yes) {
-            (cursor.is(parser, next, end_kind) == yes) {
-                @trailing_failure = cursor.fail_with(parser, next, errors.trailing_comma())
-                diagnostics = trailing_failure.diagnostics
-                leave
-            }
-        }
-        (cursor.is(parser, next, end_kind) == no) {
-            (require_separator == yes) {
-                (separated == no) {
-                    @separator_failure = cursor.fail(parser, next, "expected_separator")
-                    diagnostics = separator_failure.diagnostics
-                    leave
-                }
-            }
-        }
-    }
-    out cursor.Read { node = cursor.make_node("sequence", items), next = next, diagnostics = diagnostics }
-}
-
-skill names(parser, start, end_kind, item_message) {
-    @items = sequence(parser, start, end_kind, "name", item_message, item_message, yes, yes)
-    out cursor.Read { node = cursor.make_node("names", items.node.datum), next = items.next, diagnostics = items.diagnostics }
-}
-
-skill params(parser, start) {
-    @parsed_names = names(parser, start, Token.Kind.RPAREN, "expected_parameter_name")
-    out cursor.Read { node = cursor.make_node("params", parsed_names.node.datum), next = parsed_names.next, diagnostics = parsed_names.diagnostics }
-}
-
-skill subject_skill(parser, start) {
-    @word = cursor.at(parser, start)
-    (cursor.is(parser, start + 1, Token.Kind.IDENT) == no) { out cursor.fail(parser, start + 1, "expected_skill_name") }
-    @name_token = cursor.at(parser, start + 1)
-    @open = cursor.expect(parser, start + 2, Token.Kind.LPAREN, "expected_open_paren")
-    (diagnostic.has(open.diagnostics) == yes) { out open }
-    @parsed_params = params(parser, open.next)
-    (diagnostic.has(parsed_params.diagnostics) == yes) { out parsed_params }
-    @body = block(parser, parsed_params.next)
-    (diagnostic.has(body.diagnostics) == yes) { out body }
-    out cursor.ok("subject-skill", cursor.loc(["subject-skill", name_token.value, parsed_params.node.datum, body.node.datum], word, parser.locations), body.next)
-}
-
-skill expression_list(parser, start, end_kind) {
-    @items = sequence(parser, start, end_kind, "expression", "expected_expression", "expected_closing_token", no, yes)
-    out cursor.Read { node = cursor.make_node("expressions", items.node.datum), next = items.next, diagnostics = items.diagnostics }
-}
-
-skill primary(parser, start) {
-    @word = cursor.at(parser, start)
-    (word.kind == Token.Kind.NUMBER) { out literals.number_literal(parser, word, "", word.value, start + 1) }
-    (word.kind == Token.Kind.MINUS) {
-        @digits = cursor.at(parser, start + 1)
-        (digits.kind == Token.Kind.NUMBER) {
-            (digits.line == word.line) {
-                (digits.col == word.col + 1) { out literals.number_literal(parser, word, "-", digits.value, start + 2) }
-            }
-        }
-        @operand = postfix(parser, start + 1)
-        (diagnostic.has(operand.diagnostics) == yes) { out operand }
-        out cursor.ok("negate", cursor.loc(["negate", operand.node.datum], word, parser.locations), operand.next)
-    }
-    (word.kind == Token.Kind.STRING) { out cursor.ok("string", cursor.loc(["string", word.value], word, parser.locations), start + 1) }
-    (word.kind == Token.Kind.TEMPLATE) { out literals.template(parser, word, start) }
-    (word.kind == Token.Kind.YES) { out cursor.ok("answer", cursor.loc(["answer", "yes"], word, parser.locations), start + 1) }
-    (word.kind == Token.Kind.NO) { out cursor.ok("answer", cursor.loc(["answer", "no"], word, parser.locations), start + 1) }
-    (word.kind == Token.Kind.NONE) { out cursor.ok("none", cursor.loc(["none"], word, parser.locations), start + 1) }
-    (word.kind == Token.Kind.DOT) {
-        (cursor.is(parser, start + 1, Token.Kind.IDENT) == no) { out cursor.fail(parser, start + 1, "expected_enum_value") }
-        @name_token = cursor.at(parser, start + 1)
-        out cursor.ok("enum-value", cursor.loc(["enum-value", name_token.value], word, parser.locations), start + 2)
-    }
-    (word.kind == Token.Kind.LBRACKET) { out group_literal(parser, start) }
-    (word.kind == Token.Kind.IDENT) { out cursor.path_at(parser, start, parser.locations) }
-    (word.kind == Token.Kind.LPAREN) {
-        @inside = expression(parser, start + 1)
-        (diagnostic.has(inside.diagnostics) == yes) { out inside }
-        @close = cursor.expect(parser, inside.next, Token.Kind.RPAREN, "expected_close_paren")
-        (diagnostic.has(close.diagnostics) == yes) { out close }
-        out cursor.Read { node = inside.node, next = close.next, diagnostics = [] }
-    }
-    out cursor.fail(parser, start, "expected_expression")
-}
-
-skill args(parser, start) {
-    @list = expression_list(parser, start + 1, Token.Kind.RPAREN)
-    out cursor.Read { node = cursor.make_node("args", list.node.datum), next = list.next, diagnostics = list.diagnostics }
-}
-
-skill fields(parser, start) {
-    @open = cursor.expect(parser, start, Token.Kind.LBRACE, "expected_open_brace")
-    (diagnostic.has(open.diagnostics) == yes) { out open }
-    @list = sequence(parser, open.next, Token.Kind.RBRACE, "field", "expected_field_name", "expected_close_brace", no, yes)
-    out cursor.Read { node = cursor.make_node("fields", list.node.datum), next = list.next, diagnostics = list.diagnostics }
-}
-
-skill postfix(parser, start) {
-    @base = primary(parser, start)
-    (diagnostic.has(base.diagnostics) == yes) { out base }
-    @node = base.node
-    @next = base.next
-    @diagnostics = []
-    @stream = parser.tokens
-    drum (stream.count()) {
-        (cursor.is(parser, next, Token.Kind.LPAREN) == yes) {
-            @call_token = cursor.at(parser, next)
-            @arguments = args(parser, next)
-            (diagnostic.has(arguments.diagnostics) == yes) {
-                diagnostics = arguments.diagnostics
-                leave
-            }
-            @call = ["call", node.datum]
-            call = cursor.append_tail(call, arguments.node.datum, 0)
-            node = cursor.make_node("call", cursor.loc(call, call_token, parser.locations))
-            next = arguments.next
-        }
-        (cursor.is(parser, next, Token.Kind.LPAREN) == no) {
-            (node.tag == "call") {
-                (cursor.is(parser, next, Token.Kind.DOT) == yes) {
-                    @close_token = cursor.at(parser, next - 1)
-                    @dot_token = cursor.at(parser, next)
-                    (dot_token.line == close_token.line) {
-                        (dot_token.col == close_token.col + 1) {
-                            @field_failure = cursor.fail_with(parser, next, errors.call_field())
-                            diagnostics = field_failure.diagnostics
-                            leave
+        (item_kind == "field") { out field_item(start, item_message) }
+        (item_kind == "member") {
+            (look.is(start, Token.Kind.IDENT) == yes) {
+                (look.field_follows(start) == no) {
+                    (look.is(start + 2, Token.Kind.ENUM) == yes) {
+                        @states = enum_declaration(start)
+                        (states.broken() == yes) {
+                            out states
                         }
+                        out look.ok("member", states.datum(), states.next)
                     }
+                    @inner = box_declaration(start)
+                    (inner.broken() == yes) { out inner }
+                    out look.ok("member", inner.datum(), inner.next)
                 }
             }
-            ((node.tag == "path") == no) { leave }
-            (cursor.is(parser, next, Token.Kind.LBRACE) == no) { leave }
-            @box_token = cursor.at(parser, next)
-            @box_fields = fields(parser, next)
-            (diagnostic.has(box_fields.diagnostics) == yes) {
-                diagnostics = box_fields.diagnostics
-                leave
+            (look.is(start, Token.Kind.SKILL) == yes) {
+                @member_skill = subject_skill(start)
+                (member_skill.broken() == yes) { out member_skill }
+                out look.ok("member", member_skill.datum(), member_skill.next)
             }
-            @plain_name = node.datum
-            (parser.locations == yes) { plain_name = group.get(node.datum, 3) }
-            @box_name = group.get(plain_name, 1)
-            @name_index = 2
-            drum (group.count(plain_name) - 2) {
-                box_name = str.concat(box_name, str.concat(".", group.get(plain_name, name_index)))
-                name_index = name_index + 1
-            }
-            @box = ["box-new", box_name]
-            box = cursor.append_tail(box, box_fields.node.datum, 0)
-            node = cursor.make_node("box-new", cursor.loc(box, box_token, parser.locations))
-            next = box_fields.next
+            out field_item(start, item_message)
         }
-    }
-    out cursor.Read { node = node, next = next, diagnostics = diagnostics }
-}
-
-skill binary(parser, start, minimum) {
-    @first = postfix(parser, start)
-    (diagnostic.has(first.diagnostics) == yes) { out first }
-    @left = first.node
-    @next = first.next
-    @diagnostics = []
-    @stream = parser.tokens
-    drum (stream.count()) {
-        @operator = cursor.at(parser, next)
-        @level = literals.precedence(operator.kind)
-        (level < minimum) { leave }
-        (level == 0) { leave }
-        @right = binary(parser, next + 1, level + 1)
-        (diagnostic.has(right.diagnostics) == yes) {
-            diagnostics = right.diagnostics
-            leave
+        (item_kind == "statement") {
+            @value = statement(start)
+            (value.broken() == yes) { out value }
+            out look.ok("statement", value.datum(), value.next)
         }
-        left = cursor.make_node("binary", cursor.loc(["binary", operator.value, left.datum, right.node.datum], operator, parser.locations))
-        next = right.next
+        out look.fail(start, item_message)
     }
-    out cursor.Read { node = left, next = next, diagnostics = diagnostics }
-}
 
-skill expression(parser, start) {
-    @value = binary(parser, start, 0)
-    (diagnostic.has(value.diagnostics) == yes) { out value }
-    (cursor.is(parser, value.next, Token.Kind.RESCUE) == yes) {
-        @rescue_token = cursor.at(parser, value.next)
-        @pipe = cursor.expect(parser, value.next + 1, Token.Kind.PIPE, "expected_pipe")
-        (diagnostic.has(pipe.diagnostics) == yes) { out pipe }
-        (cursor.is(parser, pipe.next, Token.Kind.IDENT) == no) { out cursor.fail(parser, pipe.next, "expected_rescue_name") }
-        @error_token = cursor.at(parser, pipe.next)
-        @error_name = error_token.value
-        @pipe2 = cursor.expect(parser, pipe.next + 1, Token.Kind.PIPE, "expected_pipe")
-        (diagnostic.has(pipe2.diagnostics) == yes) { out pipe2 }
-        @body = block(parser, pipe2.next)
-        (diagnostic.has(body.diagnostics) == yes) { out body }
-        out cursor.ok("rescue", cursor.loc(["rescue", value.node.datum, error_name, body.node.datum], rescue_token, parser.locations), body.next)
-    }
-    out value
-}
-
-skill group_literal(parser, start) {
-    @word = cursor.at(parser, start)
-    @list = expression_list(parser, start + 1, Token.Kind.RBRACKET)
-    (diagnostic.has(list.diagnostics) == yes) { out list }
-    @items = ["group"]
-    items = cursor.append_tail(items, list.node.datum, 0)
-    out cursor.ok("group", cursor.loc(items, word, parser.locations), list.next)
-}
-
-skill block(parser, start) {
-    @word = cursor.at(parser, start)
-    @open = cursor.expect(parser, start, Token.Kind.LBRACE, "expected_open_brace")
-    (diagnostic.has(open.diagnostics) == yes) { out open }
-    @lines = sequence(parser, open.next, Token.Kind.RBRACE, "statement", "expected_statement", "expected_close_brace", no, no)
-    @items = ["block"]
-    items = cursor.append_tail(items, lines.node.datum, 0)
-    out cursor.Read { node = cursor.make_node("block", cursor.loc(items, word, parser.locations)), next = lines.next, diagnostics = lines.diagnostics }
-}
-
-skill variable(parser, start) {
-    @word = cursor.at(parser, start)
-    (cursor.is(parser, start + 1, Token.Kind.IDENT) == no) { out cursor.fail(parser, start + 1, "expected_variable_name") }
-    @name_token = cursor.at(parser, start + 1)
-    @name = name_token.value
-    @eq = cursor.expect(parser, start + 2, Token.Kind.ASSIGN, "expected_variable_equals")
-    (diagnostic.has(eq.diagnostics) == yes) { out eq }
-    @value = expression(parser, eq.next)
-    (diagnostic.has(value.diagnostics) == yes) { out value }
-    out cursor.ok("var", cursor.loc(["var", name, value.node.datum], word, parser.locations), value.next)
-}
-
-skill assign(parser, start) {
-    @word = cursor.at(parser, start)
-    @value = expression(parser, start + 2)
-    (diagnostic.has(value.diagnostics) == yes) { out value }
-    out cursor.ok("assign", cursor.loc(["assign", word.value, value.node.datum], word, parser.locations), value.next)
-}
-
-skill field_assign(parser, start) {
-    @word = cursor.at(parser, start)
-    @target = cursor.path_at(parser, start, parser.locations)
-    (diagnostic.has(target.diagnostics) == yes) { out target }
-    @eq = cursor.expect(parser, target.next, Token.Kind.ASSIGN, "expected_equals")
-    (diagnostic.has(eq.diagnostics) == yes) { out eq }
-    @value = expression(parser, eq.next)
-    (diagnostic.has(value.diagnostics) == yes) { out value }
-    out cursor.ok("field-assign", cursor.loc(["field-assign", target.node.datum, value.node.datum], word, parser.locations), value.next)
-}
-
-skill out_statement(parser, start) {
-    @word = cursor.at(parser, start)
-    @value = expression(parser, start + 1)
-    (diagnostic.has(value.diagnostics) == yes) { out value }
-    out cursor.ok("out", cursor.loc(["out", value.node.datum], word, parser.locations), value.next)
-}
-
-skill always_statement(parser, start) {
-    @word = cursor.at(parser, start)
-    @body = block(parser, start + 1)
-    (diagnostic.has(body.diagnostics) == yes) { out body }
-    out cursor.ok("always", cursor.loc(["always", body.node.datum], word, parser.locations), body.next)
-}
-
-skill drum_statement(parser, start) {
-    @word = cursor.at(parser, start)
-    @open = cursor.expect(parser, start + 1, Token.Kind.LPAREN, "expected_drum_paren")
-    (diagnostic.has(open.diagnostics) == yes) { out open }
-    @count = expression(parser, open.next)
-    (diagnostic.has(count.diagnostics) == yes) { out count }
-    @close = cursor.expect(parser, count.next, Token.Kind.RPAREN, "expected_close_paren")
-    (diagnostic.has(close.diagnostics) == yes) { out close }
-    @body = block(parser, close.next)
-    (diagnostic.has(body.diagnostics) == yes) { out body }
-    out cursor.ok("drum", cursor.loc(["drum", count.node.datum, body.node.datum], word, parser.locations), body.next)
-}
-
-skill pick_statement(parser, start) {
-    @word = cursor.at(parser, start)
-    @open = cursor.expect(parser, start + 1, Token.Kind.LBRACE, "expected_pick_open")
-    (diagnostic.has(open.diagnostics) == yes) { out open }
-    @items = ["pick"]
-    @next = cursor.skip_lines(parser, open.next)
-    @stream = parser.tokens
-    @count = stream.count()
-    drum (count) {
-        pick {
-            (cursor.is(parser, next, Token.Kind.RBRACE) == yes) { out cursor.Read { node = cursor.make_node("pick", cursor.loc(items, word, parser.locations)), next = next + 1, diagnostics = [] } }
-            (cursor.is(parser, next, Token.Kind.LBRACE) == yes) {
-                @fallback_token = cursor.at(parser, next)
-                @fallback = block(parser, next)
-                (diagnostic.has(fallback.diagnostics) == yes) { out fallback }
-                items = group.add(items, cursor.loc(["otherwise", fallback.node.datum], fallback_token, parser.locations))
-                next = cursor.skip_lines(parser, fallback.next)
-            }
-            (cursor.is(parser, next, Token.Kind.LPAREN) == yes) {
-                @choice = paren_statement(parser, next)
-                (diagnostic.has(choice.diagnostics) == yes) { out choice }
-                items = group.add(items, choice.node.datum)
-                next = cursor.skip_lines(parser, choice.next)
-            }
-            { out cursor.fail(parser, next, "expected_pick_branch") }
+    skill enum_declaration(start) {
+        @word = look.at(start)
+        @open = look.expect(start + 3, Token.Kind.LBRACE, "expected_open_brace")
+        (open.broken() == yes) {
+            out open
         }
+        @variants = names(open.next, Token.Kind.RBRACE, "expected_enum_variant")
+        (variants.broken() == yes) {
+            out variants
+        }
+        @datum = look.append_tail(["enum", word.value], variants.datum(), 0)
+        out look.ok("enum", look.loc(datum, word, look.locations), variants.next)
     }
-    out cursor.fail(parser, next, "expected_pick_close")
-}
 
-skill present_statement(parser, word, value, start) {
-    (cursor.is(parser, start + 1, Token.Kind.IDENT) == no) { out cursor.fail(parser, start + 1, "expected_present_name") }
-    @name_token = cursor.at(parser, start + 1)
-    @pipe = cursor.expect(parser, start + 2, Token.Kind.PIPE, "expected_pipe")
-    (diagnostic.has(pipe.diagnostics) == yes) { out pipe }
-    @body = block(parser, pipe.next)
-    (diagnostic.has(body.diagnostics) == yes) { out body }
-    out cursor.ok("present", cursor.loc(["present", value.node.datum, name_token.value, body.node.datum], word, parser.locations), body.next)
-}
+    skill box_declaration(start) {
+        @word = look.at(start)
+        @open = look.expect(start + 3, Token.Kind.LBRACE, "expected_open_brace")
+        (open.broken() == yes) { out open }
+        @members = sequence(open.next, Token.Kind.RBRACE, "member", "expected_field_or_skill", "expected_close_brace", no, yes)
+        (members.broken() == yes) { out members }
+        @datum = look.append_tail(["box", word.value], members.datum(), 0)
+        out look.ok("box", look.loc(datum, word, look.locations), members.next)
+    }
 
-skill paren_statement(parser, start) {
-    @word = cursor.at(parser, start)
-    @value = expression(parser, start + 1)
-    (diagnostic.has(value.diagnostics) == yes) { out value }
-    @close = cursor.expect(parser, value.next, Token.Kind.RPAREN, "expected_close_paren")
-    (diagnostic.has(close.diagnostics) == yes) { out close }
-    (cursor.is(parser, close.next, Token.Kind.PIPE) == yes) { out present_statement(parser, word, value, close.next) }
-    @open = cursor.expect(parser, close.next, Token.Kind.LBRACE, "expected_open_brace")
-    (diagnostic.has(open.diagnostics) == yes) { out open }
-    @next = cursor.skip_lines(parser, open.next)
-    (cursor.is(parser, next, Token.Kind.DOT) == yes) {
-        @cases = ["switch", value.node.datum]
+    skill sequence(start, end_kind, item_kind, item_message, eof_message, require_separator, allow_comma) {
+        @items = []
+        @next = look.skip_lines(start)
         @diagnostics = []
-        @stream = parser.tokens
+        @stream = look.tokens
         drum (stream.count()) {
-            (cursor.is(parser, next, Token.Kind.RBRACE) == yes) {
+            (look.is(next, end_kind) == yes) {
                 next = next + 1
                 leave
             }
-            @case_token = cursor.at(parser, next)
-            @dot = cursor.expect(parser, next, Token.Kind.DOT, "expected_dot")
-            (diagnostic.has(dot.diagnostics) == yes) {
-                diagnostics = dot.diagnostics
-                leave
-            }
-            (cursor.is(parser, dot.next, Token.Kind.IDENT) == no) {
-                @failure = cursor.fail(parser, dot.next, "expected_case_label")
+            (look.is(next, Token.Kind.EOF) == yes) {
+                @failure = look.fail(next, eof_message)
                 diagnostics = failure.diagnostics
                 leave
             }
-            @tag_token = cursor.at(parser, dot.next)
-            @tag = tag_token.value
-            @arrow = cursor.expect(parser, dot.next + 1, Token.Kind.ARROW, "expected_arrow")
-            (diagnostic.has(arrow.diagnostics) == yes) {
-                diagnostics = arrow.diagnostics
+            @item = sequence_item(next, item_kind, item_message)
+            (item.broken() == yes) {
+                diagnostics = item.diagnostics
                 leave
             }
-            @body = case_body(parser, arrow.next)
-            (diagnostic.has(body.diagnostics) == yes) {
-                diagnostics = body.diagnostics
-                leave
+            items = group.add(items, item.datum())
+            next = item.next
+            @separated = no
+            @comma = no
+            (allow_comma == yes) {
+                (look.is(next, Token.Kind.COMMA) == yes) {
+                    next = next + 1
+                    separated = yes
+                    comma = yes
+                }
             }
-            cases = group.add(cases, cursor.loc(["case", tag, body.node.datum], case_token, parser.locations))
-            next = body.next
-            @case_comma = no
-            (cursor.is(parser, next, Token.Kind.COMMA) == yes) {
-                next = next + 1
-                case_comma = yes
+            @before_lines = next
+            next = look.skip_lines(next)
+            (next > before_lines) { separated = yes }
+            (item.node.tag == "field") {
+                @comma_message = look.field_comma_message(comma, look.field_follows(next))
+                (str.bytes(comma_message) > 0) {
+                    @comma_failure = look.fail(next, comma_message)
+                    diagnostics = comma_failure.diagnostics
+                    leave
+                }
             }
-            next = cursor.skip_lines(parser, next)
-            (case_comma == yes) {
-                (cursor.is(parser, next, Token.Kind.RBRACE) == yes) {
-                    @trailing_failure = cursor.fail_with(parser, next, errors.trailing_comma())
+            (comma == yes) {
+                (look.is(next, end_kind) == yes) {
+                    @trailing_failure = look.fail_with(next, errors.trailing_comma())
                     diagnostics = trailing_failure.diagnostics
                     leave
                 }
             }
+            (look.is(next, end_kind) == no) {
+                (require_separator == yes) {
+                    (separated == no) {
+                        @separator_failure = look.fail(next, "expected_separator")
+                        diagnostics = separator_failure.diagnostics
+                        leave
+                    }
+                }
+            }
         }
-        out cursor.Read { node = cursor.make_node("switch", cursor.loc(cases, word, parser.locations)), next = next, diagnostics = diagnostics }
+        out look.read(look.make_node("sequence", items), next, diagnostics)
     }
-    @lines = sequence(parser, next, Token.Kind.RBRACE, "statement", "expected_statement", "expected_close_brace", no, no)
-    @items = ["block"]
-    items = cursor.append_tail(items, lines.node.datum, 0)
-    @located_body = cursor.loc(items, word, parser.locations)
-    out cursor.Read { node = cursor.make_node("if", cursor.loc(["if", value.node.datum, located_body], word, parser.locations)), next = lines.next, diagnostics = lines.diagnostics }
-}
 
-skill case_body(parser, start) {
-    (cursor.is(parser, start, Token.Kind.LBRACE) == yes) { out block(parser, start) }
-    @single = statement(parser, start)
-    (diagnostic.has(single.diagnostics) == yes) { out single }
-    @word = cursor.at(parser, start)
-    out cursor.ok("block", cursor.loc(["block", single.node.datum], word, parser.locations), single.next)
-}
-
-skill statement(parser, start) {
-    @word = cursor.at(parser, start)
-    (word.kind == Token.Kind.AT) { out variable(parser, start) }
-    (word.kind == Token.Kind.OUT) { out out_statement(parser, start) }
-    (word.kind == Token.Kind.DRUM) { out drum_statement(parser, start) }
-    (word.kind == Token.Kind.ALWAYS) { out always_statement(parser, start) }
-    (word.kind == Token.Kind.LEAVE) { out cursor.ok("leave", cursor.loc(["leave"], word, parser.locations), start + 1) }
-    (word.kind == Token.Kind.PICK) { out pick_statement(parser, start) }
-    (word.kind == Token.Kind.LPAREN) { out paren_statement(parser, start) }
-    (word.kind == Token.Kind.IDENT) {
-        (cursor.is(parser, start + 1, Token.Kind.ASSIGN) == yes) { out assign(parser, start) }
-        @target = cursor.path_at(parser, start, no)
-        (cursor.is(parser, target.next, Token.Kind.ASSIGN) == yes) { out field_assign(parser, start) }
+    skill names(start, end_kind, item_message) {
+        @items = sequence(start, end_kind, "name", item_message, item_message, yes, yes)
+        out look.read(look.make_node("names", items.datum()), items.next, items.diagnostics)
     }
-    @value = expression(parser, start)
-    (diagnostic.has(value.diagnostics) == yes) { out value }
-    out cursor.ok("expr", ["expr", value.node.datum], value.next)
+
+    skill params(start) {
+        @parsed_names = names(start, Token.Kind.RPAREN, "expected_parameter_name")
+        out look.read(look.make_node("params", parsed_names.datum()), parsed_names.next, parsed_names.diagnostics)
+    }
+
+    skill subject_skill(start) {
+        @word = look.at(start)
+        (look.is(start + 1, Token.Kind.IDENT) == no) { out look.fail(start + 1, "expected_skill_name") }
+        @name_token = look.at(start + 1)
+        @open = look.expect(start + 2, Token.Kind.LPAREN, "expected_open_paren")
+        (open.broken() == yes) { out open }
+        @parsed_params = params(open.next)
+        (parsed_params.broken() == yes) { out parsed_params }
+        @body = block(parsed_params.next)
+        (body.broken() == yes) { out body }
+        out look.ok("subject-skill", look.loc(["subject-skill", name_token.value, parsed_params.datum(), body.datum()], word, look.locations), body.next)
+    }
+
+    skill expression_list(start, end_kind) {
+        @items = sequence(start, end_kind, "expression", "expected_expression", "expected_closing_token", no, yes)
+        out look.read(look.make_node("expressions", items.datum()), items.next, items.diagnostics)
+    }
+
+    skill primary(start) {
+        @word = look.at(start)
+        (word.kind == Token.Kind.NUMBER) { out leaves.number_literal(word, "", word.value, start + 1) }
+        (word.kind == Token.Kind.MINUS) {
+            @digits = look.at(start + 1)
+            (digits.kind == Token.Kind.NUMBER) {
+                (digits.line == word.line) {
+                    (digits.col == word.col + 1) { out leaves.number_literal(word, "-", digits.value, start + 2) }
+                }
+            }
+            @operand = postfix(start + 1)
+            (operand.broken() == yes) { out operand }
+            out look.ok("negate", look.loc(["negate", operand.datum()], word, look.locations), operand.next)
+        }
+        (word.kind == Token.Kind.STRING) { out look.ok("string", look.loc(["string", word.value], word, look.locations), start + 1) }
+        (word.kind == Token.Kind.TEMPLATE) { out leaves.template(word, start) }
+        (word.kind == Token.Kind.YES) { out look.ok("answer", look.loc(["answer", "yes"], word, look.locations), start + 1) }
+        (word.kind == Token.Kind.NO) { out look.ok("answer", look.loc(["answer", "no"], word, look.locations), start + 1) }
+        (word.kind == Token.Kind.NONE) { out look.ok("none", look.loc(["none"], word, look.locations), start + 1) }
+        (word.kind == Token.Kind.DOT) {
+            (look.is(start + 1, Token.Kind.IDENT) == no) { out look.fail(start + 1, "expected_enum_value") }
+            @name_token = look.at(start + 1)
+            out look.ok("enum-value", look.loc(["enum-value", name_token.value], word, look.locations), start + 2)
+        }
+        (word.kind == Token.Kind.LBRACKET) { out group_literal(start) }
+        (word.kind == Token.Kind.IDENT) { out look.path_at(start, look.locations) }
+        (word.kind == Token.Kind.LPAREN) {
+            @inside = expression(start + 1)
+            (inside.broken() == yes) { out inside }
+            @close = look.expect(inside.next, Token.Kind.RPAREN, "expected_close_paren")
+            (close.broken() == yes) { out close }
+            out look.read(inside.node, close.next, [])
+        }
+        out look.fail(start, "expected_expression")
+    }
+
+    skill args(start) {
+        @list = expression_list(start + 1, Token.Kind.RPAREN)
+        out look.read(look.make_node("args", list.datum()), list.next, list.diagnostics)
+    }
+
+    skill fields(start) {
+        @open = look.expect(start, Token.Kind.LBRACE, "expected_open_brace")
+        (open.broken() == yes) { out open }
+        @list = sequence(open.next, Token.Kind.RBRACE, "field", "expected_field_name", "expected_close_brace", no, yes)
+        out look.read(look.make_node("fields", list.datum()), list.next, list.diagnostics)
+    }
+
+    skill postfix(start) {
+        @base = primary(start)
+        (base.broken() == yes) { out base }
+        @node = base.node
+        @next = base.next
+        @diagnostics = []
+        @stream = look.tokens
+        drum (stream.count()) {
+            (look.is(next, Token.Kind.LPAREN) == yes) {
+                @call_token = look.at(next)
+                @arguments = args(next)
+                (arguments.broken() == yes) {
+                    diagnostics = arguments.diagnostics
+                    leave
+                }
+                @call = ["call", node.datum]
+                call = look.append_tail(call, arguments.datum(), 0)
+                node = look.make_node("call", look.loc(call, call_token, look.locations))
+                next = arguments.next
+            }
+            (look.is(next, Token.Kind.LPAREN) == no) {
+                (node.tag == "call") {
+                    (look.is(next, Token.Kind.DOT) == yes) {
+                        @close_token = look.at(next - 1)
+                        @dot_token = look.at(next)
+                        (dot_token.line == close_token.line) {
+                            (dot_token.col == close_token.col + 1) {
+                                @field_failure = look.fail_with(next, errors.call_field())
+                                diagnostics = field_failure.diagnostics
+                                leave
+                            }
+                        }
+                    }
+                }
+                ((node.tag == "path") == no) { leave }
+                (look.is(next, Token.Kind.LBRACE) == no) { leave }
+                @box_token = look.at(next)
+                @box_fields = fields(next)
+                (box_fields.broken() == yes) {
+                    diagnostics = box_fields.diagnostics
+                    leave
+                }
+                @plain_name = node.datum
+                (look.locations == yes) { plain_name = group.get(node.datum, 3) }
+                @box_name = group.get(plain_name, 1)
+                @name_index = 2
+                drum (group.count(plain_name) - 2) {
+                    box_name = str.concat(box_name, str.concat(".", group.get(plain_name, name_index)))
+                    name_index = name_index + 1
+                }
+                @box = ["box-new", box_name]
+                box = look.append_tail(box, box_fields.datum(), 0)
+                node = look.make_node("box-new", look.loc(box, box_token, look.locations))
+                next = box_fields.next
+            }
+        }
+        out look.read(node, next, diagnostics)
+    }
+
+    skill binary(start, minimum) {
+        @first = postfix(start)
+        (first.broken() == yes) { out first }
+        @left = first.node
+        @next = first.next
+        @diagnostics = []
+        @stream = look.tokens
+        drum (stream.count()) {
+            @operator = look.at(next)
+            @level = leaves.precedence(operator.kind)
+            (level < minimum) { leave }
+            (level == 0) { leave }
+            @right = binary(next + 1, level + 1)
+            (right.broken() == yes) {
+                diagnostics = right.diagnostics
+                leave
+            }
+            left = look.make_node("binary", look.loc(["binary", operator.value, left.datum, right.datum()], operator, look.locations))
+            next = right.next
+        }
+        out look.read(left, next, diagnostics)
+    }
+
+    skill expression(start) {
+        @value = binary(start, 0)
+        (value.broken() == yes) { out value }
+        (look.is(value.next, Token.Kind.RESCUE) == yes) {
+            @rescue_token = look.at(value.next)
+            @pipe = look.expect(value.next + 1, Token.Kind.PIPE, "expected_pipe")
+            (pipe.broken() == yes) { out pipe }
+            (look.is(pipe.next, Token.Kind.IDENT) == no) { out look.fail(pipe.next, "expected_rescue_name") }
+            @error_token = look.at(pipe.next)
+            @error_name = error_token.value
+            @pipe2 = look.expect(pipe.next + 1, Token.Kind.PIPE, "expected_pipe")
+            (pipe2.broken() == yes) { out pipe2 }
+            @body = block(pipe2.next)
+            (body.broken() == yes) { out body }
+            out look.ok("rescue", look.loc(["rescue", value.datum(), error_name, body.datum()], rescue_token, look.locations), body.next)
+        }
+        out value
+    }
+
+    skill group_literal(start) {
+        @word = look.at(start)
+        @list = expression_list(start + 1, Token.Kind.RBRACKET)
+        (list.broken() == yes) { out list }
+        @items = ["group"]
+        items = look.append_tail(items, list.datum(), 0)
+        out look.ok("group", look.loc(items, word, look.locations), list.next)
+    }
+
+    skill block(start) {
+        @word = look.at(start)
+        @open = look.expect(start, Token.Kind.LBRACE, "expected_open_brace")
+        (open.broken() == yes) { out open }
+        @lines = sequence(open.next, Token.Kind.RBRACE, "statement", "expected_statement", "expected_close_brace", no, no)
+        @items = ["block"]
+        items = look.append_tail(items, lines.datum(), 0)
+        out look.read(look.make_node("block", look.loc(items, word, look.locations)), lines.next, lines.diagnostics)
+    }
+
+    skill variable(start) {
+        @word = look.at(start)
+        (look.is(start + 1, Token.Kind.IDENT) == no) { out look.fail(start + 1, "expected_variable_name") }
+        @name_token = look.at(start + 1)
+        @name = name_token.value
+        @eq = look.expect(start + 2, Token.Kind.ASSIGN, "expected_variable_equals")
+        (eq.broken() == yes) { out eq }
+        @value = expression(eq.next)
+        (value.broken() == yes) { out value }
+        out look.ok("var", look.loc(["var", name, value.datum()], word, look.locations), value.next)
+    }
+
+    skill assign(start) {
+        @word = look.at(start)
+        @value = expression(start + 2)
+        (value.broken() == yes) { out value }
+        out look.ok("assign", look.loc(["assign", word.value, value.datum()], word, look.locations), value.next)
+    }
+
+    skill field_assign(start) {
+        @word = look.at(start)
+        @target = look.path_at(start, look.locations)
+        (target.broken() == yes) { out target }
+        @eq = look.expect(target.next, Token.Kind.ASSIGN, "expected_equals")
+        (eq.broken() == yes) { out eq }
+        @value = expression(eq.next)
+        (value.broken() == yes) { out value }
+        out look.ok("field-assign", look.loc(["field-assign", target.datum(), value.datum()], word, look.locations), value.next)
+    }
+
+    skill out_statement(start) {
+        @word = look.at(start)
+        @value = expression(start + 1)
+        (value.broken() == yes) { out value }
+        out look.ok("out", look.loc(["out", value.datum()], word, look.locations), value.next)
+    }
+
+    skill always_statement(start) {
+        @word = look.at(start)
+        @body = block(start + 1)
+        (body.broken() == yes) { out body }
+        out look.ok("always", look.loc(["always", body.datum()], word, look.locations), body.next)
+    }
+
+    skill drum_statement(start) {
+        @word = look.at(start)
+        @open = look.expect(start + 1, Token.Kind.LPAREN, "expected_drum_paren")
+        (open.broken() == yes) { out open }
+        @count = expression(open.next)
+        (count.broken() == yes) { out count }
+        @close = look.expect(count.next, Token.Kind.RPAREN, "expected_close_paren")
+        (close.broken() == yes) { out close }
+        @body = block(close.next)
+        (body.broken() == yes) { out body }
+        out look.ok("drum", look.loc(["drum", count.datum(), body.datum()], word, look.locations), body.next)
+    }
+
+    skill pick_statement(start) {
+        @word = look.at(start)
+        @open = look.expect(start + 1, Token.Kind.LBRACE, "expected_pick_open")
+        (open.broken() == yes) { out open }
+        @items = ["pick"]
+        @next = look.skip_lines(open.next)
+        @stream = look.tokens
+        @count = stream.count()
+        drum (count) {
+            pick {
+                (look.is(next, Token.Kind.RBRACE) == yes) { out look.read(look.make_node("pick", look.loc(items, word, look.locations)), next + 1, []) }
+                (look.is(next, Token.Kind.LBRACE) == yes) {
+                    @fallback_token = look.at(next)
+                    @fallback = block(next)
+                    (fallback.broken() == yes) { out fallback }
+                    items = group.add(items, look.loc(["otherwise", fallback.datum()], fallback_token, look.locations))
+                    next = look.skip_lines(fallback.next)
+                }
+                (look.is(next, Token.Kind.LPAREN) == yes) {
+                    @choice = paren_statement(next)
+                    (choice.broken() == yes) { out choice }
+                    items = group.add(items, choice.datum())
+                    next = look.skip_lines(choice.next)
+                }
+                { out look.fail(next, "expected_pick_branch") }
+            }
+        }
+        out look.fail(next, "expected_pick_close")
+    }
+
+    skill present_statement(word, value, start) {
+        (look.is(start + 1, Token.Kind.IDENT) == no) { out look.fail(start + 1, "expected_present_name") }
+        @name_token = look.at(start + 1)
+        @pipe = look.expect(start + 2, Token.Kind.PIPE, "expected_pipe")
+        (pipe.broken() == yes) { out pipe }
+        @body = block(pipe.next)
+        (body.broken() == yes) { out body }
+        out look.ok("present", look.loc(["present", value.datum(), name_token.value, body.datum()], word, look.locations), body.next)
+    }
+
+    skill paren_statement(start) {
+        @word = look.at(start)
+        @value = expression(start + 1)
+        (value.broken() == yes) { out value }
+        @close = look.expect(value.next, Token.Kind.RPAREN, "expected_close_paren")
+        (close.broken() == yes) { out close }
+        (look.is(close.next, Token.Kind.PIPE) == yes) { out present_statement(word, value, close.next) }
+        @open = look.expect(close.next, Token.Kind.LBRACE, "expected_open_brace")
+        (open.broken() == yes) { out open }
+        @next = look.skip_lines(open.next)
+        (look.is(next, Token.Kind.DOT) == yes) {
+            @cases = ["switch", value.datum()]
+            @diagnostics = []
+            @stream = look.tokens
+            drum (stream.count()) {
+                (look.is(next, Token.Kind.RBRACE) == yes) {
+                    next = next + 1
+                    leave
+                }
+                @case_token = look.at(next)
+                @dot = look.expect(next, Token.Kind.DOT, "expected_dot")
+                (dot.broken() == yes) {
+                    diagnostics = dot.diagnostics
+                    leave
+                }
+                (look.is(dot.next, Token.Kind.IDENT) == no) {
+                    @failure = look.fail(dot.next, "expected_case_label")
+                    diagnostics = failure.diagnostics
+                    leave
+                }
+                @tag_token = look.at(dot.next)
+                @tag = tag_token.value
+                @arrow = look.expect(dot.next + 1, Token.Kind.ARROW, "expected_arrow")
+                (arrow.broken() == yes) {
+                    diagnostics = arrow.diagnostics
+                    leave
+                }
+                @body = case_body(arrow.next)
+                (body.broken() == yes) {
+                    diagnostics = body.diagnostics
+                    leave
+                }
+                cases = group.add(cases, look.loc(["case", tag, body.datum()], case_token, look.locations))
+                next = body.next
+                @case_comma = no
+                (look.is(next, Token.Kind.COMMA) == yes) {
+                    next = next + 1
+                    case_comma = yes
+                }
+                next = look.skip_lines(next)
+                (case_comma == yes) {
+                    (look.is(next, Token.Kind.RBRACE) == yes) {
+                        @trailing_failure = look.fail_with(next, errors.trailing_comma())
+                        diagnostics = trailing_failure.diagnostics
+                        leave
+                    }
+                }
+            }
+            out look.read(look.make_node("switch", look.loc(cases, word, look.locations)), next, diagnostics)
+        }
+        @lines = sequence(next, Token.Kind.RBRACE, "statement", "expected_statement", "expected_close_brace", no, no)
+        @items = ["block"]
+        items = look.append_tail(items, lines.datum(), 0)
+        @located_body = look.loc(items, word, look.locations)
+        out look.read(look.make_node("if", look.loc(["if", value.datum(), located_body], word, look.locations)), lines.next, lines.diagnostics)
+    }
+
+    skill case_body(start) {
+        (look.is(start, Token.Kind.LBRACE) == yes) { out block(start) }
+        @single = statement(start)
+        (single.broken() == yes) { out single }
+        @word = look.at(start)
+        out look.ok("block", look.loc(["block", single.datum()], word, look.locations), single.next)
+    }
+
+    skill statement(start) {
+        @word = look.at(start)
+        (word.kind == Token.Kind.AT) { out variable(start) }
+        (word.kind == Token.Kind.OUT) { out out_statement(start) }
+        (word.kind == Token.Kind.DRUM) { out drum_statement(start) }
+        (word.kind == Token.Kind.ALWAYS) { out always_statement(start) }
+        (word.kind == Token.Kind.LEAVE) { out look.ok("leave", look.loc(["leave"], word, look.locations), start + 1) }
+        (word.kind == Token.Kind.PICK) { out pick_statement(start) }
+        (word.kind == Token.Kind.LPAREN) { out paren_statement(start) }
+        (word.kind == Token.Kind.IDENT) {
+            (look.is(start + 1, Token.Kind.ASSIGN) == yes) { out assign(start) }
+            @target = look.path_at(start, no)
+            (look.is(target.next, Token.Kind.ASSIGN) == yes) { out field_assign(start) }
+        }
+        @value = expression(start)
+        (value.broken() == yes) { out value }
+        out look.ok("expr", ["expr", value.datum()], value.next)
+    }
 }

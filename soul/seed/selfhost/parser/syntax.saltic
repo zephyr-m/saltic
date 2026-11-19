@@ -8,88 +8,86 @@
 -- группа, аргументы, параметры, ветки выбора) — ошибка trailing_comma;
 -- поле у результата вызова `f().x` — ошибка call_field.
 --
--- Parser = Box { tokens, path, locations } — только данные; parse(parser) -> Parse
--- Parse = Box { ast, tokens, diagnostics }
--- parse_string / parse_string_loc(source, path) -> Parse
--- parse_tokens / parse_tokens_loc(tokens, path) / parse_tokens_mode(tokens, path, locations) -> Parse
--- lex(source, path) -> lexer.Scan; append_tail(head, tail, start) -> head + tail[start…]
+-- Syntax = Box { path, locations } — вход разбора: собирает самостоятельных
+--     субъектов и отдаёт им работу сверху вниз:
+--     Parse — Box { ast, tokens, diagnostics } — итог
+--     parse(source) -> Parse — лексер, потом parse_tokens
+--     parse_tokens(stream) -> Parse — Reader → Literals → Grammar → Declarations
 --
--- Дети: cursor (шаги по токенам), literals (листья выражений), grammar
--- (блоки, инструкции и выражения), declarations (верхний уровень).
+-- Дети: reader (Reader — глаза), literals (Literals — листья выражений),
+-- grammar (Grammar — блоки, инструкции, выражения), declarations
+-- (Declarations — верхний уровень).
 
 use core.group
-use selfhost.diagnostic
 use selfhost.parser.lexer
 use selfhost.parser.token
-use selfhost.parser.syntax.cursor
+use selfhost.parser.syntax.reader
+use selfhost.parser.syntax.literals
+use selfhost.parser.syntax.grammar
 use selfhost.parser.syntax.declarations
 
-Parser = Box {
-    tokens = none,
+Syntax = Box {
     path = "",
     locations = no
-}
 
-Parse = Box {
-    ast = [],
-    tokens = none,
-    diagnostics = []
-}
+    Parse = Box {
+        ast = [],
+        tokens = none,
+        diagnostics = []
+    }
 
-skill parse(parser) {
-    @tree = ["program"]
-    @next = cursor.skip_lines(parser, 0)
-    @diagnostics = []
-    @stream = parser.tokens
-    drum (stream.count()) {
-        (cursor.is(parser, next, Token.Kind.EOF) == yes) { leave }
-        @item = declarations.top(parser, next)
-        (diagnostic.has(item.diagnostics) == yes) {
-            diagnostics = item.diagnostics
-            leave
+    skill parse(source) {
+        @scanner = Lexer {
+            source = source,
+            path = path
         }
-        tree = group.add(tree, item.node.datum)
-        next = cursor.skip_lines(parser, item.next)
+        @scan = scanner.scan()
+        (group.count(scan.diagnostics) > 0) {
+            out Parse {
+                ast = [],
+                tokens = scan.tokens,
+                diagnostics = scan.diagnostics
+            }
+        }
+        out parse_tokens(scan.tokens)
     }
-    out Parse { ast = tree, tokens = parser.tokens, diagnostics = diagnostics }
-}
 
-skill lex(source, path) {
-    @reader = Lexer {
-        source = source,
-        path = path
+    skill parse_tokens(stream) {
+        @look = Reader {
+            tokens = stream,
+            path = path,
+            locations = locations
+        }
+        @leaves = Literals {
+            look = look
+        }
+        @speech = Grammar {
+            look = look,
+            leaves = leaves
+        }
+        @outline = Declarations {
+            look = look,
+            speech = speech
+        }
+        @tree = ["program"]
+        @next = look.skip_lines(0)
+        @diagnostics = []
+        drum (stream.count()) {
+            (look.is(next, Token.Kind.EOF) == yes) {
+                leave
+            }
+            @item = outline.top(next)
+            (item.broken() == yes) {
+                diagnostics = item.diagnostics
+                leave
+            }
+            tree = group.add(tree, item.datum())
+            next = look.skip_lines(item.next)
+        }
+        out Parse {
+            ast = tree,
+            tokens = stream,
+            diagnostics = diagnostics
+        }
     }
-    out reader.scan()
-}
-
-skill append_tail(head, tail, start) {
-    out cursor.append_tail(head, tail, start)
-}
-
-skill parse_tokens_mode(tokens, path, locations) {
-    @parser = Parser()
-    parser.tokens = tokens
-    parser.path = path
-    parser.locations = locations
-    out parse(parser)
-}
-
-skill parse_tokens(tokens, path) {
-    out parse_tokens_mode(tokens, path, no)
-}
-
-skill parse_tokens_loc(tokens, path) {
-    out parse_tokens_mode(tokens, path, yes)
-}
-
-skill parse_string(source, path) {
-    @scan = lex(source, path)
-    (diagnostic.has(scan.diagnostics) == yes) { out Parse { ast = [], tokens = scan.tokens, diagnostics = scan.diagnostics } }
-    out parse_tokens(scan.tokens, path)
-}
-
-skill parse_string_loc(source, path) {
-    @scan = lex(source, path)
-    (diagnostic.has(scan.diagnostics) == yes) { out Parse { ast = [], tokens = scan.tokens, diagnostics = scan.diagnostics } }
-    out parse_tokens_loc(scan.tokens, path)
 }
