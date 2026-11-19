@@ -1,0 +1,103 @@
+-- main — вход редактора «Сцена» (soft/graphics/scene): окно Wayland на этом
+-- компьютере, страница — editor (сцена, вьюпорт, таймлайн, журнал из жителей
+-- UIEngine), тема soft, шрифты TTF из os/fonts и значки os/icons. Щелчок по
+-- объекту дерева — он в инспекторе, по инструменту слева или режиму сверху —
+-- он выбран; «×» окна или Esc — выход. Экран пересобирается только после
+-- щелчка. Пока только Linux: общего слоя окна для всех машин ещё нет.
+-- Данные сцены — образец, 3D-движка в окне ещё нет — так и подписано.
+--
+-- Window { canvas, link, palette, studio, runtime, reader, packet, hold,
+--     joined } — окно и всё долгое — его поля (корневой регион пуст);
+--     start() — окно, шрифты, первый кадр; NoWindow; step() -> no, когда пора
+--     выходить; drawn() — пересобрать и нарисовать
+-- program() — вход
+-- Внутри: face(path) -> Typeface из файла
+
+use io.file
+use core.bytes
+use core.group
+use core.socket
+use os.icons
+use os.fonts.ttf
+use os.target.linux.screen
+use os.screen.graphics
+use os.input.gestures
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use tarantul.uiengine.draw.atoms
+use tarantul.uiengine.draw.typeface
+use tarantul.uiengine.themes
+use soft.graphics.scene.editor
+
+REGULAR = "os/fonts/inter/Inter-Regular.ttf"
+BOLD = "os/fonts/inter/Inter-Bold.ttf"
+MONO = "os/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
+ICONS = "os/icons/lucide/icons.txt"
+TITLE = "Сцена"
+WIDE = 1600
+HIGH = 1000
+
+skill face(path) {
+    out typeface.from_bytes(file.read_bytes(path))
+}
+
+Window = Box {
+    canvas = graphics.Screen {},
+    link = screen.Link {},
+    palette = atoms.Palette {},
+    studio = editor.Editor {},
+    runtime = jtml.Runtime {},
+    reader = gestures.Reader {},
+    packet = bytes.new(8192),
+    hold = bytes.new(4096),
+    joined = bytes.new(12288)
+
+    skill drawn() {
+        @tree = atoms.fitted(read.page(studio.jtml()), no, palette)
+        runtime = jtml.mount(canvas, tree)
+        atoms.draw(canvas, runtime, palette)
+        out screen.present(link)
+    }
+
+    skill start() {
+        @host = screen.sized(TITLE, WIDE, HIGH)
+        (group.count(host) == 0) { out error.NoWindow }
+        canvas = group.get(host, 0)
+        link = group.get(host, 1)
+        @sheet = file.read_bytes(ICONS)
+        palette = atoms.with_icons(atoms.with_faces(themes.named("soft", canvas), face(REGULAR), face(BOLD), face(MONO)), icons.open(ttf.from_bytes(sheet), bytes.count(sheet)))
+        @world = studio.world
+        world.sample()
+        out drawn()
+    }
+
+    skill step() {
+        (link.way_closed == yes) { out no }
+        (link.way_failed == yes) { out no }
+        screen.pump(link, packet, hold, joined)
+        @drained = reader.drain(link.way_events)
+        link.way_events = drained.core
+        @changed = no
+        @closing = no
+        drum (drained.gestures) {
+            (beat.kind == gestures.Kind.CLICK) {
+                @hit = jtml.hit(runtime, beat.x, beat.y)
+                (hit.id == "close") { closing = yes }
+                (studio.choose(hit.id) == yes) { changed = yes }
+            }
+        }
+        (closing == yes) { out no }
+        (changed == yes) { drawn() }
+        socket.sleep(16)
+        out yes
+    }
+}
+
+program() {
+    @window = Window {}
+    window.start()
+    always {
+        (window.step() == no) { leave }
+    }
+    out none
+}
