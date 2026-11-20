@@ -5,7 +5,14 @@
 -- Literals = Box { look } — look — Reader; навыки:
 -- number_literal(token, sign, digits, next) -> Read number / wide-number / fraction-number
 -- template(token, start) -> Read template; ошибка bad_template_name
--- precedence(kind) -> 1 сравнение (и ~=), 2 + -, 3 * / %, 0 не оператор
+-- precedence(kind) -> 1 звенья ○ ○○, 2 сравнение (и ~=), 3 + -, 4 * / %, -1 не
+--     оператор; linking / comparing(kind) -> звено ли, сравнение ли
+-- order(index, operator, before, linked) -> [] или ошибка у index (решение
+--     автора 21.11.2026: порядок — только скобками): сравнение рядом с ○ / ○○
+--     — в своих скобках (linked — справа звено; before — прошлый знак этого
+--     ряда), ○ и ○○ в одном ряду не смешиваются; голое сравнение вне звеньев
+--     ловит limits (workbench/check/limits/parens), не разбор
+-- joined(operator, left, right) -> узел binary или logic (○ и ○○)
 -- placeholder_path(name) -> ["path", …] или [] для плохого имени в "{…}"
 -- number_value(text) -> число; number_is_wide(text) -> answer (не влезает в 29 бит)
 
@@ -17,6 +24,10 @@ use selfhost.abi
 use selfhost.abi.fixed
 use selfhost.parser.token
 use selfhost.parser.syntax.reader
+
+COMPARISONS = [Token.Kind.EQ, Token.Kind.NEAR, Token.Kind.GT, Token.Kind.LT, Token.Kind.GE, Token.Kind.LE]
+COMPARISON_SIGNS = ["==", "~=", ">", "<", ">=", "<="]
+LINK_SIGNS = ["○", "○○"]
 
 Literals = Box {
     look = Reader {}
@@ -47,18 +58,61 @@ Literals = Box {
     }
 
     skill precedence(kind) {
-        (kind == Token.Kind.EQ) { out 1 }
-        (kind == Token.Kind.NEAR) { out 1 }
-        (kind == Token.Kind.GT) { out 1 }
-        (kind == Token.Kind.LT) { out 1 }
-        (kind == Token.Kind.GE) { out 1 }
-        (kind == Token.Kind.LE) { out 1 }
-        (kind == Token.Kind.PLUS) { out 2 }
-        (kind == Token.Kind.MINUS) { out 2 }
-        (kind == Token.Kind.STAR) { out 3 }
-        (kind == Token.Kind.SLASH) { out 3 }
-        (kind == Token.Kind.PERCENT) { out 3 }
-        out 0
+        (linking(kind) == yes) {
+            out 1
+        }
+        (comparing(kind) == yes) {
+            out 2
+        }
+        (kind == Token.Kind.PLUS) { out 3 }
+        (kind == Token.Kind.MINUS) { out 3 }
+        (kind == Token.Kind.STAR) { out 4 }
+        (kind == Token.Kind.SLASH) { out 4 }
+        (kind == Token.Kind.PERCENT) { out 4 }
+        out -1
+    }
+
+    skill linking(kind) {
+        (kind == Token.Kind.AND) {
+            out yes
+        }
+        out kind == Token.Kind.OR
+    }
+
+    skill comparing(kind) {
+        out group.contains(COMPARISONS, kind)
+    }
+
+    skill order(index, operator, before, linked) {
+        @problem = errors.ok()
+        (comparing(operator.kind) == yes) {
+            (linked == yes) {
+                problem = errors.comparison_needs_parens(operator.value)
+            }
+        }
+        (linking(operator.kind) == yes) {
+            (group.contains(COMPARISON_SIGNS, before) == yes) {
+                problem = errors.comparison_needs_parens(before)
+            }
+            (group.contains(LINK_SIGNS, before) == yes) {
+                ((before == operator.value) == no) {
+                    problem = errors.links_mixed()
+                }
+            }
+        }
+        (errors.is_ok(problem) == yes) {
+            out []
+        }
+        @refused = look.fail_with(index, problem)
+        out refused.diagnostics
+    }
+
+    skill joined(operator, left, right) {
+        @tag = "binary"
+        (linking(operator.kind) == yes) {
+            tag = "logic"
+        }
+        out look.make_node(tag, look.loc([tag, operator.value, left.datum, right], operator, look.locations))
     }
 
     skill placeholder_path(name) {

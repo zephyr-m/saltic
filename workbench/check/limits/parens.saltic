@@ -1,0 +1,216 @@
+-- parens — сравнение в своих скобках (решение автора 21.11.2026: порядок в
+-- языке только скобками): ==, ~=, >, <, >=, <= стоят корнем выражения в
+-- скобках — (a == b), условие (a == b) { … }, ((a == b) == no). Голое
+-- сравнение (@x = a == b, out a == b, f(a == b)) — нарушение. Рядом с ○ и ○○
+-- это ошибка разбора; здесь — весь старый код: известные — в KNOWN («путь
+-- число»), им можно не расти, новое или выросшее — нарушение. Токены — от
+-- лексера языка (selfhost.parser.lexer), строки и шапка не в счёт.
+--
+-- Parens { known } — строки KNOWN; load() -> known; tally(path, text) ->
+--     голых сравнений; verdict(path, text) -> "" или «новое …» / «выросло …»
+-- Внутри: bare(stream, at) -> сравнение at без своих скобок; edge(kind,
+--     ends) -> граница выражения; opener(stream, at) -> «(», «[» парные
+--     слева для закрывающей at или -1; closer — то же вправо; grouping(stream,
+--     at) -> скобка at — скобки выражения, а не вызова или drum
+-- COMPARISONS, LEFT_EDGES, RIGHT_EDGES, CALLERS — виды токенов
+
+use io.file
+use core.str
+use core.group
+use selfhost.parser.token
+use selfhost.parser.lexer
+use workbench.check.limits.canon
+
+KNOWN = "workbench/check/limits-parens.txt"
+ADVICE = "сравнение — в свои скобки: (a == b)"
+COMPARISONS = [Token.Kind.EQ, Token.Kind.NEAR, Token.Kind.GT, Token.Kind.LT, Token.Kind.GE, Token.Kind.LE]
+LEFT_EDGES = [Token.Kind.NEWLINE, Token.Kind.LPAREN, Token.Kind.LBRACKET, Token.Kind.LBRACE, Token.Kind.COMMA, Token.Kind.ASSIGN, Token.Kind.ARROW, Token.Kind.AND, Token.Kind.OR, Token.Kind.PIPE, Token.Kind.OUT, Token.Kind.RESCUE]
+RIGHT_EDGES = [Token.Kind.NEWLINE, Token.Kind.RPAREN, Token.Kind.RBRACKET, Token.Kind.RBRACE, Token.Kind.COMMA, Token.Kind.LBRACE, Token.Kind.AND, Token.Kind.OR, Token.Kind.PIPE, Token.Kind.ARROW, Token.Kind.RESCUE, Token.Kind.EOF]
+CALLERS = [Token.Kind.IDENT, Token.Kind.RPAREN, Token.Kind.RBRACKET, Token.Kind.DRUM]
+
+Parens = Box {
+    known = []
+
+    skill load() {
+        known = []
+        drum (str.lines(file.read(KNOWN))) {
+            (str.starts_with(beat, "#") == no) {
+                known = group.add(known, beat)
+            }
+        }
+        out known
+    }
+
+    skill opener(stream, at) {
+        @depth = 0
+        @index = at
+        always {
+            (index < 0) {
+                leave
+            }
+            @item = stream.at(index)
+            pick {
+                (item.kind == Token.Kind.RPAREN) {
+                    depth = depth + 1
+                }
+                (item.kind == Token.Kind.RBRACKET) {
+                    depth = depth + 1
+                }
+                (item.kind == Token.Kind.LPAREN) {
+                    depth = depth - 1
+                }
+                (item.kind == Token.Kind.LBRACKET) {
+                    depth = depth - 1
+                }
+            }
+            (depth == 0) {
+                out index
+            }
+            index = index - 1
+        }
+        out -1
+    }
+
+    skill closer(stream, at) {
+        @depth = 0
+        @index = at
+        @total = stream.count()
+        always {
+            (index >= total) {
+                leave
+            }
+            @item = stream.at(index)
+            pick {
+                (item.kind == Token.Kind.LPAREN) {
+                    depth = depth + 1
+                }
+                (item.kind == Token.Kind.LBRACKET) {
+                    depth = depth + 1
+                }
+                (item.kind == Token.Kind.RPAREN) {
+                    depth = depth - 1
+                }
+                (item.kind == Token.Kind.RBRACKET) {
+                    depth = depth - 1
+                }
+            }
+            (depth == 0) {
+                out index
+            }
+            index = index + 1
+        }
+        out -1
+    }
+
+    skill grouping(stream, at) {
+        (at == 0) {
+            out yes
+        }
+        @before = stream.at(at - 1)
+        out (group.contains(CALLERS, before.kind) == no)
+    }
+
+    skill bare(stream, at) {
+        @left = at - 1
+        always {
+            (left < 0) {
+                leave
+            }
+            @item = stream.at(left)
+            @closing = (item.kind == Token.Kind.RPAREN)
+            (item.kind == Token.Kind.RBRACKET) {
+                closing = yes
+            }
+            pick {
+                (closing == yes) {
+                    left = opener(stream, left) - 1
+                }
+                (group.contains(LEFT_EDGES, item.kind) == yes) {
+                    leave
+                }
+                {
+                    left = left - 1
+                }
+            }
+        }
+        @right = at + 1
+        always {
+            (right >= stream.count()) {
+                leave
+            }
+            @item = stream.at(right)
+            @opening = (item.kind == Token.Kind.LPAREN)
+            (item.kind == Token.Kind.LBRACKET) {
+                opening = yes
+            }
+            pick {
+                (opening == yes) {
+                    right = closer(stream, right) + 1
+                    (right == 0) {
+                        out no
+                    }
+                }
+                (group.contains(RIGHT_EDGES, item.kind) == yes) {
+                    leave
+                }
+                {
+                    right = right + 1
+                }
+            }
+        }
+        (left < 0) {
+            out yes
+        }
+        (right >= stream.count()) {
+            out yes
+        }
+        @start = stream.at(left)
+        @end = stream.at(right)
+        ((start.kind == Token.Kind.LPAREN) == no) {
+            out yes
+        }
+        ((end.kind == Token.Kind.RPAREN) == no) {
+            out yes
+        }
+        out (grouping(stream, left) == no)
+    }
+
+    skill tally(path, text) {
+        @reading = Lexer {
+            source = text,
+            path = path
+        }
+        @scanned = reading.scan()
+        @stream = scanned.tokens
+        @found = 0
+        drum (stream.count()) {
+            @item = stream.at(beat)
+            (group.contains(COMPARISONS, item.kind) == yes) {
+                (bare(stream, beat) == yes) {
+                    found = found + 1
+                }
+            }
+        }
+        out found
+    }
+
+    skill verdict(path, text) {
+        @found = tally(path, text)
+        (found == 0) {
+            out ""
+        }
+        drum (known) {
+            @parts = str.split(beat, " ")
+            (group.count(parts) == 2) {
+                (group.get(parts, 0) == path) {
+                    @was = canon.number(group.get(parts, 1))
+                    (found > was) {
+                        out "выросло — голых сравнений {was} → {found}: {ADVICE}"
+                    }
+                    out ""
+                }
+            }
+        }
+        out "новое нарушение — голых сравнений {found}: {ADVICE}"
+    }
+}
