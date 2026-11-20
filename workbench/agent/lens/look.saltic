@@ -1,16 +1,15 @@
 -- look — то, что lens видит в коде, строками: проверка без сборки (разбор и
 -- чекер, числа 61-битные), публичное лицо модуля, поиск имени. Печатает
 -- родитель workbench/agent/lens.
--- Модуль — путь к файлу или имя через точки; корни core, io, selfhost — в
--- soul/seed, canonical — в soul, остальное — от корня репозитория.
+-- Модуль — путь к файлу или имя через точки (jump.module_file).
 --
--- path_of(subject) -> путь файла модуля; NoModule
 -- check(path) -> ["ok"] или строки «код|строка|столбец|текст»; файл без
 --     program — модуль, missing_program у него не ошибка; лимиты канона
 --     (workbench/check/limits/canon) — строкой «limits|1|1|…»
 -- api(path) -> строки: файл, шапка, верхний уровень (skill, Box, константы)
--- find(name) -> строки: где определено и где встречается, по git ls-files
--- Внутри: module(text), header(text), top_level / commented / definition / mention(line…)
+-- find(name) -> строки: где определено (jump.definition) и где встречается, по
+--     git ls-files
+-- Внутри: module(text), header(text), top_level / mention(line…)
 
 use io.file
 use core.str
@@ -19,27 +18,9 @@ use core.process
 use selfhost.parser
 use selfhost.checker
 use workbench.check.limits.canon
+use workbench.agent.lens.jump
 
-ROOTS = ["core", "io", "selfhost"]
 LIMIT = 200
-
-skill path_of(subject) {
-    (str.ends_with(subject, ".saltic") == yes) { out subject }
-    @parts = str.split(subject, ".")
-    @tail = str.join(parts, "/")
-    @first = group.get(parts, 0)
-    @made = "{tail}.saltic"
-    (group.contains(ROOTS, first) == yes) { made = "soul/seed/{tail}.saltic" }
-    (first == "canonical") { made = "soul/{tail}.saltic" }
-    @text = file.read(made) rescue |err| { "" }
-    (str.bytes(text) > 0) { out made }
-    @last = group.get(parts, group.count(parts) - 1)
-    @folder = str.slice(made, 0, str.bytes(made) - 7)
-    @nested = "{folder}/{last}.saltic"
-    @inside = file.read(nested) rescue |err| { "" }
-    (str.bytes(inside) > 0) { out nested }
-    out error.NoModule
-}
 
 skill module(text) {
     (str.starts_with(text, "program(") == yes) { out no }
@@ -107,20 +88,6 @@ skill api(path) {
     out made
 }
 
-skill commented(line) {
-    drum (str.bytes(line)) {
-        @letter = str.get(line, beat)
-        ((letter == " ") == no) { out str.starts_with(str.slice(line, beat, str.bytes(line)), "--") }
-    }
-    out no
-}
-
-skill definition(line, name) {
-    (str.starts_with(line, "skill {name}(") == yes) { out yes }
-    (str.starts_with(line, "{name} = ") == yes) { out yes }
-    out no
-}
-
 skill mention(line, name) {
     (str.contains(line, ".{name}(") == yes) { out yes }
     (str.contains(line, " {name}(") == yes) { out yes }
@@ -131,6 +98,7 @@ skill mention(line, name) {
 }
 
 skill find(name) {
+    @seeker = jump.Jump {}
     @listed = process.capture(["git", "ls-files", "*.saltic"], "", [])
     @shown = 0
     @defined = []
@@ -144,9 +112,9 @@ skill find(name) {
                 drum (str.lines(text)) {
                     number = number + 1
                     @line = beat
-                    (commented(line) == no) {
-                        (definition(line, name) == yes) { defined = group.add(defined, "{path}:{number}: {line}") }
-                        (definition(line, name) == no) {
+                    (seeker.commented(line) == no) {
+                        (seeker.definition(line, name) == yes) { defined = group.add(defined, "{path}:{number}: {line}") }
+                        (seeker.definition(line, name) == no) {
                             (mention(line, name) == yes) {
                                 (group.count(used) < LIMIT) { used = group.add(used, "{path}:{number}: {line}") }
                             }

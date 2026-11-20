@@ -1,0 +1,388 @@
+-- jump — переход к определению: какое имя стоит в строке line, столбце column
+-- файла path (rows — строки, как сейчас в редакторе, с пустыми) и где оно
+-- родилось. По месту слова: со скобкой после — навык; после точки без скобки
+-- — часть хозяина (Agent.Point) или константа модуля; иначе сперва рождение
+-- в своём навыке (@имя =, |имя|, параметр) — ближайшее выше, потом Box, enum,
+-- константа. Строка use — файл модуля. Из найденных по проекту (git
+-- ls-files, без .archive) — сперва в этом файле, потом в файлах его use,
+-- иначе все. Строки — str.rows, с пустыми: номера совпадают с редактором. Зовут lens goto (VS Code) и SalticIDE (Ctrl+щелчок).
+--
+-- Place { path, line, column } — строка с единицы, столбец в буквах с нуля
+-- Word { text, start, called, field } — имя, его первая буква, стоит ли
+--     скобка после, стоит ли точка перед (без скобки)
+-- Jump { path, rows } — places(line, column) -> [Place]; пусто — не нашлось
+-- module_file(dotted) -> путь файла модуля, как у loader: seed, craft,
+--     canonical — в soul/, core, io, selfhost — в soul/seed/, остальное — от
+--     корня; a/b.saltic, a/b/b.saltic или вход папки a/b/main.saltic;
+--     NoModule. commented(line) -> строка — комментарий; definition(line,
+--     name) -> здесь ли родилось name: навык и вложенные Box/enum — с любым
+--     отступом, константа — с края (ими же ищет lens find)
+-- KEYWORDS — слова языка: по ним не ходим
+-- Внутри: aim(line, column) -> Word; named(letter) -> буква имени ли;
+--     local(line, name) / defined(name, called) -> [Place]; near() -> пути
+--     файлов из use; ranked(found) -> [Place]; indent(text) -> пробелов в
+--     начале; found_at(text, needle) -> байт начала или -1; readable(file_path)
+--     -> файл читается
+
+use io.file
+use core.str
+use core.group
+use core.process
+
+KEYWORDS = ["skill", "use", "out", "drum", "always", "leave", "rescue", "yes", "no", "none", "Box", "enum", "beat", "program", "pick", "native", "error"]
+SOUL = ["seed", "craft", "canonical"]
+SEED = ["core", "io", "selfhost"]
+
+Place = Box {
+    path = "",
+    line = 1,
+    column = 0
+}
+
+Word = Box {
+    text = "",
+    start = 0,
+    called = no,
+    field = no
+}
+
+Jump = Box {
+    path = "",
+    rows = []
+
+    skill readable(file_path) {
+        file.read(file_path) rescue |err| {
+            out no
+        }
+        out yes
+    }
+
+    skill module_file(dotted) {
+        (str.ends_with(dotted, ".saltic") == yes) {
+            out dotted
+        }
+        @parts = str.split(dotted, ".")
+        @tail = str.join(parts, "/")
+        @first = group.get(parts, 0)
+        @base = ""
+        (group.contains(SOUL, first) == yes) {
+            base = "soul/"
+        }
+        (group.contains(SEED, first) == yes) {
+            base = "soul/seed/"
+        }
+        @single = "{base}{tail}.saltic"
+        (readable(single) == yes) {
+            out single
+        }
+        @last = group.get(parts, group.count(parts) - 1)
+        @nested = "{base}{tail}/{last}.saltic"
+        (readable(nested) == yes) {
+            out nested
+        }
+        @entrance = "{base}{tail}/main.saltic"
+        (readable(entrance) == yes) {
+            out entrance
+        }
+        out error.NoModule
+    }
+
+    skill commented(line) {
+        drum (str.bytes(line)) {
+            ((str.get(line, beat) == " ") == no) {
+                out str.starts_with(str.slice(line, beat, str.bytes(line)), "--")
+            }
+        }
+        out no
+    }
+
+    skill definition(line, name) {
+        (str.starts_with(line, "{name} = ") == yes) {
+            out yes
+        }
+        @rest = str.slice(line, indent(line), str.bytes(line))
+        (str.starts_with(rest, "skill {name}(") == yes) {
+            out yes
+        }
+        (str.starts_with(rest, "{name} = Box") == yes) {
+            out yes
+        }
+        out str.starts_with(rest, "{name} = enum")
+    }
+
+    skill named(letter) {
+        (str.bytes(letter) > 1) {
+            out yes
+        }
+        @code = str.byte(letter, 0)
+        (code == 95) {
+            out yes
+        }
+        (code >= 48) {
+            (code <= 57) {
+                out yes
+            }
+        }
+        (code >= 65) {
+            (code <= 90) {
+                out yes
+            }
+        }
+        (code >= 97) {
+            (code <= 122) {
+                out yes
+            }
+        }
+        out no
+    }
+
+    skill indent(text) {
+        drum (str.bytes(text)) {
+            ((str.get(text, beat) == " ") == no) {
+                out beat
+            }
+        }
+        out str.bytes(text)
+    }
+
+    skill found_at(text, needle) {
+        drum (str.bytes(text)) {
+            (str.starts_at(text, needle, beat) == yes) {
+                out beat
+            }
+        }
+        out -1
+    }
+
+    skill aim(line, column) {
+        @letters = str.letters(group.get(rows, line - 1))
+        @count = group.count(letters)
+        @at = column
+        (at >= count) {
+            at = count - 1
+        }
+        (at < 0) {
+            out Word {}
+        }
+        (named(group.get(letters, at)) == no) {
+            (at == 0) {
+                out Word {}
+            }
+            at = at - 1
+            (named(group.get(letters, at)) == no) {
+                out Word {}
+            }
+        }
+        @start = at
+        always {
+            (start == 0) {
+                leave
+            }
+            (named(group.get(letters, start - 1)) == no) {
+                leave
+            }
+            start = start - 1
+        }
+        @end = at + 1
+        always {
+            (end == count) {
+                leave
+            }
+            (named(group.get(letters, end)) == no) {
+                leave
+            }
+            end = end + 1
+        }
+        @after = end
+        always {
+            (after == count) {
+                leave
+            }
+            ((group.get(letters, after) == " ") == no) {
+                leave
+            }
+            after = after + 1
+        }
+        @called = no
+        (after < count) {
+            called = (group.get(letters, after) == "(")
+        }
+        @field = no
+        (start > 0) {
+            (called == no) {
+                field = (group.get(letters, start - 1) == ".")
+            }
+        }
+        @text = str.join(group.slice(letters, start, end), "")
+        (group.contains(KEYWORDS, text) == yes) {
+            out Word {}
+        }
+        out Word {
+            text = text,
+            start = start,
+            called = called,
+            field = field
+        }
+    }
+
+    skill local(line, name) {
+        @row = line
+        always {
+            (row < 1) {
+                leave
+            }
+            @text = group.get(rows, row - 1)
+            @spaces = indent(text)
+            @trimmed = str.slice(text, spaces, str.bytes(text))
+            @head = str.starts_with(trimmed, "skill ")
+            (str.starts_with(trimmed, "program(") == yes) {
+                head = yes
+            }
+            (head == yes) {
+                @open = found_at(text, "(")
+                @close = found_at(text, ")")
+                (open < 0) {
+                    out []
+                }
+                (close < open) {
+                    out []
+                }
+                @inside = str.slice(text, open + 1, close)
+                drum (str.split(inside, ",")) {
+                    @part = beat
+                    @lead = indent(part)
+                    @param = str.slice(part, lead, str.bytes(part))
+                    (param == name) {
+                        @spot = open + 1 + found_at(inside, name)
+                        out [
+                            Place {
+                                path = path,
+                                line = row,
+                                column = str.count(str.slice(text, 0, spot))
+                            }
+                        ]
+                    }
+                }
+                out []
+            }
+            @born = str.starts_with(trimmed, "@{name} =")
+            (str.contains(text, "|{name}|") == yes) {
+                born = yes
+            }
+            (born == yes) {
+                out [
+                    Place {
+                        path = path,
+                        line = row,
+                        column = spaces
+                    }
+                ]
+            }
+            row = row - 1
+        }
+        out []
+    }
+
+    skill defined(name, called) {
+        @listed = process.capture(["git", "ls-files", "*.saltic"], "", [])
+        @found = []
+        drum (str.lines(listed.output)) {
+            @file_path = beat
+            (str.starts_with(file_path, ".archive/") == no) {
+                @text = file.read(file_path) rescue |err| {
+                    ""
+                }
+                (str.contains(text, name) == yes) {
+                    @number = 0
+                    drum (str.rows(text)) {
+                        number = number + 1
+                        @row = beat
+                        (commented(row) == no) {
+                            (definition(row, name) == yes) {
+                                @spaces = indent(row)
+                                @skilled = str.starts_with(str.slice(row, spaces, str.bytes(row)), "skill ")
+                                (skilled == called) {
+                                    found = group.add(found, Place {
+                                        path = file_path,
+                                        line = number,
+                                        column = spaces
+                                    })
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out found
+    }
+
+    skill near() {
+        @made = []
+        drum (rows) {
+            (str.starts_with(beat, "use ") == yes) {
+                @dotted = str.slice(beat, 4, str.bytes(beat))
+                @module_path = module_file(dotted) rescue |err| {
+                    ""
+                }
+                made = group.add(made, module_path)
+            }
+        }
+        out made
+    }
+
+    skill ranked(found) {
+        @here = []
+        @used = []
+        @modules = near()
+        drum (found) {
+            (beat.path == path) {
+                here = group.add(here, beat)
+            }
+            (group.contains(modules, beat.path) == yes) {
+                used = group.add(used, beat)
+            }
+        }
+        (group.count(here) > 0) {
+            out here
+        }
+        (group.count(used) > 0) {
+            out used
+        }
+        out found
+    }
+
+    skill places(line, column) {
+        (line < 1) {
+            out []
+        }
+        (line > group.count(rows)) {
+            out []
+        }
+        @text = group.get(rows, line - 1)
+        (str.starts_with(text, "use ") == yes) {
+            @dotted = str.slice(text, 4, str.bytes(text))
+            @module_path = module_file(dotted) rescue |err| {
+                out []
+            }
+            out [
+                Place {
+                    path = module_path
+                }
+            ]
+        }
+        @aimed = aim(line, column)
+        (aimed.text == "") {
+            out []
+        }
+        (aimed.called == no) {
+            (aimed.field == no) {
+                @born = local(line, aimed.text)
+                (group.count(born) > 0) {
+                    out born
+                }
+            }
+        }
+        out ranked(defined(aimed.text, aimed.called))
+    }
+}
