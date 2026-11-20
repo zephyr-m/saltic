@@ -1,0 +1,219 @@
+-- lists — перечни: всё, что идёт списком до закрывающего знака, — поля Box,
+-- аргументы, элементы группы, параметры, имена enum, тело Box, строки блока.
+-- Один разбор списка — sequence: элементы, запятые, переносы строк; запятая
+-- в конце — trailing_comma. Элемент разбирает тот, чей он: выражение —
+-- Expressions, инструкция — Statements, вложенный Box, enum и навык субъекта —
+-- Declarations (use по кругу — части одного разбора, решение автора 21.11.2026).
+--
+-- Lists = Box { look, leaves } — look — Reader, leaves — Literals; навыки:
+-- sequence(start, end_kind, item_kind, item_message, eof_message,
+--     require_separator, allow_comma) -> Read "sequence"; item_kind — name,
+--     expression, field, member, statement
+-- sequence_item(start, item_kind, item_message) -> Read одного элемента;
+--     field_item(start, item_message) -> Read "field" — имя = выражение
+-- names(start, end_kind, item_message) / params(start) -> Read списка имён
+-- expression_list(start, end_kind) / args(start) / fields(start) -> Read
+--     выражений, аргументов вызова, полей литерала Box
+-- words() / steps() / outline() -> соседи Expressions, Statements, Declarations
+--     на тех же look и leaves (держать их в полях нельзя — петля ссылок)
+
+use core.str
+use core.group
+use selfhost.errors
+use selfhost.parser.token
+use selfhost.parser.syntax.reader
+use selfhost.parser.syntax.literals
+use selfhost.parser.syntax.expressions
+use selfhost.parser.syntax.statements
+use selfhost.parser.syntax.declarations
+
+Lists = Box {
+    look = Reader {},
+    leaves = Literals {}
+
+    skill sequence(start, end_kind, item_kind, item_message, eof_message, require_separator, allow_comma) {
+        @items = []
+        @next = look.skip_lines(start)
+        @diagnostics = []
+        @stream = look.tokens
+        drum (stream.count()) {
+            (look.is(next, end_kind) == yes) {
+                next = next + 1
+                leave
+            }
+            (look.is(next, Token.Kind.EOF) == yes) {
+                @failure = look.fail(next, eof_message)
+                diagnostics = failure.diagnostics
+                leave
+            }
+            @item = sequence_item(next, item_kind, item_message)
+            (item.broken() == yes) {
+                diagnostics = item.diagnostics
+                leave
+            }
+            items = group.add(items, item.datum())
+            next = item.next
+            @separated = no
+            @comma = no
+            (allow_comma == yes) {
+                (look.is(next, Token.Kind.COMMA) == yes) {
+                    next = next + 1
+                    separated = yes
+                    comma = yes
+                }
+            }
+            @before_lines = next
+            next = look.skip_lines(next)
+            (next > before_lines) { separated = yes }
+            (item.node.tag == "field") {
+                @comma_message = look.field_comma_message(comma, look.field_follows(next))
+                (str.bytes(comma_message) > 0) {
+                    @comma_failure = look.fail(next, comma_message)
+                    diagnostics = comma_failure.diagnostics
+                    leave
+                }
+            }
+            (comma == yes) {
+                (look.is(next, end_kind) == yes) {
+                    @trailing_failure = look.fail_with(next, errors.trailing_comma())
+                    diagnostics = trailing_failure.diagnostics
+                    leave
+                }
+            }
+            (look.is(next, end_kind) == no) {
+                (require_separator == yes) {
+                    (separated == no) {
+                        @separator_failure = look.fail(next, "expected_separator")
+                        diagnostics = separator_failure.diagnostics
+                        leave
+                    }
+                }
+            }
+        }
+        out look.read(look.make_node("sequence", items), next, diagnostics)
+    }
+
+    skill sequence_item(start, item_kind, item_message) {
+        (item_kind == "name") {
+            (look.is(start, Token.Kind.IDENT) == no) {
+                out look.fail(start, item_message)
+            }
+            @word = look.at(start)
+            out look.ok("name", word.value, start + 1)
+        }
+        (item_kind == "expression") {
+            @speaking = words()
+            @value = speaking.expression(start)
+            (value.broken() == yes) {
+                out value
+            }
+            out look.ok("expression", value.datum(), value.next)
+        }
+        (item_kind == "field") {
+            out field_item(start, item_message)
+        }
+        (item_kind == "member") {
+            @outlining = outline()
+            (look.is(start, Token.Kind.IDENT) == yes) {
+                (look.field_follows(start) == no) {
+                    (look.is(start + 2, Token.Kind.ENUM) == yes) {
+                        @states = outlining.enum_declaration(start)
+                        (states.broken() == yes) {
+                            out states
+                        }
+                        out look.ok("member", states.datum(), states.next)
+                    }
+                    @inner = outlining.box_declaration(start)
+                    (inner.broken() == yes) {
+                        out inner
+                    }
+                    out look.ok("member", inner.datum(), inner.next)
+                }
+            }
+            (look.is(start, Token.Kind.SKILL) == yes) {
+                @member_skill = outlining.subject_skill(start)
+                (member_skill.broken() == yes) {
+                    out member_skill
+                }
+                out look.ok("member", member_skill.datum(), member_skill.next)
+            }
+            out field_item(start, item_message)
+        }
+        (item_kind == "statement") {
+            @stepping = steps()
+            @value = stepping.statement(start)
+            (value.broken() == yes) {
+                out value
+            }
+            out look.ok("statement", value.datum(), value.next)
+        }
+        out look.fail(start, item_message)
+    }
+
+    skill field_item(start, item_message) {
+        (look.is(start, Token.Kind.IDENT) == no) {
+            out look.fail(start, item_message)
+        }
+        @name_token = look.at(start)
+        @eq = look.expect(start + 1, Token.Kind.ASSIGN, "expected_field_equals")
+        (eq.broken() == yes) {
+            out eq
+        }
+        @speaking = words()
+        @value = speaking.expression(eq.next)
+        (value.broken() == yes) {
+            out value
+        }
+        out look.ok("field", ["field", name_token.value, value.datum()], value.next)
+    }
+
+    skill names(start, end_kind, item_message) {
+        @items = sequence(start, end_kind, "name", item_message, item_message, yes, yes)
+        out look.read(look.make_node("names", items.datum()), items.next, items.diagnostics)
+    }
+
+    skill params(start) {
+        @parsed_names = names(start, Token.Kind.RPAREN, "expected_parameter_name")
+        out look.read(look.make_node("params", parsed_names.datum()), parsed_names.next, parsed_names.diagnostics)
+    }
+
+    skill expression_list(start, end_kind) {
+        @items = sequence(start, end_kind, "expression", "expected_expression", "expected_closing_token", no, yes)
+        out look.read(look.make_node("expressions", items.datum()), items.next, items.diagnostics)
+    }
+
+    skill args(start) {
+        @list = expression_list(start + 1, Token.Kind.RPAREN)
+        out look.read(look.make_node("args", list.datum()), list.next, list.diagnostics)
+    }
+
+    skill fields(start) {
+        @open = look.expect(start, Token.Kind.LBRACE, "expected_open_brace")
+        (open.broken() == yes) {
+            out open
+        }
+        @list = sequence(open.next, Token.Kind.RBRACE, "field", "expected_field_name", "expected_close_brace", no, yes)
+        out look.read(look.make_node("fields", list.datum()), list.next, list.diagnostics)
+    }
+
+    skill words() {
+        out Expressions {
+            look = look,
+            leaves = leaves
+        }
+    }
+
+    skill steps() {
+        out Statements {
+            look = look,
+            leaves = leaves
+        }
+    }
+
+    skill outline() {
+        out Declarations {
+            look = look,
+            leaves = leaves
+        }
+    }
+}
