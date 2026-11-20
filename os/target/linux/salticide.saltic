@@ -4,25 +4,29 @@
 -- os.target.linux.screen, окно WIDE × HIGH; строк кода — сколько влезет (page.fit).
 -- Ввод — жестами (os/input/gestures, из ядра событий окна way_events): клик по
 -- «×» (цель close) — выход, по «–» (minimize) — свернуть окно, по строке кода
--- — курсор на неё, по полосе прокрутки — код туда же (page.click); колесо —
--- прокрутка дерева файлов или кода, где стоит мышь (page.wheel); Esc — выход.
--- Файлы — с диска (salticide/linux/disk): дерево от папки запуска, щелчок по
--- папке — раскрыть или свернуть, по файлу — открыть во вкладке, по вкладке — переключиться, по
--- крестику на ней — закрыть. На старте файлов нет — приветствие.
--- Поменялось — экран заново. Журнал — JOURNAL: каждый жест (место и цель) и
--- каждая перерисовка с кучей и побегами, строка дописывается сразу (dd),
--- чтобы при падении было видно, что нажимали перед ним.
--- Окно — субъект Window (как у Полигона): холст, шрифты, страница, диск и
--- runtime — его поля, то есть лежат в хранилище, а корневой регион программы
--- пуст. Так надо: пока в регионах занято больше 512 КБ, карантин хранилища
--- ничего не освобождает (MEMORY-MODEL, «Карантин и освобождение») — каждая
+-- — курсор туда (строка и столбец), по полосе прокрутки — код туда же
+-- (page.click); колесо — прокрутка дерева файлов или кода, где стоит мышь
+-- (page.wheel); Ctrl+щелчок по имени — к его определению (lens/jump, тот же,
+-- что у VS Code); набор и клавиши — правка (page.typed, page.press); Ctrl+S —
+-- сохранить активный файл (disk.write); Esc — выход. Выход (Esc или «×»), когда
+-- есть несохранённое, — сначала предупреждение в полосе, выход со второго раза.
+-- Файлы — с диска (salticide/linux/disk): дерево от папки запуска; папка —
+-- раскрыть, файл — во вкладку, крестик — закрыть. Поменялось — экран заново.
+-- Журнал — JOURNAL: жесты и перерисовки с кучей и побегами, дописывается
+-- сразу (dd), чтобы при падении было видно, что нажимали перед ним.
+-- Окно — субъект Window: холст, шрифты, страница, диск и runtime — его поля,
+-- в хранилище, а корневой регион пуст: иначе при занятых больше 512 КБ
+-- регионах карантин хранилища ничего не освобождает (MEMORY-MODEL) и каждая
 -- пересборка экрана оставалась бы в побегах навсегда.
 --
 -- Window { canvas, link, palette, view, files, runtime, reader, packet, hold,
---     joined } — start() — окно, шрифты, первый кадр; NoWindow; step() ->
---     no, когда пора выходить: один оборот — ввод, жесты, пересборка экрана
+--     joined, asked } — asked — о несохранённом при выходе уже предупредили;
+--     start() — окно, шрифты, ширина буквы кода, первый кадр; NoWindow; step()
+--     -> no, когда пора выходить: один оборот — ввод, жесты, пересборка
+--     экрана; leaving() -> можно ли выйти; save() — Ctrl+S; go() — Ctrl+щелчок
+-- CODE_SIZE — кегль кода (как у жителя code-token): по нему ширина буквы
 -- program() — вход; face(path) -> Typeface из файла; drawn(canvas, view,
---     palette) -> runtime нарисованной страницы; pressed(view, files, hit, y)
+--     palette) -> runtime нарисованной страницы; pressed(view, files, hit, x, y)
 --     -> yes, если щелчок что-то поменял (дерево — здесь, остальное — page);
 --     note(text) — строка в журнал со временем
 
@@ -45,7 +49,9 @@ use os.target.linux.screen
 use os.screen.graphics
 use tarantul.uiengine.draw.atoms
 use soft.development.salticide.page
+use soft.development.salticide.components.editor
 use os.input.gestures
+use workbench.agent.lens.jump
 use tarantul.uiengine.themes
 
 REGULAR = "os/fonts/inter/Inter-Regular.ttf"
@@ -56,6 +62,7 @@ TITLE = "SalticIDE"
 JOURNAL = ".cache/salticide.log"
 WIDE = 1600
 HIGH = 1000
+CODE_SIZE = 14
 
 skill face(path) {
     out typeface.from_bytes(file.read_bytes(path))
@@ -77,7 +84,7 @@ skill note(text) {
     out writer.code()
 }
 
-skill pressed(view, files, hit, y) {
+skill pressed(view, files, hit, x, y) {
     (str.starts_with(hit.id, project.FOLDER) == yes) {
         files.toggle(str.slice(hit.id, str.bytes(project.FOLDER), str.bytes(hit.id)))
         view.files(files.rows())
@@ -85,10 +92,11 @@ skill pressed(view, files, hit, y) {
     }
     (str.starts_with(hit.id, project.FILE) == yes) {
         @path = str.slice(hit.id, str.bytes(project.FILE), str.bytes(hit.id))
-        view.open(path, files.read(path))
+        @text = files.read(path)
+        view.open(path, text.lines, text.whole)
         out yes
     }
-    out view.click(hit, y)
+    out view.click(hit, x, y)
 }
 
 Window = Box {
@@ -101,7 +109,8 @@ Window = Box {
     reader = gestures.Reader {},
     packet = bytes.new(8192),
     hold = bytes.new(4096),
-    joined = bytes.new(12288)
+    joined = bytes.new(12288),
+    asked = no
 
     skill start() {
         @host = screen.sized(TITLE, WIDE, HIGH)
@@ -110,6 +119,7 @@ Window = Box {
         link = group.get(host, 1)
         @sheet = file.read_bytes(ICONS)
         palette = atoms.with_icons(atoms.with_faces(themes.named("site", canvas), face(REGULAR), face(BOLD), face(MONO)), icons.open(ttf.from_bytes(sheet), bytes.count(sheet)))
+        view.pane.advance = typeface.measure(palette.mono, "0", CODE_SIZE, 0)
         view.fit(canvas.height)
         view.files(files.rows())
         runtime = drawn(canvas, view, palette)
@@ -117,9 +127,65 @@ Window = Box {
         out note("старт: окно {WIDE}×{HIGH}")
     }
 
+    skill leaving() {
+        (view.unsaved() == no) {
+            out yes
+        }
+        (asked == yes) {
+            out yes
+        }
+        asked = yes
+        view.told("есть несохранённые файлы: Ctrl+S — сохранить, выход ещё раз — без сохранения")
+        runtime = drawn(canvas, view, palette)
+        screen.present(link)
+        out no
+    }
+
+    skill save() {
+        @path = view.pane.active
+        (path == "") {
+            out none
+        }
+        (view.pane.writable == no) {
+            out view.told("только чтение: {path} не сохранить")
+        }
+        files.write(path, view.pane.lines) rescue |err| {
+            note("не сохранён {path}: {err}")
+            out view.told("не сохранён {path}: {err}")
+        }
+        note("сохранён {path}")
+        out view.saved()
+    }
+
+    skill go() {
+        @pane = view.pane
+        @aiming = jump.Jump {
+            path = pane.active,
+            rows = pane.lines
+        }
+        @found = aiming.places(pane.light, pane.column)
+        (group.count(found) == 0) {
+            out view.told("не нашла, где родилось имя под курсором")
+        }
+        @target = group.get(found, 0)
+        note("к определению: {target.path}:{target.line}")
+        @text = files.read(target.path)
+        view.reach(target.path, text.lines, text.whole, target.line, target.column)
+        @more = group.count(found) - 1
+        (more > 0) {
+            view.told("с этим именем ещё мест: {more} — показала первое")
+        }
+        out none
+    }
+
     skill step() {
-        (link.way_closed == yes) { out no }
         (link.way_failed == yes) { out no }
+        (link.way_closed == yes) {
+            link.way_closed = no
+            (leaving() == yes) {
+                out no
+            }
+        }
         screen.pump(link, packet, hold, joined)
         @drained = reader.drain(link.way_events)
         link.way_events = drained.core
@@ -131,7 +197,31 @@ Window = Box {
                 note("клик {beat.x},{beat.y} → «{hit.id}»")
                 (hit.id == "close") { closing = yes }
                 (hit.id == "minimize") { screen.minimize(link) }
-                (pressed(view, files, hit, beat.y) == yes) { changed = yes }
+                (pressed(view, files, hit, beat.x, beat.y) == yes) { changed = yes }
+                (beat.ctrl == yes) {
+                    (str.starts_with(hit.id, editor.LINE) == yes) {
+                        go()
+                        changed = yes
+                    }
+                }
+            }
+            (beat.kind == gestures.Kind.TYPE) {
+                view.typed(beat.text)
+                changed = yes
+            }
+            (beat.kind == gestures.Kind.PRESS) {
+                note("клавиша {beat.text}, ctrl {beat.ctrl}")
+                pick {
+                    (beat.ctrl == yes) {
+                        (beat.text == "s") {
+                            save()
+                            changed = yes
+                        }
+                    }
+                    (view.press(beat.text) == yes) {
+                        changed = yes
+                    }
+                }
             }
             (beat.kind == gestures.Kind.WHEEL) {
                 note("колесо {beat.amount}")
@@ -139,7 +229,11 @@ Window = Box {
                 changed = yes
             }
         }
-        (closing == yes) { out no }
+        (closing == yes) {
+            (leaving() == yes) {
+                out no
+            }
+        }
         (changed == yes) {
             runtime = drawn(canvas, view, palette)
             screen.present(link)

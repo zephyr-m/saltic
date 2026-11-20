@@ -1,31 +1,34 @@
--- page — страница SalticIDE, уровень 5: Box Page держит компоненты — заголовок
--- (head), левую панель проекта (tree), редактор (pane), правую панель сборки
--- (side) и полосу режимов (foot), каждый — Box в своём файле
--- salticide/components, — и ставит их по местам: заголовок сверху, панели и
--- редактор в ряд с линиями между ними, режимы внизу. Своего вида у страницы
--- нет; тема — светлая 1 с сайта (docs/site/public/IDE.html). Открытые файлы —
--- docs: у каждого свои прокрутка и курсор; диск — у хозяина окна (Linux —
--- soft/development/salticide/linux/disk), страница получает строки дерева и
--- текст.
+-- page — страница SalticIDE, уровень 5: Box Page ставит компоненты
+-- salticide/components по местам — заголовок (head) сверху, дерево (tree) и
+-- редактор (pane) в ряд, полоса (foot) внизу; тема — светлая 1 с сайта.
+-- Открытые файлы — docs, у каждого свои прокрутка, курсор и правки. Диск — у
+-- хозяина окна (Linux — salticide/linux/disk): он даёт дерево и текст и
+-- сохраняет (saved — когда записал).
 --
--- Doc { path, lines, info, first, light } — открытый файл
--- Page { head, tree, pane, side, foot, docs }
+-- Doc { path, lines, info, first, light, column, dirty, writable } — файл
+-- Page { head, tree, pane, foot, docs, warned } — warned — о чьих правках уже
+--     предупредили при закрытии
 -- files(rows) — строки дерева проекта (project.Row)
--- open(path, lines) — открыть файл (уже открыт — переключиться)
--- close(path) — закрыть файл; был активным — активен последний, не осталось
---     ни одного — приветствие
+-- open(path, lines, writable) — открыть файл (уже открыт — переключиться);
+--     writable no — только читать (файл не целиком или не текст)
+-- close(path) — закрыть файл; правлен и не сохранён — сначала предупредить в
+--     полосе, закрыть со второго раза; был активным — активен последний, не
+--     осталось ни одного — приветствие
 -- show(path) — сделать открытый файл активным: редактор, вкладки, заголовок,
---     место в дереве, сводка сборки
--- opened(lines) -> Page — страница для файла lines (разбор подсветки — один на всех)
+--     место в дереве, место курсора; reach(path, lines, writable, line,
+--     column) — открыть и поставить курсор (переход к определению)
+-- typed(text) — набор; press(name) -> yes, если клавиша что-то сделала;
+--     saved() — хозяин записал; told(text) — в полосу; unsaved() -> yes/no
+-- opened(lines) -> Page — образец lines (code.PATH), только читать
 -- jtml() -> текст страницы
 -- fit(height) — экран высотой height: строк кода — сколько влезет между
---     заголовком, вкладками и полосой режимов (CHROME точек на них), дереву —
---     всё между заголовком и режимами (FRAME точек на них)
--- wheel(steps, x) — колесо в точке x: левее project.WIDTH — прокрутка дерева,
---     иначе кода; click(hit, y) -> yes, если щелчок
---     что-то поменял: hit — jtml.hit под точкой высоты y; строка кода — курсор
---     и место в полосе режимов, полоса прокрутки — код туда же, вкладка —
---     её файл, крестик на вкладке — закрыть её файл
+--     заголовком, вкладками и полосой (CHROME точек на них), дереву — всё
+--     между заголовком и полосой (FRAME точек на них)
+-- wheel(steps, x) — колесо: левее project.WIDTH — дерево, иначе код;
+--     click(hit, x, y) -> yes, если щелчок что-то поменял (hit — jtml.hit):
+--     строка кода — курсор, полоса прокрутки — код туда, вкладка — её файл,
+--     крестик — закрыть
+-- Внутри: dirty_of(path) -> правлен ли файл; edited() — после правки
 
 use core.str
 use core.group
@@ -35,43 +38,78 @@ use soft.development.salticide.syntax
 use soft.development.salticide.components.title
 use soft.development.salticide.components.project
 use soft.development.salticide.components.editor
-use soft.development.salticide.components.build
-use soft.development.salticide.components.modes
+use soft.development.salticide.components.status
+
 
 CHROME = 147
 FRAME = 90
+
 
 Doc = Box {
     path = "",
     lines = [],
     info = syntax.Info {},
     first = 1,
-    light = 1
+    light = 1,
+    column = 0,
+    dirty = no,
+    writable = yes
 }
 
 Page = Box {
     head = title.TitleBar {},
     tree = project.Project {},
     pane = editor.Editor {},
-    side = build.Build {},
-    foot = modes.Modes {},
-    docs = []
+    foot = status.StatusBar {},
+    docs = [],
+    warned = ""
 
     skill files(rows) {
         tree.rows = rows
         out tree.scroll(0)
     }
 
-    skill open(path, lines) {
+    skill open(path, lines, writable) {
         @known = no
         drum (docs) {
-            (beat.path == path) { known = yes }
+            (beat.path == path) {
+                known = yes
+            }
         }
-        (known == no) { docs = group.add(docs, Doc { path = path, lines = lines, info = syntax.scan(lines) }) }
+        (known == no) {
+            @fresh = Doc {
+                path = path,
+                lines = lines,
+                info = syntax.scan(lines),
+                writable = writable
+            }
+            docs = group.add(docs, fresh)
+        }
         out show(path)
     }
 
+    skill dirty_of(path) {
+        (path == pane.active) {
+            out pane.dirty
+        }
+        drum (docs) {
+            (beat.path == path) {
+                out beat.dirty
+            }
+        }
+        out no
+    }
+
     skill close(path) {
+        (dirty_of(path) == yes) {
+            ((warned == path) == no) {
+                warned = path
+                foot.note = "{path} не сохранён: Ctrl+S — сохранить, × ещё раз — закрыть без сохранения"
+                out none
+            }
+        }
+        warned = ""
+        foot.note = ""
         @left = []
         @paths = []
         drum (docs) {
@@ -82,15 +120,20 @@ Page = Box {
         }
         docs = left
         pane.tabs = paths
-        ((pane.active == path) == no) { out none }
-        (group.count(docs) > 0) { out show(group.get(paths, group.count(paths) - 1)) }
+        ((pane.active == path) == no) {
+            out none
+        }
+        (group.count(docs) > 0) {
+            out show(group.get(paths, group.count(paths) - 1))
+        }
         pane.lines = []
         pane.info = syntax.Info {}
         pane.active = ""
         pane.first = 1
+        pane.light = 1
+        pane.column = 0
+        pane.dirty = no
         tree.current = ""
-        side.lines = []
-        side.info = syntax.Info {}
         head.path = ""
         foot.place = "1:1"
         out tree.scroll(0)
@@ -103,10 +146,16 @@ Page = Box {
         drum (docs) {
             @doc = beat
             (doc.path == pane.active) {
+                doc.lines = pane.lines
+                doc.info = pane.info
                 doc.first = pane.first
                 doc.light = pane.light
+                doc.column = pane.column
+                doc.dirty = pane.dirty
             }
-            (doc.path == path) { chosen = doc }
+            (doc.path == path) {
+                chosen = doc
+            }
             made = group.add(made, doc)
             paths = group.add(paths, doc.path)
         }
@@ -115,14 +164,76 @@ Page = Box {
         pane.info = chosen.info
         pane.first = chosen.first
         pane.light = chosen.light
+        pane.column = chosen.column
+        pane.dirty = chosen.dirty
+        pane.writable = chosen.writable
         pane.tabs = paths
         pane.active = path
         tree.current = path
-        side.lines = chosen.lines
-        side.info = chosen.info
         head.path = path
-        foot.place = "{chosen.light}:1"
+        foot.place = pane.place()
+        foot.note = ""
+        (chosen.writable == no) {
+            foot.note = "только чтение: файл не текст или открыт не целиком"
+        }
         out none
+    }
+
+    skill reach(path, lines, writable, line, column) {
+        open(path, lines, writable)
+        pane.light = line
+        pane.column = column
+        pane.follow()
+        foot.place = pane.place()
+        out none
+    }
+
+    skill edited() {
+        warned = ""
+        foot.place = pane.place()
+        out none
+    }
+
+    skill typed(text) {
+        (pane.active == "") {
+            out none
+        }
+        pane.typed(text)
+        out edited()
+    }
+
+    skill press(name) {
+        (pane.active == "") {
+            out no
+        }
+        (pane.press(name) == no) {
+            out no
+        }
+        edited()
+        out yes
+    }
+
+    skill saved() {
+        pane.dirty = no
+        foot.note = "сохранено: {pane.active}"
+        out none
+    }
+
+    skill told(text) {
+        foot.note = text
+        out none
+    }
+
+    skill unsaved() {
+        (pane.dirty == yes) {
+            out yes
+        }
+        drum (docs) {
+            (beat.dirty == yes) {
+                out yes
+            }
+        }
+        out no
     }
 
     skill fit(height) {
@@ -132,11 +243,13 @@ Page = Box {
     }
 
     skill wheel(steps, x) {
-        (x < project.WIDTH) { out tree.scroll(steps) }
+        (x < project.WIDTH) {
+            out tree.scroll(steps)
+        }
         out pane.scroll(steps)
     }
 
-    skill click(hit, y) {
+    skill click(hit, x, y) {
         (str.starts_with(hit.id, editor.CLOSE) == yes) {
             close(str.slice(hit.id, str.bytes(editor.CLOSE), str.bytes(hit.id)))
             out yes
@@ -149,15 +262,17 @@ Page = Box {
             pane.jump(y - hit.y, hit.height)
             out yes
         }
-        (pane.point(hit.id) == no) { out no }
-        foot.place = "{pane.light}:1"
+        (pane.point(hit.id, x - hit.x) == no) {
+            out no
+        }
+        foot.place = pane.place()
         out yes
     }
 
     skill jtml() {
         @line = calls.call("bar", [["height", "1"], ["tone", calls.quoted("line")]])
         @upright = calls.call("bar", [["width", "1"], ["tone", calls.quoted("line")]])
-        @middle = calls.join([tree.jtml(), upright, pane.jtml(), upright, side.jtml()])
+        @middle = calls.join([tree.jtml(), upright, pane.jtml()])
         @top = head.jtml()
         @bottom = foot.jtml()
         out "\{\"box\": \{\"fill\": \"ground\", \"gap\": 0, \"children\": [{top}, {line}, \{\"box\": \{\"flow\": \"row\", \"grow\": 1, \"gap\": 0, \"children\": [{middle}]\}\}, {line}, {bottom}]\}\}"
@@ -165,6 +280,12 @@ Page = Box {
 }
 
 skill opened(lines) {
-    @info = syntax.scan(lines)
-    out Page { head = title.TitleBar { path = code.PATH }, pane = editor.Editor { lines = lines, info = info }, side = build.Build { lines = lines, info = info } }
+    @view = Page {
+        head = title.TitleBar {
+            path = code.PATH
+        }
+    }
+    view.open(code.PATH, lines, no)
+    view.told("образец с сайта — только чтение")
+    out view
 }

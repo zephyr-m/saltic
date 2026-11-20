@@ -1,23 +1,34 @@
 -- editor — редактор SalticIDE: вкладки и shown строк открытого файла с
--- подсветкой по смыслу (salticide/syntax), начиная с first; строка light —
--- под курсором; вид — житель editor, строки — code-line из code-token (id
--- строки — LINE и номер, по нему щелчок ставит курсор); переменные (info)
--- переливаются в цвет текста, как на сайте.
+-- подсветкой по смыслу (salticide/syntax), начиная с first; курсор — строка
+-- light и столбец column (в буквах, с нуля), в строке курсора — черта; вид —
+-- житель editor, строки — code-line из code-token (id строки — LINE и номер,
+-- по нему щелчок ставит курсор). Правка: набор, Enter (с отступом строки),
+-- Backspace, Delete, Tab (INDENT), стрелки, Home, End, страницы; writable no —
+-- только читать.
 --
--- Editor { lines, info, first, light, shown, tabs, active } — строки файла,
---     разбор, первая показанная строка, строка курсора, сколько строк влезает
---     (SHOWN, пока страница не скажет иначе: page.fit), пути открытых файлов
---     и путь активного; вкладок нет — образец с сайта, а нет и строк —
+-- Editor { lines, info, first, light, column, advance, shown, tabs, active,
+--     dirty, writable } — строки файла, разбор, первая показанная строка,
+--     курсор, ширина буквы кода в точках (её знает хозяин окна — шрифт у
+--     него), сколько строк влезает (SHOWN, пока страница не скажет иначе:
+--     page.fit), пути открытых файлов и путь активного, правлен ли с
+--     открытия или сохранения, можно ли править; нет ни вкладок, ни строк —
 --     приветствие (WELCOME); jtml() -> текст JTML
 -- TAB — начало id вкладки (дальше путь): щелчок переключает файл; CLOSE —
 --     начало id крестика на вкладке: щелчок закрывает файл
--- ROW — высота строки кода в точках
+-- ROW — высота строки кода в точках; GUTTER — точек от края строки до кода
+--     (номер и отступ жителя code-line)
 -- scroll(steps) — прокрутка на STEP строк за шаг колеса, в пределах файла
--- point(id) -> yes, если id — строка кода: курсор на неё
+-- point(id, x) -> yes, если id — строка кода: курсор на неё, x — точек от
+--     края строки, по нему столбец
 -- jump(at, high) — щелчок по полосе прокрутки (TRACK) на высоте at из high:
 --     туда же и код; полоса — житель scrollbar, ползунок — видимая часть файла
--- Внутри: row(number) — строка кода жителем code-line; tab(path) — вкладка; last() — самая нижняя
---     первая строка; bar() — полоса прокрутки; greeting() — строки приветствия
+-- typed(text) — набран знак: ⌫ — стереть назад, «\n» — новая строка, «\t» —
+--     INDENT, «&» — звено RING «○» (два раза — «○○»), иначе вставить; press(name) -> yes, если клавиша — движение
+--     или Delete; place() -> «строка:столбец» с единицы
+-- Внутри: row, token, caret — вид строки, куска и черты курсора; spelled /
+--     size — буквы строки и их число; rewrite / cut — строку заново, убрать;
+--     changed — разбор и dirty после правки; follow — курсор на виду; tab,
+--     last, bar, greeting — вкладка, нижняя первая строка, полоса, привет
 
 use core.str
 use core.group
@@ -28,52 +39,118 @@ use soft.development.salticide.syntax
 SHOWN = 35
 STEP = 3
 ROW = 20
+GUTTER = 58
 LEAST = 24
+INDENT = "    "
+RING = "○"
 TRACK = "scroll-track"
 LINE = "line-"
 TAB = "tab:"
 CLOSE = "close:"
-WELCOME = ["Открой файл в дереве слева — он появится во вкладке.", "Колесо над деревом листает файлы, над кодом — код.", "Крестик на вкладке закрывает файл."]
+WELCOME = ["Открой файл в дереве слева — он появится во вкладке.", "Колесо над деревом листает файлы, над кодом — код.", "Ctrl+S сохраняет, крестик на вкладке закрывает файл."]
 
 Editor = Box {
     lines = [],
     info = syntax.Info {},
     first = 1,
-    light = 24,
+    light = 1,
+    column = 0,
+    advance = 8,
     shown = SHOWN,
     tabs = [],
-    active = ""
+    active = "",
+    dirty = no,
+    writable = yes
+
+    skill token(text, tone) {
+        @fade = ""
+        (tone == "info") {
+            fade = "ink"
+        }
+        out calls.call("code-token", [["text", calls.quoted(text)], ["tone", calls.quoted(tone)], ["fade", calls.quoted(fade)]])
+    }
+
+    skill caret() {
+        @high = ROW - 4
+        out calls.call("bar", [["width", "2"], ["height", "{high}"], ["tone", calls.quoted("ink")], ["radius", "0"]])
+    }
 
     skill row(number) {
         @tokens = []
+        @spent = 0
+        @placed = yes
+        (number == light) {
+            placed = no
+        }
         drum (syntax.line(group.get(lines, number - 1), number, info)) {
-            @fade = ""
-            (beat.tone == "info") { fade = "ink" }
-            tokens = group.add(tokens, calls.call("code-token", [["text", calls.quoted(beat.value)], ["tone", calls.quoted(beat.tone)], ["fade", calls.quoted(fade)]]))
+            @piece = beat
+            @count = str.count(piece.value)
+            @inside = no
+            (placed == no) {
+                (column <= spent + count) {
+                    inside = yes
+                }
+            }
+            pick {
+                (inside == yes) {
+                    @letters = str.letters(piece.value)
+                    @head = str.join(group.slice(letters, 0, column - spent), "")
+                    @tail = str.join(group.slice(letters, column - spent, count), "")
+                    (str.bytes(head) > 0) {
+                        tokens = group.add(tokens, token(head, piece.tone))
+                    }
+                    tokens = group.add(tokens, caret())
+                    (str.bytes(tail) > 0) {
+                        tokens = group.add(tokens, token(tail, piece.tone))
+                    }
+                    placed = yes
+                }
+                {
+                    tokens = group.add(tokens, token(piece.value, piece.tone))
+                }
+            }
+            spent = spent + count
+        }
+        (placed == no) {
+            tokens = group.add(tokens, caret())
         }
         @tone = ""
-        (number == light) { tone = "select" }
+        (number == light) {
+            tone = "select"
+        }
         out calls.call("code-line", [["id", calls.quoted("{LINE}{number}")], ["number", calls.quoted("{number}")], ["tokens", calls.listed(tokens)], ["tone", calls.quoted(tone)]])
     }
 
     skill last() {
         @bottom = group.count(lines) - shown + 1
-        (bottom < 1) { out 1 }
+        (bottom < 1) {
+            out 1
+        }
         out bottom
     }
 
     skill scroll(steps) {
         first = first + steps * STEP
-        (first > last()) { first = last() }
-        (first < 1) { first = 1 }
+        (first > last()) {
+            first = last()
+        }
+        (first < 1) {
+            first = 1
+        }
         out none
     }
 
     skill jump(at, high) {
-        (high < 1) { out none }
+        (high < 1) {
+            out none
+        }
         first = 1 + (last() - 1) * at / high
-        (first > last()) { first = last() }
-        (first < 1) { first = 1 }
+        (first > last()) {
+            first = last()
+        }
+        (first < 1) {
+            first = 1
+        }
         out none
     }
 
@@ -81,47 +158,254 @@ Editor = Box {
         @track = shown * ROW
         @size = track
         @total = group.count(lines)
-        (total > shown) { size = track * shown / total }
-        (size < LEAST) { size = LEAST }
+        (total > shown) {
+            size = track * shown / total
+        }
+        (size < LEAST) {
+            size = LEAST
+        }
         @offset = 0
-        (last() > 1) { offset = (track - size) * (first - 1) / (last() - 1) }
+        (last() > 1) {
+            offset = (track - size) * (first - 1) / (last() - 1)
+        }
         out calls.call("scrollbar", [["id", calls.quoted(TRACK)], ["offset", "{offset}"], ["size", "{size}"], ["height", "{track}"]])
     }
 
-    skill point(id) {
-        (str.starts_with(id, LINE) == no) { out no }
+    skill spelled(number) {
+        out str.letters(group.get(lines, number - 1))
+    }
+
+    skill size(number) {
+        out str.count(group.get(lines, number - 1))
+    }
+
+    skill place() {
+        @shown_column = column + 1
+        out "{light}:{shown_column}"
+    }
+
+    skill follow() {
+        (light < first) {
+            first = light
+        }
+        (light >= first + shown) {
+            first = light - shown + 1
+        }
+        (first < 1) {
+            first = 1
+        }
+        (column > size(light)) {
+            column = size(light)
+        }
+        out none
+    }
+
+    skill point(id, x) {
+        (str.starts_with(id, LINE) == no) {
+            out no
+        }
         light = parse.parse_size(str.slice(id, str.bytes(LINE), str.bytes(id)))
+        column = (x - GUTTER + advance / 2) / advance
+        (column < 0) {
+            column = 0
+        }
+        follow()
         out yes
+    }
+
+    skill rewrite(number, text) {
+        lines = group.replaced(lines, number - 1, text)
+        out none
+    }
+
+    skill cut(number) {
+        lines = group.concat(group.slice(lines, 0, number - 1), group.slice(lines, number, group.count(lines)))
+        out none
+    }
+
+    skill changed() {
+        info = syntax.scan(lines)
+        dirty = yes
+        out follow()
+    }
+
+    skill typed(text) {
+        (writable == no) {
+            out none
+        }
+        @letters = spelled(light)
+        @head = str.join(group.slice(letters, 0, column), "")
+        @tail = str.join(group.slice(letters, column, group.count(letters)), "")
+        (text == "⌫") {
+            (column > 0) {
+                rewrite(light, str.concat(str.join(group.slice(letters, 0, column - 1), ""), tail))
+                column = column - 1
+                out changed()
+            }
+            (light == 1) {
+                out none
+            }
+            column = size(light - 1)
+            rewrite(light - 1, str.concat(group.get(lines, light - 2), tail))
+            cut(light)
+            light = light - 1
+            out changed()
+        }
+        (text == "\n") {
+            @indent = ""
+            @spaces = yes
+            drum (letters) {
+                ((beat == " ") == no) {
+                    spaces = no
+                }
+                (spaces == yes) {
+                    (str.bytes(indent) < column) {
+                        indent = str.concat(indent, " ")
+                    }
+                }
+            }
+            rewrite(light, head)
+            lines = group.concat(group.add(group.slice(lines, 0, light), str.concat(indent, tail)), group.slice(lines, light, group.count(lines)))
+            light = light + 1
+            column = str.bytes(indent)
+            out changed()
+        }
+        @put = text
+        (text == "\t") {
+            put = INDENT
+        }
+        (text == "&") {
+            put = RING
+        }
+        rewrite(light, "{head}{put}{tail}")
+        column = column + str.count(put)
+        out changed()
+    }
+
+    skill press(name) {
+        (name == "left") {
+            pick {
+                (column > 0) {
+                    column = column - 1
+                }
+                (light > 1) {
+                    light = light - 1
+                    column = size(light)
+                }
+            }
+            out yes
+        }
+        (name == "right") {
+            pick {
+                (column < size(light)) {
+                    column = column + 1
+                }
+                (light < group.count(lines)) {
+                    light = light + 1
+                    column = 0
+                }
+            }
+            follow()
+            out yes
+        }
+        (name == "up") {
+            (light > 1) {
+                light = light - 1
+            }
+            follow()
+            out yes
+        }
+        (name == "down") {
+            (light < group.count(lines)) {
+                light = light + 1
+            }
+            follow()
+            out yes
+        }
+        (name == "home") {
+            column = 0
+            out yes
+        }
+        (name == "end") {
+            column = size(light)
+            out yes
+        }
+        (name == "page_up") {
+            light = light - shown
+            (light < 1) {
+                light = 1
+            }
+            follow()
+            out yes
+        }
+        (name == "page_down") {
+            light = light + shown
+            (light > group.count(lines)) {
+                light = group.count(lines)
+            }
+            follow()
+            out yes
+        }
+        (name == "delete") {
+            (writable == no) {
+                out yes
+            }
+            @letters = spelled(light)
+            (column < group.count(letters)) {
+                rewrite(light, str.concat(str.join(group.slice(letters, 0, column), ""), str.join(group.slice(letters, column + 1, group.count(letters)), "")))
+                changed()
+                out yes
+            }
+            (light < group.count(lines)) {
+                rewrite(light, str.concat(group.get(lines, light - 1), group.get(lines, light)))
+                cut(light + 1)
+                changed()
+            }
+            out yes
+        }
+        out no
     }
 
     skill tab(path) {
         @parts = str.split(path, "/")
         @name = group.get(parts, group.count(parts) - 1)
         @kind = "tab"
-        (path == active) { kind = "tab-active" }
+        (path == active) {
+            kind = "tab-active"
+        }
+        (path == active) {
+            (dirty == yes) {
+                name = "● {name}"
+            }
+        }
         out calls.call(kind, [["id", calls.quoted("{TAB}{path}")], ["text", calls.quoted(name)], ["close", calls.quoted("{CLOSE}{path}")]])
     }
 
     skill greeting() {
         @rows = [calls.call("headline", [["text", calls.quoted("SalticIDE")]])]
-        drum (WELCOME) { rows = group.add(rows, calls.call("hint", [["text", calls.quoted(beat)]])) }
+        drum (WELCOME) {
+            rows = group.add(rows, calls.call("hint", [["text", calls.quoted(beat)]]))
+        }
         @inside = calls.join(rows)
         out ["\{\"box\": \{\"padding\": [24, 24, 24, 24], \"gap\": 10, \"children\": [{inside}]\}\}"]
     }
 
     skill jtml() {
-        @heads = [calls.call("tab-active", [["id", calls.quoted("")], ["text", calls.quoted("actor.saltic")]]), calls.call("tab", [["id", calls.quoted("")], ["text", calls.quoted("stamp.saltic")]])]
-        (group.count(tabs) > 0) {
-            heads = []
-            drum (tabs) { heads = group.add(heads, tab(beat)) }
+        @heads = []
+        drum (tabs) {
+            heads = group.add(heads, tab(beat))
         }
         (group.count(lines) == 0) {
-            (group.count(tabs) == 0) { out calls.call("editor", [["tabs", calls.listed([])], ["lines", calls.listed(greeting())], ["scroll", bar()]]) }
+            out calls.call("editor", [["tabs", calls.listed(heads)], ["lines", calls.listed(greeting())], ["scroll", bar()]])
         }
         @rows = []
         @count = shown
-        (group.count(lines) - first + 1 < count) { count = group.count(lines) - first + 1 }
-        drum (count) { rows = group.add(rows, row(first + beat)) }
+        (group.count(lines) - first + 1 < count) {
+            count = group.count(lines) - first + 1
+        }
+        drum (count) {
+            rows = group.add(rows, row(first + beat))
+        }
         out calls.call("editor", [["tabs", calls.listed(heads)], ["lines", calls.listed(rows)], ["scroll", bar()]])
     }
 }

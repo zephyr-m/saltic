@@ -1,23 +1,31 @@
 -- gestures — ядро жестов, верхнее над ядром событий os/input/events
 -- (docs/os/EVENTS.md): изменения нижнего ядра → жесты фиксированного словаря
 -- (первая версия, решение автора 17.11.2026): клик, двойной клик, колесо,
--- набор текста. Программа своих жестов не задаёт, словарь пополняет автор.
+-- набор текста; с 21.11 — нажатие клавиши без знака (стрелки, Home, End,
+-- Delete, страницы) и Ctrl. Программа своих жестов не задаёт, словарь
+-- пополняет автор.
 -- Канал не важен: мышь, другая машина или агент дают те же изменения.
 -- Имена нижнего ядра — POINTER_X / POINTER_Y (место, events.pair),
 -- POINTER_LEFT (счётчик нажатий левой, events.bump), POINTER_WHEEL (сумма
--- шагов колеса: вниз — плюс), TYPED (счётчик набранного, знак — в text).
+-- шагов колеса: вниз — плюс), TYPED (счётчик набранного, знак — в text),
+-- KEY и имя клавиши (key.left… — счётчик нажатий, events.bump), CTRL (1 —
+-- зажат, 0 — отпущен). Знак, набранный с зажатым Ctrl, — не набор, а нажатие
+-- PRESS с этим знаком (Ctrl+S — PRESS «s», ctrl yes); у клика тоже есть ctrl.
 -- Место жеста — где был указатель в момент изменения; что под ним, решает
 -- программа (jtml.hit) — переезд попадания сюда ещё впереди.
 --
--- Kind — CLICK, DOUBLE, WHEEL, TYPE
--- Gesture { kind, x, y, amount, text, time } — amount — шагов колеса
+-- Kind — CLICK, DOUBLE, WHEEL, TYPE, PRESS
+-- Gesture { kind, x, y, amount, text, ctrl, time } — amount — шагов колеса,
+--     text — знак набора или имя клавиши нажатия (left, right, up, down, home,
+--     end, delete, page_up, page_down — без KEY), ctrl — зажат ли Ctrl
 -- Drained { core, gestures } — ядро без прочитанного и жесты по порядку
--- Reader { x, y, wheel, last_time, last_x, last_y } — что ядро жестов
+-- Reader { x, y, wheel, ctrl, last_time, last_x, last_y } — что ядро жестов
 --     помнит между изменениями: read(change) -> [Gesture] (клик — один, клик
 --     рядом и вскоре после прошлого — ещё и двойной); drain(core) -> Drained
 -- DOUBLE_TIME — мс между кликами двойного; NEAR — на сколько точек можно
 --     сдвинуться между ними
 
+use core.str
 use core.group
 use os.input.events
 
@@ -26,6 +34,8 @@ POINTER_Y = "pointer.y"
 POINTER_LEFT = "pointer.left"
 POINTER_WHEEL = "pointer.wheel"
 TYPED = "keyboard.typed"
+KEY = "key."
+CTRL = "key.ctrl"
 DOUBLE_TIME = 400
 NEAR = 4
 
@@ -33,7 +43,8 @@ Kind = enum {
     CLICK,
     DOUBLE,
     WHEEL,
-    TYPE
+    TYPE,
+    PRESS
 }
 
 Gesture = Box {
@@ -42,6 +53,7 @@ Gesture = Box {
     y = 0,
     amount = 0,
     text = "",
+    ctrl = no,
     time = 0
 }
 
@@ -59,6 +71,7 @@ Reader = Box {
     x = 0,
     y = 0,
     wheel = 0,
+    ctrl = no,
     last_time = -1000000,
     last_x = -1000,
     last_y = -1000
@@ -73,7 +86,15 @@ Reader = Box {
             out []
         }
         (change.id == POINTER_LEFT) {
-            @made = [Gesture { kind = Kind.CLICK, x = x, y = y, time = change.time }]
+            @made = [
+                Gesture {
+                    kind = Kind.CLICK,
+                    x = x,
+                    y = y,
+                    ctrl = ctrl,
+                    time = change.time
+                }
+            ]
             @quick = change.time - last_time <= DOUBLE_TIME
             (apart(x, last_x) > NEAR) { quick = no }
             (apart(y, last_y) > NEAR) { quick = no }
@@ -91,7 +112,38 @@ Reader = Box {
             wheel = change.number
             out [Gesture { kind = Kind.WHEEL, x = x, y = y, amount = step, time = change.time }]
         }
-        (change.id == TYPED) { out [Gesture { kind = Kind.TYPE, x = x, y = y, text = change.text, time = change.time }] }
+        (change.id == CTRL) {
+            ctrl = change.number == 1
+            out []
+        }
+        (str.starts_with(change.id, KEY) == yes) {
+            out [
+                Gesture {
+                    kind = Kind.PRESS,
+                    x = x,
+                    y = y,
+                    text = str.slice(change.id, str.bytes(KEY), str.bytes(change.id)),
+                    ctrl = ctrl,
+                    time = change.time
+                }
+            ]
+        }
+        (change.id == TYPED) {
+            @kind = Kind.TYPE
+            (ctrl == yes) {
+                kind = Kind.PRESS
+            }
+            out [
+                Gesture {
+                    kind = kind,
+                    x = x,
+                    y = y,
+                    text = change.text,
+                    ctrl = ctrl,
+                    time = change.time
+                }
+            ]
+        }
         out []
     }
 

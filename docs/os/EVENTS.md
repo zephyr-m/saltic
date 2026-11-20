@@ -70,9 +70,13 @@ Saltic.
 - `os/input/events.saltic` — ядро: `Change`, `Core`, `change`, `pair`, `bump`,
   `tick`, `current`, `take`.
 - `os/input/gestures.saltic` — ядро жестов, словарь первой версии (решение
-  автора 17.11.2026): клик, двойной клик, колесо, набор текста. Имена нижнего
-  ядра — `pointer.x`, `pointer.y`, `pointer.left`, `pointer.wheel`,
-  `keyboard.typed`; `Reader.drain(core)` — жесты по порядку.
+  автора 17.11.2026): клик, двойной клик, колесо, набор текста; 21.11 —
+  нажатие клавиши без знака (стрелки, Home, End, Delete, страницы) и Ctrl
+  (для редактора SalticIDE). Имена нижнего ядра — `pointer.x`, `pointer.y`,
+  `pointer.left`, `pointer.wheel`, `keyboard.typed`, `key.<имя>` (счётчик
+  нажатий), `key.ctrl` (1 — зажат, 0 — отпущен). Знак, набранный с Ctrl, —
+  нажатие, а не набор (Ctrl+S); у клика пометка ctrl. `Reader.drain(core)` —
+  жесты по порядку.
 - Сырой ввод → изменения: окно Wayland (`os/target/linux/screen.saltic`,
   `way_events`; байты протокола — `os/target/linux/wire.saltic`), время — из
   событий Wayland. Первая программа на жестах — SalticIDE в Linux (общая часть —
