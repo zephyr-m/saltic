@@ -1,0 +1,151 @@
+-- passes — первый проход по верхнему уровню: таблица глобальных имён (use,
+-- константа, enum, Box, навык, native, варианты), повторы, нет program,
+-- одна арность у метода одного имени во всей программе (Q-045).
+
+use core.str
+use core.group
+use selfhost.ast
+use selfhost.diagnostic
+use selfhost.errors
+use selfhost.abi.call
+use selfhost.checker.names
+use selfhost.checker.notes
+use selfhost.checker.rules.numbers
+use selfhost.checker.types
+
+Passes = Box {
+    register = Names {},
+    journal = Notes {},
+    typing = Types {}
+
+    Result = Box {
+        diagnostics = [],
+        globals = [],
+        tree = []
+    }
+
+    skill source(module, path) {
+        (str.bytes(module) > 0) {
+            out module
+        }
+        out path
+    }
+
+    skill method_arities(result, item, box_name) {
+        drum (group.count(ast.plain(item)) - 2) {
+            @member = ast.part(item, beat + 2)
+            (ast.tag(member) == "subject-skill") {
+                @method = ast.part(member, 1)
+                @count = group.count(ast.part(member, 2))
+                @key = "__method__|{method}"
+                @seen = register.table_find(result.globals, key)
+                pick {
+                    (str.bytes(seen.name) == 0) { result.globals = register.table_put_node(result.globals, key, box_name, "{count}", member) }
+                    (seen.kind == box_name) { }
+                    (("{count}" == seen.type) == no) {
+                        @other = ast.part(seen.node, 2)
+                        result.diagnostics = journal.add_diagnostic(result.diagnostics, journal.placed(member, errors.method_arity(method, box_name, count, group.count(other))))
+                    }
+                }
+            }
+        }
+        out result
+    }
+
+    skill nested_name(globals, module, own, name) {
+        @parts = str.split(own, ".")
+        (group.count(parts) < 2) {
+            out globals
+        }
+        @key = ast.alias_key(module, group.get(parts, group.count(parts) - 1))
+        @old = register.table_find(globals, key)
+        (str.bytes(old.name) == 0) {
+            out register.table_put(globals, key, "nest", name)
+        }
+        (old.kind == "nest") {
+            out register.table_update(globals, key, names.AMBIGUOUS)
+        }
+        out globals
+    }
+
+    skill collect(program_ast, path, wide) {
+        @result = Result {}
+        (wide == yes) { result.globals = register.table_put(result.globals, numbers.WIDE_MARK, "flag", "yes") }
+        @program_seen = no
+        drum (group.count(program_ast) - 1) {
+            @item = group.get(program_ast, beat + 1)
+            @tag = ast.tag(item)
+            @module = ast.module_name(item)
+            @first = group.count(result.diagnostics)
+            @name = ""
+            @kind = ""
+            (tag == "use") {
+                @target = ast.path_text(item)
+                @plain_use = ast.plain(item)
+                @alias = group.get(plain_use, group.count(plain_use) - 1)
+                @alias_key = ast.alias_key(module, alias)
+                @old_alias = register.table_find(result.globals, alias_key)
+                pick {
+                    (str.bytes(old_alias.name) > 0) {
+                        ((old_alias.type == target) == no) { result.diagnostics = journal.add_diagnostic(result.diagnostics, journal.placed(item, errors.duplicate_alias(alias))) }
+                    }
+                    { result.globals = register.table_put(result.globals, alias_key, "import", target) }
+                }
+            }
+            (tag == "entry") {
+                (program_seen == yes) { result.diagnostics = journal.add_diagnostic(result.diagnostics, journal.placed(item, errors.duplicate_program())) }
+                program_seen = yes
+            }
+            (tag == "const") { name = ast.qualified(module, ast.part(item, 1)) kind = "const" }
+            (tag == "enum") {
+                name = ast.qualified(module, ast.part(item, 1))
+                kind = "enum"
+                result.globals = nested_name(result.globals, module, ast.part(item, 1), name)
+            }
+            (tag == "box") {
+                name = ast.qualified(module, ast.part(item, 1))
+                kind = "box"
+                result = method_arities(result, item, name)
+                result.globals = nested_name(result.globals, module, ast.part(item, 1), name)
+            }
+            (tag == "skill") { name = ast.qualified(module, ast.part(item, 1)) kind = "skill" }
+            (tag == "native") { name = ast.qualified(module, ast.part(item, 1)) kind = "native" }
+            (str.bytes(name) > 0) {
+                @type = "unknown"
+                (kind == "const") { type = typing.type_in_module(ast.part(item, 2), module, result.globals) }
+                (kind == "enum") { type = "enum-type" }
+                (kind == "box") { type = "box-type" }
+                (kind == "skill") { type = "function" }
+                (kind == "native") { type = "function" }
+                pick {
+                    (register.table_has(result.globals, name) == yes) {
+                        result.diagnostics = journal.add_diagnostic(result.diagnostics, journal.placed(item, errors.duplicate_global(name)))
+                    }
+                    {
+                        result.globals = register.table_put_node(result.globals, name, kind, type, item)
+                        (kind == "enum") {
+                            drum (ast.enum_variant_count(item)) {
+                                @variant = ast.enum_variant(item, beat)
+                                @own_key = register.enum_variant_key(name, variant)
+                                @short = register.table_find(result.globals, register.variant_key(variant))
+                                pick {
+                                    (register.table_has(result.globals, own_key) == yes) {
+                                        result.diagnostics = journal.add_diagnostic(result.diagnostics, journal.placed(item, errors.duplicate_enum_variant(variant)))
+                                    }
+                                    (str.bytes(short.name) > 0) { result.globals = register.table_update(result.globals, short.name, names.AMBIGUOUS) }
+                                    { result.globals = register.table_put_node(result.globals, register.variant_key(variant), "enum-variant", "enum:{name}", item) }
+                                }
+                                result.globals = register.table_put_node(result.globals, own_key, "enum-variant", "enum:{name}", item)
+                            }
+                        }
+                    }
+                }
+            }
+            result.diagnostics = diagnostic.in_module(result.diagnostics, first, source(module, path))
+        }
+        (program_seen == no) {
+            result.diagnostics = journal.add_diagnostic(result.diagnostics, diagnostic.place(errors.missing_program(), path, 1, 1))
+        }
+        out result
+    }
+}

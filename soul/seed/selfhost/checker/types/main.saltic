@@ -1,0 +1,392 @@
+-- types — вывод типа выражения: литерал, путь, вызов, блок; тип поля Box,
+-- навык субъекта для прямого вызова, есть ли у Box навык, вариант у enum.
+
+use core.str
+use core.group
+use selfhost.ast
+use selfhost.errors
+use core.num
+use selfhost.intrinsic.contract
+use selfhost.checker.names
+use selfhost.checker.names.paths
+use selfhost.checker.notes
+use selfhost.checker.types.shapes
+
+Types = Box {
+    register = Names {},
+    journal = Notes {},
+    routes = Paths {},
+    forms = Shapes {}
+
+    skill literal_type(node) {
+        @tag = ast.tag(node)
+        (tag == "number") {
+            out "number"
+        }
+        (tag == "wide-number") {
+            out "number"
+        }
+        (tag == "fraction-number") {
+            out "fraction"
+        }
+        (tag == "string") {
+            out "string"
+        }
+        (tag == "template") {
+            out "string"
+        }
+        (tag == "answer") {
+            out "answer"
+        }
+        (tag == "none") {
+            out "none"
+        }
+        (tag == "group") {
+            @type = "unknown"
+            @plain = ast.plain(node)
+            drum (group.count(plain) - 1) {
+                type = forms.merge_types(type, literal_type(group.get(plain, beat + 1)))
+            }
+            out forms.group_type(type)
+        }
+        (tag == "box-new") {
+            out forms.box_type(ast.part(node, 1))
+        }
+        out "unknown"
+    }
+
+    skill field_type(node, module, globals) {
+        (ast.tag(node) == "call") {
+            @module_scope = Names.Scope {
+                module = module
+            }
+            @callee = routes.call_name(ast.plain(ast.call_callee(node)), module_scope, globals)
+            (str.bytes(contract.conversion(contract.find(callee))) > 0) {
+                out "number"
+            }
+        }
+        out type_in_module(node, module, globals)
+    }
+
+    skill type_in_module(node, module, globals) {
+        out resolve_type(literal_type(node), module, globals)
+    }
+
+    skill resolve_type(type, module, globals) {
+        (forms.is_group_type(type) == yes) {
+            out forms.group_type(resolve_type(forms.group_item_type(type), module, globals))
+        }
+        (forms.is_box_type(type) == yes) {
+            @name = forms.box_name(type)
+            @resolved = routes.resolve_name(name, module, globals)
+            (str.bytes(resolved) > 0) {
+                out forms.box_type(resolved)
+            }
+        }
+        out type
+    }
+
+    skill box_field(globals, box_name, field_name) {
+        @box = register.table_find(globals, box_name)
+        @member = forms.box_member(box.node, field_name)
+        (group.count(member) == 0) {
+            out Names.Name {}
+        }
+        out Names.Name {
+            name = field_name,
+            kind = "field",
+            type = forms.stored(field_type(ast.part(member, 2), ast.name_module(box_name), globals)),
+            node = member
+        }
+    }
+
+    skill method_key(callee, scope, globals) {
+        @parts = ast.plain(callee)
+        ((group.get(parts, 0) == "path") == no) {
+            out ""
+        }
+        @count = group.count(parts)
+        @box = ""
+        (count == 2) { box = scope.subject }
+        (count == 3) { box = forms.box_name(path_type(["path", group.get(parts, 1)], scope, globals)) }
+        (forms.is_box_type(ast.type_of(callee)) == yes) { box = forms.box_name(ast.type_of(callee)) }
+        (str.bytes(box) == 0) {
+            out ""
+        }
+        @skill_name = group.get(parts, count - 1)
+        @found = register.table_find(globals, box)
+        ((found.kind == "box") == no) {
+            out ""
+        }
+        drum (group.count(ast.plain(found.node)) - 2) {
+            @member = ast.part(found.node, beat + 2)
+            (ast.tag(member) == "subject-skill") {
+                (ast.part(member, 1) == skill_name) {
+                    out "{box}.{skill_name}"
+                }
+            }
+        }
+        out ""
+    }
+
+    skill path_type(node, scope, globals) {
+        @parts = ast.plain(node)
+        @count = group.count(parts)
+        @name = group.get(parts, 1)
+        @resolved = routes.resolve_path(node, scope, globals)
+        (str.bytes(resolved) > 0) {
+            @resolved_name = register.table_find(globals, resolved)
+            out resolved_name.type
+        }
+        (count > 2) {
+            @resolved_enum = routes.resolve_name(ast.path_prefix(node), scope.module, globals)
+            @enum_symbol = register.table_find(globals, resolved_enum)
+            (enum_symbol.kind == "enum") {
+                out "enum:{resolved_enum}"
+            }
+        }
+        (count == 2) {
+            @local = register.find_name(scope.names, name)
+            (str.bytes(local.name) > 0) {
+                out local.type
+            }
+            @global = routes.find_visible(globals, scope.module, name)
+            (str.bytes(global.name) > 0) {
+                out global.type
+            }
+            (name == "error") {
+                out "error"
+            }
+            out "unknown"
+        }
+        (name == "error") {
+            out "error"
+        }
+        @enum_model = routes.find_visible(globals, scope.module, name)
+        (enum_model.kind == "enum") {
+            (count == 3) {
+                out "enum:{name}"
+            }
+        }
+        @local_value = register.find_name(scope.names, name)
+        @type = local_value.type
+        (type == "unknown") {
+            @global_value = routes.find_visible(globals, scope.module, name)
+            type = global_value.type
+        }
+        drum (count - 2) {
+            pick {
+                (forms.is_box_type(type) == yes) {
+                    @field = box_field(globals, forms.box_name(type), group.get(parts, beat + 2))
+                    type = field.type
+                }
+                { type = "unknown" }
+            }
+        }
+        out type
+    }
+
+    skill call_type(node, scope, globals) {
+        @plain = ast.plain(node)
+        @callee = ast.plain(group.get(plain, 1))
+        (group.get(callee, 0) == "path") {
+            @name = group.get(callee, 1)
+            @part_count = group.count(callee)
+            (part_count == 2) {
+                @box_name = routes.resolve_name(name, scope.module, globals)
+                @global = register.table_find(globals, box_name)
+                (global.kind == "box") {
+                    out "box:{box_name}"
+                }
+            }
+            @full = routes.call_name(callee, scope, globals)
+            @input_type = "unknown"
+            (group.count(plain) > 2) { input_type = value_type(group.get(plain, 2), scope, globals) }
+            @method = method_key(group.get(plain, 1), scope, globals)
+            (str.bytes(method) > 0) {
+                @returned = register.table_find(globals, register.result_key(method))
+                (str.bytes(returned.name) > 0) {
+                    out returned.type
+                }
+            }
+            @inferred = register.table_find(globals, register.result_key(routes.resolve_path(callee, scope, globals)))
+            (str.bytes(inferred.name) > 0) {
+                out inferred.type
+            }
+            @kind = contract.find(full)
+            @result_type = contract.result(kind, input_type)
+            (result_type == "group-item") {
+                out forms.group_item_type(input_type)
+            }
+            @stored_at = -1
+            (result_type == "group-add") { stored_at = 3 }
+            (result_type == "group-replaced") { stored_at = 4 }
+            (stored_at > 0) {
+                @item_type = "unknown"
+                (group.count(plain) > stored_at) { item_type = value_type(group.get(plain, stored_at), scope, globals) }
+                out forms.group_type(forms.merge_types(forms.group_item_type(input_type), forms.stored(item_type)))
+            }
+            ((result_type == "unknown") == no) {
+                out result_type
+            }
+        }
+        out "unknown"
+    }
+
+    skill block_value_type(block, scope, globals) {
+        @plain = ast.plain(block)
+        @count = group.count(plain)
+        (count == 1) {
+            out "none"
+        }
+        @last = ast.plain(group.get(plain, count - 1))
+        @tag = group.get(last, 0)
+        (tag == "expr") {
+            out value_type(group.get(last, 1), scope, globals)
+        }
+        (tag == "out") {
+            out "unknown"
+        }
+        (tag == "leave") {
+            out "unknown"
+        }
+        out "none"
+    }
+
+    skill value_type(node, scope, globals) {
+        @plain = ast.plain(node)
+        @tag = group.get(plain, 0)
+        (tag == "number") {
+            out "number"
+        }
+        (tag == "wide-number") {
+            out "number"
+        }
+        (tag == "fraction-number") {
+            out "fraction"
+        }
+        (tag == "string") {
+            out "string"
+        }
+        (tag == "template") {
+            out "string"
+        }
+        (tag == "answer") {
+            out "answer"
+        }
+        (tag == "none") {
+            out "none"
+        }
+        (tag == "enum-value") {
+            out "unknown"
+        }
+        (tag == "path") {
+            out path_type(node, scope, globals)
+        }
+        (tag == "box-new") {
+            @box_name = routes.resolve_name(group.get(plain, 1), scope.module, globals)
+            (str.bytes(box_name) == 0) {
+                out "unknown"
+            }
+            out "box:{box_name}"
+        }
+        (tag == "call") {
+            out call_type(node, scope, globals)
+        }
+        (tag == "group") {
+            @type = "unknown"
+            drum (group.count(plain) - 1) {
+                type = forms.merge_types(type, forms.stored(value_type(group.get(plain, beat + 1), scope, globals)))
+            }
+            out forms.group_type(type)
+        }
+        (tag == "negate") {
+            @operand = value_type(group.get(plain, 1), scope, globals)
+            (operand == "unknown") {
+                out "number"
+            }
+            out operand
+        }
+        (tag == "logic") {
+            out "answer"
+        }
+        (tag == "binary") {
+            @operator = group.get(plain, 1)
+            (operator == "==") {
+                out "answer"
+            }
+            (operator == ">") {
+                out "answer"
+            }
+            (operator == "<") {
+                out "answer"
+            }
+            (operator == ">=") {
+                out "answer"
+            }
+            (operator == "<=") {
+                out "answer"
+            }
+            (operator == "~=") {
+                out "answer"
+            }
+            @left_type = value_type(group.get(plain, 2), scope, globals)
+            (contract.is_fixed_type(left_type) == yes) {
+                out left_type
+            }
+            @right_type = value_type(group.get(plain, 3), scope, globals)
+            (contract.is_fixed_type(right_type) == yes) {
+                out right_type
+            }
+            (left_type == "fraction") {
+                out "fraction"
+            }
+            (right_type == "fraction") {
+                out "fraction"
+            }
+            out "number"
+        }
+        (tag == "rescue") {
+            @left = value_type(group.get(plain, 1), scope, globals)
+            @child = Names.Scope {
+                names = scope.names,
+                subject = scope.subject,
+                module = scope.module
+            }
+            child.names = register.put_name(child.names, group.get(plain, 2), "variable", "error")
+            out forms.merge_types(left, block_value_type(group.get(plain, 3), child, globals))
+        }
+        out "unknown"
+    }
+
+    skill box_has_skill(globals, box_name, skill_name) {
+        @box = register.table_find(globals, box_name)
+        ((box.kind == "box") == no) {
+            out no
+        }
+        out box_node_has_skill(box.node, skill_name)
+    }
+
+    skill box_node_has_skill(node, skill_name) {
+        drum (group.count(ast.plain(node)) - 2) {
+            @member = ast.part(node, beat + 2)
+            (ast.tag(member) == "subject-skill") {
+                (ast.part(member, 1) == skill_name) {
+                    out yes
+                }
+            }
+        }
+        out no
+    }
+
+    skill enum_has(globals, enum_name, variant) {
+        @model = register.table_find(globals, enum_name)
+        drum (ast.enum_variant_count(model.node)) {
+            (ast.enum_variant(model.node, beat) == variant) {
+                out yes
+            }
+        }
+        out no
+    }
+
+}
