@@ -1,9 +1,5 @@
--- architect — первая ступень сборки (architect → parser → checker → compiler),
--- вход папки architect/ (use selfhost.architect): из каких файлов состоит
--- программа и как они связаны. Читает главный файл, идёт по его use, отдаёт
--- одно дерево из всех файлов. Что написано внутри файлов — дело парсера и
--- чекера; архитектор только спрашивает у парсера, кого файл подключает.
--- Зона и законы — README.md рядом, единая архитектура — docs/laws/ARCHITECTURE.md.
+-- architect — первая ступень сборки (architect → parser → checker → compiler):
+-- главный файл и все его use -> одно дерево. Зона и законы — README.md рядом.
 --
 -- Путь модуля — от root: seed/craft/canonical -> soul/, core/io/selfhost ->
 -- soul/seed/, остальное — как есть. Два корня (решение автора 17.11.2026):
@@ -14,13 +10,15 @@
 -- пропускается, и use по кругу тоже (решение автора 21.11.2026: модули — граф,
 -- не дерево; файл уже в пути — он уже подгружается); вложенные Box и enum
 -- поднимаются наверх (parser.nest).
--- Модуль из нескольких файлов — папка со входом main.saltic (решение автора
--- 20.11.2026): use a.b ищет a/b.saltic, а если его нет — a/b/main.saltic.
+-- use a.b ищет a/b.saltic, иначе a/b/main.saltic (20.11.2026). Законы пока —
+-- советы, не ошибки (21.11.2026): «один способ» — файл и папка того же имени
+-- рядом — совет module_doubled; сборка идёт, told печатает советы построчно.
 --
 -- Architect = Box { root, locations, eyes } — корень проекта, ставить ли узлам
 --     место, eyes — Reader для склейки групп:
---     Load — Box { ast, included, diagnostics } — итог
+--     Load — Box { ast, included, diagnostics, advice } — итог; advice — советы
 --     gather(path) -> Load — программа из файла и всех его use
+--     told(load) — печатает советы итога, по строке на совет
 --     expand(path, included, stack, module_name, place) -> Load; place =
 --         [строка, столбец] узла use, которым файл подключён ([0, 0] у корня)
 --     join_path(base, relative) -> путь; module_path(parts, under) -> путь к
@@ -28,8 +26,10 @@
 --         located(parts) -> путь модуля: в проекте, а если там нет и дом задан —
 --         в доме; entrance(parts, under) -> файл модуля или main.saltic его папки;
 --         found(path) -> yes, если файл читается; failure(path, problem,
---         included, place) -> Load с одной ошибкой; MAIN — имя входа папки
+--         included, place) -> Load с одной ошибкой; MAIN — имя входа папки;
+--         doubled(path) -> yes, если рядом с файлом папка того же имени
 
+use io
 use io.file
 use core.str
 use core.group
@@ -52,7 +52,8 @@ Architect = Box {
     Load = Box {
         ast = [],
         included = [],
-        diagnostics = []
+        diagnostics = [],
+        advice = []
     }
 
     skill join_path(base, relative) {
@@ -130,6 +131,14 @@ Architect = Box {
         out entrance(parts, other)
     }
 
+    skill doubled(path) {
+        @folder = str.slice(path, 0, str.bytes(path) - str.bytes(".saltic"))
+        file.list(folder) rescue |err| {
+            out no
+        }
+        out yes
+    }
+
     skill failure(path, problem, included, place) {
         out Load {
             ast = ["program"],
@@ -157,6 +166,10 @@ Architect = Box {
         @next_included = group.add(included, path)
         @source = file.read(path) rescue |error| {
             out failure(importer, errors.module_not_found(name), next_included, place)
+        }
+        @advice = []
+        (doubled(path) == yes) {
+            advice = [diagnostic.place(errors.module_doubled(name), importer, group.get(place, 0), group.get(place, 1))]
         }
         @reading = Syntax {
             path = path,
@@ -197,6 +210,7 @@ Architect = Box {
                 @module_file = located(parts)
                 @loaded = expand(module_file, next_included, next_stack, str.join(parts, "."), ast.location(item))
                 next_included = loaded.included
+                advice = group.concat(advice, loaded.advice)
                 (group.count(loaded.diagnostics) > 0) {
                     diagnostics = loaded.diagnostics
                     leave
@@ -207,11 +221,19 @@ Architect = Box {
         out Load {
             ast = output,
             included = next_included,
-            diagnostics = diagnostics
+            diagnostics = diagnostics,
+            advice = advice
         }
     }
 
     skill gather(path) {
         out expand(path, [], [], "", [0, 0])
+    }
+
+    skill told(load) {
+        drum (load.advice) {
+            io.show("архитектор советует: {beat.message}")
+        }
+        out none
     }
 }
