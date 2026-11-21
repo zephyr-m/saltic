@@ -1,38 +1,31 @@
 -- layout — программа в сборке, общая для всех исполнителей: секции
 -- code/rodata/data/bss, метки, общие правки (patch) и их разрешение в адреса.
--- Program — значение, каждый навык отдаёт его обновлённым; после любого
--- изменения resolved = no, перед записью нужен resolve. Метки — хеш-корзины.
--- Раскладка: rodata выровнена на 8, data на 4096, bss на 8 после data.
--- Правки семьи (переходы RISC-V…) — у чинильщика семьи в Program.fixer:
--- resolve чинит общие сам, остальное отдаёт fixer.fixed; общее не знает семью.
+-- Program — хозяин своих навыков (СОП, 22.11.2026): меняет себя на месте,
+-- после изменения resolved = no. Правки семьи — у чинильщика в Program.fixer:
+-- resolve чинит общие сам (resolve_own), остальное отдаёт fixer.fixed.
+-- Раскладка: rodata на 8, data на 4096, bss на 8 после data. Метки — хеш-корзины.
 --
 -- Section = enum { CODE, RODATA, DATA, BSS }; PatchKind = enum { ADDRESS_WORD, REL32, ABS32 }
--- Label { name, section, offset, present, next } / LabelBucket { labels } — в корзине копии меток без next:
---     метка с next ведёт ко всем новым, и проверка цикла при записи в корзину обходила бы их все
--- Patch { kind, section, offset, label, addend } — REL32: 4 байта rel32 от конца
---     поля, ABS32 — адрес метки + addend, ADDRESS_WORD — слово-адрес в секции
--- Layout { code_offset, rodata_offset, data_offset, bss_offset, file_size, memory_size (wide) }
--- Program { load_address, low_memory_size, entry, code, rodata, data, bss_size (wide),
---     heap_size (wide: куча последняя в bss, может быть больше 4 ГБ), labels_*, …, fixer }
+-- Label { name, section, offset, present, next } / LabelBucket { labels } — в корзине
+--     копии меток без next (иначе проверка цикла обходила бы все новые)
+-- Patch { kind, section, offset, label, addend } — REL32: rel32 от конца поля,
+--     ABS32 — адрес метки + addend, ADDRESS_WORD — слово-адрес в секции
+-- Layout { code_offset, rodata_offset, data_offset, bss_offset, file_size, memory_size }
+-- Program { load_address, low_memory_size, entry, code, rodata, data, bss_size,
+--     heap_size, labels_*, patches_*, resolved, far_calls, encoding_errors, fixer }:
+--     меняют: emit_word(word), note_patch(Patch), define_label(section, name) —
+--     DuplicateLabel, reserve_bss(wide), align_section(section, boundary),
+--     append_section_byte / _word / _text(section, …), append_label_address(section,
+--     label, addend), set_section_word(section, offset, word), assign_section,
+--     resolve_patch(layout, patch) — UnknownPatch, resolve_own() — InstructionEncoding;
+--     отвечают: section_buffer / section_length(section), find_label(name) -> Label,
+--     layout() -> Layout, label_offset(layout, name) / label_address(layout, name,
+--     addend) — UnknownLabel, patches() -> сколько правок ждёт (общие и семьи)
 -- host(entry) / qemu_virt(entry) -> Program (адрес 65536 с низкой памятью / 0x80000000)
 -- word_address(b0, b1, b2, b3) / address_from_number(n) / address_add(word, n) -> Word;
---     InvalidAddress, AddressOverflow
--- align(value, boundary) -> число; InvalidAlignment
--- section_buffer / section_length(program, section); assign_section(program, section, buffer)
--- align_buffer(buffer, boundary) -> buffer; emit_word(program, word) — слово в код
--- note_patch(program, Patch) — правка без байтов, offset задаёт вызывающий
--- append_label_address(program, section, label, addend) — слово-адрес в секцию
--- define_label(program, section, name); DuplicateLabel; find_label(program, name) -> Label
--- label_hash / label_bucket / index_label — внутренности поиска меток
--- reserve_bss(program, wide) / align_section(program, section, boundary)
--- append_section_byte / append_section_word / append_section_text(program, section, …)
--- set_section_word(program, section, offset, word)
--- layout(program) -> Layout; section_offset(layout, section)
--- label_offset(program, layout, name) / label_address(program, layout, name, addend);
---     UnknownLabel
--- resolve_patch(program, layout, patch); UnknownPatch
--- patches(program) -> сколько правок ждёт: общие и семьи (fixer.count)
--- resolve(program) -> Program; InstructionEncoding, UnresolvedPatch
+--     InvalidAddress, AddressOverflow; align(value, boundary) — InvalidAlignment
+-- align_buffer(buffer, boundary); label_hash / index_label; section_offset(layout, section)
+-- resolve(program) -> Program — общие правки и правки семьи; UnresolvedPatch
 
 use core.str
 use core.group
@@ -108,6 +101,235 @@ Program = Box {
     far_calls = no,
     encoding_errors = 0,
     fixer = none
+
+    skill assign_section(section, target) {
+        (section == Section.CODE) { code = target }
+        (section == Section.RODATA) { rodata = target }
+        (section == Section.DATA) { data = target }
+        resolved = no
+        out none
+    }
+
+    skill emit_word(encoded) {
+        code = buffer.append_word(code, encoded)
+        resolved = no
+        out none
+    }
+
+    skill note_patch(patch) {
+        (patch_count == 0) { patches_first = patch }
+        (patch_count > 0) { patches_last.next = patch }
+        patches_last = patch
+        patch_count = patch_count + 1
+        resolved = no
+        out none
+    }
+
+    skill define_label(section, name) {
+        @old = find_label(name)
+        (old.present == yes) { out error.DuplicateLabel }
+        @label = Label {
+            name = name,
+            section = section,
+            offset = section_length(section),
+            present = yes
+        }
+        (label_count == 0) { labels_first = label }
+        (label_count > 0) { labels_last.next = label }
+        labels_last = label
+        label_count = label_count + 1
+        index_label(label_bucket(name), Label { name = name, section = section, offset = label.offset, present = yes })
+        resolved = no
+        out none
+    }
+
+    skill reserve_bss(count) {
+        bss_size = wide.add(bss_size, count)
+        resolved = no
+        out none
+    }
+
+    skill append_section_byte(section, byte) {
+        @target = section_buffer(section)
+        target = buffer.append_byte(target, byte)
+        assign_section(section, target)
+        out none
+    }
+
+    skill append_section_word(section, data_value) {
+        @target = section_buffer(section)
+        target = buffer.append_word(target, data_value)
+        assign_section(section, target)
+        out none
+    }
+
+    skill append_section_text(section, text, terminated) {
+        @target = section_buffer(section)
+        target = buffer.append_text(target, text)
+        (terminated == yes) { target = buffer.append_byte(target, 0) }
+        assign_section(section, target)
+        out none
+    }
+
+    skill align_section(section, boundary) {
+        (section == Section.BSS) {
+            bss_size = wide.align(bss_size, boundary)
+            resolved = no
+            out none
+        }
+        @target = section_buffer(section)
+        target = align_buffer(target, boundary)
+        assign_section(section, target)
+        out none
+    }
+
+    skill append_label_address(section, label, addend) {
+        @target = section_buffer(section)
+        @offset = target.length
+        target = buffer.append_word(target, word.from_bytes(0, 0, 0, 0))
+        assign_section(section, target)
+        @patch = Patch {
+            kind = PatchKind.ADDRESS_WORD,
+            section = section,
+            offset = offset,
+            label = label,
+            addend = addend
+        }
+        (patch_count == 0) { patches_first = patch }
+        (patch_count > 0) { patches_last.next = patch }
+        patches_last = patch
+        patch_count = patch_count + 1
+        resolved = no
+        out none
+    }
+
+    skill set_section_word(section, offset, data_value) {
+        @target = section_buffer(section)
+        target = buffer.set_word(target, offset, data_value)
+        assign_section(section, target)
+        out none
+    }
+
+    skill resolve_patch(current_layout, patch) {
+        @label_base = label_offset(current_layout, patch.label) rescue |failure| {
+            (str.bytes(patch.label) > 0) {
+                @problem = errors.missing_label(patch.label)
+                io.show(problem.message)
+            }
+            out error.UnknownLabel
+        }
+        @target_offset = label_base + patch.addend
+        (patch.kind == PatchKind.ADDRESS_WORD) {
+            @target = label_address(current_layout, patch.label, patch.addend)
+            set_section_word(patch.section, patch.offset, target)
+            out none
+        }
+        (patch.kind == PatchKind.REL32) {
+            @distance = target_offset - patch.offset - 4
+            set_section_word(Section.CODE, patch.offset, word.from_signed(distance))
+            out none
+        }
+        (patch.kind == PatchKind.ABS32) {
+            @target = label_address(current_layout, patch.label, patch.addend)
+            set_section_word(Section.CODE, patch.offset, target)
+            out none
+        }
+        out error.UnknownPatch
+    }
+
+    skill resolve_own() {
+        (encoding_errors > 0) {
+            @problem = errors.encoding_failed(encoding_errors)
+            io.show(problem.message)
+            out error.InstructionEncoding
+        }
+        @current_layout = layout()
+        @patch = patches_first
+        drum (patch_count) {
+            (patch) |item| {
+                resolve_patch(current_layout, item) rescue |failure| {
+                    out error.UnresolvedPatch
+                }
+                patch = item.next
+            }
+        }
+        out none
+    }
+
+    skill section_buffer(section) {
+        (section == Section.CODE) { out code }
+        (section == Section.RODATA) { out rodata }
+        (section == Section.DATA) { out data }
+        out error.SectionHasNoFileData
+    }
+
+    skill section_length(section) {
+        (section == Section.CODE) { out code.length }
+        (section == Section.RODATA) { out rodata.length }
+        (section == Section.DATA) { out data.length }
+        out wide.to_word(bss_size)
+    }
+
+    skill label_bucket(name) {
+        (group.count(label_buckets) == 0) {
+            @buckets = []
+            drum (LABEL_BUCKETS) { buckets = group.add(buckets, LabelBucket {}) }
+            label_buckets = buckets
+        }
+        out group.get(label_buckets, label_hash(name))
+    }
+
+    skill find_label(name) {
+        (label_count == 0) { out Label {} }
+        @bucket = label_bucket(name)
+        drum (bucket.labels) {
+            (beat.name == name) { out beat }
+        }
+        out Label {}
+    }
+
+    skill layout() {
+        @rodata_offset = align(code.length, 8)
+        @data_offset = align(rodata_offset + rodata.length, 4096)
+        @bss_offset = align(data_offset + data.length, 8)
+        out Layout {
+            code_offset = 0,
+            rodata_offset = rodata_offset,
+            data_offset = data_offset,
+            bss_offset = bss_offset,
+            file_size = bss_offset,
+            memory_size = wide.add_number(bss_size, bss_offset)
+        }
+    }
+
+    skill label_offset(current_layout, name) {
+        @label = find_label(name)
+        (label.present == no) { out error.UnknownLabel }
+        (label.section == Section.BSS) {
+            out word.to_number(word.add_number(label.offset, current_layout.bss_offset))
+        }
+        out section_offset(current_layout, label.section) + label.offset
+    }
+
+    skill label_address(current_layout, name, addend) {
+        @label = find_label(name)
+        (label.present == no) { out error.UnknownLabel }
+        (label.section == Section.BSS) {
+            @offset = word.add_number(label.offset, current_layout.bss_offset + addend)
+            out word.add(load_address, offset)
+        }
+        @offset = label_offset(current_layout, name) + addend
+        (offset < 0) { out error.InvalidAddress }
+        out address_add(load_address, offset)
+    }
+
+    skill patches() {
+        @total = patch_count
+        (fixer) |keeper| {
+            total = total + keeper.count
+        }
+        out total
+    }
 }
 
 skill word_address(b0, b1, b2, b3) {
@@ -155,46 +377,9 @@ skill qemu_virt(entry) {
     }
 }
 
-skill section_buffer(value, section) {
-    (section == Section.CODE) { out value.code }
-    (section == Section.RODATA) { out value.rodata }
-    (section == Section.DATA) { out value.data }
-    out error.SectionHasNoFileData
-}
-
-skill section_length(value, section) {
-    (section == Section.CODE) { out value.code.length }
-    (section == Section.RODATA) { out value.rodata.length }
-    (section == Section.DATA) { out value.data.length }
-    out wide.to_word(value.bss_size)
-}
-
-skill assign_section(value, section, target) {
-    (section == Section.CODE) { value.code = target }
-    (section == Section.RODATA) { value.rodata = target }
-    (section == Section.DATA) { value.data = target }
-    value.resolved = no
-    out value
-}
-
 skill align_buffer(target, boundary) {
     @target_length = align(target.length, boundary)
     out buffer.append_zeroes(target, target_length - target.length)
-}
-
-skill emit_word(value, encoded) {
-    value.code = buffer.append_word(value.code, encoded)
-    value.resolved = no
-    out value
-}
-
-skill note_patch(value, patch) {
-    (value.patch_count == 0) { value.patches_first = patch }
-    (value.patch_count > 0) { value.patches_last.next = patch }
-    value.patches_last = patch
-    value.patch_count = value.patch_count + 1
-    value.resolved = no
-    out value
 }
 
 skill label_hash(name) {
@@ -203,115 +388,9 @@ skill label_hash(name) {
     out hash % LABEL_BUCKETS
 }
 
-skill label_bucket(value, name) {
-    (group.count(value.label_buckets) == 0) {
-        @buckets = []
-        drum (LABEL_BUCKETS) { buckets = group.add(buckets, LabelBucket {}) }
-        value.label_buckets = buckets
-    }
-    out group.get(value.label_buckets, label_hash(name))
-}
-
 skill index_label(bucket, label) {
     bucket.labels = group.add(bucket.labels, label)
     out bucket
-}
-
-skill find_label(value, name) {
-    (value.label_count == 0) { out Label {} }
-    @bucket = label_bucket(value, name)
-    drum (bucket.labels) {
-        (beat.name == name) { out beat }
-    }
-    out Label {}
-}
-
-skill define_label(value, section, name) {
-    @old = find_label(value, name)
-    (old.present == yes) { out error.DuplicateLabel }
-    @label = Label {
-        name = name,
-        section = section,
-        offset = section_length(value, section),
-        present = yes
-    }
-    (value.label_count == 0) { value.labels_first = label }
-    (value.label_count > 0) { value.labels_last.next = label }
-    value.labels_last = label
-    value.label_count = value.label_count + 1
-    index_label(label_bucket(value, name), Label { name = name, section = section, offset = label.offset, present = yes })
-    value.resolved = no
-    out value
-}
-
-skill reserve_bss(value, count) {
-    value.bss_size = wide.add(value.bss_size, count)
-    value.resolved = no
-    out value
-}
-
-skill append_section_byte(value, section, byte) {
-    @target = section_buffer(value, section)
-    target = buffer.append_byte(target, byte)
-    out assign_section(value, section, target)
-}
-
-skill append_section_word(value, section, data) {
-    @target = section_buffer(value, section)
-    target = buffer.append_word(target, data)
-    out assign_section(value, section, target)
-}
-
-skill append_section_text(value, section, text, terminated) {
-    @target = section_buffer(value, section)
-    target = buffer.append_text(target, text)
-    (terminated == yes) { target = buffer.append_byte(target, 0) }
-    out assign_section(value, section, target)
-}
-
-skill align_section(value, section, boundary) {
-    (section == Section.BSS) {
-        value.bss_size = wide.align(value.bss_size, boundary)
-        value.resolved = no
-        out value
-    }
-    @target = section_buffer(value, section)
-    target = align_buffer(target, boundary)
-    out assign_section(value, section, target)
-}
-
-skill append_label_address(value, section, label, addend) {
-    @target = section_buffer(value, section)
-    @offset = target.length
-    target = buffer.append_word(target, word.from_bytes(0, 0, 0, 0))
-    value = assign_section(value, section, target)
-    @patch = Patch {
-        kind = PatchKind.ADDRESS_WORD,
-        section = section,
-        offset = offset,
-        label = label,
-        addend = addend
-    }
-    (value.patch_count == 0) { value.patches_first = patch }
-    (value.patch_count > 0) { value.patches_last.next = patch }
-    value.patches_last = patch
-    value.patch_count = value.patch_count + 1
-    value.resolved = no
-    out value
-}
-
-skill layout(value) {
-    @rodata_offset = align(value.code.length, 8)
-    @data_offset = align(rodata_offset + value.rodata.length, 4096)
-    @bss_offset = align(data_offset + value.data.length, 8)
-    out Layout {
-        code_offset = 0,
-        rodata_offset = rodata_offset,
-        data_offset = data_offset,
-        bss_offset = bss_offset,
-        file_size = bss_offset,
-        memory_size = wide.add_number(value.bss_size, bss_offset)
-    }
 }
 
 skill section_offset(current_layout, section) {
@@ -321,79 +400,13 @@ skill section_offset(current_layout, section) {
     out current_layout.bss_offset
 }
 
-skill label_offset(value, current_layout, name) {
-    @label = find_label(value, name)
-    (label.present == no) { out error.UnknownLabel }
-    (label.section == Section.BSS) {
-        out word.to_number(word.add_number(label.offset, current_layout.bss_offset))
-    }
-    out section_offset(current_layout, label.section) + label.offset
-}
-
-skill label_address(value, current_layout, name, addend) {
-    @label = find_label(value, name)
-    (label.present == no) { out error.UnknownLabel }
-    (label.section == Section.BSS) {
-        @offset = word.add_number(label.offset, current_layout.bss_offset + addend)
-        out word.add(value.load_address, offset)
-    }
-    @offset = label_offset(value, current_layout, name) + addend
-    (offset < 0) { out error.InvalidAddress }
-    out address_add(value.load_address, offset)
-}
-
-skill set_section_word(value, section, offset, data) {
-    @target = section_buffer(value, section)
-    target = buffer.set_word(target, offset, data)
-    out assign_section(value, section, target)
-}
-
-skill resolve_patch(value, current_layout, patch) {
-    @label_base = label_offset(value, current_layout, patch.label) rescue |failure| {
-        (str.bytes(patch.label) > 0) {
-            @problem = errors.missing_label(patch.label)
-            io.show(problem.message)
-        }
-        out error.UnknownLabel
-    }
-    @target_offset = label_base + patch.addend
-    (patch.kind == PatchKind.ADDRESS_WORD) {
-        @target = label_address(value, current_layout, patch.label, patch.addend)
-        out set_section_word(value, patch.section, patch.offset, target)
-    }
-    (patch.kind == PatchKind.REL32) {
-        @distance = target_offset - patch.offset - 4
-        out set_section_word(value, Section.CODE, patch.offset, word.from_signed(distance))
-    }
-    (patch.kind == PatchKind.ABS32) {
-        @target = label_address(value, current_layout, patch.label, patch.addend)
-        out set_section_word(value, Section.CODE, patch.offset, target)
-    }
-    out error.UnknownPatch
-}
-
-skill patches(value) {
-    @total = value.patch_count
-    (value.fixer) |keeper| {
-        total = total + keeper.count
-    }
-    out total
-}
-
 skill resolve(value) {
-    (value.encoding_errors > 0) {
-        @problem = errors.encoding_failed(value.encoding_errors)
-        io.show(problem.message)
-        out error.InstructionEncoding
-    }
-    @current_layout = layout(value)
-    @patch = value.patches_first
-    drum (value.patch_count) {
-        value = resolve_patch(value, current_layout, patch) rescue |failure| { out error.UnresolvedPatch }
-        patch = patch.next
-    }
+    value.resolve_own()
+    @current_layout = value.layout()
     (value.fixer) |keeper| {
-        value = keeper.fixed(value, current_layout) rescue |failure| { out error.UnresolvedPatch }
+        value = keeper.fixed(value, current_layout) rescue |failure| {
+            out error.UnresolvedPatch
+        }
     }
     value.resolved = yes
     out value
