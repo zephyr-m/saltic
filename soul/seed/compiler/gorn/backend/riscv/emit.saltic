@@ -1,16 +1,21 @@
 -- emit — команды семьи RISC-V в программу layout: команда по таблице,
--- переходы, вызовы и адреса меток. Переход или адрес пишется заглушкой,
--- правка (fixer.Fix) уходит в Fixer программы — его кладёт первая же правка.
--- Ошибки кодирования копятся в Program.encoding_errors, resolve их покажет.
+-- широкие смещения через T6, переходы, вызовы и адреса меток. Переход или
+-- адрес пишется заглушкой, правка (fixer.Fix) уходит в Fixer программы — его
+-- кладёт первая же правка. Ошибки кодирования копятся в Program.encoding_errors.
 -- far_calls = yes у программы — call через auipc+jalr вместо jal.
+-- Хозяин — Emit { coder } (СОП, 22.11.2026), бывшие emit и assembler; его
+-- держат исполнители семьи в поле writer. Программа меняется на месте.
+-- WIDE_OFFSET_REGISTER = T6 — занят под широкие смещения, в рантайме не хранит
+-- значений поперёк таких команд.
 --
--- op(program, kind, rd, rs1, rs2, immediate) — команда
--- pending(program, fix, placeholder) — заглушка и правка к ней
--- branch(program, kind, rs1, rs2, label); InvalidBranchInstruction
--- branch_unsigned_greater(program, rs1, rs2, label) — bltu с переставленными
--- jump(program, rd, label) / call(program, label)
--- load_immediate(program, rd, n) / load_word(program, rd, word)
--- relative_address / absolute_address(program, rd, label, addend)
+-- Emit { coder }: op(program, kind, rd, rs1, rs2, immediate) — команда;
+--     wide_op(program, …) — то же, смещение шире 12 бит через T6 (ADDI, load/store);
+--     pending(program, fix, placeholder) — заглушка и правка к ней;
+--     branch(program, kind, rs1, rs2, label) — InvalidBranchInstruction;
+--     branch_unsigned_greater(program, rs1, rs2, label) — bltu с переставленными;
+--     jal(program, rd, label) / call(program, label); load_immediate(program, rd, n)
+--     / load_word(program, rd, word); relative_address / absolute_address(program,
+--     rd, label, addend); fits_immediate(n) / wide_offset_kind(kind) -> yes/no
 
 use compiler.machine.word
 use compiler.gorn.backend.layout
@@ -19,144 +24,212 @@ use compiler.gorn.backend.riscv.fixer
 use compiler.gorn.backend.riscv.instruction
 use compiler.gorn.backend.riscv.registers
 
-skill op(value, kind, rd, rs1, rs2, immediate) {
-    @encoded = codec.encode_kind(kind, rd, rs1, rs2, immediate) rescue |failure| {
-        value.encoding_errors = value.encoding_errors + 1
-        word.from_bytes(0, 0, 0, 0)
-    }
-    value.emit_word(encoded)
-    out value
-}
+WIDE_OFFSET_REGISTER = registers.T6
 
-skill pending(value, fix, placeholder) {
-    fix.offset = value.code.length
-    (value.fixer == none) { value.fixer = fixer.Fixer {} }
-    (value.fixer) |keeper| { keeper.noted(fix) }
-    value.emit_word(placeholder)
-    out value
-}
+Emit = Box {
+    coder = codec.Codec {}
 
-skill branch(value, kind, rs1, rs2, label) {
-    @catalog = instruction.Catalog {}
-    @item = catalog.find_kind(kind)
-    ((item.form == Instruction.Form.B) == no) {
-        out error.InvalidBranchInstruction
-    }
-    @placeholder = codec.encode(item, registers.ZERO, rs1, rs2, 0)
-    out pending(value, fixer.Fix {
-        kind = fixer.FixKind.BRANCH,
-        instruction_kind = kind,
-        label = label,
-        rs1 = rs1,
-        rs2 = rs2
-    }, placeholder)
-}
-
-skill jump(value, rd, label) {
-    @placeholder = codec.encode_kind(Instruction.Kind.JAL, rd, registers.ZERO, registers.ZERO, 0)
-    out pending(value, fixer.Fix {
-        kind = fixer.FixKind.JUMP,
-        instruction_kind = Instruction.Kind.JAL,
-        label = label,
-        rd = rd
-    }, placeholder)
-}
-
-skill load_immediate(value, rd, immediate) {
-    (immediate > -2049) {
-        (immediate < 2048) {
-            @encoded = codec.encode_kind(Instruction.Kind.ADDI, rd, registers.ZERO, registers.ZERO, immediate)
-            value.emit_word(encoded)
-            out value
+    skill op(value, kind, rd, rs1, rs2, immediate) {
+        @encoded = coder.encode_kind(kind, rd, rs1, rs2, immediate) rescue |failure| {
+            value.encoding_errors = value.encoding_errors + 1
+            word.from_bytes(0, 0, 0, 0)
         }
+        value.emit_word(encoded)
+        out none
     }
-    out load_word(value, rd, word.from_signed(immediate))
-}
 
-skill load_word(value, rd, immediate) {
-    @lui = codec.encode_kind(Instruction.Kind.LUI, rd, registers.ZERO, registers.ZERO, fixer.address_upper(immediate))
-    value.emit_word(lui)
-    @addi = codec.encode_kind(Instruction.Kind.ADDI, rd, rd, registers.ZERO, fixer.address_low(immediate))
-    value.emit_word(addi)
-    out value
-}
-
-skill branch_unsigned_greater(value, rs1, rs2, label) {
-    @catalog = instruction.Catalog {}
-    @item = catalog.find_kind(Instruction.Kind.BLTU)
-    @placeholder = codec.encode(item, registers.ZERO, rs2, rs1, 0)
-    out pending(value, fixer.Fix {
-        kind = fixer.FixKind.BRANCH,
-        instruction_kind = Instruction.Kind.BLTU,
-        label = label,
-        rs1 = rs2,
-        rs2 = rs1
-    }, placeholder)
-}
-
-skill relative_address(value, rd, label, addend) {
-    @base = value.code.length
-    @high = codec.encode_kind(Instruction.Kind.AUIPC, rd, registers.ZERO, registers.ZERO, 0)
-    value = pending(value, fixer.Fix {
-        kind = fixer.FixKind.RELATIVE_HIGH,
-        instruction_kind = Instruction.Kind.AUIPC,
-        base = base,
-        label = label,
-        addend = addend,
-        rd = rd
-    }, high)
-    @low = codec.encode_kind(Instruction.Kind.ADDI, rd, rd, registers.ZERO, 0)
-    out pending(value, fixer.Fix {
-        kind = fixer.FixKind.RELATIVE_LOW,
-        instruction_kind = Instruction.Kind.ADDI,
-        base = base,
-        label = label,
-        addend = addend,
-        rd = rd,
-        rs1 = rd
-    }, low)
-}
-
-skill call(value, label) {
-    (value.far_calls == no) {
-        out jump(value, registers.RA, label)
+    skill pending(value, fix, placeholder) {
+        fix.offset = value.code.length
+        (value.fixer == none) { value.fixer = fixer.Fixer {} }
+        (value.fixer) |keeper| { keeper.noted(fix) }
+        value.emit_word(placeholder)
+        out none
     }
-    @base = value.code.length
-    @high = codec.encode_kind(Instruction.Kind.AUIPC, registers.RA, registers.ZERO, registers.ZERO, 0)
-    value = pending(value, fixer.Fix {
-        kind = fixer.FixKind.RELATIVE_HIGH,
-        instruction_kind = Instruction.Kind.AUIPC,
-        base = base,
-        label = label,
-        rd = registers.RA
-    }, high)
-    @low = codec.encode_kind(Instruction.Kind.JALR, registers.RA, registers.RA, registers.ZERO, 0)
-    out pending(value, fixer.Fix {
-        kind = fixer.FixKind.RELATIVE_LOW,
-        instruction_kind = Instruction.Kind.JALR,
-        base = base,
-        label = label,
-        rd = registers.RA,
-        rs1 = registers.RA
-    }, low)
-}
 
-skill absolute_address(value, rd, label, addend) {
-    @high = codec.encode_kind(Instruction.Kind.LUI, rd, registers.ZERO, registers.ZERO, 0)
-    value = pending(value, fixer.Fix {
-        kind = fixer.FixKind.ABSOLUTE_HIGH,
-        instruction_kind = Instruction.Kind.LUI,
-        label = label,
-        addend = addend,
-        rd = rd
-    }, high)
-    @low = codec.encode_kind(Instruction.Kind.ADDI, rd, rd, registers.ZERO, 0)
-    out pending(value, fixer.Fix {
-        kind = fixer.FixKind.ABSOLUTE_LOW,
-        instruction_kind = Instruction.Kind.ADDI,
-        label = label,
-        addend = addend,
-        rd = rd,
-        rs1 = rd
-    }, low)
+    skill branch(value, kind, rs1, rs2, label) {
+        @catalog = coder.catalog
+        @item = catalog.find_kind(kind)
+        ((item.form == Instruction.Form.B) == no) {
+            out error.InvalidBranchInstruction
+        }
+        @placeholder = coder.encode(item, registers.ZERO, rs1, rs2, 0)
+        pending(value, fixer.Fix {
+            kind = Fixer.Kind.BRANCH,
+            instruction_kind = kind,
+            label = label,
+            rs1 = rs1,
+            rs2 = rs2
+        }, placeholder)
+        out none
+    }
+
+    skill jal(value, rd, label) {
+        @placeholder = coder.encode_kind(Instruction.Kind.JAL, rd, registers.ZERO, registers.ZERO, 0)
+        pending(value, fixer.Fix {
+            kind = Fixer.Kind.JUMP,
+            instruction_kind = Instruction.Kind.JAL,
+            label = label,
+            rd = rd
+        }, placeholder)
+        out none
+    }
+
+    skill load_immediate(value, rd, immediate) {
+        (immediate > -2049) {
+            (immediate < 2048) {
+                @encoded = coder.encode_kind(Instruction.Kind.ADDI, rd, registers.ZERO, registers.ZERO, immediate)
+                value.emit_word(encoded)
+                out none
+            }
+        }
+        load_word(value, rd, word.from_signed(immediate))
+        out none
+    }
+
+    skill load_word(value, rd, immediate) {
+        @lui = coder.encode_kind(Instruction.Kind.LUI, rd, registers.ZERO, registers.ZERO, fixer.address_upper(immediate))
+        value.emit_word(lui)
+        @addi = coder.encode_kind(Instruction.Kind.ADDI, rd, rd, registers.ZERO, fixer.address_low(immediate))
+        value.emit_word(addi)
+        out none
+    }
+
+    skill branch_unsigned_greater(value, rs1, rs2, label) {
+        @catalog = coder.catalog
+        @item = catalog.find_kind(Instruction.Kind.BLTU)
+        @placeholder = coder.encode(item, registers.ZERO, rs2, rs1, 0)
+        pending(value, fixer.Fix {
+            kind = Fixer.Kind.BRANCH,
+            instruction_kind = Instruction.Kind.BLTU,
+            label = label,
+            rs1 = rs2,
+            rs2 = rs1
+        }, placeholder)
+        out none
+    }
+
+    skill relative_address(value, rd, label, addend) {
+        @base = value.code.length
+        @high = coder.encode_kind(Instruction.Kind.AUIPC, rd, registers.ZERO, registers.ZERO, 0)
+        pending(value, fixer.Fix {
+            kind = Fixer.Kind.RELATIVE_HIGH,
+            instruction_kind = Instruction.Kind.AUIPC,
+            base = base,
+            label = label,
+            addend = addend,
+            rd = rd
+        }, high)
+        @low = coder.encode_kind(Instruction.Kind.ADDI, rd, rd, registers.ZERO, 0)
+        pending(value, fixer.Fix {
+            kind = Fixer.Kind.RELATIVE_LOW,
+            instruction_kind = Instruction.Kind.ADDI,
+            base = base,
+            label = label,
+            addend = addend,
+            rd = rd,
+            rs1 = rd
+        }, low)
+        out none
+    }
+
+    skill call(value, label) {
+        (value.far_calls == no) {
+            jal(value, registers.RA, label)
+            out none
+        }
+        @base = value.code.length
+        @high = coder.encode_kind(Instruction.Kind.AUIPC, registers.RA, registers.ZERO, registers.ZERO, 0)
+        pending(value, fixer.Fix {
+            kind = Fixer.Kind.RELATIVE_HIGH,
+            instruction_kind = Instruction.Kind.AUIPC,
+            base = base,
+            label = label,
+            rd = registers.RA
+        }, high)
+        @low = coder.encode_kind(Instruction.Kind.JALR, registers.RA, registers.RA, registers.ZERO, 0)
+        pending(value, fixer.Fix {
+            kind = Fixer.Kind.RELATIVE_LOW,
+            instruction_kind = Instruction.Kind.JALR,
+            base = base,
+            label = label,
+            rd = registers.RA,
+            rs1 = registers.RA
+        }, low)
+        out none
+    }
+
+    skill absolute_address(value, rd, label, addend) {
+        @high = coder.encode_kind(Instruction.Kind.LUI, rd, registers.ZERO, registers.ZERO, 0)
+        pending(value, fixer.Fix {
+            kind = Fixer.Kind.ABSOLUTE_HIGH,
+            instruction_kind = Instruction.Kind.LUI,
+            label = label,
+            addend = addend,
+            rd = rd
+        }, high)
+        @low = coder.encode_kind(Instruction.Kind.ADDI, rd, rd, registers.ZERO, 0)
+        pending(value, fixer.Fix {
+            kind = Fixer.Kind.ABSOLUTE_LOW,
+            instruction_kind = Instruction.Kind.ADDI,
+            label = label,
+            addend = addend,
+            rd = rd,
+            rs1 = rd
+        }, low)
+        out none
+    }
+
+    skill fits_immediate(value) {
+        (value < -2048) {
+            out no
+        }
+        (value > 2047) {
+            out no
+        }
+        out yes
+    }
+
+    skill wide_offset_kind(kind) {
+        (kind == Instruction.Kind.ADDI) {
+            out yes
+        }
+        (kind == Instruction.Kind.LW) {
+            out yes
+        }
+        (kind == Instruction.Kind.LB) {
+            out yes
+        }
+        (kind == Instruction.Kind.LBU) {
+            out yes
+        }
+        (kind == Instruction.Kind.LH) {
+            out yes
+        }
+        (kind == Instruction.Kind.LHU) {
+            out yes
+        }
+        (kind == Instruction.Kind.SW) {
+            out yes
+        }
+        (kind == Instruction.Kind.SB) {
+            out yes
+        }
+        (kind == Instruction.Kind.SH) {
+            out yes
+        }
+        out no
+    }
+
+    skill wide_op(value, kind, rd, rs1, rs2, immediate) {
+        (fits_immediate(immediate) == no) {
+            (wide_offset_kind(kind) == yes) {
+                load_immediate(value, WIDE_OFFSET_REGISTER, immediate)
+                op(value, Instruction.Kind.ADD, WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, rs1, 0)
+                op(value, kind, rd, WIDE_OFFSET_REGISTER, rs2, 0)
+                out none
+            }
+        }
+        op(value, kind, rd, rs1, rs2, immediate)
+        out none
+    }
 }

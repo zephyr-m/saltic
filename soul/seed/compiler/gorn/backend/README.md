@@ -21,8 +21,8 @@ backend/
   main  buffer  layout/  runtime/         общее для всех: договор, байты и запись
                                            образа, программа в сборке, рантайм rt_*
   riscv/      общее семьи: main (Executor базового набора — его берёт цель rv32i,
-              к нему обращается rv64), instruction, registers, codec, assembler,
-              emit (команды и переходы), fixer (правки RISC-V)
+              к нему обращается rv64), instruction, registers, codec,
+              emit (команды, переходы, широкие смещения — бывший assembler), fixer (правки)
     rv32i/  rv64/
   x86/x86_64/    arm/arm64/    xtensa/lx6/    wasm/wasm32/
 ```

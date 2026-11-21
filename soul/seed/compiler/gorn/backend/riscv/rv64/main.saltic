@@ -5,7 +5,7 @@
 -- раскладке backend.layout: RV64 — базовый набор плюс широкие команды.
 -- Сам делает 64-битное: слово 8 байт (ld / sd, push / pop, data_word),
 -- 32-битные поля (lwu / sw / data32), сдвиги до 63 — по форме (machine.forms);
--- общие с RV32I (addi, lui, lbu…) — через riscv.assembler. Широкое смещение
+-- общие с RV32I (addi, lui, lbu…) — через writer (riscv.emit). Широкое смещение
 -- (не влезает в 12 бит) — через t6, как у RV32I. 32-битная константа — lui +
 -- addiw (не addi: иначе значение чуть ниже 2^31 после lui расширится знаком).
 -- Раскладка памяти — abi.shape на 8 байт (WORDS). Вызов ядра — номер RV32 из
@@ -26,7 +26,6 @@ use compiler.gorn.backend.riscv
 use compiler.gorn.backend.layout
 use compiler.gorn.backend.riscv.registers
 use compiler.gorn.backend.riscv.rv64.machine.forms
-use compiler.gorn.backend.riscv.assembler
 use compiler.gorn.backend.riscv.instruction
 use compiler.abi.shape
 use compiler.machine.word
@@ -40,6 +39,7 @@ WORD_BYTES = 8
 WIDE_OFFSET_REGISTER = registers.T6
 
 Executor = Box {
+    writer = emit.Emit {},
     far_calls = no,
     narrow_executor = riscv.Executor {},
     encodings = forms.Forms {}
@@ -59,8 +59,9 @@ Executor = Box {
     }
 
     skill wide_offset(billet, base, offset) {
-        billet.machine = emit.load_immediate(billet.machine, WIDE_OFFSET_REGISTER, offset)
-        out assembler.emit_op(billet, Instruction.Kind.ADD, WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, base, 0)
+        writer.load_immediate(billet.machine, WIDE_OFFSET_REGISTER, offset)
+        writer.wide_op(billet.machine, Instruction.Kind.ADD, WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, base, 0)
+        out billet
     }
 
     skill new_program(billet, entry) {
@@ -121,14 +122,15 @@ Executor = Box {
     }
 
     skill load_immediate(billet, to, value) {
-        (assembler.fits_immediate(value) == yes) {
-            out assembler.emit_op(billet, Instruction.Kind.ADDI, register(to), registers.ZERO, registers.ZERO, value)
+        (writer.fits_immediate(value) == yes) {
+            writer.wide_op(billet.machine, Instruction.Kind.ADDI, register(to), registers.ZERO, registers.ZERO, value)
+            out billet
         }
         out load_word(billet, to, word.from_signed(value))
     }
 
     skill load_word(billet, to, value) {
-        billet = assembler.emit_op(billet, Instruction.Kind.LUI, register(to), registers.ZERO, registers.ZERO, fixer.address_upper(value))
+        writer.wide_op(billet.machine, Instruction.Kind.LUI, register(to), registers.ZERO, registers.ZERO, fixer.address_upper(value))
         out emit(billet, encodings.addiw(register(to), register(to), fixer.address_low(value)))
     }
 
@@ -250,7 +252,7 @@ Executor = Box {
     }
 
     skill load(billet, to, base, offset) {
-        (assembler.fits_immediate(offset) == no) {
+        (writer.fits_immediate(offset) == no) {
             billet = wide_offset(billet, register(base), offset)
             out emit(billet, encodings.ld(register(to), WIDE_OFFSET_REGISTER, 0))
         }
@@ -258,7 +260,7 @@ Executor = Box {
     }
 
     skill load32(billet, to, base, offset) {
-        (assembler.fits_immediate(offset) == no) {
+        (writer.fits_immediate(offset) == no) {
             billet = wide_offset(billet, register(base), offset)
             out emit(billet, encodings.lwu(register(to), WIDE_OFFSET_REGISTER, 0))
         }
@@ -266,19 +268,22 @@ Executor = Box {
     }
 
     skill store32(billet, from, base, offset) {
-        out assembler.emit_op(billet, Instruction.Kind.SW, registers.ZERO, register(base), register(from), offset)
+        writer.wide_op(billet.machine, Instruction.Kind.SW, registers.ZERO, register(base), register(from), offset)
+        out billet
     }
 
     skill load_byte(billet, to, base, offset) {
-        out assembler.emit_op(billet, Instruction.Kind.LBU, register(to), register(base), registers.ZERO, offset)
+        writer.wide_op(billet.machine, Instruction.Kind.LBU, register(to), register(base), registers.ZERO, offset)
+        out billet
     }
 
     skill load_half(billet, to, base, offset) {
-        out assembler.emit_op(billet, Instruction.Kind.LHU, register(to), register(base), registers.ZERO, offset)
+        writer.wide_op(billet.machine, Instruction.Kind.LHU, register(to), register(base), registers.ZERO, offset)
+        out billet
     }
 
     skill store(billet, from, base, offset) {
-        (assembler.fits_immediate(offset) == no) {
+        (writer.fits_immediate(offset) == no) {
             billet = wide_offset(billet, register(base), offset)
             out emit(billet, encodings.sd(register(from), WIDE_OFFSET_REGISTER, 0))
         }
@@ -286,15 +291,17 @@ Executor = Box {
     }
 
     skill store_byte(billet, from, base, offset) {
-        out assembler.emit_op(billet, Instruction.Kind.SB, registers.ZERO, register(base), register(from), offset)
+        writer.wide_op(billet.machine, Instruction.Kind.SB, registers.ZERO, register(base), register(from), offset)
+        out billet
     }
 
     skill store_half(billet, from, base, offset) {
-        out assembler.emit_op(billet, Instruction.Kind.SH, registers.ZERO, register(base), register(from), offset)
+        writer.wide_op(billet.machine, Instruction.Kind.SH, registers.ZERO, register(base), register(from), offset)
+        out billet
     }
 
     skill store_zero(billet, base, offset) {
-        (assembler.fits_immediate(offset) == no) {
+        (writer.fits_immediate(offset) == no) {
             billet = wide_offset(billet, register(base), offset)
             out emit(billet, encodings.sd(registers.ZERO, WIDE_OFFSET_REGISTER, 0))
         }
@@ -302,17 +309,19 @@ Executor = Box {
     }
 
     skill store_byte_zero(billet, base, offset) {
-        out assembler.emit_op(billet, Instruction.Kind.SB, registers.ZERO, register(base), registers.ZERO, offset)
+        writer.wide_op(billet.machine, Instruction.Kind.SB, registers.ZERO, register(base), registers.ZERO, offset)
+        out billet
     }
 
     skill push(billet, from) {
-        billet = assembler.emit_op(billet, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, -WORD_BYTES)
+        writer.wide_op(billet.machine, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, -WORD_BYTES)
         out emit(billet, encodings.sd(register(from), registers.SP, 0))
     }
 
     skill pop(billet, to) {
         billet = emit(billet, encodings.ld(register(to), registers.SP, 0))
-        out assembler.emit_op(billet, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, WORD_BYTES)
+        writer.wide_op(billet.machine, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, WORD_BYTES)
+        out billet
     }
 
     skill branch_equal(billet, left, right, name) {

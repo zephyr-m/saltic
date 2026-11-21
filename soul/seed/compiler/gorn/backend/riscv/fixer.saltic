@@ -4,9 +4,9 @@
 -- REL32, ABS32) — у layout, свои — здесь: общее не знает семью.
 -- Половинки адреса для lui/addi и auipc — здесь же.
 --
--- FixKind = enum { BRANCH, JUMP, RELATIVE_HIGH, RELATIVE_LOW, ABSOLUTE_HIGH, ABSOLUTE_LOW }
 -- Fix { kind, instruction_kind, offset, base, label, addend, rd, rs1, rs2, next }
--- Fixer { first, last, count } — правки одной программы по порядку:
+-- Fixer { first, last, count, coder } — правки одной программы по порядку; Kind =
+--     enum { BRANCH, JUMP, RELATIVE_HIGH, RELATIVE_LOW, ABSOLUTE_HIGH, ABSOLUTE_LOW }:
 --     noted(fix) — в конец списка; fixed(program, layout) -> program;
 --     mended(program, layout, fix) -> program; UnknownLabel, PatchOutsideRange
 -- address_upper / address_low(word) -> части для lui/addi; relative_high /
@@ -20,17 +20,8 @@ use compiler.gorn.backend.riscv.codec
 use compiler.gorn.backend.riscv.instruction
 use compiler.gorn.backend.riscv.registers
 
-FixKind = enum {
-    BRANCH,
-    JUMP,
-    RELATIVE_HIGH,
-    RELATIVE_LOW,
-    ABSOLUTE_HIGH,
-    ABSOLUTE_LOW
-}
-
 Fix = Box {
-    kind = FixKind.BRANCH,
+    kind = Fixer.Kind.BRANCH,
     instruction_kind = Instruction.Kind.BEQ,
     offset = 0,
     base = 0,
@@ -45,7 +36,17 @@ Fix = Box {
 Fixer = Box {
     first = none,
     last = none,
-    count = 0
+    count = 0,
+    coder = codec.Codec {}
+
+    Kind = enum {
+        BRANCH,
+        JUMP,
+        RELATIVE_HIGH,
+        RELATIVE_LOW,
+        ABSOLUTE_HIGH,
+        ABSOLUTE_LOW
+    }
 
     skill noted(fix) {
         (last) |tail| { tail.next = fix }
@@ -64,43 +65,43 @@ Fixer = Box {
             out error.UnknownLabel
         }
         @target_offset = label_base + fix.addend
-        (fix.kind == FixKind.BRANCH) {
+        (fix.kind == Fixer.Kind.BRANCH) {
             @distance = target_offset - fix.offset
-            @encoded = codec.encode_kind(fix.instruction_kind, registers.ZERO, fix.rs1, fix.rs2, distance) rescue |failure| {
+            @encoded = coder.encode_kind(fix.instruction_kind, registers.ZERO, fix.rs1, fix.rs2, distance) rescue |failure| {
                 out error.PatchOutsideRange
             }
             value.set_section_word(Layout.Section.CODE, fix.offset, encoded)
             out value
         }
-        (fix.kind == FixKind.JUMP) {
+        (fix.kind == Fixer.Kind.JUMP) {
             @distance = target_offset - fix.offset
-            @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, registers.ZERO, registers.ZERO, distance) rescue |failure| {
+            @encoded = coder.encode_kind(fix.instruction_kind, fix.rd, registers.ZERO, registers.ZERO, distance) rescue |failure| {
                 out error.PatchOutsideRange
             }
             value.set_section_word(Layout.Section.CODE, fix.offset, encoded)
             out value
         }
-        (fix.kind == FixKind.RELATIVE_HIGH) {
+        (fix.kind == Fixer.Kind.RELATIVE_HIGH) {
             @distance = target_offset - fix.base
-            @upper = codec.signed_value(relative_high(distance), codec.IMMEDIATE20_LIMIT)
-            @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, registers.ZERO, registers.ZERO, upper)
+            @upper = coder.signed_value(relative_high(distance), codec.IMMEDIATE20_LIMIT)
+            @encoded = coder.encode_kind(fix.instruction_kind, fix.rd, registers.ZERO, registers.ZERO, upper)
             value.set_section_word(Layout.Section.CODE, fix.offset, encoded)
             out value
         }
-        (fix.kind == FixKind.RELATIVE_LOW) {
+        (fix.kind == Fixer.Kind.RELATIVE_LOW) {
             @distance = target_offset - fix.base
             @low = relative_low(distance)
-            @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, fix.rs1, registers.ZERO, low)
+            @encoded = coder.encode_kind(fix.instruction_kind, fix.rd, fix.rs1, registers.ZERO, low)
             value.set_section_word(Layout.Section.CODE, fix.offset, encoded)
             out value
         }
         @target = value.label_address(current_layout, fix.label, fix.addend)
-        (fix.kind == FixKind.ABSOLUTE_HIGH) {
-            @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, registers.ZERO, registers.ZERO, address_upper(target))
+        (fix.kind == Fixer.Kind.ABSOLUTE_HIGH) {
+            @encoded = coder.encode_kind(fix.instruction_kind, fix.rd, registers.ZERO, registers.ZERO, address_upper(target))
             value.set_section_word(Layout.Section.CODE, fix.offset, encoded)
             out value
         }
-        @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, fix.rs1, registers.ZERO, address_low(target))
+        @encoded = coder.encode_kind(fix.instruction_kind, fix.rd, fix.rs1, registers.ZERO, address_low(target))
         value.set_section_word(Layout.Section.CODE, fix.offset, encoded)
         out value
     }

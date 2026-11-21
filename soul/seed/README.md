@@ -62,7 +62,7 @@
   общий для исполнителей): арифметика, Box и группы, строки,
   фиксированные типы, прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
 - `gorn/backend/{buffer,layout}` — байтовый буфер и программа в сборке, общие
-  для всех; `gorn/backend/riscv/{instruction,registers,codec,assembler,emit,fixer}`
+  для всех; `gorn/backend/riscv/{main,instruction,registers,codec,emit,fixer}`
   — общее семьи RISC-V: таблица команд (`Instruction`, `Catalog`), кодирование,
   команды и переходы, правки; `riscv/rv32i/{profile,elf}` — паспорт машины и ELF32;
 - `machine/word` — 32-битное слово из четырёх байтов, общее для всех
