@@ -21,11 +21,12 @@
 --     layout() -> Layout, label_offset(layout, name) / label_address(layout, name,
 --     addend) — UnknownLabel, patches() -> сколько правок ждёт (общие и семьи),
 --     payload(layout) -> Buffer тела образа: code, rodata, data по раскладке
--- host(entry) / qemu_virt(entry) -> Program (адрес 65536 с низкой памятью / 0x80000000)
--- word_address(b0, b1, b2, b3) / address_from_number(n) / address_add(word, n) -> Word;
---     InvalidAddress, AddressOverflow; align(value, boundary) — InvalidAlignment
--- align_buffer(buffer, boundary); label_hash / index_label; section_offset(layout, section)
--- resolve(program) -> Program — общие правки и правки семьи; UnresolvedPatch
+-- Layout.offset_of(section); LabelBucket.hold(label); Program.label_hash(name)
+-- Свободные, пока язык не даст лучше: host / qemu_virt(entry) -> Program
+--     (65536 с низкой памятью / 0x80000000) — конструкторы, у Box нет «создай
+--     себя»; resolve(program) — общие правки и правки семьи, методу нечем отдать
+--     «себя» чинильщику; UnresolvedPatch. word_address(b0…b3) / address_from_number
+--     / address_add -> Word — ждут, когда Word станет хозяином; InvalidAddress, AddressOverflow
 
 use core.str
 use core.group
@@ -49,6 +50,11 @@ Label = Box {
 
 LabelBucket = Box {
     labels = []
+
+    skill hold(label) {
+        labels = group.add(labels, label)
+        out none
+    }
 }
 
 Layout = Box {
@@ -58,6 +64,19 @@ Layout = Box {
     bss_offset = 0,
     file_size = 0,
     memory_size = wide.Wide {}
+
+    skill offset_of(section) {
+        (section == Section.CODE) {
+            out code_offset
+        }
+        (section == Section.RODATA) {
+            out rodata_offset
+        }
+        (section == Section.DATA) {
+            out data_offset
+        }
+        out bss_offset
+    }
 
     Section = enum {
         CODE,
@@ -124,7 +143,13 @@ Program = Box {
         (label_count > 0) { labels_last.next = label }
         labels_last = label
         label_count = label_count + 1
-        index_label(label_bucket(name), Label { name = name, section = section, offset = label.offset, present = yes })
+        @bucket = label_bucket(name)
+        bucket.hold(Label {
+            name = name,
+            section = section,
+            offset = label.offset,
+            present = yes
+        })
         resolved = no
         out none
     }
@@ -166,7 +191,7 @@ Program = Box {
             out none
         }
         @target = section_buffer(section)
-        target = align_buffer(target, boundary)
+        target.align_to(boundary)
         assign_section(section, target)
         out none
     }
@@ -258,6 +283,14 @@ Program = Box {
         out wide.to_word(bss_size)
     }
 
+    skill label_hash(name) {
+        @hash = 0
+        drum (str.bytes(name)) {
+            hash = hash + str.byte(name, beat) * (beat + 1)
+        }
+        out hash % LABEL_BUCKETS
+    }
+
     skill label_bucket(name) {
         (group.count(label_buckets) == 0) {
             @buckets = []
@@ -277,9 +310,9 @@ Program = Box {
     }
 
     skill layout() {
-        @rodata_offset = align(code.length, 8)
-        @data_offset = align(rodata_offset + rodata.length, 4096)
-        @bss_offset = align(data_offset + data.length, 8)
+        @rodata_offset = num.align(code.length, 8)
+        @data_offset = num.align(rodata_offset + rodata.length, 4096)
+        @bss_offset = num.align(data_offset + data.length, 8)
         out Layout {
             code_offset = 0,
             rodata_offset = rodata_offset,
@@ -296,7 +329,7 @@ Program = Box {
         (label.section == Layout.Section.BSS) {
             out word.to_number(word.add_number(label.offset, current_layout.bss_offset))
         }
-        out section_offset(current_layout, label.section) + label.offset
+        out current_layout.offset_of(label.section) + label.offset
     }
 
     skill label_address(current_layout, name, addend) {
@@ -356,11 +389,6 @@ skill address_add(value, amount) {
     out word.from_bytes(v0 % 256, v1 % 256, v2 % 256, v3)
 }
 
-skill align(value, boundary) {
-    (boundary < 1) { out error.InvalidAlignment }
-    out num.align(value, boundary)
-}
-
 skill host(entry) {
     out Program {
         load_address = address_from_number(65536),
@@ -374,30 +402,6 @@ skill qemu_virt(entry) {
         load_address = word_address(0, 0, 0, 128),
         entry = entry
     }
-}
-
-skill align_buffer(target, boundary) {
-    @target_length = align(target.length, boundary)
-    target.append_zeroes(target_length - target.length)
-    out target
-}
-
-skill label_hash(name) {
-    @hash = 0
-    drum (str.bytes(name)) { hash = hash + str.byte(name, beat) * (beat + 1) }
-    out hash % LABEL_BUCKETS
-}
-
-skill index_label(bucket, label) {
-    bucket.labels = group.add(bucket.labels, label)
-    out bucket
-}
-
-skill section_offset(current_layout, section) {
-    (section == Layout.Section.CODE) { out current_layout.code_offset }
-    (section == Layout.Section.RODATA) { out current_layout.rodata_offset }
-    (section == Layout.Section.DATA) { out current_layout.data_offset }
-    out current_layout.bss_offset
 }
 
 skill resolve(value) {

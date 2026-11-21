@@ -1,10 +1,11 @@
 -- rv64 — исполнитель договора машины для RV64 (канон RVA23). Всё, что на
--- RV64 кодируется так же, как на RV32I — арифметика, сравнения, переходы,
--- вызовы, auipc + addi, lui + addi, ecall, — отдаёт исполнителю RV32I (поле
--- narrow_executor, один на сборку) на той же раскладке (rv32i.machine.layout).
+-- RV64 кодируется так же, как в базовом наборе RISC-V — арифметика, сравнения,
+-- переходы, вызовы, auipc + addi, lui + addi, ecall, — отдаёт исполнителю
+-- семьи riscv.Executor (поле narrow_executor, один на сборку) на той же
+-- раскладке backend.layout: RV64 — базовый набор плюс широкие команды.
 -- Сам делает 64-битное: слово 8 байт (ld / sd, push / pop, data_word),
 -- 32-битные поля (lwu / sw / data32), сдвиги до 63 — по форме (machine.forms);
--- общие с RV32I (addi, lui, lbu…) — через rv32i.assembler. Широкое смещение
+-- общие с RV32I (addi, lui, lbu…) — через riscv.assembler. Широкое смещение
 -- (не влезает в 12 бит) — через t6, как у RV32I. 32-битная константа — lui +
 -- addiw (не addi: иначе значение чуть ниже 2^31 после lui расширится знаком).
 -- Раскладка памяти — abi.shape на 8 байт (WORDS). Вызов ядра — номер RV32 из
@@ -21,7 +22,7 @@
 use core.group
 use core.system
 use compiler.gorn.backend
-use compiler.gorn.backend.riscv.rv32i
+use compiler.gorn.backend.riscv
 use compiler.gorn.backend.layout
 use compiler.gorn.backend.riscv.registers
 use compiler.gorn.backend.riscv.rv64.machine.forms
@@ -40,14 +41,15 @@ WIDE_OFFSET_REGISTER = registers.T6
 
 Executor = Box {
     far_calls = no,
-    narrow_executor = rv32i.Executor {}
+    narrow_executor = riscv.Executor {},
+    encodings = forms.Forms {}
 
     skill narrow() {
         out narrow_executor
     }
 
     skill register(role) {
-        out group.get(rv32i.REGISTER_OF_ROLE, role)
+        out group.get(riscv.REGISTER_OF_ROLE, role)
     }
 
     skill emit(billet, encoded) {
@@ -58,7 +60,7 @@ Executor = Box {
 
     skill wide_offset(billet, base, offset) {
         billet.machine = emit.load_immediate(billet.machine, WIDE_OFFSET_REGISTER, offset)
-        out assembler.emit_op(billet, instruction.Kind.ADD, WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, base, 0)
+        out assembler.emit_op(billet, Instruction.Kind.ADD, WIDE_OFFSET_REGISTER, WIDE_OFFSET_REGISTER, base, 0)
     }
 
     skill new_program(billet, entry) {
@@ -120,14 +122,14 @@ Executor = Box {
 
     skill load_immediate(billet, to, value) {
         (assembler.fits_immediate(value) == yes) {
-            out assembler.emit_op(billet, instruction.Kind.ADDI, register(to), registers.ZERO, registers.ZERO, value)
+            out assembler.emit_op(billet, Instruction.Kind.ADDI, register(to), registers.ZERO, registers.ZERO, value)
         }
         out load_word(billet, to, word.from_signed(value))
     }
 
     skill load_word(billet, to, value) {
-        billet = assembler.emit_op(billet, instruction.Kind.LUI, register(to), registers.ZERO, registers.ZERO, fixer.address_upper(value))
-        out emit(billet, forms.addiw(register(to), register(to), fixer.address_low(value)))
+        billet = assembler.emit_op(billet, Instruction.Kind.LUI, register(to), registers.ZERO, registers.ZERO, fixer.address_upper(value))
+        out emit(billet, encodings.addiw(register(to), register(to), fixer.address_low(value)))
     }
 
     skill load_address(billet, to, name, addend) {
@@ -191,15 +193,15 @@ Executor = Box {
     }
 
     skill shift_left(billet, to, from, count) {
-        out emit(billet, forms.slli(register(to), register(from), count))
+        out emit(billet, encodings.slli(register(to), register(from), count))
     }
 
     skill shift_right_signed(billet, to, from, count) {
-        out emit(billet, forms.srai(register(to), register(from), count))
+        out emit(billet, encodings.srai(register(to), register(from), count))
     }
 
     skill shift_right_unsigned(billet, to, from, count) {
-        out emit(billet, forms.srli(register(to), register(from), count))
+        out emit(billet, encodings.srli(register(to), register(from), count))
     }
 
     skill shift_left_by(billet, to, from, count) {
@@ -250,67 +252,67 @@ Executor = Box {
     skill load(billet, to, base, offset) {
         (assembler.fits_immediate(offset) == no) {
             billet = wide_offset(billet, register(base), offset)
-            out emit(billet, forms.ld(register(to), WIDE_OFFSET_REGISTER, 0))
+            out emit(billet, encodings.ld(register(to), WIDE_OFFSET_REGISTER, 0))
         }
-        out emit(billet, forms.ld(register(to), register(base), offset))
+        out emit(billet, encodings.ld(register(to), register(base), offset))
     }
 
     skill load32(billet, to, base, offset) {
         (assembler.fits_immediate(offset) == no) {
             billet = wide_offset(billet, register(base), offset)
-            out emit(billet, forms.lwu(register(to), WIDE_OFFSET_REGISTER, 0))
+            out emit(billet, encodings.lwu(register(to), WIDE_OFFSET_REGISTER, 0))
         }
-        out emit(billet, forms.lwu(register(to), register(base), offset))
+        out emit(billet, encodings.lwu(register(to), register(base), offset))
     }
 
     skill store32(billet, from, base, offset) {
-        out assembler.emit_op(billet, instruction.Kind.SW, registers.ZERO, register(base), register(from), offset)
+        out assembler.emit_op(billet, Instruction.Kind.SW, registers.ZERO, register(base), register(from), offset)
     }
 
     skill load_byte(billet, to, base, offset) {
-        out assembler.emit_op(billet, instruction.Kind.LBU, register(to), register(base), registers.ZERO, offset)
+        out assembler.emit_op(billet, Instruction.Kind.LBU, register(to), register(base), registers.ZERO, offset)
     }
 
     skill load_half(billet, to, base, offset) {
-        out assembler.emit_op(billet, instruction.Kind.LHU, register(to), register(base), registers.ZERO, offset)
+        out assembler.emit_op(billet, Instruction.Kind.LHU, register(to), register(base), registers.ZERO, offset)
     }
 
     skill store(billet, from, base, offset) {
         (assembler.fits_immediate(offset) == no) {
             billet = wide_offset(billet, register(base), offset)
-            out emit(billet, forms.sd(register(from), WIDE_OFFSET_REGISTER, 0))
+            out emit(billet, encodings.sd(register(from), WIDE_OFFSET_REGISTER, 0))
         }
-        out emit(billet, forms.sd(register(from), register(base), offset))
+        out emit(billet, encodings.sd(register(from), register(base), offset))
     }
 
     skill store_byte(billet, from, base, offset) {
-        out assembler.emit_op(billet, instruction.Kind.SB, registers.ZERO, register(base), register(from), offset)
+        out assembler.emit_op(billet, Instruction.Kind.SB, registers.ZERO, register(base), register(from), offset)
     }
 
     skill store_half(billet, from, base, offset) {
-        out assembler.emit_op(billet, instruction.Kind.SH, registers.ZERO, register(base), register(from), offset)
+        out assembler.emit_op(billet, Instruction.Kind.SH, registers.ZERO, register(base), register(from), offset)
     }
 
     skill store_zero(billet, base, offset) {
         (assembler.fits_immediate(offset) == no) {
             billet = wide_offset(billet, register(base), offset)
-            out emit(billet, forms.sd(registers.ZERO, WIDE_OFFSET_REGISTER, 0))
+            out emit(billet, encodings.sd(registers.ZERO, WIDE_OFFSET_REGISTER, 0))
         }
-        out emit(billet, forms.sd(registers.ZERO, register(base), offset))
+        out emit(billet, encodings.sd(registers.ZERO, register(base), offset))
     }
 
     skill store_byte_zero(billet, base, offset) {
-        out assembler.emit_op(billet, instruction.Kind.SB, registers.ZERO, register(base), registers.ZERO, offset)
+        out assembler.emit_op(billet, Instruction.Kind.SB, registers.ZERO, register(base), registers.ZERO, offset)
     }
 
     skill push(billet, from) {
-        billet = assembler.emit_op(billet, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, -WORD_BYTES)
-        out emit(billet, forms.sd(register(from), registers.SP, 0))
+        billet = assembler.emit_op(billet, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, -WORD_BYTES)
+        out emit(billet, encodings.sd(register(from), registers.SP, 0))
     }
 
     skill pop(billet, to) {
-        billet = emit(billet, forms.ld(register(to), registers.SP, 0))
-        out assembler.emit_op(billet, instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, WORD_BYTES)
+        billet = emit(billet, encodings.ld(register(to), registers.SP, 0))
+        out assembler.emit_op(billet, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, WORD_BYTES)
     }
 
     skill branch_equal(billet, left, right, name) {
@@ -425,50 +427,50 @@ Executor = Box {
     }
 
     skill multiply(billet, to, left, right) {
-        out emit(billet, forms.mul(register(to), register(left), register(right)))
+        out emit(billet, encodings.mul(register(to), register(left), register(right)))
     }
 
     skill multiply_high(billet, to, left, right) {
-        out emit(billet, forms.mulh(register(to), register(left), register(right)))
+        out emit(billet, encodings.mulh(register(to), register(left), register(right)))
     }
 
     skill multiply_high_unsigned(billet, to, left, right) {
-        out emit(billet, forms.mulhu(register(to), register(left), register(right)))
+        out emit(billet, encodings.mulhu(register(to), register(left), register(right)))
     }
 
     skill divide(billet, to, left, right) {
-        out emit(billet, forms.div(register(to), register(left), register(right)))
+        out emit(billet, encodings.div(register(to), register(left), register(right)))
     }
 
     skill remainder(billet, to, left, right) {
-        out emit(billet, forms.rem(register(to), register(left), register(right)))
+        out emit(billet, encodings.rem(register(to), register(left), register(right)))
     }
 
     skill divide_unsigned(billet, to, left, right) {
-        out emit(billet, forms.divu(register(to), register(left), register(right)))
+        out emit(billet, encodings.divu(register(to), register(left), register(right)))
     }
 
     skill remainder_unsigned(billet, to, left, right) {
-        out emit(billet, forms.remu(register(to), register(left), register(right)))
+        out emit(billet, encodings.remu(register(to), register(left), register(right)))
     }
 
     skill fraction(billet, op, to, left, right) {
-        billet = emit(billet, forms.fmv_d_x(0, register(left)))
-        billet = emit(billet, forms.fmv_d_x(1, register(right)))
-        (op == backend.FRACTION_LESS) { out emit(billet, forms.flt(register(to), 0, 1)) }
-        (op == backend.FRACTION_LESS_EQUAL) { out emit(billet, forms.fle(register(to), 0, 1)) }
-        billet = emit(billet, forms.fop(op, 0, 0, 1))
-        out emit(billet, forms.fmv_x_d(register(to), 0))
+        billet = emit(billet, encodings.fmv_d_x(0, register(left)))
+        billet = emit(billet, encodings.fmv_d_x(1, register(right)))
+        (op == backend.FRACTION_LESS) { out emit(billet, encodings.flt(register(to), 0, 1)) }
+        (op == backend.FRACTION_LESS_EQUAL) { out emit(billet, encodings.fle(register(to), 0, 1)) }
+        billet = emit(billet, encodings.fop(op, 0, 0, 1))
+        out emit(billet, encodings.fmv_x_d(register(to), 0))
     }
 
     skill fraction_from(billet, to, from) {
-        billet = emit(billet, forms.fcvt_d_l(0, register(from)))
-        out emit(billet, forms.fmv_x_d(register(to), 0))
+        billet = emit(billet, encodings.fcvt_d_l(0, register(from)))
+        out emit(billet, encodings.fmv_x_d(register(to), 0))
     }
 
     skill fraction_to(billet, to, from, mode) {
-        billet = emit(billet, forms.fmv_d_x(0, register(from)))
-        out emit(billet, forms.fcvt_l_d(register(to), 0, mode))
+        billet = emit(billet, encodings.fmv_d_x(0, register(from)))
+        out emit(billet, encodings.fcvt_l_d(register(to), 0, mode))
     }
 
     skill load_wide(billet, to, value) {

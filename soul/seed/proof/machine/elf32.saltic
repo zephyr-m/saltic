@@ -1,19 +1,19 @@
--- elf test — заголовки ELF32: образ host (три сегмента, восемь секций, BSS,
+-- elf32 test — заголовки ELF32: образ host (три сегмента, восемь секций, BSS,
 -- symtab) и qemu_virt (один сегмент с 0x80000000).
 --
 -- read_u16 / read_u32(bytes, offset) -> число из буфера, little endian
 -- bytes4(bytes, offset, b0, b1, b2, b3) -> yes/no
--- host_fixture() -> цель rv32i.host с кодом, rodata, data и bss
+-- host_fixture() -> цель layout.host с кодом, rodata, data и bss
 -- host / virt / run(suite) -> suite
 
 use craft.testing
 use compiler.gorn.backend.riscv.instruction
 use compiler.gorn.backend.layout
 use compiler.gorn.backend.riscv.rv32i.elf
-use compiler.gorn.backend.riscv.rv32i
 use compiler.machine.word
 use compiler.machine.wide
 use compiler.gorn.backend.buffer
+use compiler.gorn.backend.riscv.emit
 
 skill read_u16(bytes, offset) {
     out bytes.byte_at(offset) + bytes.byte_at(offset + 1) * 256
@@ -35,11 +35,11 @@ skill bytes4(bytes, offset, b0, b1, b2, b3) {
 }
 
 skill host_fixture() {
-    @target = rv32i.host("_start")
-    target = rv32i.label(target, Layout.Section.CODE, "_start")
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.EBREAK, 0, 0, 0, 0))
+    @target = layout.host("_start")
+    target.define_label(Layout.Section.CODE, "_start")
+    target = emit.op(target, Instruction.Kind.EBREAK, 0, 0, 0, 0)
     target.append_section_text(Layout.Section.RODATA, "saltic", yes)
-    target = rv32i.label(target, Layout.Section.RODATA, "message")
+    target.define_label(Layout.Section.RODATA, "message")
     target.append_section_word(Layout.Section.DATA, word.from_bytes(1, 2, 3, 4))
     target.reserve_bss(wide.from_number(17))
     out target
@@ -48,7 +48,10 @@ skill host_fixture() {
 skill host(suite) {
     @target = host_fixture()
     @current = target.layout()
-    @output = elf.executable(target)
+    @target_elf = Elf {
+        machine = target
+    }
+    @output = target_elf.executable()
     @section_table = read_u32(output, 32)
     @low_header = 52
     @load_header = 84
@@ -90,10 +93,13 @@ skill host(suite) {
 }
 
 skill virt(suite) {
-    @target = rv32i.qemu_virt("_start")
-    target = rv32i.label(target, Layout.Section.CODE, "_start")
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.WFI, 0, 0, 0, 0))
-    @output = elf.executable(target)
+    @target = layout.qemu_virt("_start")
+    target.define_label(Layout.Section.CODE, "_start")
+    target = emit.op(target, Instruction.Kind.WFI, 0, 0, 0, 0)
+    @target_elf = Elf {
+        machine = target
+    }
+    @output = target_elf.executable()
     suite = testing.test_yes(suite, "ELF virt: entry 0x80000000", bytes4(output, 24, 0, 0, 0, 128))
     suite = testing.test_equal(suite, "ELF virt: один load segment", read_u16(output, 44), 1)
     suite = testing.test_yes(suite, "ELF virt: segment 0x80000000", bytes4(output, 60, 0, 0, 0, 128))

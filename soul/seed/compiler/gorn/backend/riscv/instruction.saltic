@@ -1,18 +1,19 @@
--- instruction — таблица команд RV32I (40 базовых + 4 машинных: csrrw,
--- csrrs, mret, wfi): вид, имя, форма, opcode, funct3, funct7, system.
--- ANY = -1 — поле не участвует в кодировании. Порядок DEFINITIONS совпадает
--- с порядком Kind начиная с LUI.
+-- instruction — команда RV32I и таблица команд (40 базовых + 4 машинных:
+-- csrrw, csrrs, mret, wfi). ANY = -1 — поле не участвует в кодировании.
+-- Порядок DEFINITIONS совпадает с порядком Kind начиная с LUI.
+-- Хозяева (СОП, 22.11.2026): Instruction — запись таблицы со своими видами
+-- (снаружи Instruction.Kind.ADDI); Catalog —
+-- таблица целиком: поиск по имени и виду, разбор слова, проверка таблицы.
 --
--- Form = enum { R, I, S, B, U, J }; Kind = enum { UNKNOWN_INSTRUCTION, LUI, … WFI }
--- Definition { kind, name, form, opcode, funct3, funct7, system }
--- definition(kind, name, form, opcode, funct3, funct7, system) -> Definition
--- all() -> DEFINITIONS; count() -> число команд
--- at(index) / find(name) / find_kind(kind) -> Definition или пустой
--- valid_form(form) / valid_optional(value, maximum) / valid(item) -> yes/no
--- overlaps / same_encoding(left, right) -> yes/no
--- valid_table() -> yes/no — нет дублей имён, видов и кодировок
--- matches(item, opcode, funct3, funct7, system) -> yes/no
--- decode(opcode, funct3, funct7, system) -> Definition или пустой
+-- Instruction { kind, name, form, opcode, funct3, funct7, system }:
+--     Kind = enum { UNKNOWN_INSTRUCTION, LUI, … WFI }; Form = enum { R, I, S, B, U, J }
+--     valid() / same_encoding(other) / matches(opcode, funct3, funct7, system) -> yes/no;
+--     внутренние:
+--     valid_form(form), valid_optional(value, maximum), overlaps(left, right)
+-- Catalog { items }: count(), at(index) / find(name) / find_kind(kind) ->
+--     Instruction или пустая; decode(opcode, funct3, funct7, system); valid() ->
+--     нет дублей имён, видов и кодировок
+-- definition(kind, name, form, opcode, funct3, funct7, system) -> Instruction
 
 use core.str
 use core.group
@@ -22,29 +23,7 @@ MACHINE_COUNT = 4
 COUNT = BASE_COUNT + MACHINE_COUNT
 ANY = -1
 
-Form = enum {
-    R,
-    I,
-    S,
-    B,
-    U,
-    J
-}
-
-Kind = enum {
-    UNKNOWN_INSTRUCTION,
-    LUI, AUIPC, JAL, JALR,
-    BEQ, BNE, BLT, BGE, BLTU, BGEU,
-    LB, LH, LW, LBU, LHU,
-    SB, SH, SW,
-    ADDI, SLTI, SLTIU, XORI, ORI, ANDI,
-    SLLI, SRLI, SRAI,
-    ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND,
-    FENCE, ECALL, EBREAK,
-    CSRRW, CSRRS, MRET, WFI
-}
-
-Definition = Box {
+Instruction = Box {
     kind = Kind.UNKNOWN_INSTRUCTION,
     name = "",
     form = Form.R,
@@ -52,10 +31,143 @@ Definition = Box {
     funct3 = ANY,
     funct7 = ANY,
     system = ANY
+
+    Form = enum {
+        R,
+        I,
+        S,
+        B,
+        U,
+        J
+    }
+
+    Kind = enum {
+        UNKNOWN_INSTRUCTION,
+        LUI, AUIPC, JAL, JALR,
+        BEQ, BNE, BLT, BGE, BLTU, BGEU,
+        LB, LH, LW, LBU, LHU,
+        SB, SH, SW,
+        ADDI, SLTI, SLTIU, XORI, ORI, ANDI,
+        SLLI, SRLI, SRAI,
+        ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND,
+        FENCE, ECALL, EBREAK,
+        CSRRW, CSRRS, MRET, WFI
+    }
+
+    skill valid_form(shape) {
+        (shape == Form.R) {
+            out yes
+        }
+        (shape == Form.I) {
+            out yes
+        }
+        (shape == Form.S) {
+            out yes
+        }
+        (shape == Form.B) {
+            out yes
+        }
+        (shape == Form.U) {
+            out yes
+        }
+        (shape == Form.J) {
+            out yes
+        }
+        out no
+    }
+
+    skill valid_optional(value, maximum) {
+        (value == ANY) {
+            out yes
+        }
+        (value < 0) {
+            out no
+        }
+        (value > maximum) {
+            out no
+        }
+        out yes
+    }
+
+    skill valid() {
+        (kind == Kind.UNKNOWN_INSTRUCTION) {
+            out no
+        }
+        (str.bytes(name) == 0) {
+            out no
+        }
+        (valid_form(form) == no) {
+            out no
+        }
+        (opcode < 0) {
+            out no
+        }
+        (opcode > 127) {
+            out no
+        }
+        (valid_optional(funct3, 7) == no) {
+            out no
+        }
+        (valid_optional(funct7, 127) == no) {
+            out no
+        }
+        (valid_optional(system, 4095) == no) {
+            out no
+        }
+        out yes
+    }
+
+    skill overlaps(left, right) {
+        (left == ANY) {
+            out yes
+        }
+        (right == ANY) {
+            out yes
+        }
+        out (left == right)
+    }
+
+    skill same_encoding(other) {
+        ((opcode == other.opcode) == no) {
+            out no
+        }
+        (overlaps(funct3, other.funct3) == no) {
+            out no
+        }
+        (overlaps(funct7, other.funct7) == no) {
+            out no
+        }
+        out overlaps(system, other.system)
+    }
+
+    skill matches(code, field3, field7, field_system) {
+        (kind == Kind.UNKNOWN_INSTRUCTION) {
+            out no
+        }
+        ((opcode == code) == no) {
+            out no
+        }
+        ((funct3 == ANY) == no) {
+            ((funct3 == field3) == no) {
+                out no
+            }
+        }
+        ((funct7 == ANY) == no) {
+            ((funct7 == field7) == no) {
+                out no
+            }
+        }
+        ((system == ANY) == no) {
+            ((system == field_system) == no) {
+                out no
+            }
+        }
+        out yes
+    }
 }
 
 skill definition(kind, name, form, opcode, funct3, funct7, system) {
-    out Definition {
+    out Instruction {
         kind = kind,
         name = name,
         form = form,
@@ -67,166 +179,125 @@ skill definition(kind, name, form, opcode, funct3, funct7, system) {
 }
 
 DEFINITIONS = [
-        definition(Kind.LUI, "lui", Form.U, 55, ANY, ANY, ANY),
-        definition(Kind.AUIPC, "auipc", Form.U, 23, ANY, ANY, ANY),
-        definition(Kind.JAL, "jal", Form.J, 111, ANY, ANY, ANY),
-        definition(Kind.JALR, "jalr", Form.I, 103, 0, ANY, ANY),
+        definition(Instruction.Kind.LUI, "lui", Instruction.Form.U, 55, ANY, ANY, ANY),
+        definition(Instruction.Kind.AUIPC, "auipc", Instruction.Form.U, 23, ANY, ANY, ANY),
+        definition(Instruction.Kind.JAL, "jal", Instruction.Form.J, 111, ANY, ANY, ANY),
+        definition(Instruction.Kind.JALR, "jalr", Instruction.Form.I, 103, 0, ANY, ANY),
 
-        definition(Kind.BEQ, "beq", Form.B, 99, 0, ANY, ANY),
-        definition(Kind.BNE, "bne", Form.B, 99, 1, ANY, ANY),
-        definition(Kind.BLT, "blt", Form.B, 99, 4, ANY, ANY),
-        definition(Kind.BGE, "bge", Form.B, 99, 5, ANY, ANY),
-        definition(Kind.BLTU, "bltu", Form.B, 99, 6, ANY, ANY),
-        definition(Kind.BGEU, "bgeu", Form.B, 99, 7, ANY, ANY),
+        definition(Instruction.Kind.BEQ, "beq", Instruction.Form.B, 99, 0, ANY, ANY),
+        definition(Instruction.Kind.BNE, "bne", Instruction.Form.B, 99, 1, ANY, ANY),
+        definition(Instruction.Kind.BLT, "blt", Instruction.Form.B, 99, 4, ANY, ANY),
+        definition(Instruction.Kind.BGE, "bge", Instruction.Form.B, 99, 5, ANY, ANY),
+        definition(Instruction.Kind.BLTU, "bltu", Instruction.Form.B, 99, 6, ANY, ANY),
+        definition(Instruction.Kind.BGEU, "bgeu", Instruction.Form.B, 99, 7, ANY, ANY),
 
-        definition(Kind.LB, "lb", Form.I, 3, 0, ANY, ANY),
-        definition(Kind.LH, "lh", Form.I, 3, 1, ANY, ANY),
-        definition(Kind.LW, "lw", Form.I, 3, 2, ANY, ANY),
-        definition(Kind.LBU, "lbu", Form.I, 3, 4, ANY, ANY),
-        definition(Kind.LHU, "lhu", Form.I, 3, 5, ANY, ANY),
+        definition(Instruction.Kind.LB, "lb", Instruction.Form.I, 3, 0, ANY, ANY),
+        definition(Instruction.Kind.LH, "lh", Instruction.Form.I, 3, 1, ANY, ANY),
+        definition(Instruction.Kind.LW, "lw", Instruction.Form.I, 3, 2, ANY, ANY),
+        definition(Instruction.Kind.LBU, "lbu", Instruction.Form.I, 3, 4, ANY, ANY),
+        definition(Instruction.Kind.LHU, "lhu", Instruction.Form.I, 3, 5, ANY, ANY),
 
-        definition(Kind.SB, "sb", Form.S, 35, 0, ANY, ANY),
-        definition(Kind.SH, "sh", Form.S, 35, 1, ANY, ANY),
-        definition(Kind.SW, "sw", Form.S, 35, 2, ANY, ANY),
+        definition(Instruction.Kind.SB, "sb", Instruction.Form.S, 35, 0, ANY, ANY),
+        definition(Instruction.Kind.SH, "sh", Instruction.Form.S, 35, 1, ANY, ANY),
+        definition(Instruction.Kind.SW, "sw", Instruction.Form.S, 35, 2, ANY, ANY),
 
-        definition(Kind.ADDI, "addi", Form.I, 19, 0, ANY, ANY),
-        definition(Kind.SLTI, "slti", Form.I, 19, 2, ANY, ANY),
-        definition(Kind.SLTIU, "sltiu", Form.I, 19, 3, ANY, ANY),
-        definition(Kind.XORI, "xori", Form.I, 19, 4, ANY, ANY),
-        definition(Kind.ORI, "ori", Form.I, 19, 6, ANY, ANY),
-        definition(Kind.ANDI, "andi", Form.I, 19, 7, ANY, ANY),
-        definition(Kind.SLLI, "slli", Form.I, 19, 1, 0, ANY),
-        definition(Kind.SRLI, "srli", Form.I, 19, 5, 0, ANY),
-        definition(Kind.SRAI, "srai", Form.I, 19, 5, 32, ANY),
+        definition(Instruction.Kind.ADDI, "addi", Instruction.Form.I, 19, 0, ANY, ANY),
+        definition(Instruction.Kind.SLTI, "slti", Instruction.Form.I, 19, 2, ANY, ANY),
+        definition(Instruction.Kind.SLTIU, "sltiu", Instruction.Form.I, 19, 3, ANY, ANY),
+        definition(Instruction.Kind.XORI, "xori", Instruction.Form.I, 19, 4, ANY, ANY),
+        definition(Instruction.Kind.ORI, "ori", Instruction.Form.I, 19, 6, ANY, ANY),
+        definition(Instruction.Kind.ANDI, "andi", Instruction.Form.I, 19, 7, ANY, ANY),
+        definition(Instruction.Kind.SLLI, "slli", Instruction.Form.I, 19, 1, 0, ANY),
+        definition(Instruction.Kind.SRLI, "srli", Instruction.Form.I, 19, 5, 0, ANY),
+        definition(Instruction.Kind.SRAI, "srai", Instruction.Form.I, 19, 5, 32, ANY),
 
-        definition(Kind.ADD, "add", Form.R, 51, 0, 0, ANY),
-        definition(Kind.SUB, "sub", Form.R, 51, 0, 32, ANY),
-        definition(Kind.SLL, "sll", Form.R, 51, 1, 0, ANY),
-        definition(Kind.SLT, "slt", Form.R, 51, 2, 0, ANY),
-        definition(Kind.SLTU, "sltu", Form.R, 51, 3, 0, ANY),
-        definition(Kind.XOR, "xor", Form.R, 51, 4, 0, ANY),
-        definition(Kind.SRL, "srl", Form.R, 51, 5, 0, ANY),
-        definition(Kind.SRA, "sra", Form.R, 51, 5, 32, ANY),
-        definition(Kind.OR, "or", Form.R, 51, 6, 0, ANY),
-        definition(Kind.AND, "and", Form.R, 51, 7, 0, ANY),
+        definition(Instruction.Kind.ADD, "add", Instruction.Form.R, 51, 0, 0, ANY),
+        definition(Instruction.Kind.SUB, "sub", Instruction.Form.R, 51, 0, 32, ANY),
+        definition(Instruction.Kind.SLL, "sll", Instruction.Form.R, 51, 1, 0, ANY),
+        definition(Instruction.Kind.SLT, "slt", Instruction.Form.R, 51, 2, 0, ANY),
+        definition(Instruction.Kind.SLTU, "sltu", Instruction.Form.R, 51, 3, 0, ANY),
+        definition(Instruction.Kind.XOR, "xor", Instruction.Form.R, 51, 4, 0, ANY),
+        definition(Instruction.Kind.SRL, "srl", Instruction.Form.R, 51, 5, 0, ANY),
+        definition(Instruction.Kind.SRA, "sra", Instruction.Form.R, 51, 5, 32, ANY),
+        definition(Instruction.Kind.OR, "or", Instruction.Form.R, 51, 6, 0, ANY),
+        definition(Instruction.Kind.AND, "and", Instruction.Form.R, 51, 7, 0, ANY),
 
-        definition(Kind.FENCE, "fence", Form.I, 15, 0, ANY, ANY),
-        definition(Kind.ECALL, "ecall", Form.I, 115, 0, ANY, 0),
-        definition(Kind.EBREAK, "ebreak", Form.I, 115, 0, ANY, 1),
-        definition(Kind.CSRRW, "csrrw", Form.I, 115, 1, ANY, ANY),
-        definition(Kind.CSRRS, "csrrs", Form.I, 115, 2, ANY, ANY),
-        definition(Kind.MRET, "mret", Form.I, 115, 0, ANY, 770),
-        definition(Kind.WFI, "wfi", Form.I, 115, 0, ANY, 261)
+        definition(Instruction.Kind.FENCE, "fence", Instruction.Form.I, 15, 0, ANY, ANY),
+        definition(Instruction.Kind.ECALL, "ecall", Instruction.Form.I, 115, 0, ANY, 0),
+        definition(Instruction.Kind.EBREAK, "ebreak", Instruction.Form.I, 115, 0, ANY, 1),
+        definition(Instruction.Kind.CSRRW, "csrrw", Instruction.Form.I, 115, 1, ANY, ANY),
+        definition(Instruction.Kind.CSRRS, "csrrs", Instruction.Form.I, 115, 2, ANY, ANY),
+        definition(Instruction.Kind.MRET, "mret", Instruction.Form.I, 115, 0, ANY, 770),
+        definition(Instruction.Kind.WFI, "wfi", Instruction.Form.I, 115, 0, ANY, 261)
 ]
 
-skill all() {
-    out DEFINITIONS
-}
+Catalog = Box {
+    items = DEFINITIONS
 
-skill count() {
-    out COUNT
-}
-
-skill at(index) {
-    (index < 0) { out Definition {} }
-    (index >= COUNT) { out Definition {} }
-    out group.get(DEFINITIONS, index)
-}
-
-skill find(name) {
-    drum (COUNT) {
-        @item = group.get(DEFINITIONS, beat)
-        (item.name == name) { out item }
+    skill count() {
+        out COUNT
     }
-    out Definition {}
-}
 
-skill find_kind(kind) {
-    drum (COUNT) {
-        @item = group.get(DEFINITIONS, beat)
-        (item.kind == kind) { out item }
-    }
-    out Definition {}
-}
-
-skill valid_form(form) {
-    (form == Form.R) { out yes }
-    (form == Form.I) { out yes }
-    (form == Form.S) { out yes }
-    (form == Form.B) { out yes }
-    (form == Form.U) { out yes }
-    (form == Form.J) { out yes }
-    out no
-}
-
-skill valid_optional(value, maximum) {
-    (value == ANY) { out yes }
-    (value < 0) { out no }
-    (value > maximum) { out no }
-    out yes
-}
-
-skill valid(item) {
-    (item.kind == Kind.UNKNOWN_INSTRUCTION) { out no }
-    (str.bytes(item.name) == 0) { out no }
-    (valid_form(item.form) == no) { out no }
-    (item.opcode < 0) { out no }
-    (item.opcode > 127) { out no }
-    (valid_optional(item.funct3, 7) == no) { out no }
-    (valid_optional(item.funct7, 127) == no) { out no }
-    (valid_optional(item.system, 4095) == no) { out no }
-    out yes
-}
-
-skill overlaps(left, right) {
-    (left == ANY) { out yes }
-    (right == ANY) { out yes }
-    out left == right
-}
-
-skill same_encoding(left, right) {
-    ((left.opcode == right.opcode) == no) { out no }
-    (overlaps(left.funct3, right.funct3) == no) { out no }
-    (overlaps(left.funct7, right.funct7) == no) { out no }
-    out overlaps(left.system, right.system)
-}
-
-skill valid_table() {
-    @items = DEFINITIONS
-    ((group.count(items) == COUNT) == no) { out no }
-    drum (COUNT) {
-        @left_index = beat
-        @left = group.get(items, left_index)
-        (valid(left) == no) { out no }
-        drum (COUNT - left_index - 1) {
-            @right = group.get(items, left_index + 1 + beat)
-            (left.name == right.name) { out no }
-            (left.kind == right.kind) { out no }
-            (same_encoding(left, right) == yes) { out no }
+    skill at(index) {
+        (index < 0) {
+            out Instruction {}
         }
+        (index >= COUNT) {
+            out Instruction {}
+        }
+        out group.get(items, index)
     }
-    out yes
-}
 
-skill matches(item, opcode, funct3, funct7, system) {
-    (item.kind == Kind.UNKNOWN_INSTRUCTION) { out no }
-    ((item.opcode == opcode) == no) { out no }
-    ((item.funct3 == ANY) == no) {
-        ((item.funct3 == funct3) == no) { out no }
+    skill find(wanted) {
+        drum (items) {
+            (beat.name == wanted) {
+                out beat
+            }
+        }
+        out Instruction {}
     }
-    ((item.funct7 == ANY) == no) {
-        ((item.funct7 == funct7) == no) { out no }
-    }
-    ((item.system == ANY) == no) {
-        ((item.system == system) == no) { out no }
-    }
-    out yes
-}
 
-skill decode(opcode, funct3, funct7, system) {
-    drum (COUNT) {
-        @item = at(beat)
-        (matches(item, opcode, funct3, funct7, system) == yes) { out item }
+    skill find_kind(wanted) {
+        drum (items) {
+            (beat.kind == wanted) {
+                out beat
+            }
+        }
+        out Instruction {}
     }
-    out Definition {}
+
+    skill valid() {
+        ((group.count(items) == COUNT) == no) {
+            out no
+        }
+        drum (COUNT) {
+            @left_index = beat
+            @left = group.get(items, left_index)
+            (left.valid() == no) {
+                out no
+            }
+            drum (COUNT - left_index - 1) {
+                @right = group.get(items, left_index + 1 + beat)
+                (left.name == right.name) {
+                    out no
+                }
+                (left.kind == right.kind) {
+                    out no
+                }
+                (left.same_encoding(right) == yes) {
+                    out no
+                }
+            }
+        }
+        out yes
+    }
+
+    skill decode(code, field3, field7, field_system) {
+        drum (items) {
+            (beat.matches(code, field3, field7, field_system) == yes) {
+                out beat
+            }
+        }
+        out Instruction {}
+    }
 }

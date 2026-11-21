@@ -61,9 +61,10 @@
   машинный runtime `rt_*` на договоре машины (роли и операции `gorn/backend`,
   общий для исполнителей): арифметика, Box и группы, строки,
   фиксированные типы, прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
-- `gorn/backend/riscv/rv32i/{instruction,registers,codec,decoder,buffer,layout,image,profile}` —
-  команды и регистры RV32I, кодирование и разбор команд, байтовый буфер,
-  раскладка, ELF32-образ;
+- `gorn/backend/{buffer,layout}` — байтовый буфер и программа в сборке, общие
+  для всех; `gorn/backend/riscv/{instruction,registers,codec,assembler,emit,fixer}`
+  — общее семьи RISC-V: таблица команд (`Instruction`, `Catalog`), кодирование,
+  команды и переходы, правки; `riscv/rv32i/{profile,elf}` — паспорт машины и ELF32;
 - `machine/word` — 32-битное слово из четырёх байтов, общее для всех
   бэкендов, образов и ОС; `machine/wide` — 64-битное из двух `word` (константы
   RV64, поля ELF64). Компилятор считает ими, потому что работает и на RV32I,

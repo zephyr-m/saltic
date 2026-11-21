@@ -5,12 +5,13 @@
 -- (low_memory_size) — отдельный сегмент с адреса 0.
 --
 -- Tables { symbols, names } / ProgramHeader { … } / SectionHeader { … }
--- section_index(section) -> номер секции в ELF
--- symbol_tables(program, layout) -> Tables; section_names() -> buffer
--- append_header / append_program_header / append_section_header(target, …)
--- executable(program) -> buffer ELF; UnresolvedPatch, LoadAddressNotAligned
--- write(path, program) — ELF через Buffer.write_program
+-- Elf { machine } — хозяин записи ELF32 (СОП, 22.11.2026):
+--     executable() -> Buffer ELF; UnresolvedPatch, LoadAddressNotAligned;
+--     write(path) — ELF через Buffer.write_program; внутренние:
+--     section_index(section), symbol_tables(layout) -> Tables, section_names(),
+--     append_header / append_program_header / append_section_header(target, …)
 
+use core.num
 use compiler.gorn.backend.layout
 use compiler.machine.word
 use compiler.machine.wide
@@ -45,214 +46,226 @@ SectionHeader = Box {
     entry_size = 0
 }
 
-skill section_index(section) {
-    (section == Layout.Section.CODE) { out 1 }
-    (section == Layout.Section.RODATA) { out 2 }
-    (section == Layout.Section.DATA) { out 3 }
-    out 4
-}
+Elf = Box {
+    machine = layout.Program {}
 
-skill symbol_tables(value, current_layout) {
-    @symbols = buffer.empty()
-    symbols.append_zeroes(16)
-    @names = buffer.empty()
-    names.append_byte(0)
-    @label = value.labels_first
-    drum (value.label_count) {
-        @name_offset = names.length
-        names.append_cstring(label.name)
-        @address = value.label_address(current_layout, label.name, 0)
-        @info = 17
-        (label.section == Layout.Section.CODE) { info = 18 }
-        symbols.append_number32(name_offset)
-        symbols.append_word(address)
-        symbols.append_number32(0)
-        symbols.append_byte(info)
-        symbols.append_byte(0)
-        symbols.append_u16(section_index(label.section))
-        label = label.next
-    }
-    out Tables { symbols = symbols, names = names }
-}
-
-skill section_names() {
-    @names = buffer.empty()
-    names.append_byte(0)
-    names.append_cstring(".text")
-    names.append_cstring(".rodata")
-    names.append_cstring(".data")
-    names.append_cstring(".bss")
-    names.append_cstring(".symtab")
-    names.append_cstring(".strtab")
-    names.append_cstring(".shstrtab")
-    out names
-}
-
-skill append_program_header(target, header) {
-    target.append_number32(header.type)
-    target.append_number32(header.offset)
-    target.append_word(header.virtual_address)
-    target.append_word(header.physical_address)
-    target.append_number32(header.file_size)
-    target.append_word(header.memory_size)
-    target.append_number32(header.flags)
-    target.append_number32(header.alignment)
-    out target
-}
-
-skill append_section_header(target, header) {
-    target.append_number32(header.name)
-    target.append_number32(header.type)
-    target.append_number32(header.flags)
-    target.append_word(header.address)
-    target.append_number32(header.offset)
-    target.append_word(header.size)
-    target.append_number32(header.link)
-    target.append_number32(header.info)
-    target.append_number32(header.alignment)
-    target.append_number32(header.entry_size)
-    out target
-}
-
-skill append_header(target, entry, program_count, section_table_offset) {
-    target.append_byte(127)
-    target.append_byte(69)
-    target.append_byte(76)
-    target.append_byte(70)
-    target.append_byte(1)
-    target.append_byte(1)
-    target.append_byte(1)
-    target.append_zeroes(9)
-    target.append_u16(2)
-    target.append_u16(243)
-    target.append_number32(1)
-    target.append_word(entry)
-    target.append_number32(52)
-    target.append_number32(section_table_offset)
-    target.append_number32(0)
-    target.append_u16(52)
-    target.append_u16(32)
-    target.append_u16(program_count)
-    target.append_u16(40)
-    target.append_u16(8)
-    target.append_u16(7)
-    out target
-}
-
-skill executable(value) {
-    (value.resolved == no) { value = layout.resolve(value) rescue |failure| { out error.UnresolvedPatch } }
-    @current_layout = value.layout()
-    @entry = value.label_address(current_layout, value.entry, 0)
-    @page_offset = value.load_address.b0 + value.load_address.b1 % 16 * 256
-    (page_offset > 0) { out error.LoadAddressNotAligned }
-
-    @body = value.payload(current_layout)
-    @tables = symbol_tables(value, current_layout)
-    @names = section_names()
-    @segment_offset = 4096
-    @symbols_offset = layout.align(segment_offset + body.length, 4)
-    @strings_offset = symbols_offset + tables.symbols.length
-    @section_names_offset = strings_offset + tables.names.length
-    @section_table_offset = layout.align(section_names_offset + names.length, 4)
-    @has_writable = value.data.length > 0
-    (wide.is_zero(value.bss_size) == no) { has_writable = yes }
-    @program_count = 1
-    (has_writable == yes) { program_count = program_count + 1 }
-    (value.low_memory_size > 0) { program_count = 2 }
-    (value.low_memory_size > 0) {
-        (has_writable == yes) { program_count = 3 }
+    skill section_index(section) {
+        (section == Layout.Section.CODE) { out 1 }
+        (section == Layout.Section.RODATA) { out 2 }
+        (section == Layout.Section.DATA) { out 3 }
+        out 4
     }
 
-    @result = buffer.empty()
-    result = append_header(result, entry, program_count, section_table_offset)
-    (value.low_memory_size > 0) {
+    skill symbol_tables(current_layout) {
+        @value = machine
+        @symbols = buffer.empty()
+        symbols.append_zeroes(16)
+        @names = buffer.empty()
+        names.append_byte(0)
+        @label = value.labels_first
+        drum (value.label_count) {
+            (label) |item| {
+                @name_offset = names.length
+                names.append_cstring(item.name)
+                @address = value.label_address(current_layout, item.name, 0)
+                @info = 17
+                (item.section == Layout.Section.CODE) {
+                    info = 18
+                }
+                symbols.append_number32(name_offset)
+                symbols.append_word(address)
+                symbols.append_number32(0)
+                symbols.append_byte(info)
+                symbols.append_byte(0)
+                symbols.append_u16(section_index(item.section))
+                label = item.next
+            }
+        }
+        out Tables { symbols = symbols, names = names }
+    }
+
+    skill section_names() {
+        @names = buffer.empty()
+        names.append_byte(0)
+        names.append_cstring(".text")
+        names.append_cstring(".rodata")
+        names.append_cstring(".data")
+        names.append_cstring(".bss")
+        names.append_cstring(".symtab")
+        names.append_cstring(".strtab")
+        names.append_cstring(".shstrtab")
+        out names
+    }
+
+    skill append_program_header(target, header) {
+        target.append_number32(header.type)
+        target.append_number32(header.offset)
+        target.append_word(header.virtual_address)
+        target.append_word(header.physical_address)
+        target.append_number32(header.file_size)
+        target.append_word(header.memory_size)
+        target.append_number32(header.flags)
+        target.append_number32(header.alignment)
+        out target
+    }
+
+    skill append_section_header(target, header) {
+        target.append_number32(header.name)
+        target.append_number32(header.type)
+        target.append_number32(header.flags)
+        target.append_word(header.address)
+        target.append_number32(header.offset)
+        target.append_word(header.size)
+        target.append_number32(header.link)
+        target.append_number32(header.info)
+        target.append_number32(header.alignment)
+        target.append_number32(header.entry_size)
+        out target
+    }
+
+    skill append_header(target, entry, program_count, section_table_offset) {
+        target.append_byte(127)
+        target.append_byte(69)
+        target.append_byte(76)
+        target.append_byte(70)
+        target.append_byte(1)
+        target.append_byte(1)
+        target.append_byte(1)
+        target.append_zeroes(9)
+        target.append_u16(2)
+        target.append_u16(243)
+        target.append_number32(1)
+        target.append_word(entry)
+        target.append_number32(52)
+        target.append_number32(section_table_offset)
+        target.append_number32(0)
+        target.append_u16(52)
+        target.append_u16(32)
+        target.append_u16(program_count)
+        target.append_u16(40)
+        target.append_u16(8)
+        target.append_u16(7)
+        out target
+    }
+
+    skill executable() {
+        @value = machine
+        (value.resolved == no) { value = layout.resolve(value) rescue |failure| { out error.UnresolvedPatch } }
+        @current_layout = value.layout()
+        @entry = value.label_address(current_layout, value.entry, 0)
+        @page_offset = value.load_address.b0 + value.load_address.b1 % 16 * 256
+        (page_offset > 0) { out error.LoadAddressNotAligned }
+
+        @body = value.payload(current_layout)
+        @tables = symbol_tables(current_layout)
+        @names = section_names()
+        @segment_offset = 4096
+        @symbols_offset = num.align(segment_offset + body.length, 4)
+        @strings_offset = symbols_offset + tables.symbols.length
+        @section_names_offset = strings_offset + tables.names.length
+        @section_table_offset = num.align(section_names_offset + names.length, 4)
+        @has_writable = value.data.length > 0
+        (wide.is_zero(value.bss_size) == no) { has_writable = yes }
+        @program_count = 1
+        (has_writable == yes) { program_count = program_count + 1 }
+        (value.low_memory_size > 0) { program_count = 2 }
+        (value.low_memory_size > 0) {
+            (has_writable == yes) { program_count = 3 }
+        }
+
+        @result = buffer.empty()
+        result = append_header(result, entry, program_count, section_table_offset)
+        (value.low_memory_size > 0) {
+            result = append_program_header(result, ProgramHeader {
+                type = 1,
+                offset = 0,
+                virtual_address = word.from_bytes(0, 0, 0, 0),
+                physical_address = word.from_bytes(0, 0, 0, 0),
+                file_size = 52 + program_count * 32,
+                memory_size = layout.address_from_number(value.low_memory_size),
+                flags = 6,
+                alignment = 4096
+            })
+        }
         result = append_program_header(result, ProgramHeader {
             type = 1,
-            offset = 0,
-            virtual_address = word.from_bytes(0, 0, 0, 0),
-            physical_address = word.from_bytes(0, 0, 0, 0),
-            file_size = 52 + program_count * 32,
-            memory_size = layout.address_from_number(value.low_memory_size),
-            flags = 6,
+            offset = segment_offset,
+            virtual_address = value.load_address,
+            physical_address = value.load_address,
+            file_size = current_layout.data_offset,
+            memory_size = layout.address_from_number(current_layout.data_offset),
+            flags = 5,
             alignment = 4096
         })
-    }
-    result = append_program_header(result, ProgramHeader {
-        type = 1,
-        offset = segment_offset,
-        virtual_address = value.load_address,
-        physical_address = value.load_address,
-        file_size = current_layout.data_offset,
-        memory_size = layout.address_from_number(current_layout.data_offset),
-        flags = 5,
-        alignment = 4096
-    })
-    (has_writable == yes) {
-        @data_file_size = current_layout.file_size - current_layout.data_offset
-        @data_address = layout.address_add(value.load_address, current_layout.data_offset)
-        result = append_program_header(result, ProgramHeader {
-            type = 1,
+        (has_writable == yes) {
+            @data_file_size = current_layout.file_size - current_layout.data_offset
+            @data_address = layout.address_add(value.load_address, current_layout.data_offset)
+            result = append_program_header(result, ProgramHeader {
+                type = 1,
+                offset = segment_offset + current_layout.data_offset,
+                virtual_address = data_address,
+                physical_address = data_address,
+                file_size = data_file_size,
+                memory_size = wide.to_word(wide.add_number(value.bss_size, data_file_size)),
+                flags = 6,
+                alignment = 4096
+            })
+        }
+        result.pad_to(segment_offset)
+        result.append_buffer(body)
+        result.pad_to(symbols_offset)
+        result.append_buffer(tables.symbols)
+        result.append_buffer(tables.names)
+        result.append_buffer(names)
+        result.pad_to(section_table_offset)
+
+        result.append_zeroes(40)
+        result = append_section_header(result, SectionHeader {
+            name = 1, type = 1, flags = 6,
+            address = layout.address_add(value.load_address, current_layout.code_offset),
+            offset = segment_offset + current_layout.code_offset,
+            size = layout.address_from_number(value.code.length), link = 0, info = 0, alignment = 4, entry_size = 0
+        })
+        result = append_section_header(result, SectionHeader {
+            name = 7, type = 1, flags = 2,
+            address = layout.address_add(value.load_address, current_layout.rodata_offset),
+            offset = segment_offset + current_layout.rodata_offset,
+            size = layout.address_from_number(value.rodata.length), link = 0, info = 0, alignment = 8, entry_size = 0
+        })
+        result = append_section_header(result, SectionHeader {
+            name = 15, type = 1, flags = 3,
+            address = layout.address_add(value.load_address, current_layout.data_offset),
             offset = segment_offset + current_layout.data_offset,
-            virtual_address = data_address,
-            physical_address = data_address,
-            file_size = data_file_size,
-            memory_size = wide.to_word(wide.add_number(value.bss_size, data_file_size)),
-            flags = 6,
-            alignment = 4096
+            size = layout.address_from_number(value.data.length), link = 0, info = 0, alignment = 8, entry_size = 0
         })
+        result = append_section_header(result, SectionHeader {
+            name = 21, type = 8, flags = 3,
+            address = layout.address_add(value.load_address, current_layout.bss_offset),
+            offset = segment_offset + current_layout.bss_offset,
+            size = wide.to_word(value.bss_size), link = 0, info = 0, alignment = 8, entry_size = 0
+        })
+        result = append_section_header(result, SectionHeader {
+            name = 26, type = 2, flags = 0, address = word.from_bytes(0, 0, 0, 0),
+            offset = symbols_offset, size = layout.address_from_number(tables.symbols.length),
+            link = 6, info = 1, alignment = 4, entry_size = 16
+        })
+        result = append_section_header(result, SectionHeader {
+            name = 34, type = 3, flags = 0, address = word.from_bytes(0, 0, 0, 0),
+            offset = strings_offset, size = layout.address_from_number(tables.names.length),
+            link = 0, info = 0, alignment = 1, entry_size = 0
+        })
+        result = append_section_header(result, SectionHeader {
+            name = 42, type = 3, flags = 0, address = word.from_bytes(0, 0, 0, 0),
+            offset = section_names_offset, size = layout.address_from_number(names.length),
+            link = 0, info = 0, alignment = 1, entry_size = 0
+        })
+        out result
     }
-    result.pad_to(segment_offset)
-    result.append_buffer(body)
-    result.pad_to(symbols_offset)
-    result.append_buffer(tables.symbols)
-    result.append_buffer(tables.names)
-    result.append_buffer(names)
-    result.pad_to(section_table_offset)
 
-    result.append_zeroes(40)
-    result = append_section_header(result, SectionHeader {
-        name = 1, type = 1, flags = 6,
-        address = layout.address_add(value.load_address, current_layout.code_offset),
-        offset = segment_offset + current_layout.code_offset,
-        size = layout.address_from_number(value.code.length), link = 0, info = 0, alignment = 4, entry_size = 0
-    })
-    result = append_section_header(result, SectionHeader {
-        name = 7, type = 1, flags = 2,
-        address = layout.address_add(value.load_address, current_layout.rodata_offset),
-        offset = segment_offset + current_layout.rodata_offset,
-        size = layout.address_from_number(value.rodata.length), link = 0, info = 0, alignment = 8, entry_size = 0
-    })
-    result = append_section_header(result, SectionHeader {
-        name = 15, type = 1, flags = 3,
-        address = layout.address_add(value.load_address, current_layout.data_offset),
-        offset = segment_offset + current_layout.data_offset,
-        size = layout.address_from_number(value.data.length), link = 0, info = 0, alignment = 8, entry_size = 0
-    })
-    result = append_section_header(result, SectionHeader {
-        name = 21, type = 8, flags = 3,
-        address = layout.address_add(value.load_address, current_layout.bss_offset),
-        offset = segment_offset + current_layout.bss_offset,
-        size = wide.to_word(value.bss_size), link = 0, info = 0, alignment = 8, entry_size = 0
-    })
-    result = append_section_header(result, SectionHeader {
-        name = 26, type = 2, flags = 0, address = word.from_bytes(0, 0, 0, 0),
-        offset = symbols_offset, size = layout.address_from_number(tables.symbols.length),
-        link = 6, info = 1, alignment = 4, entry_size = 16
-    })
-    result = append_section_header(result, SectionHeader {
-        name = 34, type = 3, flags = 0, address = word.from_bytes(0, 0, 0, 0),
-        offset = strings_offset, size = layout.address_from_number(tables.names.length),
-        link = 0, info = 0, alignment = 1, entry_size = 0
-    })
-    result = append_section_header(result, SectionHeader {
-        name = 42, type = 3, flags = 0, address = word.from_bytes(0, 0, 0, 0),
-        offset = section_names_offset, size = layout.address_from_number(names.length),
-        link = 0, info = 0, alignment = 1, entry_size = 0
-    })
-    out result
-}
-
-skill write(path, value) {
-    @output = executable(value) rescue |failure| { out error.UnresolvedPatch }
-    out output.write_program(path)
+    skill write(path) {
+        @output = executable() rescue |failure| {
+            out error.UnresolvedPatch
+        }
+        out output.write_program(path)
+    }
 }

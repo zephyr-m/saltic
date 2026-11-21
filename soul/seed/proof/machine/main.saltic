@@ -13,11 +13,10 @@ use compiler.gorn.backend.riscv.instruction
 use compiler.gorn.backend.riscv.rv32i.profile
 use compiler.gorn.backend.riscv.codec
 use compiler.gorn.backend.layout
-use compiler.gorn.backend.riscv.rv32i
 use proof.machine.golden
 use proof.machine.immediate
 use proof.machine.patches
-use proof.machine.elf
+use proof.machine.elf32
 use proof.machine.scale
 use proof.machine.runtime_bytes
 use proof.machine.qemu
@@ -25,8 +24,12 @@ use proof.machine.wide
 use compiler.gorn.backend.riscv.registers
 use compiler.machine.word
 use compiler.gorn.backend.buffer
+use compiler.gorn.backend.riscv.emit
+use compiler.gorn.backend.riscv.rv32i.elf
 
 skill machine_profile(suite) {
+    @passport = profile.Profile {}
+    @catalog = instruction.Catalog {}
     @names = [
         "lui", "auipc", "jal", "jalr",
         "beq", "bne", "blt", "bge", "bltu", "bgeu",
@@ -41,24 +44,24 @@ skill machine_profile(suite) {
     @machine_count = 0
     drum (profile.INSTRUCTION_COUNT) {
         @name = group.get(names, beat)
-        (profile.supports(name) == no) { known = no }
-        @item = instruction.at(beat)
-        (profile.is_machine(item.kind) == yes) { machine_count = machine_count + 1 }
+        (passport.supports(name) == no) { known = no }
+        @item = catalog.at(beat)
+        (passport.is_machine(item.kind) == yes) { machine_count = machine_count + 1 }
     }
-    @add = instruction.find("add")
-    @csrrw = instruction.find("csrrw")
-    @mret = instruction.find("mret")
-    @wfi = instruction.find("wfi")
-    @ecall = instruction.find("ecall")
-    @outside = instruction.at(44)
-    suite = testing.test_yes(suite, "профиль: внутренне согласован", profile.valid())
-    suite = testing.test_yes(suite, "профиль: таблица не имеет дыр и пересечений", instruction.valid_table())
+    @add = catalog.find("add")
+    @csrrw = catalog.find("csrrw")
+    @mret = catalog.find("mret")
+    @wfi = catalog.find("wfi")
+    @ecall = catalog.find("ecall")
+    @outside = catalog.at(44)
+    suite = testing.test_yes(suite, "профиль: внутренне согласован", passport.valid())
+    suite = testing.test_yes(suite, "профиль: таблица не имеет дыр и пересечений", catalog.valid())
     suite = testing.test_equal(suite, "профиль: слово содержит 32 бита", profile.WORD_BITS, 32)
     suite = testing.test_equal(suite, "профиль: регистров ровно 32", profile.REGISTER_COUNT, 32)
     suite = testing.test_equal(suite, "профиль: команда занимает 4 байта", profile.INSTRUCTION_BYTES, 4)
     suite = testing.test_equal(suite, "профиль: базовых команд ровно 40", profile.BASE_INSTRUCTION_COUNT, 40)
     suite = testing.test_equal(suite, "профиль: добавочных машинных команд ровно 4", profile.MACHINE_INSTRUCTION_COUNT, 4)
-    suite = testing.test_equal(suite, "профиль: полный профиль содержит 44 команды", instruction.count(), 44)
+    suite = testing.test_equal(suite, "профиль: полный профиль содержит 44 команды", catalog.count(), 44)
     suite = testing.test_equal(suite, "профиль: независимый список содержит 44 команды", group.count(names), 44)
     suite = testing.test_yes(suite, "профиль: все 44 имени найдены", known)
     suite = testing.test_equal(suite, "профиль: четыре машинные команды отделены", machine_count, 4)
@@ -67,19 +70,19 @@ skill machine_profile(suite) {
     suite = testing.test_equal(suite, "профиль: вид CSR-записи закреплён", csrrw.funct3, 1)
     suite = testing.test_equal(suite, "профиль: возврат из ловушки закреплён", mret.system, 770)
     suite = testing.test_equal(suite, "профиль: ожидание процессора закреплено", wfi.system, 261)
-    suite = testing.test_yes(suite, "профиль: возврат распознаётся однозначно", instruction.matches(mret, 115, 0, 24, 770))
-    suite = testing.test_no(suite, "профиль: системный вызов не становится возвратом", instruction.matches(ecall, 115, 0, 0, 770))
-    suite = testing.test_equal(suite, "профиль: выход за таблицу даёт неизвестную команду", outside.kind, instruction.Kind.UNKNOWN_INSTRUCTION)
+    suite = testing.test_yes(suite, "профиль: возврат распознаётся однозначно", mret.matches(115, 0, 24, 770))
+    suite = testing.test_no(suite, "профиль: системный вызов не становится возвратом", ecall.matches(115, 0, 0, 770))
+    suite = testing.test_equal(suite, "профиль: выход за таблицу даёт неизвестную команду", outside.kind, Instruction.Kind.UNKNOWN_INSTRUCTION)
     out suite
 }
 
 skill lowering(suite) {
-    @target = rv32i.host("_start")
-    target = rv32i.load_immediate(target, registers.T0, 5)
-    target = rv32i.load_immediate(target, registers.T0, 2048)
-    target = rv32i.label(target, Layout.Section.CODE, "target")
-    target = rv32i.branch_unsigned_greater(target, registers.T1, registers.T2, "target")
-    target = rv32i.resolve(target)
+    @target = layout.host("_start")
+    target = emit.load_immediate(target, registers.T0, 5)
+    target = emit.load_immediate(target, registers.T0, 2048)
+    target.define_label(Layout.Section.CODE, "target")
+    target = emit.branch_unsigned_greater(target, registers.T1, registers.T2, "target")
+    target = layout.resolve(target)
 
     @target_code = target.code
     suite = testing.test_equal(suite, "lowering: li малого значения", target_code.byte_at(0), 147)
@@ -99,17 +102,18 @@ skill lowering(suite) {
 }
 
 skill encoding(suite) {
+    @catalog = instruction.Catalog {}
     @encoded = buffer.empty()
     @valid = yes
-    drum (instruction.count()) {
-        @item = instruction.at(beat)
+    drum (catalog.count()) {
+        @item = catalog.at(beat)
         @bits = codec.encode(item, 1, 2, 3, 4) rescue |failure| {
             valid = no
             word.from_bytes(0, 0, 0, 0)
         }
         encoded.append_word(bits)
     }
-    @addi = codec.encode_kind(instruction.Kind.ADDI, 1, 2, 0, 3)
+    @addi = codec.encode_kind(Instruction.Kind.ADDI, 1, 2, 0, 3)
     suite = testing.test_yes(suite, "кодировщик: все 44 команды кодируются", valid)
     suite = testing.test_equal(suite, "кодировщик: каждая команда занимает четыре байта", encoded.length, 176)
     suite = testing.test_equal(suite, "кодировщик: первый байт addi закреплён", addi.b0, 147)
@@ -126,19 +130,22 @@ skill encoding(suite) {
 }
 
 skill executable(suite) {
-    @target = rv32i.host("_start")
-    target = rv32i.label(target, Layout.Section.CODE, "_start")
-    target = rv32i.branch(target, instruction.Kind.BEQ, registers.ZERO, registers.ZERO, "done")
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 9))
-    target = rv32i.label(target, Layout.Section.CODE, "done")
-    target = rv32i.emit(target, rv32i.operation(instruction.Kind.EBREAK, registers.ZERO, registers.ZERO, registers.ZERO, 0))
-    target = rv32i.resolve(target)
+    @target = layout.host("_start")
+    target.define_label(Layout.Section.CODE, "_start")
+    target = emit.branch(target, Instruction.Kind.BEQ, registers.ZERO, registers.ZERO, "done")
+    target = emit.op(target, Instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 9)
+    target.define_label(Layout.Section.CODE, "done")
+    target = emit.op(target, Instruction.Kind.EBREAK, registers.ZERO, registers.ZERO, registers.ZERO, 0)
+    target = layout.resolve(target)
 
     @current_layout = target.layout()
     @done_offset = target.label_offset(current_layout, "done")
     @target_code = target.code
     @branch_byte = target_code.byte_at(1)
-    @output = rv32i.executable(target)
+    @target_elf = Elf {
+        machine = target
+    }
+    @output = target_elf.executable()
 
     suite = testing.test_equal(suite, "программа: метка получила точное смещение", done_offset, 8)
     suite = testing.test_equal(suite, "программа: ссылка на метку исправлена", branch_byte, 4)
@@ -156,7 +163,7 @@ program(output_path) {
     suite = golden.run(suite)
     suite = immediate.run(suite)
     suite = patches.run(suite)
-    suite = elf.run(suite)
+    suite = elf32.run(suite)
     suite = scale.run(suite)
     suite = wide.run(suite)
     suite = qemu.run(suite, output_path)
