@@ -1,21 +1,23 @@
 -- control — переходы, вызовы, адреса меток и вызов ядра договора на AArch64.
 -- Переход к метке пишется заглушкой и запоминается правкой (Fixup) в списке
 -- исполнителя (Fixups); resolve доводит их по раскладке layout перед записью.
--- Правки свои, не layout.Patch: у ARM поля адреса другой ширины, а layout —
+-- Правки свои, не layout.Patch: у ARM поля адреса другой ширины; Fixups — чинильщик
+-- семьи в Program.fixer (как riscv.Fixer), layout.resolve отдаёт ему правки; layout —
 -- общий. Ближние переходы — b.cond / cbz / cbnz (±1 МБ), «на любое
 -- расстояние» и вызовы — b / bl (±128 МБ), адрес метки — adrp + add (±4 ГБ).
 --
--- FixupKind = enum { BRANCH, CONDITION, COMPARE, ADDRESS }
+-- Fixups.Kind = enum { BRANCH, CONDITION, COMPARE, ADDRESS }
 -- Fixup { kind, offset, label, addend, register, condition, flag, next } — condition —
 --     условие b.cond; flag: у BRANCH — bl (yes) или b, у COMPARE — cbnz (yes) или cbz
 -- Fixups { first, last } — список правок одной сборки
--- branch(billet, fixups, condition, left, right, label) — сравнение и b.cond
--- branch_test(billet, fixups, kind, from, label) — kind ZERO / NONZERO / encoder.MI / PL / LE
--- jump_if(billet, fixups, condition, left, right, label) / jump_if_test(…, nonzero, from, label)
--- jump(billet, fixups, label) / call(billet, fixups, label) / load_address(billet, fixups, to, label, addend)
+-- branch(billet, condition, left, right, label) — сравнение и b.cond
+-- branch_test(billet, kind, from, label) — kind ZERO / NONZERO / encoder.MI / PL / LE
+-- jump_if(billet, condition, left, right, label) / jump_if_test(…, nonzero, from, label)
+-- jump(billet, label) / call(billet, label) / load_address(billet, to, label, addend)
 -- syscall(billet, number) — x8 = номер (часы — номер RV64), svc #0; у openat
 --     бит O_DIRECTORY общей таблицы (65536) переводится в ARM-овый (16384)
--- resolve(machine, fixups) -> machine; UnknownLabel, PatchOutsideRange
+-- Fixups: noted(fixup), fixed(program, layout) -> program; UnknownLabel, PatchOutsideRange
+-- Хозяин — Control { coder, places, arithmetic; правки — Fixups в Program.fixer } (СОП, 22.11.2026): навыки ниже — его методы.
 
 use io
 use core.str
@@ -33,15 +35,8 @@ FLAGS = 2
 DIRECTORY_ROTATE = 48
 DIRECTORY_SHIFT = 2
 
-FixupKind = enum {
-    BRANCH,
-    CONDITION,
-    COMPARE,
-    ADDRESS
-}
-
 Fixup = Box {
-    kind = FixupKind.BRANCH,
+    kind = Fixups.Kind.BRANCH,
     offset = 0,
     label = "",
     addend = 0,
@@ -53,121 +48,156 @@ Fixup = Box {
 
 Fixups = Box {
     first = none,
-    last = none
-}
+    last = none,
+    count = 0,
+    coder = encoder.Encoder {}
 
-skill note(billet, fixups, fixup, placeholder) {
-    fixup.offset = billet.machine.code.length
-    (fixups.last) |last| { last.next = fixup }
-    (fixups.first == none) { fixups.first = fixup }
-    fixups.last = fixup
-    out ops.emit(billet, placeholder)
-}
+    Kind = enum {
+        BRANCH,
+        CONDITION,
+        COMPARE,
+        ADDRESS
+    }
 
-skill branch(billet, fixups, condition, left, right, label) {
-    billet = ops.emit(billet, encoder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, roles.register(left), roles.register(right)))
-    out note(billet, fixups, Fixup { kind = FixupKind.CONDITION, label = label, condition = condition }, encoder.branch_condition(condition, 0))
-}
-
-skill branch_test(billet, fixups, kind, from, label) {
-    @rt = roles.register(from)
-    (kind == ZERO) { out note(billet, fixups, Fixup { kind = FixupKind.COMPARE, label = label, register = rt, flag = no }, encoder.compare_branch(no, rt, 0)) }
-    (kind == NONZERO) { out note(billet, fixups, Fixup { kind = FixupKind.COMPARE, label = label, register = rt, flag = yes }, encoder.compare_branch(yes, rt, 0)) }
-    billet = ops.emit(billet, encoder.compare_immediate(rt, 0))
-    out note(billet, fixups, Fixup { kind = FixupKind.CONDITION, label = label, condition = kind }, encoder.branch_condition(kind, 0))
-}
-
-skill inverse(condition) {
-    (condition % 2 == 1) { out condition - 1 }
-    out condition + 1
-}
-
-skill jump_if(billet, fixups, condition, left, right, label) {
-    billet = ops.emit(billet, encoder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, roles.register(left), roles.register(right)))
-    billet = ops.emit(billet, encoder.branch_condition(inverse(condition), SKIP_JUMP))
-    out jump(billet, fixups, label)
-}
-
-skill jump_if_test(billet, fixups, nonzero, from, label) {
-    @skip = yes
-    (nonzero == yes) { skip = no }
-    billet = ops.emit(billet, encoder.compare_branch(skip, roles.register(from), SKIP_JUMP))
-    out jump(billet, fixups, label)
-}
-
-skill jump(billet, fixups, label) {
-    out note(billet, fixups, Fixup { kind = FixupKind.BRANCH, label = label, flag = no }, encoder.branch(no, 0))
-}
-
-skill call(billet, fixups, label) {
-    out note(billet, fixups, Fixup { kind = FixupKind.BRANCH, label = label, flag = yes }, encoder.branch(yes, 0))
-}
-
-skill load_address(billet, fixups, to, label, addend) {
-    @rd = roles.register(to)
-    billet = note(billet, fixups, Fixup { kind = FixupKind.ADDRESS, label = label, addend = addend, register = rd }, encoder.adrp(rd, 0))
-    out ops.emit(billet, encoder.add_immediate(rd, rd, 0))
-}
-
-skill directory_flag(billet) {
-    billet = ops.emit(billet, encoder.logical_immediate(encoder.AND_IMMEDIATE, roles.TEMP, FLAGS, 1, DIRECTORY_ROTATE, 0))
-    billet = ops.emit(billet, encoder.register_op(encoder.EOR, FLAGS, FLAGS, roles.TEMP))
-    billet = ops.emit(billet, encoder.bitfield(encoder.UBFM, roles.TEMP, roles.TEMP, DIRECTORY_SHIFT, 63))
-    out ops.emit(billet, encoder.register_op(encoder.ORR, FLAGS, FLAGS, roles.TEMP))
-}
-
-skill syscall(billet, number) {
-    (number == system.SYSCALL_CLOCK_GETTIME) { number = system.SYSCALL_CLOCK_GETTIME_RV64 }
-    (number == system.SYSCALL_OPENAT) { billet = directory_flag(billet) }
-    billet = ops.number(billet, roles.SYSCALL, number)
-    out ops.emit(billet, encoder.svc())
-}
-
-skill page(address) {
-    out address.b1 / 16 + address.b2 * 16 + address.b3 * 4096
-}
-
-skill resolve_one(machine, current, fixup) {
-    @target = machine.label_offset(current, fixup.label) rescue |failure| {
-        (str.bytes(fixup.label) > 0) {
-            @problem = errors.missing_label(fixup.label)
-            io.show(problem.message)
+    skill noted(fixup) {
+        (last) |tail| {
+            tail.next = fixup
         }
-        out error.UnknownLabel
+        (first == none) {
+            first = fixup
+        }
+        last = fixup
+        count = count + 1
+        out none
     }
-    @words = (target + fixup.addend - fixup.offset) / 4
-    (fixup.kind == FixupKind.BRANCH) {
-        @encoded = encoder.branch(fixup.flag, words) rescue |failure| { out error.PatchOutsideRange }
-        machine.set_section_word(Layout.Section.CODE, fixup.offset, encoded)
+
+    skill page(address) {
+        out address.b1 / 16 + address.b2 * 16 + address.b3 * 4096
+    }
+
+    skill mended(machine, current, fixup) {
+        @target = machine.label_offset(current, fixup.label) rescue |failure| {
+            (str.bytes(fixup.label) > 0) {
+                @problem = errors.missing_label(fixup.label)
+                io.show(problem.message)
+            }
+            out error.UnknownLabel
+        }
+        @words = (target + fixup.addend - fixup.offset) / 4
+        (fixup.kind == Kind.BRANCH) {
+            @encoded = coder.branch_word(fixup.flag, words) rescue |failure| {
+                out error.PatchOutsideRange
+            }
+            machine.set_section_word(Layout.Section.CODE, fixup.offset, encoded)
+            out machine
+        }
+        (fixup.kind == Kind.CONDITION) {
+            @encoded = coder.branch_condition(fixup.condition, words) rescue |failure| {
+                out error.PatchOutsideRange
+            }
+            machine.set_section_word(Layout.Section.CODE, fixup.offset, encoded)
+            out machine
+        }
+        (fixup.kind == Kind.COMPARE) {
+            @encoded = coder.compare_branch(fixup.flag, fixup.register, words) rescue |failure| {
+                out error.PatchOutsideRange
+            }
+            machine.set_section_word(Layout.Section.CODE, fixup.offset, encoded)
+            out machine
+        }
+        @address = machine.label_address(current, fixup.label, fixup.addend)
+        @here = layout.address_add(machine.load_address, fixup.offset)
+        @low = address.b0 + address.b1 % 16 * 256
+        machine.set_section_word(Layout.Section.CODE, fixup.offset, coder.adrp(fixup.register, page(address) - page(here)))
+        machine.set_section_word(Layout.Section.CODE, fixup.offset + 4, coder.add_immediate_word(fixup.register, fixup.register, low))
         out machine
     }
-    (fixup.kind == FixupKind.CONDITION) {
-        @encoded = encoder.branch_condition(fixup.condition, words) rescue |failure| { out error.PatchOutsideRange }
-        machine.set_section_word(Layout.Section.CODE, fixup.offset, encoded)
-        out machine
+
+    skill fixed(value, current_layout) {
+        @fixup = first
+        drum (count) {
+            (fixup) |item| {
+                value = mended(value, current_layout, item)
+                fixup = item.next
+            }
+        }
+        out value
     }
-    (fixup.kind == FixupKind.COMPARE) {
-        @encoded = encoder.compare_branch(fixup.flag, fixup.register, words) rescue |failure| { out error.PatchOutsideRange }
-        machine.set_section_word(Layout.Section.CODE, fixup.offset, encoded)
-        out machine
-    }
-    @address = machine.label_address(current, fixup.label, fixup.addend)
-    @here = layout.address_add(machine.load_address, fixup.offset)
-    @low = address.b0 + address.b1 % 16 * 256
-    machine.set_section_word(Layout.Section.CODE, fixup.offset, encoder.adrp(fixup.register, page(address) - page(here)))
-    machine.set_section_word(Layout.Section.CODE, fixup.offset + 4, encoder.add_immediate(fixup.register, fixup.register, low))
-    out machine
 }
 
-skill resolve(machine, fixups) {
-    @current = machine.layout()
-    @fixup = fixups.first
-    drum (machine.code.length / 4) {
-        (fixup) |item| {
-            machine = resolve_one(machine, current, item)
-            fixup = item.next
+Control = Box {
+    coder = encoder.Encoder {},
+    places = roles.Roles {},
+    arithmetic = ops.Ops {}
+
+    skill note_fixup(billet, fixup, placeholder) {
+        fixup.offset = billet.machine.code.length
+        @machine = billet.machine
+        (machine.fixer == none) {
+            machine.fixer = Fixups {}
         }
-        (fixup == none) { out machine }
+        (machine.fixer) |keeper| {
+            keeper.noted(fixup)
+        }
+        out arithmetic.emit(billet, placeholder)
     }
-    out machine
+
+    skill branch(billet, condition, left, right, label) {
+        billet = arithmetic.emit(billet, coder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, places.register(left), places.register(right)))
+        out note_fixup(billet, Fixup { kind = Fixups.Kind.CONDITION, label = label, condition = condition }, coder.branch_condition(condition, 0))
+    }
+
+    skill branch_test(billet, kind, from, label) {
+        @rt = places.register(from)
+        (kind == ZERO) { out note_fixup(billet, Fixup { kind = Fixups.Kind.COMPARE, label = label, register = rt, flag = no }, coder.compare_branch(no, rt, 0)) }
+        (kind == NONZERO) { out note_fixup(billet, Fixup { kind = Fixups.Kind.COMPARE, label = label, register = rt, flag = yes }, coder.compare_branch(yes, rt, 0)) }
+        billet = arithmetic.emit(billet, coder.compare_immediate_word(rt, 0))
+        out note_fixup(billet, Fixup { kind = Fixups.Kind.CONDITION, label = label, condition = kind }, coder.branch_condition(kind, 0))
+    }
+
+    skill inverse(condition) {
+        (condition % 2 == 1) { out condition - 1 }
+        out condition + 1
+    }
+
+    skill jump_if(billet, condition, left, right, label) {
+        billet = arithmetic.emit(billet, coder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, places.register(left), places.register(right)))
+        billet = arithmetic.emit(billet, coder.branch_condition(inverse(condition), SKIP_JUMP))
+        out jump(billet, label)
+    }
+
+    skill jump_if_test(billet, nonzero, from, label) {
+        @skip = yes
+        (nonzero == yes) { skip = no }
+        billet = arithmetic.emit(billet, coder.compare_branch(skip, places.register(from), SKIP_JUMP))
+        out jump(billet, label)
+    }
+
+    skill jump(billet, label) {
+        out note_fixup(billet, Fixup { kind = Fixups.Kind.BRANCH, label = label, flag = no }, coder.branch_word(no, 0))
+    }
+
+    skill call(billet, label) {
+        out note_fixup(billet, Fixup { kind = Fixups.Kind.BRANCH, label = label, flag = yes }, coder.branch_word(yes, 0))
+    }
+
+    skill load_address(billet, to, label, addend) {
+        @rd = places.register(to)
+        billet = note_fixup(billet, Fixup { kind = Fixups.Kind.ADDRESS, label = label, addend = addend, register = rd }, coder.adrp(rd, 0))
+        out arithmetic.emit(billet, coder.add_immediate_word(rd, rd, 0))
+    }
+
+    skill directory_flag(billet) {
+        billet = arithmetic.emit(billet, coder.logical_immediate(encoder.AND_IMMEDIATE, roles.TEMP, FLAGS, 1, DIRECTORY_ROTATE, 0))
+        billet = arithmetic.emit(billet, coder.register_op(encoder.EOR, FLAGS, FLAGS, roles.TEMP))
+        billet = arithmetic.emit(billet, coder.bitfield(encoder.UBFM, roles.TEMP, roles.TEMP, DIRECTORY_SHIFT, 63))
+        out arithmetic.emit(billet, coder.register_op(encoder.ORR, FLAGS, FLAGS, roles.TEMP))
+    }
+
+    skill syscall(billet, number) {
+        (number == system.SYSCALL_CLOCK_GETTIME) { number = system.SYSCALL_CLOCK_GETTIME_RV64 }
+        (number == system.SYSCALL_OPENAT) { billet = directory_flag(billet) }
+        billet = arithmetic.number(billet, roles.SYSCALL, number)
+        out arithmetic.emit(billet, coder.svc())
+    }
 }

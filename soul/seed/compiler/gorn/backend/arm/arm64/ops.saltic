@@ -6,19 +6,20 @@
 -- −2^k (TAG_MASK и его дополнение), иначе через TEMP.
 --
 -- emit(billet, encoded) — слово команды в код
--- constant(billet, register, halves) — [h0, h1, h2, h3] младшая первой
+-- load_constant(billet, register, halves) — [h0, h1, h2, h3] младшая первой
 -- word_halves(word) / wide_halves(wide) -> половины (слово — со знаком)
 -- number(billet, register, n) — число со знаком в пределах 32 бит
 -- load_immediate / load_word / load_wide(billet, to, …); move / negate(billet, to, from)
--- add_immediate(billet, to, from, n); binary(billet, op, to, left, right)
+-- add_immediate(billet, to, from, n); binary_op(billet, op, to, left, right)
 -- logical(billet, op, to, from, n) — op encoder.AND / ORR / EOR; mask(n) -> [N, immr, imms]
 --     или [] (k до MASK_LIMIT: на RV32I больше 2^28 не посчитать)
 -- shift(billet, op, to, from, count) — op SHIFT_LEFT / SHIFT_RIGHT / SHIFT_ARITHMETIC
--- compare(billet, condition, to, left, right) / compare_immediate(billet, condition, to, from, n)
+-- compare_op(billet, condition, to, left, right) / compare_immediate_op(billet, condition, to, from, n)
 -- checked(billet, op) — VALUE = VALUE ± ERROR, ERROR = CALL_NO_ERROR или ERROR_NUMBER_OVERFLOW
--- multiply(billet, op, to, left, right); data2(billet, op, to, left, right) — LSLV / LSRV /
---     SDIV / UDIV; remainder(billet, op, to, left, right) — op SDIV / UDIV и msub
+-- multiply_op(billet, op, to, left, right); data2_op(billet, op, to, left, right) — LSLV / LSRV /
+--     SDIV / UDIV; remainder_op(billet, op, to, left, right) — op SDIV / UDIV и msub
 -- fraction(billet, op, to, left, right) / fraction_from / fraction_to(billet, to, from[, mode])
+-- Хозяин — Ops { coder, places } (СОП, 22.11.2026): навыки ниже — его методы.
 
 use core.group
 use compiler.abi
@@ -36,191 +37,196 @@ SHIFT_LEFT = 0
 SHIFT_RIGHT = 1
 SHIFT_ARITHMETIC = 2
 
-skill emit(billet, encoded) {
-    @billet_machine = billet.machine
-    billet_machine.emit_word(encoded)
-    out billet
-}
+Ops = Box {
+    coder = encoder.Encoder {},
+    places = roles.Roles {}
 
-skill word_halves(value) {
-    @fill = 0
-    (value.b3 > 127) { fill = TOP_HALF }
-    out [value.b0 + value.b1 * 256, value.b2 + value.b3 * 256, fill, fill]
-}
-
-skill wide_halves(value) {
-    @low = word_halves(value.low)
-    @high = word_halves(value.high)
-    out [group.get(low, 0), group.get(low, 1), group.get(high, 0), group.get(high, 1)]
-}
-
-skill constant(billet, register, halves) {
-    @ones = 0
-    @zeros = 0
-    drum (halves) {
-        (beat == TOP_HALF) { ones = ones + 1 }
-        (beat == 0) { zeros = zeros + 1 }
+    skill emit(billet, encoded) {
+        @billet_machine = billet.machine
+        billet_machine.emit_word(encoded)
+        out billet
     }
-    @fill = 0
-    (ones > zeros) { fill = TOP_HALF }
-    @started = no
-    drum (4) {
-        @half = group.get(halves, beat)
-        ((half == fill) == no) {
-            pick {
-                (started == yes) { billet = emit(billet, encoder.move_wide(encoder.MOVK, register, half, beat)) }
-                (fill == 0) { billet = emit(billet, encoder.move_wide(encoder.MOVZ, register, half, beat)) }
-                { billet = emit(billet, encoder.move_wide(encoder.MOVN, register, TOP_HALF - half, beat)) }
+
+    skill word_halves(value) {
+        @fill = 0
+        (value.b3 > 127) { fill = TOP_HALF }
+        out [value.b0 + value.b1 * 256, value.b2 + value.b3 * 256, fill, fill]
+    }
+
+    skill wide_halves(value) {
+        @low = word_halves(value.low)
+        @high = word_halves(value.high)
+        out [group.get(low, 0), group.get(low, 1), group.get(high, 0), group.get(high, 1)]
+    }
+
+    skill load_constant(billet, register, halves) {
+        @ones = 0
+        @zeros = 0
+        drum (halves) {
+            (beat == TOP_HALF) { ones = ones + 1 }
+            (beat == 0) { zeros = zeros + 1 }
+        }
+        @fill = 0
+        (ones > zeros) { fill = TOP_HALF }
+        @started = no
+        drum (4) {
+            @half = group.get(halves, beat)
+            ((half == fill) == no) {
+                pick {
+                    (started == yes) { billet = emit(billet, coder.move_wide(encoder.MOVK, register, half, beat)) }
+                    (fill == 0) { billet = emit(billet, coder.move_wide(encoder.MOVZ, register, half, beat)) }
+                    { billet = emit(billet, coder.move_wide(encoder.MOVN, register, TOP_HALF - half, beat)) }
+                }
+                started = yes
             }
-            started = yes
         }
+        (started == yes) { out billet }
+        (fill == 0) { out emit(billet, coder.move_wide(encoder.MOVZ, register, 0, 0)) }
+        out emit(billet, coder.move_wide(encoder.MOVN, register, 0, 0))
     }
-    (started == yes) { out billet }
-    (fill == 0) { out emit(billet, encoder.move_wide(encoder.MOVZ, register, 0, 0)) }
-    out emit(billet, encoder.move_wide(encoder.MOVN, register, 0, 0))
-}
 
-skill number(billet, register, value) {
-    (value >= 0) {
-        (value < HALF) { out emit(billet, encoder.move_wide(encoder.MOVZ, register, value, 0)) }
-    }
-    (value < 0) {
-        (value >= -HALF) { out emit(billet, encoder.move_wide(encoder.MOVN, register, -value - 1, 0)) }
-    }
-    out constant(billet, register, word_halves(word.from_signed(value)))
-}
-
-skill load_immediate(billet, to, value) {
-    out number(billet, roles.register(to), value)
-}
-
-skill load_word(billet, to, value) {
-    out constant(billet, roles.register(to), word_halves(value))
-}
-
-skill load_wide(billet, to, value) {
-    out constant(billet, roles.register(to), wide_halves(value))
-}
-
-skill move(billet, to, from) {
-    out emit(billet, encoder.register_op(encoder.ORR, roles.register(to), encoder.ZERO_REGISTER, roles.register(from)))
-}
-
-skill negate(billet, to, from) {
-    out emit(billet, encoder.register_op(encoder.SUB, roles.register(to), encoder.ZERO_REGISTER, roles.register(from)))
-}
-
-skill add_immediate(billet, to, from, value) {
-    @rd = roles.register(to)
-    @rn = roles.register(from)
-    (value >= 0) {
-        (value < 4096) { out emit(billet, encoder.add_immediate(rd, rn, value)) }
-    }
-    (value < 0) {
-        (value > -4096) { out emit(billet, encoder.sub_immediate(rd, rn, -value)) }
-    }
-    billet = number(billet, roles.TEMP, value)
-    out emit(billet, encoder.register_op(encoder.ADD, rd, rn, roles.TEMP))
-}
-
-skill binary(billet, op, to, left, right) {
-    out emit(billet, encoder.register_op(op, roles.register(to), roles.register(left), roles.register(right)))
-}
-
-skill mask(value) {
-    @ones = 1
-    drum (MASK_LIMIT) {
-        @power = ones + 1
-        (value == ones) { out [1, 0, beat] }
-        (value == -power) { out [1, MASK_BITS - beat, MASK_BITS - 1 - beat] }
-        ones = ones * 2 + 1
-    }
-    out []
-}
-
-skill logical(billet, op, to, from, value) {
-    @rd = roles.register(to)
-    @rn = roles.register(from)
-    @fields = mask(value)
-    (group.count(fields) == 3) {
-        @immediate = encoder.AND_IMMEDIATE
-        (op == encoder.ORR) { immediate = encoder.ORR_IMMEDIATE }
-        (op == encoder.EOR) { immediate = encoder.EOR_IMMEDIATE }
-        out emit(billet, encoder.logical_immediate(immediate, rd, rn, group.get(fields, 0), group.get(fields, 1), group.get(fields, 2)))
-    }
-    billet = number(billet, roles.TEMP, value)
-    out emit(billet, encoder.register_op(op, rd, rn, roles.TEMP))
-}
-
-skill shift(billet, op, to, from, count) {
-    @rd = roles.register(to)
-    @rn = roles.register(from)
-    (op == SHIFT_LEFT) { out emit(billet, encoder.bitfield(encoder.UBFM, rd, rn, (64 - count) % 64, MASK_BITS - count)) }
-    (op == SHIFT_RIGHT) { out emit(billet, encoder.bitfield(encoder.UBFM, rd, rn, count, MASK_BITS)) }
-    out emit(billet, encoder.bitfield(encoder.SBFM, rd, rn, count, MASK_BITS))
-}
-
-skill compare(billet, condition, to, left, right) {
-    billet = emit(billet, encoder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, roles.register(left), roles.register(right)))
-    out emit(billet, encoder.set(roles.register(to), condition))
-}
-
-skill compare_immediate(billet, condition, to, from, value) {
-    @fits = no
-    (value >= 0) { fits = value < 4096 }
-    pick {
-        (fits == yes) { billet = emit(billet, encoder.compare_immediate(roles.register(from), value)) }
-        {
-            billet = number(billet, roles.TEMP, value)
-            billet = emit(billet, encoder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, roles.register(from), roles.TEMP))
+    skill number(billet, register, value) {
+        (value >= 0) {
+            (value < HALF) { out emit(billet, coder.move_wide(encoder.MOVZ, register, value, 0)) }
         }
+        (value < 0) {
+            (value >= -HALF) { out emit(billet, coder.move_wide(encoder.MOVN, register, -value - 1, 0)) }
+        }
+        out load_constant(billet, register, word_halves(word.from_signed(value)))
     }
-    out emit(billet, encoder.set(roles.register(to), condition))
-}
 
-skill checked(billet, op) {
-    @value = roles.register(backend.VALUE)
-    @fault = roles.register(backend.ERROR)
-    billet = emit(billet, encoder.register_op(op, value, value, fault))
-    billet = number(billet, roles.TEMP, abi.CALL_NO_ERROR)
-    billet = number(billet, roles.TEMP2, abi.ERROR_NUMBER_OVERFLOW)
-    out emit(billet, encoder.select(encoder.CSEL, fault, roles.TEMP2, roles.TEMP, encoder.VS))
-}
-
-skill multiply(billet, op, to, left, right) {
-    out emit(billet, encoder.multiply(op, roles.register(to), roles.register(left), roles.register(right), encoder.ZERO_REGISTER))
-}
-
-skill data2(billet, op, to, left, right) {
-    out emit(billet, encoder.data2(op, roles.register(to), roles.register(left), roles.register(right)))
-}
-
-skill remainder(billet, op, to, left, right) {
-    billet = emit(billet, encoder.data2(op, roles.TEMP, roles.register(left), roles.register(right)))
-    out emit(billet, encoder.multiply(encoder.MSUB, roles.register(to), roles.TEMP, roles.register(right), roles.register(left)))
-}
-
-skill fraction(billet, op, to, left, right) {
-    billet = emit(billet, encoder.fmov_to(0, roles.register(left)))
-    billet = emit(billet, encoder.fmov_to(1, roles.register(right)))
-    (op == backend.FRACTION_LESS) {
-        billet = emit(billet, encoder.fcmp(0, 1))
-        out emit(billet, encoder.set(roles.register(to), encoder.MI))
+    skill load_immediate(billet, to, value) {
+        out number(billet, places.register(to), value)
     }
-    (op == backend.FRACTION_LESS_EQUAL) {
-        billet = emit(billet, encoder.fcmp(0, 1))
-        out emit(billet, encoder.set(roles.register(to), encoder.LS))
+
+    skill load_word(billet, to, value) {
+        out load_constant(billet, places.register(to), word_halves(value))
     }
-    billet = emit(billet, encoder.fp_op(op, 0, 0, 1))
-    out emit(billet, encoder.fmov_from(roles.register(to), 0))
-}
 
-skill fraction_from(billet, to, from) {
-    billet = emit(billet, encoder.scvtf(0, roles.register(from)))
-    out emit(billet, encoder.fmov_from(roles.register(to), 0))
-}
+    skill load_wide(billet, to, value) {
+        out load_constant(billet, places.register(to), wide_halves(value))
+    }
 
-skill fraction_to(billet, to, from, mode) {
-    billet = emit(billet, encoder.fmov_to(0, roles.register(from)))
-    out emit(billet, encoder.fcvt(roles.register(to), 0, mode))
+    skill move(billet, to, from) {
+        out emit(billet, coder.register_op(encoder.ORR, places.register(to), encoder.ZERO_REGISTER, places.register(from)))
+    }
+
+    skill negate(billet, to, from) {
+        out emit(billet, coder.register_op(encoder.SUB, places.register(to), encoder.ZERO_REGISTER, places.register(from)))
+    }
+
+    skill add_immediate(billet, to, from, value) {
+        @rd = places.register(to)
+        @rn = places.register(from)
+        (value >= 0) {
+            (value < 4096) { out emit(billet, coder.add_immediate_word(rd, rn, value)) }
+        }
+        (value < 0) {
+            (value > -4096) { out emit(billet, coder.sub_immediate(rd, rn, -value)) }
+        }
+        billet = number(billet, roles.TEMP, value)
+        out emit(billet, coder.register_op(encoder.ADD, rd, rn, roles.TEMP))
+    }
+
+    skill binary_op(billet, op, to, left, right) {
+        out emit(billet, coder.register_op(op, places.register(to), places.register(left), places.register(right)))
+    }
+
+    skill mask(value) {
+        @ones = 1
+        drum (MASK_LIMIT) {
+            @power = ones + 1
+            (value == ones) { out [1, 0, beat] }
+            (value == -power) { out [1, MASK_BITS - beat, MASK_BITS - 1 - beat] }
+            ones = ones * 2 + 1
+        }
+        out []
+    }
+
+    skill logical(billet, op, to, from, value) {
+        @rd = places.register(to)
+        @rn = places.register(from)
+        @fields = mask(value)
+        (group.count(fields) == 3) {
+            @immediate = encoder.AND_IMMEDIATE
+            (op == encoder.ORR) { immediate = encoder.ORR_IMMEDIATE }
+            (op == encoder.EOR) { immediate = encoder.EOR_IMMEDIATE }
+            out emit(billet, coder.logical_immediate(immediate, rd, rn, group.get(fields, 0), group.get(fields, 1), group.get(fields, 2)))
+        }
+        billet = number(billet, roles.TEMP, value)
+        out emit(billet, coder.register_op(op, rd, rn, roles.TEMP))
+    }
+
+    skill shift(billet, op, to, from, count) {
+        @rd = places.register(to)
+        @rn = places.register(from)
+        (op == SHIFT_LEFT) { out emit(billet, coder.bitfield(encoder.UBFM, rd, rn, (64 - count) % 64, MASK_BITS - count)) }
+        (op == SHIFT_RIGHT) { out emit(billet, coder.bitfield(encoder.UBFM, rd, rn, count, MASK_BITS)) }
+        out emit(billet, coder.bitfield(encoder.SBFM, rd, rn, count, MASK_BITS))
+    }
+
+    skill compare_op(billet, condition, to, left, right) {
+        billet = emit(billet, coder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, places.register(left), places.register(right)))
+        out emit(billet, coder.cset(places.register(to), condition))
+    }
+
+    skill compare_immediate_op(billet, condition, to, from, value) {
+        @fits = no
+        (value >= 0) { fits = value < 4096 }
+        pick {
+            (fits == yes) { billet = emit(billet, coder.compare_immediate_word(places.register(from), value)) }
+            {
+                billet = number(billet, roles.TEMP, value)
+                billet = emit(billet, coder.register_op(encoder.SUBS, encoder.ZERO_REGISTER, places.register(from), roles.TEMP))
+            }
+        }
+        out emit(billet, coder.cset(places.register(to), condition))
+    }
+
+    skill checked(billet, op) {
+        @value = places.register(backend.VALUE)
+        @fault = places.register(backend.ERROR)
+        billet = emit(billet, coder.register_op(op, value, value, fault))
+        billet = number(billet, roles.TEMP, abi.CALL_NO_ERROR)
+        billet = number(billet, roles.TEMP2, abi.ERROR_NUMBER_OVERFLOW)
+        out emit(billet, coder.select(encoder.CSEL, fault, roles.TEMP2, roles.TEMP, encoder.VS))
+    }
+
+    skill multiply_op(billet, op, to, left, right) {
+        out emit(billet, coder.multiply_word(op, places.register(to), places.register(left), places.register(right), encoder.ZERO_REGISTER))
+    }
+
+    skill data2_op(billet, op, to, left, right) {
+        out emit(billet, coder.data2_word(op, places.register(to), places.register(left), places.register(right)))
+    }
+
+    skill remainder_op(billet, op, to, left, right) {
+        billet = emit(billet, coder.data2_word(op, roles.TEMP, places.register(left), places.register(right)))
+        out emit(billet, coder.multiply_word(encoder.MSUB, places.register(to), roles.TEMP, places.register(right), places.register(left)))
+    }
+
+    skill fraction(billet, op, to, left, right) {
+        billet = emit(billet, coder.fmov_to(0, places.register(left)))
+        billet = emit(billet, coder.fmov_to(1, places.register(right)))
+        (op == backend.FRACTION_LESS) {
+            billet = emit(billet, coder.fcmp(0, 1))
+            out emit(billet, coder.cset(places.register(to), encoder.MI))
+        }
+        (op == backend.FRACTION_LESS_EQUAL) {
+            billet = emit(billet, coder.fcmp(0, 1))
+            out emit(billet, coder.cset(places.register(to), encoder.LS))
+        }
+        billet = emit(billet, coder.fp_op(op, 0, 0, 1))
+        out emit(billet, coder.fmov_from(places.register(to), 0))
+    }
+
+    skill fraction_from(billet, to, from) {
+        billet = emit(billet, coder.scvtf(0, places.register(from)))
+        out emit(billet, coder.fmov_from(places.register(to), 0))
+    }
+
+    skill fraction_to(billet, to, from, mode) {
+        billet = emit(billet, coder.fmov_to(0, places.register(from)))
+        out emit(billet, coder.fcvt(places.register(to), 0, mode))
+    }
 }
