@@ -12,18 +12,12 @@
   `number`, `text`).
 - `protocols/data/json_rpc` — запросы, ответы и ошибки JSON-RPC поверх
   `json`. Проверяется `just test json-rpc`.
+- `protocols/security/crypto` — сравнение секретов за постоянное время.
+  Проверяется `just test crypto`.
 
 ## Заготовки
 
-Пустые файлы, которые размечают будущее место модуля:
-
-- инструменты: `debugger`, `profiler`, `linter`, `formatter`, `repl`,
-  `language_server`, `disassembler`, `fuzzer`, `benchmark`, `inspector`,
-  `ast_viewer`, `memory_viewer`, `test_runner`, `documentation`;
-- `studio/` — среда разработки (`ide`);
-- `protocols/` — по уровням: `hardware`, `link`, `network`, `transport`,
-  `security`, `discovery`, `application`, `development`, а в `data` —
-  `cbor`, `msgpack`, `protobuf`, `mime`, `uri`;
-- `science/` — математика и физика;
-- `technology/` — устройство железа: процессор, память, диск, экран,
-  батарея.
+Нет. Пустые файлы, что размечали будущие модули (инструменты, `studio`,
+протоколы по уровням, `science`, `technology`), — в `.archive/soul/craft/`
+(решение автора 21.11.2026: муляж — не место модуля). Новый модуль появляется
+здесь вместе с первым кодом.
