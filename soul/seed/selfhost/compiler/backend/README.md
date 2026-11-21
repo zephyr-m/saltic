@@ -18,6 +18,6 @@
 | RV64 (RVA23) | `rv64/` (вход `main.saltic`) | канон; Milk-V Duo, платы RV64 | ✅ Linux под qemu-riscv64 (06.11.2026): таблица RVA23 (ассемблер и эталон для теста), кодоген — по форме (`rv64/machine/forms`, 07.11.2026), ELF64, слово 8 байт, числа 61-битные |
 | x86-64 родной | `x86_64_native/` (вход `main.saltic`) | Linux, UEFI на Acer | ✅ `Executor` на договоре, кодировщик, ELF64 и PE32+, слово 8 байт; цели `x86_64` и `x86_64-uefi`; агент на Acer — родной |
 | x86-64 перевод | `.archive/x86_64_translation/` | — | 🗄 на пенсии с 06.11.2026: переводил готовый RV32I, был оракулом родного |
-| Thumb-2 | `thumb2/` | STM32H7, Teensy 4.1, RP2350 на ARM | ⬜ заглушка |
-| Xtensa (LX6) | `xtensa.saltic`, `xtensa/` | ESP32, ESP32-S3 | 🟡 голое железо ESP32 (13.11.2026): CALL0 без окон, слово 4 байта, образ `formats/esp`; на DevKit работают группы, рекурсия, Box, деление, текст. Кодировщик сверен с GNU as Espressif (`tests/xtensa-encoder`). Нет: окон регистров, Wi-Fi, канона на плате |
+| Thumb-2 | — | STM32H7, Teensy 4.1, RP2350 на ARM | ⬜ не начат (в плане — `docs/plan/PLAN-3.md`) |
+| Xtensa (LX6) | `xtensa/` (вход `main.saltic`) | ESP32, ESP32-S3 | 🟡 голое железо ESP32 (13.11.2026): CALL0 без окон, слово 4 байта, образ `formats/esp`; на DevKit работают группы, рекурсия, Box, деление, текст. Кодировщик сверен с GNU as Espressif (`tests/xtensa-encoder`). Нет: окон регистров, Wi-Fi, канона на плате |
 | ARM64 | `arm64/` (вход `main.saltic`) | Linux; Raspberry Pi, Orange Pi, телефоны, Android | ✅ Linux под qemu-aarch64 (12.11.2026): свой исполнитель, все роли в регистрах, ELF — общий `../linker/elf64`; канон, самосборка — неподвижная точка |
