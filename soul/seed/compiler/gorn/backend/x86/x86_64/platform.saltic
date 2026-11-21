@@ -25,6 +25,7 @@
 --     SIGNAL_RIP, gregs[REG_RIP]) — в ERROR (rdx); FRAME (rbp) ядро не трогает;
 --     стек ровняется на 16,
 --     прыжок в rt_crash_signal; назад не возвращается
+-- Хозяин — LinuxRuntime { coder, places } (СОП, 22.11.2026): навыки ниже — его методы.
 
 use core.group
 use compiler.machine.word
@@ -90,163 +91,167 @@ Map = Box {
     arguments = word.Word {}
 }
 
-skill map(machine) {
-    @current = machine.layout()
-    @strings = word.align_page(word.add(machine.load_address, wide.to_word(current.memory_size)))
-    @stack = word.add_number(strings, STRINGS_BYTES + STACK_GUARD_BYTES)
-    out Map {
-        strings = strings,
-        stack = stack,
-        arguments = word.add_number(stack, STACK_BYTES - ARGUMENTS_BYTES)
+LinuxRuntime = Box {
+    coder = encoder.Encoder {},
+    places = roles.Roles {}
+
+    skill map(machine) {
+        @current = machine.layout()
+        @strings = word.align_page(word.add(machine.load_address, wide.to_word(current.memory_size)))
+        @stack = word.add_number(strings, STRINGS_BYTES + STACK_GUARD_BYTES)
+        out Map {
+            strings = strings,
+            stack = stack,
+            arguments = word.add_number(stack, STACK_BYTES - ARGUMENTS_BYTES)
+        }
+    }
+
+    skill backward(code, kind, target) {
+        @length = JCC_BYTES
+        (kind == encoder.JUMP) { length = JMP_BYTES }
+        out coder.relative(code, kind, target - code.length - length)
+    }
+
+    skill append_entry(machine) {
+        machine.define_label(Layout.Section.CODE, "x86_start")
+        @code = machine.code
+        code = coder.move_quad(code, encoder.R14D, word.from_number(0), word.from_number(GUEST_BASE_HIGH))
+        code = coder.operate(code, 8, encoder.MOVE, encoder.EBX, encoder.ESP)
+        code = coder.memory(code, encoder.LOAD, encoder.ECX, encoder.EBX, encoder.NONE, 0)
+        code = coder.move_word(code, encoder.EDI, word.from_number(0))
+        @arguments_at = code.length - REL32_BYTES
+        code = coder.memory(code, encoder.STORE, encoder.ECX, encoder.R14D, encoder.EDI, 0)
+        code = coder.move_word(code, encoder.EDX, word.from_number(0))
+        @strings_at = code.length - REL32_BYTES
+        code = coder.operate(code, 4, encoder.XOR, encoder.ESI, encoder.ESI)
+        @loop = code.length
+        code = coder.operate(code, 4, encoder.CMP, encoder.ESI, encoder.ECX)
+        code = coder.relative(code, encoder.ABOVE_OR_EQUAL, 0)
+        @done_from = code.length
+        code = coder.operate(code, 4, encoder.MOVE, encoder.R9D, encoder.ESI)
+        code = coder.shift(code, 4, encoder.SHIFT_LEFT, encoder.R9D, POINTER_SHIFT)
+        code = coder.memory(code, encoder.LOAD64, encoder.R8D, encoder.EBX, encoder.R9D, POINTER_BYTES)
+        code = coder.operate(code, 4, encoder.MOVE, encoder.R10D, encoder.ESI)
+        code = coder.shift(code, 4, encoder.SHIFT_LEFT, encoder.R10D, CELL_SHIFT)
+        code = coder.operate(code, 4, encoder.ADD, encoder.R10D, encoder.EDI)
+        code = coder.memory(code, encoder.STORE, encoder.EDX, encoder.R14D, encoder.R10D, 4)
+        @bytes = code.length
+        code = coder.memory(code, encoder.LOAD_ZERO_BYTE, encoder.EAX, encoder.R8D, encoder.NONE, 0)
+        code = coder.memory(code, encoder.STORE_BYTE, encoder.EAX, encoder.R14D, encoder.EDX, 0)
+        code = coder.operate_immediate(code, 8, encoder.ADD, encoder.R8D, 1)
+        code = coder.operate_immediate(code, 4, encoder.ADD, encoder.EDX, 1)
+        code = coder.operate(code, 4, encoder.TEST, encoder.EAX, encoder.EAX)
+        code = backward(code, encoder.NOT_EQUAL, bytes)
+        code = coder.operate_immediate(code, 4, encoder.ADD, encoder.ESI, 1)
+        code = backward(code, encoder.JUMP, loop)
+        code.set_word(done_from - REL32_BYTES, word.from_signed(code.length - done_from))
+        code = coder.memory(code, encoder.ADDRESS64, encoder.ESP, encoder.R14D, encoder.EDI, 0)
+        code = coder.relative(code, encoder.JUMP, 0)
+        machine.code = code
+        machine.note_patch(Patch {
+            kind = Patch.Kind.REL32,
+            label = "_start",
+            offset = code.length - REL32_BYTES
+        })
+        @guest = map(machine)
+        @machine_code = machine.code
+        machine_code.set_word(arguments_at, guest.arguments)
+        machine_code = machine.code
+        machine_code.set_word(strings_at, guest.strings)
+        out machine
+    }
+
+    skill append_syscall(machine, entry) {
+        @number = group.get(entry, 0)
+        @host = group.get(entry, 1)
+        @pointers = group.get(entry, 2)
+        machine.define_label(Layout.Section.CODE, "x86_syscall_{number}")
+        @code = machine.code
+        drum (SAVED) { code = coder.register64(code, encoder.PUSH, beat) }
+        code = coder.operate(code, 4, encoder.MOVE, encoder.EDI, encoder.EAX)
+        code = coder.operate(code, 4, encoder.MOVE, encoder.ESI, encoder.EDX)
+        code = coder.operate(code, 4, encoder.MOVE, encoder.EDX, encoder.R8D)
+        code = coder.operate(code, 4, encoder.MOVE, encoder.R10D, encoder.R9D)
+        code = coder.memory(code, encoder.LOAD, encoder.R8D, encoder.R14D, encoder.NONE, places.slot(backend.ARG4, 4))
+        code = coder.memory(code, encoder.LOAD, encoder.R9D, encoder.R14D, encoder.NONE, places.slot(backend.ARG5, 4))
+        (pointers % 2 == SECOND_IS_POINTER) { code = coder.memory(code, encoder.ADDRESS64, encoder.ESI, encoder.R14D, encoder.ESI, 0) }
+        (pointers == THIRD_IS_POINTER) { code = coder.memory(code, encoder.ADDRESS64, encoder.EDX, encoder.R14D, encoder.EDX, 0) }
+        code = coder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, host)
+        code = coder.single(code, encoder.SYSCALL)
+        code = coder.operate(code, 4, encoder.MOVE, encoder.EAX, encoder.EAX)
+        @count = group.count(SAVED)
+        drum (count) { code = coder.register64(code, encoder.POP, group.get(SAVED, count - 1 - beat)) }
+        code = coder.single(code, encoder.RET)
+        machine.code = code
+        out machine
+    }
+
+    skill append(machine) {
+        machine = append_entry(machine)
+        drum (SYSCALLS) { machine = append_syscall(machine, beat) }
+        machine.entry = "x86_start"
+        out machine
+    }
+
+    skill append_wide_entry(machine) {
+        machine.define_label(Layout.Section.CODE, "x86_start")
+        @code = machine.code
+        code = coder.operate(code, 4, encoder.XOR, encoder.R14D, encoder.R14D)
+        code = coder.relative(code, encoder.JUMP, 0)
+        machine.code = code
+        machine.note_patch(Patch {
+            kind = Patch.Kind.REL32,
+            label = "_start",
+            offset = code.length - REL32_BYTES
+        })
+        out machine
+    }
+
+    skill append_wide_syscall(machine, entry) {
+        @number = group.get(entry, 0)
+        @host = group.get(entry, 1)
+        machine.define_label(Layout.Section.CODE, "x86_syscall_{number}")
+        @code = machine.code
+        drum (SAVED) { code = coder.register64(code, encoder.PUSH, beat) }
+        code = coder.operate(code, 8, encoder.MOVE, encoder.EDI, encoder.EAX)
+        code = coder.operate(code, 8, encoder.MOVE, encoder.ESI, encoder.EDX)
+        code = coder.operate(code, 8, encoder.MOVE, encoder.EDX, encoder.R8D)
+        code = coder.operate(code, 8, encoder.MOVE, encoder.R10D, encoder.R9D)
+        code = coder.memory(code, encoder.LOAD64, encoder.R8D, encoder.R14D, encoder.NONE, places.slot(backend.ARG4, 8))
+        code = coder.memory(code, encoder.LOAD64, encoder.R9D, encoder.R14D, encoder.NONE, places.slot(backend.ARG5, 8))
+        code = coder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, host)
+        code = coder.single(code, encoder.SYSCALL)
+        @count = group.count(SAVED)
+        drum (count) { code = coder.register64(code, encoder.POP, group.get(SAVED, count - 1 - beat)) }
+        code = coder.single(code, encoder.RET)
+        machine.code = code
+        out machine
+    }
+
+    skill append_wide_signal(machine) {
+        @crash = machine.find_label("rt_crash_signal")
+        (crash.present == no) { out machine }
+        machine.define_label(Layout.Section.CODE, "x86_signal_entry")
+        @code = machine.code
+        code = coder.memory(code, encoder.LOAD64, encoder.R8D, encoder.EDX, encoder.NONE, SIGNAL_RSP)
+        code = coder.memory(code, encoder.LOAD64, encoder.EAX, encoder.ESI, encoder.NONE, SIGNAL_ADDRESS)
+        code = coder.memory(code, encoder.LOAD64, encoder.EDX, encoder.EDX, encoder.NONE, SIGNAL_RIP)
+        code = coder.operate_immediate(code, 8, encoder.AND, encoder.ESP, -16)
+        code = coder.relative(code, encoder.JUMP, 0)
+        machine.code = code
+        machine.note_patch(Patch {
+            kind = Patch.Kind.REL32,
+            label = "rt_crash_signal",
+            offset = code.length - REL32_BYTES
+        })
+        out machine
+    }
+
+    skill append_wide(machine) {
+        machine = append_wide_entry(machine)
+        machine = append_wide_signal(machine)
+        drum (SYSCALLS) { machine = append_wide_syscall(machine, beat) }
+        machine.entry = "x86_start"
+        out machine
     }
 }
-
-skill backward(code, kind, target) {
-    @length = JCC_BYTES
-    (kind == encoder.JUMP) { length = JMP_BYTES }
-    out encoder.relative(code, kind, target - code.length - length)
-}
-
-skill append_entry(machine) {
-    machine.define_label(Layout.Section.CODE, "x86_start")
-    @code = machine.code
-    code = encoder.move_quad(code, encoder.R14D, word.from_number(0), word.from_number(GUEST_BASE_HIGH))
-    code = encoder.operate(code, 8, encoder.MOVE, encoder.EBX, encoder.ESP)
-    code = encoder.memory(code, encoder.LOAD, encoder.ECX, encoder.EBX, encoder.NONE, 0)
-    code = encoder.move_word(code, encoder.EDI, word.from_number(0))
-    @arguments_at = code.length - REL32_BYTES
-    code = encoder.memory(code, encoder.STORE, encoder.ECX, encoder.R14D, encoder.EDI, 0)
-    code = encoder.move_word(code, encoder.EDX, word.from_number(0))
-    @strings_at = code.length - REL32_BYTES
-    code = encoder.operate(code, 4, encoder.XOR, encoder.ESI, encoder.ESI)
-    @loop = code.length
-    code = encoder.operate(code, 4, encoder.CMP, encoder.ESI, encoder.ECX)
-    code = encoder.relative(code, encoder.ABOVE_OR_EQUAL, 0)
-    @done_from = code.length
-    code = encoder.operate(code, 4, encoder.MOVE, encoder.R9D, encoder.ESI)
-    code = encoder.shift(code, 4, encoder.SHIFT_LEFT, encoder.R9D, POINTER_SHIFT)
-    code = encoder.memory(code, encoder.LOAD64, encoder.R8D, encoder.EBX, encoder.R9D, POINTER_BYTES)
-    code = encoder.operate(code, 4, encoder.MOVE, encoder.R10D, encoder.ESI)
-    code = encoder.shift(code, 4, encoder.SHIFT_LEFT, encoder.R10D, CELL_SHIFT)
-    code = encoder.operate(code, 4, encoder.ADD, encoder.R10D, encoder.EDI)
-    code = encoder.memory(code, encoder.STORE, encoder.EDX, encoder.R14D, encoder.R10D, 4)
-    @bytes = code.length
-    code = encoder.memory(code, encoder.LOAD_ZERO_BYTE, encoder.EAX, encoder.R8D, encoder.NONE, 0)
-    code = encoder.memory(code, encoder.STORE_BYTE, encoder.EAX, encoder.R14D, encoder.EDX, 0)
-    code = encoder.operate_immediate(code, 8, encoder.ADD, encoder.R8D, 1)
-    code = encoder.operate_immediate(code, 4, encoder.ADD, encoder.EDX, 1)
-    code = encoder.operate(code, 4, encoder.TEST, encoder.EAX, encoder.EAX)
-    code = backward(code, encoder.NOT_EQUAL, bytes)
-    code = encoder.operate_immediate(code, 4, encoder.ADD, encoder.ESI, 1)
-    code = backward(code, encoder.JUMP, loop)
-    code.set_word(done_from - REL32_BYTES, word.from_signed(code.length - done_from))
-    code = encoder.memory(code, encoder.ADDRESS64, encoder.ESP, encoder.R14D, encoder.EDI, 0)
-    code = encoder.relative(code, encoder.JUMP, 0)
-    machine.code = code
-    machine.note_patch(Patch {
-        kind = Patch.Kind.REL32,
-        label = "_start",
-        offset = code.length - REL32_BYTES
-    })
-    @guest = map(machine)
-    @machine_code = machine.code
-    machine_code.set_word(arguments_at, guest.arguments)
-    machine_code = machine.code
-    machine_code.set_word(strings_at, guest.strings)
-    out machine
-}
-
-skill append_syscall(machine, entry) {
-    @number = group.get(entry, 0)
-    @host = group.get(entry, 1)
-    @pointers = group.get(entry, 2)
-    machine.define_label(Layout.Section.CODE, "x86_syscall_{number}")
-    @code = machine.code
-    drum (SAVED) { code = encoder.register64(code, encoder.PUSH, beat) }
-    code = encoder.operate(code, 4, encoder.MOVE, encoder.EDI, encoder.EAX)
-    code = encoder.operate(code, 4, encoder.MOVE, encoder.ESI, encoder.EDX)
-    code = encoder.operate(code, 4, encoder.MOVE, encoder.EDX, encoder.R8D)
-    code = encoder.operate(code, 4, encoder.MOVE, encoder.R10D, encoder.R9D)
-    code = encoder.memory(code, encoder.LOAD, encoder.R8D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG4, 4))
-    code = encoder.memory(code, encoder.LOAD, encoder.R9D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG5, 4))
-    (pointers % 2 == SECOND_IS_POINTER) { code = encoder.memory(code, encoder.ADDRESS64, encoder.ESI, encoder.R14D, encoder.ESI, 0) }
-    (pointers == THIRD_IS_POINTER) { code = encoder.memory(code, encoder.ADDRESS64, encoder.EDX, encoder.R14D, encoder.EDX, 0) }
-    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, host)
-    code = encoder.single(code, encoder.SYSCALL)
-    code = encoder.operate(code, 4, encoder.MOVE, encoder.EAX, encoder.EAX)
-    @count = group.count(SAVED)
-    drum (count) { code = encoder.register64(code, encoder.POP, group.get(SAVED, count - 1 - beat)) }
-    code = encoder.single(code, encoder.RET)
-    machine.code = code
-    out machine
-}
-
-skill append(machine) {
-    machine = append_entry(machine)
-    drum (SYSCALLS) { machine = append_syscall(machine, beat) }
-    machine.entry = "x86_start"
-    out machine
-}
-
-skill append_wide_entry(machine) {
-    machine.define_label(Layout.Section.CODE, "x86_start")
-    @code = machine.code
-    code = encoder.operate(code, 4, encoder.XOR, encoder.R14D, encoder.R14D)
-    code = encoder.relative(code, encoder.JUMP, 0)
-    machine.code = code
-    machine.note_patch(Patch {
-        kind = Patch.Kind.REL32,
-        label = "_start",
-        offset = code.length - REL32_BYTES
-    })
-    out machine
-}
-
-skill append_wide_syscall(machine, entry) {
-    @number = group.get(entry, 0)
-    @host = group.get(entry, 1)
-    machine.define_label(Layout.Section.CODE, "x86_syscall_{number}")
-    @code = machine.code
-    drum (SAVED) { code = encoder.register64(code, encoder.PUSH, beat) }
-    code = encoder.operate(code, 8, encoder.MOVE, encoder.EDI, encoder.EAX)
-    code = encoder.operate(code, 8, encoder.MOVE, encoder.ESI, encoder.EDX)
-    code = encoder.operate(code, 8, encoder.MOVE, encoder.EDX, encoder.R8D)
-    code = encoder.operate(code, 8, encoder.MOVE, encoder.R10D, encoder.R9D)
-    code = encoder.memory(code, encoder.LOAD64, encoder.R8D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG4, 8))
-    code = encoder.memory(code, encoder.LOAD64, encoder.R9D, encoder.R14D, encoder.NONE, roles.slot(backend.ARG5, 8))
-    code = encoder.operate_immediate(code, 4, encoder.MOVE, encoder.EAX, host)
-    code = encoder.single(code, encoder.SYSCALL)
-    @count = group.count(SAVED)
-    drum (count) { code = encoder.register64(code, encoder.POP, group.get(SAVED, count - 1 - beat)) }
-    code = encoder.single(code, encoder.RET)
-    machine.code = code
-    out machine
-}
-
-skill append_wide_signal(machine) {
-    @crash = machine.find_label("rt_crash_signal")
-    (crash.present == no) { out machine }
-    machine.define_label(Layout.Section.CODE, "x86_signal_entry")
-    @code = machine.code
-    code = encoder.memory(code, encoder.LOAD64, encoder.R8D, encoder.EDX, encoder.NONE, SIGNAL_RSP)
-    code = encoder.memory(code, encoder.LOAD64, encoder.EAX, encoder.ESI, encoder.NONE, SIGNAL_ADDRESS)
-    code = encoder.memory(code, encoder.LOAD64, encoder.EDX, encoder.EDX, encoder.NONE, SIGNAL_RIP)
-    code = encoder.operate_immediate(code, 8, encoder.AND, encoder.ESP, -16)
-    code = encoder.relative(code, encoder.JUMP, 0)
-    machine.code = code
-    machine.note_patch(Patch {
-        kind = Patch.Kind.REL32,
-        label = "rt_crash_signal",
-        offset = code.length - REL32_BYTES
-    })
-    out machine
-}
-
-skill append_wide(machine) {
-    machine = append_wide_entry(machine)
-    machine = append_wide_signal(machine)
-    drum (SYSCALLS) { machine = append_wide_syscall(machine, beat) }
-    machine.entry = "x86_start"
-    out machine
-}
-

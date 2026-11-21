@@ -8,13 +8,14 @@
 --
 -- Segment { offset, address, file_bytes, memory_bytes, flags }
 -- append_u32(target, value) / append_u64(target, low, high) — в буфер; Segment.memory_bytes — wide
--- append_identity / append_file_header(target, entry, segment_count) /
+-- append_identity / append_elf_header(target, entry, segment_count) /
 --     append_segment(target, Segment) — заголовки
--- executable(machine) -> buffer с готовым ELF; UnresolvedPatch
--- write(path, machine) — записать файл с правом исполнения (Q-027); WriteFailed
--- executable_wide / write_wide(…) — без окна (слово 8 байт): адреса настоящие
+-- build(machine) -> buffer с готовым ELF; UnresolvedPatch
+-- save(path, machine) — записать файл с правом исполнения (Q-027); WriteFailed
+-- executable_wide / save_wide(…) — без окна (слово 8 байт): адреса настоящие
 --     (старшая половина ноль), сегменты — страница ячеек ролей (RW), код +
 --     rodata (RX), data + bss (RW); стек и аргументы — ядра, низкой памяти нет
+-- Хозяин — Elf64 { linux } (СОП, 22.11.2026): навыки ниже — его методы.
 
 use compiler.gorn.backend.layout
 use compiler.gorn.backend.buffer
@@ -41,175 +42,178 @@ Segment = Box {
     flags = 0
 }
 
-skill append_u32(target, value) {
-    target.append_word(word.from_number(value))
-    out target
-}
+Elf64 = Box {
+    linux = platform.LinuxRuntime {}
 
-skill append_u64(target, low, high) {
-    target.append_word(low)
-    out append_u32(target, high)
-}
-
-skill append_identity(target) {
-    @items = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    drum (items) {
-        target.append_byte(beat)
+    skill append_u32(target, value) {
+        target.append_word(word.from_number(value))
+        out target
     }
-    out target
+
+    skill append_u64(target, low, high) {
+        target.append_word(low)
+        out append_u32(target, high)
+    }
+
+    skill append_identity(target) {
+        @items = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        drum (items) {
+            target.append_byte(beat)
+        }
+        out target
+    }
+
+    skill append_file_header_at(target, entry, segment_count, high) {
+        target = append_identity(target)
+        target.append_u16(TYPE_EXECUTABLE)
+        target.append_u16(MACHINE_X86_64)
+        target = append_u32(target, 1)
+        target = append_u64(target, entry, high)
+        target = append_u64(target, word.from_number(HEADER_BYTES), 0)
+        target = append_u64(target, word.from_bytes(0, 0, 0, 0), 0)
+        target = append_u32(target, 0)
+        target.append_u16(HEADER_BYTES)
+        target.append_u16(PROGRAM_HEADER_BYTES)
+        target.append_u16(segment_count)
+        target.append_u16(64)
+        target.append_u16(0)
+        target.append_u16(0)
+        out target
+    }
+
+    skill append_segment_at(target, segment, high) {
+        target = append_u32(target, SEGMENT_LOAD)
+        target = append_u32(target, segment.flags)
+        target = append_u64(target, word.from_number(segment.offset), 0)
+        target = append_u64(target, segment.address, high)
+        target = append_u64(target, segment.address, high)
+        target = append_u64(target, word.from_number(segment.file_bytes), 0)
+        target = append_u64(target, segment.memory_bytes.low, word.to_number(segment.memory_bytes.high))
+        out append_u64(target, word.from_number(PAGE_BYTES), 0)
+    }
+
+    skill append_elf_header(target, entry, segment_count) {
+        target = append_identity(target)
+        target.append_u16(TYPE_EXECUTABLE)
+        target.append_u16(MACHINE_X86_64)
+        target = append_u32(target, 1)
+        target = append_u64(target, entry, GUEST_HIGH)
+        target = append_u64(target, word.from_number(HEADER_BYTES), 0)
+        target = append_u64(target, word.from_bytes(0, 0, 0, 0), 0)
+        target = append_u32(target, 0)
+        target.append_u16(HEADER_BYTES)
+        target.append_u16(PROGRAM_HEADER_BYTES)
+        target.append_u16(segment_count)
+        target.append_u16(64)
+        target.append_u16(0)
+        target.append_u16(0)
+        out target
+    }
+
+    skill append_segment(target, segment) {
+        target = append_u32(target, SEGMENT_LOAD)
+        target = append_u32(target, segment.flags)
+        target = append_u64(target, word.from_number(segment.offset), 0)
+        target = append_u64(target, segment.address, GUEST_HIGH)
+        target = append_u64(target, segment.address, GUEST_HIGH)
+        target = append_u64(target, word.from_number(segment.file_bytes), 0)
+        target = append_u64(target, segment.memory_bytes.low, word.to_number(segment.memory_bytes.high))
+        out append_u64(target, word.from_number(PAGE_BYTES), 0)
+    }
+
+    skill build(machine) {
+        (machine.resolved == no) { out error.UnresolvedPatch }
+        @current = machine.layout()
+        @guest = linux.map(machine)
+        @body = machine.payload(current)
+        @data_file_bytes = current.file_size - current.data_offset
+        @entry = machine.label_address(current, machine.entry, 0)
+        @segment_count = 6
+
+        @result = buffer.empty()
+        result = append_elf_header(result, entry, segment_count)
+        result = append_segment(result, Segment {
+            address = word.from_bytes(0, 0, 0, 0),
+            memory_bytes = wide.from_number(machine.low_memory_size),
+            flags = READ_WRITE
+        })
+        result = append_segment(result, Segment {
+            offset = PAGE_BYTES,
+            address = machine.load_address,
+            file_bytes = roles.SLOTS_BYTES,
+            memory_bytes = wide.from_number(roles.SLOTS_BYTES),
+            flags = READ_WRITE
+        })
+        result = append_segment(result, Segment {
+            offset = PAGE_BYTES + roles.SLOTS_BYTES,
+            address = layout.address_add(machine.load_address, roles.SLOTS_BYTES),
+            file_bytes = current.data_offset - roles.SLOTS_BYTES,
+            memory_bytes = wide.from_number(current.data_offset - roles.SLOTS_BYTES),
+            flags = READ_EXECUTE
+        })
+        result = append_segment(result, Segment {
+            offset = PAGE_BYTES + current.data_offset,
+            address = layout.address_add(machine.load_address, current.data_offset),
+            file_bytes = data_file_bytes,
+            memory_bytes = wide.add_number(machine.bss_size, data_file_bytes),
+            flags = READ_WRITE
+        })
+        result = append_segment(result, Segment {
+            address = guest.strings,
+            memory_bytes = wide.from_number(platform.STRINGS_BYTES),
+            flags = READ_WRITE
+        })
+        result = append_segment(result, Segment {
+            address = guest.stack,
+            memory_bytes = wide.from_number(platform.STACK_BYTES),
+            flags = READ_WRITE
+        })
+        result.pad_to(PAGE_BYTES)
+        result.append_buffer(body)
+        out result
+    }
+
+    skill save(path, machine) {
+        @output = build(machine)
+        out output.write_program(path)
+    }
+
+    skill build_wide(machine) {
+        (machine.resolved == no) { out error.UnresolvedPatch }
+        @current = machine.layout()
+        @body = machine.payload(current)
+        @data_file_bytes = current.file_size - current.data_offset
+        @entry = machine.label_address(current, machine.entry, 0)
+        @result = buffer.empty()
+        result = append_file_header_at(result, entry, 3, 0)
+        result = append_segment_at(result, Segment {
+            offset = PAGE_BYTES,
+            address = machine.load_address,
+            file_bytes = roles.SLOTS_BYTES,
+            memory_bytes = wide.from_number(roles.SLOTS_BYTES),
+            flags = READ_WRITE
+        }, 0)
+        result = append_segment_at(result, Segment {
+            offset = PAGE_BYTES + roles.SLOTS_BYTES,
+            address = layout.address_add(machine.load_address, roles.SLOTS_BYTES),
+            file_bytes = current.data_offset - roles.SLOTS_BYTES,
+            memory_bytes = wide.from_number(current.data_offset - roles.SLOTS_BYTES),
+            flags = READ_EXECUTE
+        }, 0)
+        result = append_segment_at(result, Segment {
+            offset = PAGE_BYTES + current.data_offset,
+            address = layout.address_add(machine.load_address, current.data_offset),
+            file_bytes = data_file_bytes,
+            memory_bytes = wide.add_number(machine.bss_size, data_file_bytes),
+            flags = READ_WRITE
+        }, 0)
+        result.pad_to(PAGE_BYTES)
+        result.append_buffer(body)
+        out result
+    }
+
+    skill save_wide(path, machine) {
+        @finished = build_wide(machine)
+        out finished.write_program(path)
+    }
 }
-
-skill append_file_header_at(target, entry, segment_count, high) {
-    target = append_identity(target)
-    target.append_u16(TYPE_EXECUTABLE)
-    target.append_u16(MACHINE_X86_64)
-    target = append_u32(target, 1)
-    target = append_u64(target, entry, high)
-    target = append_u64(target, word.from_number(HEADER_BYTES), 0)
-    target = append_u64(target, word.from_bytes(0, 0, 0, 0), 0)
-    target = append_u32(target, 0)
-    target.append_u16(HEADER_BYTES)
-    target.append_u16(PROGRAM_HEADER_BYTES)
-    target.append_u16(segment_count)
-    target.append_u16(64)
-    target.append_u16(0)
-    target.append_u16(0)
-    out target
-}
-
-skill append_segment_at(target, segment, high) {
-    target = append_u32(target, SEGMENT_LOAD)
-    target = append_u32(target, segment.flags)
-    target = append_u64(target, word.from_number(segment.offset), 0)
-    target = append_u64(target, segment.address, high)
-    target = append_u64(target, segment.address, high)
-    target = append_u64(target, word.from_number(segment.file_bytes), 0)
-    target = append_u64(target, segment.memory_bytes.low, word.to_number(segment.memory_bytes.high))
-    out append_u64(target, word.from_number(PAGE_BYTES), 0)
-}
-
-skill append_file_header(target, entry, segment_count) {
-    target = append_identity(target)
-    target.append_u16(TYPE_EXECUTABLE)
-    target.append_u16(MACHINE_X86_64)
-    target = append_u32(target, 1)
-    target = append_u64(target, entry, GUEST_HIGH)
-    target = append_u64(target, word.from_number(HEADER_BYTES), 0)
-    target = append_u64(target, word.from_bytes(0, 0, 0, 0), 0)
-    target = append_u32(target, 0)
-    target.append_u16(HEADER_BYTES)
-    target.append_u16(PROGRAM_HEADER_BYTES)
-    target.append_u16(segment_count)
-    target.append_u16(64)
-    target.append_u16(0)
-    target.append_u16(0)
-    out target
-}
-
-skill append_segment(target, segment) {
-    target = append_u32(target, SEGMENT_LOAD)
-    target = append_u32(target, segment.flags)
-    target = append_u64(target, word.from_number(segment.offset), 0)
-    target = append_u64(target, segment.address, GUEST_HIGH)
-    target = append_u64(target, segment.address, GUEST_HIGH)
-    target = append_u64(target, word.from_number(segment.file_bytes), 0)
-    target = append_u64(target, segment.memory_bytes.low, word.to_number(segment.memory_bytes.high))
-    out append_u64(target, word.from_number(PAGE_BYTES), 0)
-}
-
-skill executable(machine) {
-    (machine.resolved == no) { out error.UnresolvedPatch }
-    @current = machine.layout()
-    @guest = platform.map(machine)
-    @body = machine.payload(current)
-    @data_file_bytes = current.file_size - current.data_offset
-    @entry = machine.label_address(current, machine.entry, 0)
-    @segment_count = 6
-
-    @result = buffer.empty()
-    result = append_file_header(result, entry, segment_count)
-    result = append_segment(result, Segment {
-        address = word.from_bytes(0, 0, 0, 0),
-        memory_bytes = wide.from_number(machine.low_memory_size),
-        flags = READ_WRITE
-    })
-    result = append_segment(result, Segment {
-        offset = PAGE_BYTES,
-        address = machine.load_address,
-        file_bytes = roles.SLOTS_BYTES,
-        memory_bytes = wide.from_number(roles.SLOTS_BYTES),
-        flags = READ_WRITE
-    })
-    result = append_segment(result, Segment {
-        offset = PAGE_BYTES + roles.SLOTS_BYTES,
-        address = layout.address_add(machine.load_address, roles.SLOTS_BYTES),
-        file_bytes = current.data_offset - roles.SLOTS_BYTES,
-        memory_bytes = wide.from_number(current.data_offset - roles.SLOTS_BYTES),
-        flags = READ_EXECUTE
-    })
-    result = append_segment(result, Segment {
-        offset = PAGE_BYTES + current.data_offset,
-        address = layout.address_add(machine.load_address, current.data_offset),
-        file_bytes = data_file_bytes,
-        memory_bytes = wide.add_number(machine.bss_size, data_file_bytes),
-        flags = READ_WRITE
-    })
-    result = append_segment(result, Segment {
-        address = guest.strings,
-        memory_bytes = wide.from_number(platform.STRINGS_BYTES),
-        flags = READ_WRITE
-    })
-    result = append_segment(result, Segment {
-        address = guest.stack,
-        memory_bytes = wide.from_number(platform.STACK_BYTES),
-        flags = READ_WRITE
-    })
-    result.pad_to(PAGE_BYTES)
-    result.append_buffer(body)
-    out result
-}
-
-skill write(path, machine) {
-    @output = executable(machine)
-    out output.write_program(path)
-}
-
-skill executable_wide(machine) {
-    (machine.resolved == no) { out error.UnresolvedPatch }
-    @current = machine.layout()
-    @body = machine.payload(current)
-    @data_file_bytes = current.file_size - current.data_offset
-    @entry = machine.label_address(current, machine.entry, 0)
-    @result = buffer.empty()
-    result = append_file_header_at(result, entry, 3, 0)
-    result = append_segment_at(result, Segment {
-        offset = PAGE_BYTES,
-        address = machine.load_address,
-        file_bytes = roles.SLOTS_BYTES,
-        memory_bytes = wide.from_number(roles.SLOTS_BYTES),
-        flags = READ_WRITE
-    }, 0)
-    result = append_segment_at(result, Segment {
-        offset = PAGE_BYTES + roles.SLOTS_BYTES,
-        address = layout.address_add(machine.load_address, roles.SLOTS_BYTES),
-        file_bytes = current.data_offset - roles.SLOTS_BYTES,
-        memory_bytes = wide.from_number(current.data_offset - roles.SLOTS_BYTES),
-        flags = READ_EXECUTE
-    }, 0)
-    result = append_segment_at(result, Segment {
-        offset = PAGE_BYTES + current.data_offset,
-        address = layout.address_add(machine.load_address, current.data_offset),
-        file_bytes = data_file_bytes,
-        memory_bytes = wide.add_number(machine.bss_size, data_file_bytes),
-        flags = READ_WRITE
-    }, 0)
-    result.pad_to(PAGE_BYTES)
-    result.append_buffer(body)
-    out result
-}
-
-skill write_wide(path, machine) {
-    @finished = executable_wide(machine)
-    out finished.write_program(path)
-}
-

@@ -18,6 +18,7 @@
 --     InvalidIndex, если оба rsp
 -- addressing(code, reg, base, index, displacement) — ModRM [+ SIB] [+ disp8/32]
 -- immediate(code, size, value) — знаковое число в 1/2/4 байтах, младший первым
+-- Хозяин — Operand (СОП, 22.11.2026): навыки ниже — его методы.
 
 use core.group
 use compiler.machine.word
@@ -32,121 +33,123 @@ REX = 64
 IMMEDIATE8_MODULUS = 256
 IMMEDIATE16_MODULUS = 65536
 
-skill bytes(code, items) {
-    drum (items) {
-        code.append_byte(beat)
+Operand = Box {
+    skill bytes(code, items) {
+        drum (items) {
+            code.append_byte(beat)
+        }
+        out code
     }
-    out code
-}
 
-skill low(register) {
-    (register < 0) { out error.InvalidRegister }
-    (register > 15) { out error.InvalidRegister }
-    (register > 7) { out register - 8 }
-    out register
-}
-
-skill high(register) {
-    (register > 7) { out 1 }
-    out 0
-}
-
-skill fits_byte(value) {
-    (value < -128) { out no }
-    (value > 127) { out no }
-    out yes
-}
-
-skill width(size) {
-    (size == 4) { out 0 }
-    (size == 8) { out 1 }
-    out error.InvalidSize
-}
-
-skill rex(code, wide, reg, index, base, byte_register) {
-    @value = REX + wide * 8 + high(reg) * 4 + high(index) * 2 + high(base)
-    @needed = no
-    (byte_register > 3) {
-        (byte_register < 8) { needed = yes }
+    skill low(register) {
+        (register < 0) { out error.InvalidRegister }
+        (register > 15) { out error.InvalidRegister }
+        (register > 7) { out register - 8 }
+        out register
     }
-    (value > REX) { needed = yes }
-    (needed == yes) {
+
+    skill high(register) {
+        (register > 7) { out 1 }
+        out 0
+    }
+
+    skill fits_byte(value) {
+        (value < -128) { out no }
+        (value > 127) { out no }
+        out yes
+    }
+
+    skill width(size) {
+        (size == 4) { out 0 }
+        (size == 8) { out 1 }
+        out error.InvalidSize
+    }
+
+    skill rex(code, wide, reg, index, base, byte_register) {
+        @value = REX + wide * 8 + high(reg) * 4 + high(index) * 2 + high(base)
+        @needed = no
+        (byte_register > 3) {
+            (byte_register < 8) { needed = yes }
+        }
+        (value > REX) { needed = yes }
+        (needed == yes) {
+            code.append_byte(value)
+        }
+        out code
+    }
+
+    skill start(code, form, reg, index, base) {
+        @prefix = group.get(form, 0)
+        @byte_field = group.get(form, 2)
+        @byte_register = NONE
+        (byte_field == IN_REG) { byte_register = reg }
+        (byte_field == IN_RM) { byte_register = base }
+        @field = reg
+        @extension = group.get(form, 3)
+        (extension > NONE) { field = extension }
+        (prefix > 0) {
+            code.append_byte(prefix)
+        }
+        code = rex(code, group.get(form, 1), field, index, base, byte_register)
+        out bytes(code, group.slice(form, 4, group.count(form)))
+    }
+
+    skill register_form(code, form, reg, rm) {
+        @field = reg
+        @extension = group.get(form, 3)
+        (extension > NONE) { field = extension }
+        code = start(code, form, reg, NONE, rm)
+        code.append_byte(192 + low(field) * 8 + low(rm))
+        out code
+    }
+
+    skill memory_form(code, form, reg, base, index, displacement) {
+        (index == RSP) {
+            (base == RSP) { out error.InvalidIndex }
+            index = base
+            base = RSP
+        }
+        @field = reg
+        @extension = group.get(form, 3)
+        (extension > NONE) { field = extension }
+        code = start(code, form, reg, index, base)
+        out addressing(code, field, base, index, displacement)
+    }
+
+    skill addressing(code, reg, base, index, displacement) {
+        @mode = 2
+        (fits_byte(displacement) == yes) { mode = 1 }
+        (displacement == 0) { mode = 0 }
+        (mode == 0) {
+            (low(base) == RBP) { mode = 1 }
+        }
+        @rm = low(base)
+        (index > NONE) { rm = RSP }
+        code.append_byte(mode * 64 + low(reg) * 8 + rm)
+        (rm == RSP) {
+            @scaled = RSP
+            (index > NONE) { scaled = low(index) }
+            code.append_byte(scaled * 8 + low(base))
+        }
+        (mode == 1) { out immediate(code, 1, displacement) }
+        (mode == 2) { out immediate(code, 4, displacement) }
+        out code
+    }
+
+    skill immediate(code, size, value) {
+        (size == 4) {
+            code.append_word(word.from_signed(value))
+            out code
+        }
+        (size == 2) {
+            (value < 0) { value = value + IMMEDIATE16_MODULUS }
+            @high = value / 256
+            code.append_byte(value - high * 256)
+            code.append_byte(high)
+            out code
+        }
+        (value < 0) { value = value + IMMEDIATE8_MODULUS }
         code.append_byte(value)
-    }
-    out code
-}
-
-skill start(code, form, reg, index, base) {
-    @prefix = group.get(form, 0)
-    @byte_field = group.get(form, 2)
-    @byte_register = NONE
-    (byte_field == IN_REG) { byte_register = reg }
-    (byte_field == IN_RM) { byte_register = base }
-    @field = reg
-    @extension = group.get(form, 3)
-    (extension > NONE) { field = extension }
-    (prefix > 0) {
-        code.append_byte(prefix)
-    }
-    code = rex(code, group.get(form, 1), field, index, base, byte_register)
-    out bytes(code, group.slice(form, 4, group.count(form)))
-}
-
-skill register_form(code, form, reg, rm) {
-    @field = reg
-    @extension = group.get(form, 3)
-    (extension > NONE) { field = extension }
-    code = start(code, form, reg, NONE, rm)
-    code.append_byte(192 + low(field) * 8 + low(rm))
-    out code
-}
-
-skill memory_form(code, form, reg, base, index, displacement) {
-    (index == RSP) {
-        (base == RSP) { out error.InvalidIndex }
-        index = base
-        base = RSP
-    }
-    @field = reg
-    @extension = group.get(form, 3)
-    (extension > NONE) { field = extension }
-    code = start(code, form, reg, index, base)
-    out addressing(code, field, base, index, displacement)
-}
-
-skill addressing(code, reg, base, index, displacement) {
-    @mode = 2
-    (fits_byte(displacement) == yes) { mode = 1 }
-    (displacement == 0) { mode = 0 }
-    (mode == 0) {
-        (low(base) == RBP) { mode = 1 }
-    }
-    @rm = low(base)
-    (index > NONE) { rm = RSP }
-    code.append_byte(mode * 64 + low(reg) * 8 + rm)
-    (rm == RSP) {
-        @scaled = RSP
-        (index > NONE) { scaled = low(index) }
-        code.append_byte(scaled * 8 + low(base))
-    }
-    (mode == 1) { out immediate(code, 1, displacement) }
-    (mode == 2) { out immediate(code, 4, displacement) }
-    out code
-}
-
-skill immediate(code, size, value) {
-    (size == 4) {
-        code.append_word(word.from_signed(value))
         out code
     }
-    (size == 2) {
-        (value < 0) { value = value + IMMEDIATE16_MODULUS }
-        @high = value / 256
-        code.append_byte(value - high * 256)
-        code.append_byte(high)
-        out code
-    }
-    (value < 0) { value = value + IMMEDIATE8_MODULUS }
-    code.append_byte(value)
-    out code
 }
