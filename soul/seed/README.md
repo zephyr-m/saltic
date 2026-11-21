@@ -13,7 +13,7 @@
   `core.process`, `core.system`, `core.bytes`, `core.dict`, `core.arena`, на
   64-битных целях — `core.fraction` и `core.matrix`. Сравнение секретов —
   `craft.protocols.security.crypto` (Q-023).
-- `io.saltic` и `io/` — вывод (`use io`), файлы (`use io.file`).
+- `io/` — вывод (`use io`, вход `main.saltic`), файлы (`use io.file`).
 - `selfhost/` — сам язык: `selfhost.architect`, `selfhost.parser`, `selfhost.checker`,
   `selfhost.compiler` и всё, на чём они стоят.
 

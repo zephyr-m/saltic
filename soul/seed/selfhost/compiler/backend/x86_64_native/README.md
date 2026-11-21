@@ -1,8 +1,8 @@
 # x86-64 родной — бэкенд
 
-✅ **Есть (шаг 4, 04.11.2026): Linux.** Вход — `../x86_64_native.saltic`:
+✅ **Есть (шаг 4, 04.11.2026): Linux.** Вход — `main.saltic`:
 исполнитель договора машины `Executor { firmware, wide }` (все методы
-`../backend.saltic`) и `write(path, machine)` — ELF64 для Linux. Цель
+`../main.saltic`) и `write(path, machine)` — ELF64 для Linux. Цель
 `toolchain` — `x86_64` и `x86_64-uefi` (с 04.11.2026; старые имена `x86_64-native`
 и `x86_64-uefi-native` убраны 07.11.2026). Перевод RV32I → x86-64, бывший
 оракулом, — на пенсии с 06.11.2026 (`.archive/x86_64_translation/`).
@@ -17,7 +17,7 @@
 
 | Что | Где | Строк |
 |---|---|---|
-| Вход: `Executor`, `write` | `../x86_64_native.saltic` | ~330 |
+| Вход: `Executor`, `write` | `main.saltic` | ~330 |
 | Байты команд: REX/ModRM/SIB, ~25 команд; эталоны GNU `as` | `encoder` + `encoder/operand` (`tests/x86-encoder.saltic`, `workbench/check/x86-encoder-golden.sh`) | ~430 |
 | Роль → регистр или ячейка первой страницы кода (`[r14 + SLOTS + size·роль]`, size 8 без окна), временные регистры | `roles` | ~100 |
 | Пересылки, арифметика, сдвиги, сравнения в 0/1; особые случаи `STACK` | `ops` | ~280 |

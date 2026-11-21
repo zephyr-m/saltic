@@ -37,27 +37,32 @@ runtime-архитектуре не заменяют этот канон.
 
 ## Физическая форма модуля
 
-Модуль состоит из главного файла и необязательной папки с тем же именем:
+Модуль записывается одним из двух способов, и только одним (решение автора
+20–21.11.2026): без детей — один файл; с детьми — папка, где главный файл
+называется `main.saltic`:
 
 ```text
-compiler.saltic
 compiler/
-  parser.saltic
+  main.saltic
   parser/
+    main.saltic
     lexer.saltic
-    grammar.saltic
+    syntax.saltic
   checker.saltic
-  backend.saltic
   backend/
+    main.saltic
     rv32i.saltic
 ```
 
-`compiler.saltic` — публичное лицо модуля `compiler`.
+`compiler/main.saltic` — публичное лицо модуля `compiler`; `use compiler`
+находит его сам (`a/b.saltic`, а если его нет — `a/b/main.saltic`).
 
-`compiler/` — его внутреннее дерево. Каждый ребёнок снова имеет ту же форму:
-`parser.saltic + parser/`, `backend.saltic + backend/` и так далее.
+Остальное в `compiler/` — его внутреннее дерево. Ребёнок снова имеет ту же форму:
+файл `checker.saltic`, пока он один, и папка `parser/` с `main.saltic`, когда у него
+появились дети. Файл и папка того же имени рядом (`backend.saltic` + `backend/`) —
+второй способ, его замечает архитектор (совет `module_doubled`).
 
-Пустая папка не создаётся. Если у модуля нет детей, достаточно главного файла.
+Пустая папка не создаётся. Если у модуля нет детей, достаточно одного файла.
 
 ## Ответственность
 
@@ -266,7 +271,7 @@ SDK не является складом потенциально полезны
   предупреждение (решение автора 12.11.2026: проверку не роняет, жёсткий только
   лимит кода). Проверяет `workbench/check/limits.saltic`.
 
-Образцы: `soul/seed/selfhost/compiler/codegen.saltic`,
+Образцы: `soul/seed/selfhost/compiler/codegen/main.saltic`,
 `os/target/uefi_x86_64/platform/firmware.saltic`.
 
 Ресурсы принадлежат использующему их модулю. Общие ресурсы поднимаются к ближайшему
@@ -314,8 +319,8 @@ SDK не является складом потенциально полезны
 Проект на тысячу строк:
 
 ```text
-game.saltic
 game/
+  main.saltic
   world.saltic
   input.saltic
   view.saltic
@@ -324,15 +329,15 @@ game/
 Проект на миллионы строк:
 
 ```text
-system.saltic
 system/
-  language.saltic
+  main.saltic
   language/
+    main.saltic
     parser.saltic
     checker.saltic
     compiler.saltic
-  sdk.saltic
   sdk/
+    main.saltic
     graphics.saltic
     sound.saltic
     storage.saltic

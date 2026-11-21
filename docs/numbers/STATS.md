@@ -79,7 +79,7 @@ x86-версия с 154:47:128 — родной бэкенд, а не перев
 | `os/apps/colony/colony.saltic` | 582 |
 | `registry/libraries/uiengine/jtml.saltic` | 566 |
 | `soul/seed/tests/contract.saltic` | 561 |
-| `soul/seed/selfhost/compiler/codegen.saltic` | 550 |
+| `soul/seed/selfhost/compiler/codegen/main.saltic` | 550 |
 | `soul/seed/selfhost/checker/walk.saltic` | 527 |
 | `soul/seed/selfhost/compiler/state.saltic` | 509 |
 | `os/target/uefi_x86_64/screen/glyphs.saltic` | 502 |

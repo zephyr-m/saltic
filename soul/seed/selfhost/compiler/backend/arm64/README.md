@@ -1,7 +1,7 @@
 # ARM64 — бэкенд
 
-✅ **Есть (12.11.2026): Linux.** Вход — `../arm64.saltic`: исполнитель
-договора машины `Executor { fixups }` (все методы `../backend.saltic`) и
+✅ **Есть (12.11.2026): Linux.** Вход — `main.saltic`: исполнитель
+договора машины `Executor { fixups }` (все методы `../main.saltic`) и
 `write(path, machine, fixups)` — ELF64 AArch64. Цель `toolchain` — `arm64`
 (решение автора 12.11.2026). Под `qemu-aarch64`: канон (и с кучей 4,5 ГБ),
 `edges`, `always`, `wide`, дробные, платформа, большие числа — те же выводы, что
@@ -24,7 +24,7 @@
 
 | Что | Где |
 |---|---|
-| Вход: `Executor`, `fresh`, `write` | `../arm64.saltic` |
+| Вход: `Executor`, `fresh`, `write` | `main.saltic` |
 | Роль → регистр: все 21 роль в регистрах | `roles` |
 | Слова команд (32 бита, в bits32) | `encoder` |
 | Константы (movz/movn/movk), арифметика, логика, сдвиги, сравнения, умножение, деление, дробные | `ops` |
