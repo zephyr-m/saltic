@@ -60,8 +60,8 @@ global-check: _dirs (tarantul "get")
 # говорит по stdio. Вывод сборки — в stderr: stdout принадлежит протоколу. Сборка —
 # в .part и переименование: работающий сервер свой файл перезаписать не даст.
 lens-serve: _dirs
-    @bootstrap/saltic workbench/agent/lens.saltic .cache/build/workbench/lens.part 1073741824 x86_64 >&2 && mv .cache/build/workbench/lens.part .cache/build/workbench/lens
-    @bootstrap/saltic workbench/agent/mcp.saltic .cache/build/workbench/mcp.part 268435456 x86_64 >&2 && mv .cache/build/workbench/mcp.part .cache/build/workbench/mcp
+    @bootstrap/saltic workbench/agent/lens/main.saltic .cache/build/workbench/lens.part 1073741824 x86_64 >&2 && mv .cache/build/workbench/lens.part .cache/build/workbench/lens
+    @bootstrap/saltic workbench/agent/mcp/main.saltic .cache/build/workbench/mcp.part 268435456 x86_64 >&2 && mv .cache/build/workbench/mcp.part .cache/build/workbench/mcp
     @exec .cache/build/workbench/mcp
 
 # Таблица лидеров по скорости: Saltic против языков, что есть на машине
@@ -75,7 +75,7 @@ bench: _dirs
 # Реестр — свой репозиторий (git@github.com:zephyr-m/saltic-registry.git):
 # сверяется его рабочая копия, по умолчанию ../saltic-registry.
 registry folder="../saltic-registry": _dirs
-    bootstrap/saltic workbench/agent/lens.saltic .cache/build/workbench/lens.part 1073741824 x86_64  && mv .cache/build/workbench/lens.part .cache/build/workbench/lens
+    bootstrap/saltic workbench/agent/lens/main.saltic .cache/build/workbench/lens.part 1073741824 x86_64  && mv .cache/build/workbench/lens.part .cache/build/workbench/lens
     bootstrap/saltic workbench/registry.saltic .cache/build/workbench/registry 268435456 x86_64
     cd "$1" && SALTIC_HOME="{{justfile_directory()}}" "{{justfile_directory()}}/.cache/build/workbench/registry"
 
@@ -90,16 +90,16 @@ pace: _dirs
     .cache/build/workbench/pace
 
 limits: _dirs
-    bootstrap/saltic workbench/check/limits.saltic .cache/build/workbench/limits 536870912 x86_64
+    bootstrap/saltic workbench/check/limits/main.saltic .cache/build/workbench/limits 536870912 x86_64
     .cache/build/workbench/limits
 
 # Быстрая проверка на родном x86-64 (global-check — редко): лимиты канона, случаи
 # языка без машинных эталонов и чужих процессоров (machine, rva23, rv64, arm64 —
 # в global-check) и весь набор ОС. Тестовые программы — x86-64 на этом ноутбуке.
 quick: _dirs (tarantul "get")
-    bootstrap/saltic workbench/check/limits.saltic .cache/build/workbench/limits 536870912 x86_64
+    bootstrap/saltic workbench/check/limits/main.saltic .cache/build/workbench/limits 536870912 x86_64
     .cache/build/workbench/limits
-    bootstrap/saltic tests/run.saltic .cache/build/workbench/tests 536870912 x86_64
+    bootstrap/saltic tests/run/main.saltic .cache/build/workbench/tests 536870912 x86_64
     SALTIC_TEST_HOST=x86_64 nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/tests "checker machine fixed-types fraction wide modules json-rpc diagnostics groups bytes edges always x86-encoder arm64-encoder xtensa-encoder dict crypto apk seed-contract abi memory platform process native jtml ttf events tasks panels mrpc"
 
 rv64: _dirs
@@ -126,7 +126,7 @@ x86-golden mode="": _dirs
 # `just tarantul update` — версии каталога, `just tarantul list` — что есть,
 # `just tarantul check` — всё ли на месте
 tarantul command="get": _dirs
-    bootstrap/saltic workbench/tarantul.saltic .cache/build/workbench/tarantul 268435456 x86_64
+    bootstrap/saltic workbench/tarantul/main.saltic .cache/build/workbench/tarantul 268435456 x86_64
     .cache/build/workbench/tarantul "$1"
 
 esp32: _dirs (tarantul "get")
@@ -161,7 +161,7 @@ same *sources: _dirs
     .cache/build/workbench/same-check "$*"
 
 test case="all" host="x86_64": _dirs (tarantul "get")
-    bootstrap/saltic tests/run.saltic .cache/build/workbench/tests 536870912 x86_64
+    bootstrap/saltic tests/run/main.saltic .cache/build/workbench/tests 536870912 x86_64
     SALTIC_TEST_HOST="$2" nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/tests "$1"
 
 package:

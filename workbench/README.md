@@ -22,7 +22,7 @@ workbench/
 | Программа | Что делает |
 |---|---|
 | `global-check.saltic` | Одна проверка всего, `just global-check`: по очереди — сборка проверок, лимиты канона, самосборка полки с паспортами и время/память против прошлого прогона; затем разом — тесты на rv32i, x86-64 и rv64, тесты ОС, платформы (qemu-virt, UEFI, closure), самосборка на RV64, кодировщик x86. Вид — карточки «подготовка», «проверки разом», «итог»; в CI — без цвета, раз в 10 с «идут». Журналы — `.cache/build/workbench/check-*.log`. Вызывается и в CI релиза |
-| `limits.saltic` | Лимиты канона, `just limits` и первый шаг `global-check`: до 512 строк кода и до 32 строк шапки. Замер и сверка — `limits/canon.saltic` (его же берёт `lens check`), известные нарушения — `limits-known.txt` (правит автор): им нельзя расти |
+| `limits/main.saltic` | Лимиты канона, `just limits` и первый шаг `global-check`: до 512 строк кода и до 32 строк шапки. Замер и сверка — `limits/canon.saltic` (его же берёт `lens check`), известные нарушения — `limits-known.txt` (правит автор): им нельзя расти |
 | `same.saltic` | `just same [исходники…]`: рефакторинг компилятора — исходники, собранные компилятором с полки и новым stage-1 под rv64, x86_64 и rv32i, совпадают побайтово; плюс набор ошибок канона |
 | `same-source.saltic` | `just same-source`: правка исходников без изменения смысла — все программы собираются компилятором из HEAD и из рабочего дерева и сравниваются побайтово |
 | `x86-encoder-golden.saltic` | `just x86-golden [--print]`: эталоны кодировщика x86-64 — каждую команду из `tests/x86-encoder.saltic` собирает GNU `as` и сверяет байты |
@@ -35,8 +35,8 @@ workbench/
 
 | Программа | Что делает |
 |---|---|
-| `lens.saltic` | Saltic смотрит на свой код: `check` (разбор, чекер, лимиты; модуль без `program` — не ошибка), `api` (лицо модуля), `find` (где имя). Само зрение — `lens/look.saltic` |
-| `mcp.saltic` | Сервер MCP по stdio, `just lens-serve` (.mcp.json и запись пользователя): инструменты `saltic_check`, `api`, `find`, `build`, `edit`, `rename`, `run`, `test`. Правка и переименование с проверкой — `mcp/edit.saltic`, запуск и тесты — `mcp/run.saltic`. Проверку зовёт `lens` дочерним процессом: JSON из craft и selfhost в одной программе не живут (общие варианты enum) |
+| `lens/main.saltic` | Saltic смотрит на свой код: `check` (разбор, чекер, лимиты; модуль без `program` — не ошибка), `api` (лицо модуля), `find` (где имя). Само зрение — `lens/look.saltic` |
+| `mcp/main.saltic` | Сервер MCP по stdio, `just lens-serve` (.mcp.json и запись пользователя): инструменты `saltic_check`, `api`, `find`, `build`, `edit`, `rename`, `run`, `test`. Правка и переименование с проверкой — `mcp/edit.saltic`, запуск и тесты — `mcp/run.saltic`. Проверку зовёт `lens` дочерним процессом: JSON из craft и selfhost в одной программе не живут (общие варианты enum) |
 
 ## В корне
 

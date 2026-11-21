@@ -73,7 +73,7 @@ x86-версия с 154:47:128 — родной бэкенд, а не перев
 | Файл | Строк |
 |---|---:|
 | `os/fonts/spleen.saltic` | 990 |
-| `os/target/uefi_x86_64/agent.saltic` | 773 |
+| `os/target/uefi_x86_64/agent/main.saltic` | 773 |
 | `os/uiengine/components/desktop/drop.saltic` | 686 — исключение по решению автора |
 | `soul/seed/selfhost/compiler/backend/rv32i/machine/layout.saltic` | 610 |
 | `os/apps/colony/colony.saltic` | 582 |

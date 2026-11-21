@@ -521,7 +521,7 @@
   `just limits` (первый шаг `global-check`) не даёт им расти и ловит новые. → аудит 07.11
   Решение автора 07.11.2026: пока не трогаем — проверка всех лимитов перед заморозкой
   (первый свисток); до тех пор `just limits` держит, чтобы не росли.
-- [x] Проверка лимитов канона в `global-check` — 07.11.2026 (`workbench/limits.sh`, с 07.11 — `workbench/check/limits.saltic`, второй bash на Saltic).
+- [x] Проверка лимитов канона в `global-check` — 07.11.2026 (`workbench/limits.sh`, с 07.11 — `workbench/check/limits/main.saltic`, второй bash на Saltic).
 - [x] Одно имя у целей: `x86_64-native` и `x86_64-uefi-native` убраны — 07.11.2026.
 - [x] Эталоны `translation` → `runtime_bytes`, «перевод» → «эталон» в названиях
   проверок — 07.11.2026.
