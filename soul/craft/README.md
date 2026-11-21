@@ -7,7 +7,7 @@
 
 - `testing.saltic` — тестовый набор: `test_new`, `test_equal`, `test_yes`,
   `test_no`, `test_finish`. На нём стоят тесты в `tests/` и
-  `soul/seed/tests/`.
+  `soul/seed/proof/`.
 - `protocols/data/json` — чтение и запись JSON (`reader`, `writer`, `value`,
   `number`, `text`).
 - `protocols/data/json_rpc` — запросы, ответы и ошибки JSON-RPC поверх

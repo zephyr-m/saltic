@@ -1,8 +1,8 @@
 -- architect — первая ступень сборки (architect → parser → checker → compiler):
 -- главный файл и все его use -> одно дерево. Зона и законы — README.md рядом.
 --
--- Путь модуля — от root: seed/craft/canonical -> soul/, core/io/selfhost ->
--- soul/seed/, остальное — как есть. Два корня (решение автора 17.11.2026):
+-- Путь модуля — по углам (21.11.2026): soul/seed/, потом soul/, потом root.
+-- Два корня (решение автора 17.11.2026):
 -- root — проект (его модули и tarantul/), дом Saltic — переменная окружения
 -- HOME_VARIABLE (core, io, os, registry…); модуля нет в проекте — берётся из
 -- дома; без переменной — один root, как прежде. Узлы модуля обёрнуты ast.in_module;
@@ -12,7 +12,7 @@
 -- поднимаются наверх (parser.nest).
 -- use a.b ищет a/b.saltic, иначе a/b/main.saltic (20.11.2026). Законы пока —
 -- советы, не ошибки (21.11.2026): «один способ» — файл и папка того же имени
--- рядом — совет module_doubled; сборка идёт, told печатает советы построчно.
+-- рядом — module_doubled; одно имя в двух углах — module_shadowed; told печатает.
 --
 -- Architect = Box { root, locations, eyes } — корень проекта, ставить ли узлам
 --     место, eyes — Reader для склейки групп:
@@ -22,12 +22,13 @@
 --     expand(path, included, stack, module_name, place) -> Load; place =
 --         [строка, столбец] узла use, которым файл подключён ([0, 0] у корня)
 --     join_path(base, relative) -> путь; module_path(parts, under) -> путь к
---         файлу модуля от корня under; home() -> дом Saltic из HOME_VARIABLE или "";
+--         файлу модуля от корня under; corners(under) -> углы поиска; home() -> дом Saltic из HOME_VARIABLE или "";
 --         located(parts) -> путь модуля: в проекте, а если там нет и дом задан —
 --         в доме; entrance(parts, under) -> файл модуля или main.saltic его папки;
 --         found(path) -> yes, если файл читается; failure(path, problem,
 --         included, place) -> Load с одной ошибкой; MAIN — имя входа папки;
---         doubled(path) -> yes, если рядом с файлом папка того же имени
+--         doubled(path) -> yes, если рядом с файлом папка того же имени;
+--         modules_in(folder) -> имена модулей папки; shadowed(path) -> о тени
 
 use io
 use io.file
@@ -43,6 +44,8 @@ use selfhost.parser.nest
 
 HOME_VARIABLE = "SALTIC_HOME"
 MAIN = "main"
+SEED = "soul/seed"
+SOUL = "soul"
 
 Architect = Box {
     root = ".",
@@ -64,27 +67,15 @@ Architect = Box {
     }
 
     skill module_path(parts, under) {
-        @base = under
-        @first = group.get(parts, 0)
-        (first == "seed") {
-            base = join_path(under, "soul")
-        }
-        (first == "craft") {
-            base = join_path(under, "soul")
-        }
-        (first == "canonical") {
-            base = join_path(under, "soul")
-        }
-        (first == "core") {
-            base = join_path(under, "soul/seed")
-        }
-        (first == "io") {
-            base = join_path(under, "soul/seed")
-        }
-        (first == "selfhost") {
-            base = join_path(under, "soul/seed")
-        }
-        out join_path(base, str.concat(str.join(parts, "/"), ".saltic"))
+        out join_path(under, str.concat(str.join(parts, "/"), ".saltic"))
+    }
+
+    skill corners(under) {
+        out [
+            join_path(under, SEED),
+            join_path(under, SOUL),
+            under
+        ]
     }
 
     skill home() {
@@ -105,15 +96,17 @@ Architect = Box {
     }
 
     skill entrance(parts, under) {
-        @single = module_path(parts, under)
-        (found(single) == yes) {
-            out single
+        drum (corners(under)) {
+            @single = module_path(parts, beat)
+            (found(single) == yes) {
+                out single
+            }
+            @inside = module_path(group.add(parts, MAIN), beat)
+            (found(inside) == yes) {
+                out inside
+            }
         }
-        @inside = module_path(group.add(parts, MAIN), under)
-        (found(inside) == yes) {
-            out inside
-        }
-        out single
+        out module_path(parts, under)
     }
 
     skill located(parts) {
@@ -137,6 +130,37 @@ Architect = Box {
             out no
         }
         out yes
+    }
+
+    skill modules_in(folder) {
+        @found_names = []
+        @entries = file.list(folder) rescue |err| {
+            out []
+        }
+        drum (entries) {
+            (str.ends_with(beat, ".saltic") == yes) {
+                found_names = group.add(found_names, str.slice(beat, 0, str.bytes(beat) - str.bytes(".saltic")))
+            }
+            (str.contains(beat, ".") == no) {
+                found_names = group.add(found_names, beat)
+            }
+        }
+        out found_names
+    }
+
+    skill shadowed(path) {
+        @advice = []
+        @seen = []
+        drum (corners(root)) {
+            @corner = beat
+            drum (modules_in(corner)) {
+                (group.contains(seen, beat) == yes) {
+                    advice = group.add(advice, diagnostic.place(errors.module_shadowed(beat, corner), path, 0, 0))
+                }
+                seen = group.add(seen, beat)
+            }
+        }
+        out advice
     }
 
     skill failure(path, problem, included, place) {
@@ -227,7 +251,13 @@ Architect = Box {
     }
 
     skill gather(path) {
-        out expand(path, [], [], "", [0, 0])
+        @load = expand(path, [], [], "", [0, 0])
+        out Load {
+            ast = load.ast,
+            included = load.included,
+            diagnostics = load.diagnostics,
+            advice = group.concat(shadowed(path), load.advice)
+        }
     }
 
     skill told(load) {

@@ -37,7 +37,7 @@
 | ↳ `parser` — лексер и разбор | 8 | 1 558 |
 | ↳ `checker` — проверка типов и правил | 8 | 1 505 |
 | ↳ `abi`, `intrinsic`, `memory` | 12 | 1 459 |
-| `seed/tests` — тесты компилятора | 20 | 4 014 |
+| `seed/proof` — тесты компилятора | 20 | 4 014 |
 | `craft` — ремесленные примеры | 103 | 1 399 |
 | `canonical` — канон языка | 16 | 607 |
 | `seed/core`, `seed/io` — ядро библиотеки | 24 | 597 |
@@ -78,11 +78,11 @@ x86-версия с 154:47:128 — родной бэкенд, а не перев
 | `soul/seed/selfhost/compiler/backend/rv32i/machine/layout.saltic` | 610 |
 | `os/apps/colony/colony.saltic` | 582 |
 | `registry/libraries/uiengine/jtml.saltic` | 566 |
-| `soul/seed/tests/contract.saltic` | 561 |
+| `soul/seed/proof/contract.saltic` | 561 |
 | `soul/seed/selfhost/compiler/codegen/main.saltic` | 550 |
 | `soul/seed/selfhost/checker/walk.saltic` | 527 |
 | `soul/seed/selfhost/compiler/state.saltic` | 509 |
 | `os/target/uefi_x86_64/screen/glyphs.saltic` | 502 |
 
-Самый длинный в прошлый раз — `soul/seed/tests/machine/translation.saltic`
+Самый длинный в прошлый раз — `soul/seed/proof/machine/translation.saltic`
 (2 158) — теперь в нём 24 строки.
