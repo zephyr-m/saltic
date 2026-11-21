@@ -18,7 +18,7 @@
 
 ```
 backend/
-  main  buffer  image  layout/  runtime/   общее для всех: договор, байты, запись
+  main  buffer  layout/  runtime/         общее для всех: договор, байты и запись
                                            образа, программа в сборке, рантайм rt_*
   riscv/      общее семьи: instruction, registers, codec, decoder, assembler,
               emit (команды и переходы), fixer (правки RISC-V)

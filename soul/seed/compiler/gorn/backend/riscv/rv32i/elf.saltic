@@ -1,5 +1,5 @@
 -- elf — ELF32 RISC-V из layout.Program: сегменты, секции .text/.rodata/
--- .data/.bss и таблица символов из меток. Общая запись байтов — backend.image.
+-- .data/.bss и таблица символов из меток. Общая запись байтов — у Buffer.
 -- Тело (payload) начинается с файлового смещения 4096; load_address должен
 -- быть выровнен на страницу (LoadAddressNotAligned). Низкая память
 -- (low_memory_size) — отдельный сегмент с адреса 0.
@@ -9,13 +9,12 @@
 -- symbol_tables(program, layout) -> Tables; section_names() -> buffer
 -- append_header / append_program_header / append_section_header(target, …)
 -- executable(program) -> buffer ELF; UnresolvedPatch, LoadAddressNotAligned
--- write(path, program) — ELF через image.write_program
+-- write(path, program) — ELF через Buffer.write_program
 
 use compiler.gorn.backend.layout
 use compiler.machine.word
 use compiler.machine.wide
 use compiler.gorn.backend.buffer
-use compiler.gorn.backend.image
 
 Tables = Box {
     symbols = buffer.Buffer {},
@@ -61,13 +60,13 @@ skill symbol_tables(value, current_layout) {
     @label = value.labels_first
     drum (value.label_count) {
         @name_offset = names.length
-        names = image.append_cstring(names, label.name)
+        names.append_cstring(label.name)
         @address = value.label_address(current_layout, label.name, 0)
         @info = 17
         (label.section == layout.Section.CODE) { info = 18 }
-        symbols = image.append_number32(symbols, name_offset)
-        symbols = image.append_u32(symbols, address)
-        symbols = image.append_number32(symbols, 0)
+        symbols.append_number32(name_offset)
+        symbols.append_word(address)
+        symbols.append_number32(0)
         symbols.append_byte(info)
         symbols.append_byte(0)
         symbols.append_u16(section_index(label.section))
@@ -79,39 +78,39 @@ skill symbol_tables(value, current_layout) {
 skill section_names() {
     @names = buffer.empty()
     names.append_byte(0)
-    names = image.append_cstring(names, ".text")
-    names = image.append_cstring(names, ".rodata")
-    names = image.append_cstring(names, ".data")
-    names = image.append_cstring(names, ".bss")
-    names = image.append_cstring(names, ".symtab")
-    names = image.append_cstring(names, ".strtab")
-    names = image.append_cstring(names, ".shstrtab")
+    names.append_cstring(".text")
+    names.append_cstring(".rodata")
+    names.append_cstring(".data")
+    names.append_cstring(".bss")
+    names.append_cstring(".symtab")
+    names.append_cstring(".strtab")
+    names.append_cstring(".shstrtab")
     out names
 }
 
 skill append_program_header(target, header) {
-    target = image.append_number32(target, header.type)
-    target = image.append_number32(target, header.offset)
-    target = image.append_u32(target, header.virtual_address)
-    target = image.append_u32(target, header.physical_address)
-    target = image.append_number32(target, header.file_size)
-    target = image.append_u32(target, header.memory_size)
-    target = image.append_number32(target, header.flags)
-    target = image.append_number32(target, header.alignment)
+    target.append_number32(header.type)
+    target.append_number32(header.offset)
+    target.append_word(header.virtual_address)
+    target.append_word(header.physical_address)
+    target.append_number32(header.file_size)
+    target.append_word(header.memory_size)
+    target.append_number32(header.flags)
+    target.append_number32(header.alignment)
     out target
 }
 
 skill append_section_header(target, header) {
-    target = image.append_number32(target, header.name)
-    target = image.append_number32(target, header.type)
-    target = image.append_number32(target, header.flags)
-    target = image.append_u32(target, header.address)
-    target = image.append_number32(target, header.offset)
-    target = image.append_u32(target, header.size)
-    target = image.append_number32(target, header.link)
-    target = image.append_number32(target, header.info)
-    target = image.append_number32(target, header.alignment)
-    target = image.append_number32(target, header.entry_size)
+    target.append_number32(header.name)
+    target.append_number32(header.type)
+    target.append_number32(header.flags)
+    target.append_word(header.address)
+    target.append_number32(header.offset)
+    target.append_word(header.size)
+    target.append_number32(header.link)
+    target.append_number32(header.info)
+    target.append_number32(header.alignment)
+    target.append_number32(header.entry_size)
     out target
 }
 
@@ -126,11 +125,11 @@ skill append_header(target, entry, program_count, section_table_offset) {
     target.append_zeroes(9)
     target.append_u16(2)
     target.append_u16(243)
-    target = image.append_number32(target, 1)
-    target = image.append_u32(target, entry)
-    target = image.append_number32(target, 52)
-    target = image.append_number32(target, section_table_offset)
-    target = image.append_number32(target, 0)
+    target.append_number32(1)
+    target.append_word(entry)
+    target.append_number32(52)
+    target.append_number32(section_table_offset)
+    target.append_number32(0)
     target.append_u16(52)
     target.append_u16(32)
     target.append_u16(program_count)
@@ -147,7 +146,7 @@ skill executable(value) {
     @page_offset = value.load_address.b0 + value.load_address.b1 % 16 * 256
     (page_offset > 0) { out error.LoadAddressNotAligned }
 
-    @body = image.payload(value, current_layout)
+    @body = value.payload(current_layout)
     @tables = symbol_tables(value, current_layout)
     @names = section_names()
     @segment_offset = 4096
@@ -202,13 +201,13 @@ skill executable(value) {
             alignment = 4096
         })
     }
-    result = image.pad_to(result, segment_offset)
+    result.pad_to(segment_offset)
     result.append_buffer(body)
-    result = image.pad_to(result, symbols_offset)
+    result.pad_to(symbols_offset)
     result.append_buffer(tables.symbols)
     result.append_buffer(tables.names)
     result.append_buffer(names)
-    result = image.pad_to(result, section_table_offset)
+    result.pad_to(section_table_offset)
 
     result.append_zeroes(40)
     result = append_section_header(result, SectionHeader {
@@ -255,5 +254,5 @@ skill executable(value) {
 
 skill write(path, value) {
     @output = executable(value) rescue |failure| { out error.UnresolvedPatch }
-    out image.write_program(path, output)
+    out output.write_program(path)
 }
