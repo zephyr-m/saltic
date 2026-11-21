@@ -1,0 +1,382 @@
+-- wasm — исполнитель договора машины для wasm32. Код пишется в IR
+-- (backend.wasm.asm), модуль собирает lower. Слово 4 байта, числа 29 бит.
+-- Роль — номер локальной переменной. Стек договора — локаль STACK.
+-- Вызов запоминает номер блока возврата в RETURN и прыгает на цель.
+
+use compiler.abi.shape
+use compiler.gorn.backend
+use compiler.gorn.backend.wasm.asm
+use compiler.machine.wide
+
+TEMP = 21
+C_EQ = 1
+C_NE = 2
+C_LT = 3
+C_GE = 4
+C_LTU = 5
+C_GEU = 6
+C_EQZ = 7
+C_NEZ = 8
+C_LTZ = 9
+C_GEZ = 10
+C_LEZ = 11
+A_ADD = 0
+A_SUB = 1
+A_AND = 2
+A_OR = 3
+A_XOR = 4
+A_SHL = 5
+A_SHRU = 6
+A_SHRS = 7
+A_NEG = 8
+W_WORD = 0
+W_BYTE = 1
+W_HALF = 2
+
+skill put(billet, item) {
+    billet.machine = asm.push(billet.machine, item)
+    out billet
+}
+
+skill signed_word(data) {
+    @n = data.b0 + data.b1 * 256 + data.b2 * 65536 + data.b3 * 16777216
+    (data.b3 > 127) { out n - 4294967296 }
+    out n
+}
+
+skill wide_count(value) {
+    @low = wide.to_word(value)
+    out low.b0 + low.b1 * 256 + low.b2 * 65536 + low.b3 * 16777216
+}
+
+skill alu(billet, kind, to, left, right) {
+    out put(billet, asm.make(asm.K_ALU, kind, left, right, to, ""))
+}
+
+skill imm(billet, kind, to, from, value) {
+    out put(billet, asm.make(asm.K_IMM, kind, from, to, value, ""))
+}
+
+skill cmp(billet, cond, to, left, right) {
+    out put(billet, asm.make(asm.K_CMP, cond, left, right, to, ""))
+}
+
+skill cmp_imm(billet, cond, to, from, value) {
+    out put(billet, asm.make(asm.K_CMP, cond, from, to, value, "i"))
+}
+
+skill branch(billet, cond, left, right, name) {
+    out put(billet, asm.make(asm.K_BR, cond, left, right, 0, name))
+}
+
+skill branch_one(billet, cond, from, name) {
+    out put(billet, asm.make(asm.K_BR, cond, from, 0, 0, name))
+}
+
+skill mem_load(billet, width, to, base, offset) {
+    out put(billet, asm.make(asm.K_LOAD, width, base, to, offset, ""))
+}
+
+skill mem_store(billet, width, from, base, offset) {
+    out put(billet, asm.make(asm.K_STORE, width, base, from, offset, ""))
+}
+
+Executor = Box {
+    skill new_program(billet, entry) {
+        billet.words = shape.of(4)
+        billet.machine = asm.fresh()
+        out billet
+    }
+
+    skill heap_size(billet, bytes) {
+        out billet
+    }
+
+    skill label(billet, name) {
+        billet.machine = asm.define(billet.machine, backend.CODE, name)
+        out billet
+    }
+
+    skill data_label(billet, where, name) {
+        billet.machine = asm.define(billet.machine, where, name)
+        out billet
+    }
+
+    skill align(billet, where, boundary) {
+        billet.machine = asm.align_sec(billet.machine, where, boundary)
+        out billet
+    }
+
+    skill data_byte(billet, where, value) {
+        billet.machine = asm.add_byte(billet.machine, where, value)
+        out billet
+    }
+
+    skill data32(billet, where, value) {
+        out data_word(billet, where, value)
+    }
+
+    skill data_word(billet, where, value) {
+        billet.machine = asm.add_word(billet.machine, where, value)
+        out billet
+    }
+
+    skill data_text(billet, where, text) {
+        billet.machine = asm.add_text(billet.machine, where, text)
+        out billet
+    }
+
+    skill reserve(billet, bytes) {
+        billet.machine = asm.reserve(billet.machine, wide_count(bytes))
+        out billet
+    }
+
+    skill load_immediate(billet, to, value) {
+        out put(billet, asm.make(asm.K_CONST, to, 0, 0, value, ""))
+    }
+
+    skill load_word(billet, to, value) {
+        out put(billet, asm.make(asm.K_CONST, to, 0, 0, signed_word(value), ""))
+    }
+
+    skill load_address(billet, to, name, addend) {
+        out put(billet, asm.make(asm.K_ADDR, to, addend, 0, 0, name))
+    }
+
+    skill move(billet, to, from) {
+        out put(billet, asm.make(asm.K_MOVE, to, from, 0, 0, ""))
+    }
+
+    skill negate(billet, to, from) {
+        out alu(billet, A_NEG, to, 0, from)
+    }
+
+    skill add_immediate(billet, to, from, value) {
+        out imm(billet, A_ADD, to, from, value)
+    }
+
+    skill add(billet, to, left, right) {
+        out alu(billet, A_ADD, to, left, right)
+    }
+
+    skill sub(billet, to, left, right) {
+        out alu(billet, A_SUB, to, left, right)
+    }
+
+    skill and(billet, to, left, right) {
+        out alu(billet, A_AND, to, left, right)
+    }
+
+    skill or(billet, to, left, right) {
+        out alu(billet, A_OR, to, left, right)
+    }
+
+    skill xor(billet, to, left, right) {
+        out alu(billet, A_XOR, to, left, right)
+    }
+
+    skill and_immediate(billet, to, from, value) {
+        out imm(billet, A_AND, to, from, value)
+    }
+
+    skill or_immediate(billet, to, from, value) {
+        out imm(billet, A_OR, to, from, value)
+    }
+
+    skill xor_immediate(billet, to, from, value) {
+        out imm(billet, A_XOR, to, from, value)
+    }
+
+    skill shift_left(billet, to, from, count) {
+        out imm(billet, A_SHL, to, from, count)
+    }
+
+    skill shift_right_signed(billet, to, from, count) {
+        out imm(billet, A_SHRS, to, from, count)
+    }
+
+    skill shift_right_unsigned(billet, to, from, count) {
+        out imm(billet, A_SHRU, to, from, count)
+    }
+
+    skill shift_left_by(billet, to, from, count) {
+        out alu(billet, A_SHL, to, from, count)
+    }
+
+    skill shift_right_unsigned_by(billet, to, from, count) {
+        out alu(billet, A_SHRU, to, from, count)
+    }
+
+    skill set_less(billet, to, left, right) {
+        out cmp(billet, C_LT, to, left, right)
+    }
+
+    skill set_less_unsigned(billet, to, left, right) {
+        out cmp(billet, C_LTU, to, left, right)
+    }
+
+    skill set_less_unsigned_immediate(billet, to, from, value) {
+        out cmp_imm(billet, C_LTU, to, from, value)
+    }
+
+    skill set_zero(billet, to, from) {
+        out cmp(billet, C_EQZ, to, from, 0)
+    }
+
+    skill set_nonzero(billet, to, from) {
+        out cmp(billet, C_NEZ, to, from, 0)
+    }
+
+    skill add_checked(billet) {
+        out put(billet, asm.make(asm.K_CHECK, 0, 0, 0, 0, ""))
+    }
+
+    skill sub_checked(billet) {
+        out put(billet, asm.make(asm.K_CHECK, 1, 0, 0, 0, ""))
+    }
+
+    skill load(billet, to, base, offset) {
+        out mem_load(billet, W_WORD, to, base, offset)
+    }
+
+    skill load32(billet, to, base, offset) {
+        out load(billet, to, base, offset)
+    }
+
+    skill store32(billet, from, base, offset) {
+        out store(billet, from, base, offset)
+    }
+
+    skill load_byte(billet, to, base, offset) {
+        out mem_load(billet, W_BYTE, to, base, offset)
+    }
+
+    skill load_half(billet, to, base, offset) {
+        out mem_load(billet, W_HALF, to, base, offset)
+    }
+
+    skill store(billet, from, base, offset) {
+        out mem_store(billet, W_WORD, from, base, offset)
+    }
+
+    skill store_byte(billet, from, base, offset) {
+        out mem_store(billet, W_BYTE, from, base, offset)
+    }
+
+    skill store_half(billet, from, base, offset) {
+        out mem_store(billet, W_HALF, from, base, offset)
+    }
+
+    skill store_zero(billet, base, offset) {
+        billet = put(billet, asm.make(asm.K_CONST, TEMP, 0, 0, 0, ""))
+        out mem_store(billet, W_WORD, TEMP, base, offset)
+    }
+
+    skill store_byte_zero(billet, base, offset) {
+        billet = put(billet, asm.make(asm.K_CONST, TEMP, 0, 0, 0, ""))
+        out mem_store(billet, W_BYTE, TEMP, base, offset)
+    }
+
+    skill push(billet, from) {
+        billet = imm(billet, A_ADD, backend.STACK, backend.STACK, -compiler.words.bytes)
+        out mem_store(billet, W_WORD, from, backend.STACK, 0)
+    }
+
+    skill pop(billet, to) {
+        billet = mem_load(billet, W_WORD, to, backend.STACK, 0)
+        out imm(billet, A_ADD, backend.STACK, backend.STACK, billet.words.bytes)
+    }
+
+    skill branch_equal(billet, left, right, name) {
+        out branch(billet, C_EQ, left, right, name)
+    }
+
+    skill branch_not_equal(billet, left, right, name) {
+        out branch(billet, C_NE, left, right, name)
+    }
+
+    skill branch_less(billet, left, right, name) {
+        out branch(billet, C_LT, left, right, name)
+    }
+
+    skill branch_greater_equal(billet, left, right, name) {
+        out branch(billet, C_GE, left, right, name)
+    }
+
+    skill branch_less_unsigned(billet, left, right, name) {
+        out branch(billet, C_LTU, left, right, name)
+    }
+
+    skill branch_greater_equal_unsigned(billet, left, right, name) {
+        out branch(billet, C_GEU, left, right, name)
+    }
+
+    skill branch_zero(billet, from, name) {
+        out branch_one(billet, C_EQZ, from, name)
+    }
+
+    skill branch_nonzero(billet, from, name) {
+        out branch_one(billet, C_NEZ, from, name)
+    }
+
+    skill branch_negative(billet, from, name) {
+        out branch_one(billet, C_LTZ, from, name)
+    }
+
+    skill branch_not_negative(billet, from, name) {
+        out branch_one(billet, C_GEZ, from, name)
+    }
+
+    skill branch_not_positive(billet, from, name) {
+        out branch_one(billet, C_LEZ, from, name)
+    }
+
+    skill jump(billet, name) {
+        out put(billet, asm.make(asm.K_JUMP, 0, 0, 0, 0, name))
+    }
+
+    skill jump_if_equal(billet, left, right, name) {
+        out branch_equal(billet, left, right, name)
+    }
+
+    skill jump_if_not_equal(billet, left, right, name) {
+        out branch_not_equal(billet, left, right, name)
+    }
+
+    skill jump_if_zero(billet, from, name) {
+        out branch_zero(billet, from, name)
+    }
+
+    skill jump_if_nonzero(billet, from, name) {
+        out branch_nonzero(billet, from, name)
+    }
+
+    skill jump_far(billet, name) {
+        out jump(billet, name)
+    }
+
+    skill call(billet, name) {
+        billet.machine = asm.call_to(billet.machine, name)
+        out billet
+    }
+
+    skill ret(billet) {
+        out put(billet, asm.make(asm.K_RET, 0, 0, 0, 0, ""))
+    }
+
+    skill wasi(billet, kind) {
+        out put(billet, asm.make(asm.K_WASI, kind, 0, 0, 0, ""))
+    }
+
+    skill syscall(billet, number) {
+        out load_immediate(billet, backend.VALUE, -1)
+    }
+
+    skill wait(billet) {
+        out billet
+    }
+
+    skill fence(billet) {
+        out billet
+    }
+}

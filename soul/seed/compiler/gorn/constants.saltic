@@ -1,0 +1,196 @@
+-- constants — раскладка кадра, строк, групп, Box и глобальных констант
+-- в байтах; метки хранилища констант и его выдача в .data.
+-- Кадр: STACK → [RETURN, FRAME, REGION_MARK] сверху, локальные
+-- ниже FRAME (local_offset). STACK_LIMIT в кадре не хранится — он постоянен. Отрицательный вход → -1.
+-- Константа — пара слов state/value; состояния STATE_EMPTY/INITIALIZING/READY.
+--
+-- can_begin / is_cycle / is_ready(state) -> yes/no
+-- Всё, что зависит от размера слова, берёт words (abi.shape.Words, у
+-- компилятора — billet.words): RV32I — 4 байта, RV64 — 8.
+-- stack_bytes(words, count) / stack_source_offset(words, count, index) / local_offset(words, index)
+-- frame_bytes(words, local_count) -> размер кадра навыка
+-- return_address_* / previous_frame_* / region_mark_*
+--     _save_offset(words, frame) и _load_offset(words) -> смещение от STACK / FRAME
+-- constant_frame_bytes(words) / constant_return_address_offset(words)
+-- string_storage_bytes(words, length) / group_storage_bytes(words, count) / group_item_offset(words, index)
+-- box_storage_bytes(words, count) / box_field_id_offset / box_field_value_offset(words, index)
+-- getter_label / state_label / value_label(name) -> метка
+-- emit_storage(billet) — слова state/value всех констант в .data
+-- emit_static_header(billet, section, kind, payload_bytes) — заголовок
+--     статического объекта: три поля по 32 бита и пустота до billet.words.header
+
+use core.str
+use core.group
+use compiler.abi
+use compiler.abi.call
+use compiler.gorn.state
+use compiler.memory.model
+use compiler.gorn.backend
+use compiler.machine.word
+
+STACK_ALIGNMENT = call.STACK_ALIGNMENT
+DATA_ALIGNMENT = abi.OBJECT_ALIGNMENT
+HEAP_BYTES = model.DEFAULT_HEAP_BYTES
+REGION_VALUE_ROOT = model.REGION_EXIT_VALUE_ROOT
+REGION_VALUE_SKIPPED = model.REGION_EXIT_VALUE_SKIPPED
+
+SAVED_FRAME_WORDS = 3
+LOCAL_BASE_WORDS = SAVED_FRAME_WORDS + 1
+RETURN_ADDRESS_WORDS = 1
+PREVIOUS_FRAME_WORDS = 2
+REGION_MARK_WORDS = 3
+CONSTANT_FRAME_WORDS = 4
+
+STRING_LENGTH_OFFSET = 0
+
+GROUP_COUNT_OFFSET = 0
+GROUP_FLAT_LIMIT = group.TREE_WIDTH
+TREE_MASK = group.TREE_WIDTH - 1
+TREE_SHIFT = group.TREE_SHIFT
+TREE_ADD_LABEL = "saltic_core_group_tree_add"
+FRACTION_TEXT_LABEL = "saltic_core_fraction_text"
+TREE_ADD_SKILL = "core.group.tree_add"
+
+BOX_COUNT_OFFSET = 0
+BOX_FIELD_ID_OFFSET = 0
+BOX_TYPE_FIELD_ID = -1
+
+STATE_EMPTY = 0
+STATE_INITIALIZING = 1
+STATE_READY = 2
+
+CONSTANT_STATE_OFFSET = 0
+
+skill can_begin(value) {
+    out value == STATE_EMPTY
+}
+
+skill is_cycle(value) {
+    out value == STATE_INITIALIZING
+}
+
+skill is_ready(value) {
+    out value == STATE_READY
+}
+
+skill stack_bytes(words, word_count) {
+    (word_count < 0) { out -1 }
+    out word_count * words.bytes
+}
+
+skill stack_source_offset(words, count, index) {
+    (count < 0) { out -1 }
+    (index < 0) { out -1 }
+    (index >= count) { out -1 }
+    out stack_bytes(words, count - index - 1)
+}
+
+skill local_offset(words, index) {
+    (index < 0) { out -1 }
+    out -stack_bytes(words, LOCAL_BASE_WORDS + index)
+}
+
+skill frame_bytes(words, local_count) {
+    (local_count < 0) { out -1 }
+    @bytes = (local_count + SAVED_FRAME_WORDS) * words.bytes
+    out (bytes + STACK_ALIGNMENT - 1) / STACK_ALIGNMENT * STACK_ALIGNMENT
+}
+
+skill return_address_save_offset(words, frame) {
+    (frame < STACK_ALIGNMENT) { out -1 }
+    out frame - stack_bytes(words, RETURN_ADDRESS_WORDS)
+}
+
+skill previous_frame_save_offset(words, frame) {
+    (frame < STACK_ALIGNMENT) { out -1 }
+    out frame - stack_bytes(words, PREVIOUS_FRAME_WORDS)
+}
+
+skill return_address_load_offset(words) {
+    out -stack_bytes(words, RETURN_ADDRESS_WORDS)
+}
+
+skill previous_frame_load_offset(words) {
+    out -stack_bytes(words, PREVIOUS_FRAME_WORDS)
+}
+
+skill region_mark_save_offset(words, frame) {
+    (frame < STACK_ALIGNMENT) { out -1 }
+    out frame - stack_bytes(words, REGION_MARK_WORDS)
+}
+
+skill region_mark_load_offset(words) {
+    out -stack_bytes(words, REGION_MARK_WORDS)
+}
+
+skill constant_frame_bytes(words) {
+    out stack_bytes(words, CONSTANT_FRAME_WORDS)
+}
+
+skill constant_return_address_offset(words) {
+    out stack_bytes(words, CONSTANT_FRAME_WORDS - RETURN_ADDRESS_WORDS)
+}
+
+skill string_storage_bytes(words, length) {
+    (length < 0) { out -1 }
+    out words.string_data + length + 1
+}
+
+skill group_storage_bytes(words, count) {
+    (count < 0) { out -1 }
+    out words.group_items + count * words.group_item
+}
+
+skill group_item_offset(words, index) {
+    (index < 0) { out -1 }
+    out words.group_items + index * words.group_item
+}
+
+skill box_storage_bytes(words, count) {
+    (count < 0) { out -1 }
+    out words.box_fields + count * words.box_field
+}
+
+skill box_field_id_offset(words, index) {
+    (index < 0) { out -1 }
+    out words.box_fields + index * words.box_field + BOX_FIELD_ID_OFFSET
+}
+
+skill box_field_value_offset(words, index) {
+    (index < 0) { out -1 }
+    out words.box_fields + index * words.box_field + words.box_field_value
+}
+
+skill getter_label(name) {
+    out str.concat("saltic_constant_get_", state.safe(name))
+}
+
+skill state_label(name) {
+    out str.concat("saltic_constant_state_", state.safe(name))
+}
+
+skill value_label(name) {
+    out str.concat("saltic_constant_value_", state.safe(name))
+}
+
+skill emit_storage(billet) {
+    @executor = billet.executor
+    billet = executor.align(billet, backend.DATA, DATA_ALIGNMENT)
+    drum (billet.constants) {
+        billet = executor.data_label(billet, backend.DATA, state_label(beat.name))
+        billet = executor.data_word(billet, backend.DATA, word.from_number(STATE_EMPTY))
+        billet = executor.data_label(billet, backend.DATA, value_label(beat.name))
+        billet = executor.data_word(billet, backend.DATA, word.from_number(abi.NONE))
+    }
+    out billet
+}
+
+skill emit_static_header(billet, section, kind, payload_bytes) {
+    @executor = billet.executor
+    billet = executor.data32(billet, section, word.from_number(kind))
+    billet = executor.data32(billet, section, word.from_number(payload_bytes))
+    billet = executor.data32(billet, section, word.from_number(abi.OBJECT_FLAG_STATIC))
+    drum (billet.words.header - abi.OBJECT_HEADER_BYTES) { billet = executor.data_byte(billet, section, 0) }
+    out billet
+}
+

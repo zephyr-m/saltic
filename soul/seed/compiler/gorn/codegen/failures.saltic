@@ -1,0 +1,99 @@
+-- failures — ошибки в коде навыка: проверка ERROR после вызова, значение
+-- error.Имя, rescue с восстановлением стека.
+-- Ошибка = ERROR > 0 (id), VALUE = 0. Текущая метка перехвата —
+-- current_function.failure; rescue временно подменяет её на frame.caught.
+-- Команды — методами billet.executor (договор backend).
+--
+-- Rescue { done, caught, stack_slot, outer } — кадр rescue
+-- check(billet) — ERROR > 0 → переход на failure навыка (через заглушку строки)
+-- load_value(billet, name) — VALUE = значение error.Имя (тег ERROR)
+-- load_failure(billet, name) — поднять ошибку: VALUE = 0, ERROR = id
+-- raise_value(billet) — ошибка-значение из VALUE в ERROR; trail(billet) — место
+--     в путь ошибки: «навык · файл» и строка оператора (out error.Имя — где ошибка
+--     родилась); place_text(billet) -> «навык · путь/модуля.saltic»
+-- rescue_frame(billet) -> Rescue; enter(billet, frame) — сохранить STACK
+-- catch(billet, frame, name) — метка caught: путь ошибки — в ноль (rt_trail_clear),
+--     вернуть STACK, ошибку в слот name
+
+use core.str
+use compiler.abi
+use compiler.gorn.state
+use compiler.gorn.codegen.lookup
+use compiler.gorn.codegen.emitters
+use compiler.gorn.backend
+
+Rescue = Box {
+    done = "",
+    caught = "",
+    stack_slot = 0,
+    outer = ""
+}
+
+skill check(billet) {
+    out emitters.on_error(billet)
+}
+
+skill load_value(billet, name) {
+    @executor = billet.executor
+    billet = lookup.remember_error(billet, name)
+    billet = executor.load_immediate(billet, backend.VALUE, abi.error_value(lookup.error_id(billet, name)))
+    out executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
+}
+
+skill load_failure(billet, name) {
+    @executor = billet.executor
+    billet = lookup.remember_error(billet, name)
+    billet = executor.load_immediate(billet, backend.VALUE, 0)
+    out executor.load_immediate(billet, backend.ERROR, lookup.error_id(billet, name))
+}
+
+skill trail(billet) {
+    @executor = billet.executor
+    billet = executor.load_address(billet, backend.VALUE, emitters.string_label(billet, place_text(billet)), 0)
+    billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    billet = executor.load_immediate(billet, backend.ARG2, billet.current_function.line)
+    billet = executor.call(billet, "rt_trail_push")
+    out executor.load_immediate(billet, backend.VALUE, 0)
+}
+
+skill place_text(billet) {
+    @function = billet.current_function
+    @file = "главный файл"
+    (str.bytes(billet.source) > 0) { file = billet.source }
+    (str.bytes(function.module) > 0) { file = str.concat(str.join(str.split(function.module, "."), "/"), ".saltic") }
+    out "{function.name} · {file}"
+}
+
+skill raise_value(billet) {
+    @executor = billet.executor
+    billet = executor.shift_right_unsigned(billet, backend.ERROR, backend.VALUE, abi.TAG_SHIFT)
+    out executor.load_immediate(billet, backend.VALUE, 0)
+}
+
+skill rescue_frame(billet) {
+    @done = state.label(billet, "rescue_done")
+    @caught = state.label(billet, "rescue_caught")
+    @stack_slot = state.slot(billet, "$rescue:{billet.current_function.next_rescue}")
+    out Rescue { done = done, caught = caught, stack_slot = stack_slot, outer = billet.current_function.failure }
+}
+
+skill enter(billet, frame) {
+    @executor = billet.executor
+    billet.current_function.next_rescue = billet.current_function.next_rescue + 1
+    billet = executor.store(billet, backend.STACK, backend.FRAME, frame.stack_slot)
+    billet.current_function.failure = frame.caught
+    out billet
+}
+
+skill catch(billet, frame, name) {
+    @executor = billet.executor
+    billet.current_function.failure = frame.outer
+    billet = executor.jump_if_zero(billet, backend.ERROR, frame.done)
+    billet = executor.label(billet, frame.caught)
+    billet = executor.call(billet, "rt_trail_clear")
+    billet = executor.load(billet, backend.STACK, backend.FRAME, frame.stack_slot)
+    billet = executor.shift_left(billet, backend.VALUE, backend.ERROR, abi.TAG_SHIFT)
+    billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_ERROR)
+    billet = executor.store(billet, backend.VALUE, backend.FRAME, state.slot(billet, name))
+    out executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
+}

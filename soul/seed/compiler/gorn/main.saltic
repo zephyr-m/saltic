@@ -1,0 +1,92 @@
+-- gorn — горн, последняя ступень: собирает проверенный AST в машину (state.State.machine) через
+-- исполнителя договора машины (backend) и платформу (platform): оба — Box
+-- с методами, выбирает цель (toolchain).
+-- Порядок внутри: collect_top_level → header → start → обход достижимого (reach) →
+-- навыки → константы → рантайм → платформа → хранилище констант → finish_data.
+-- heap_bytes — wide, кратное model.ALIGNMENT и не меньше model.MINIMUM_HEAP_BYTES;
+-- на 4-байтном слове исполнителя — меньше 4 ГБ; иначе ValueOutsideRange.
+--
+-- valid_heap_size(heap_bytes) -> yes/no
+-- compile_state(ast, heap_bytes, executor, platform) -> State; ValueOutsideRange
+-- compile_state_from(…, source, signals) — то же, source — путь главного
+--     исходника (в пути ошибки вместо «главный файл»), signals — yes: программа
+--     ставит обработчик сбоя памяти (сейчас только x86-64 Linux)
+-- compile_machine(ast, heap_bytes, executor, platform) -> machine исполнителя
+-- compile_machine_from(ast, heap_bytes, executor, platform, source, signals) — то же
+-- compile_machine_with_heap(ast, heap_bytes) -> machine RV32I для Linux
+--     (rv32i.Executor + linux.Linux, ближние вызовы) — для тестов
+--
+-- Дети: state, constants, functions, codegen, backend (договор машины;
+--     исполнитель и рантайм RV32I — в backend/rv32i), platform (договор платформы).
+
+use io
+use compiler.gorn.state
+use compiler.gorn.constants
+use compiler.gorn.backend.rv32i
+use compiler.gorn.backend.rv32i.runtime
+use compiler.gorn.platform.linux
+use compiler.memory.model
+use compiler.machine.wide
+use compiler.machine.word
+use compiler.gorn.functions
+
+skill valid_heap_size(heap_bytes) {
+    @low = heap_bytes.low
+    (low.b0 % model.ALIGNMENT > 0) { out no }
+    (word.is_zero(heap_bytes.high) == no) { out yes }
+    (low.b3 > 0) { out yes }
+    (low.b2 > 0) { out yes }
+    (low.b1 > 0) { out yes }
+    (low.b0 < model.MINIMUM_HEAP_BYTES) { out no }
+    out yes
+}
+
+skill compile_state(ast, heap_bytes, executor, platform) {
+    out compile_state_from(ast, heap_bytes, executor, platform, "", no)
+}
+
+skill compile_state_from(ast, heap_bytes, executor, platform, source, signals) {
+    (valid_heap_size(heap_bytes) == no) { out error.ValueOutsideRange }
+    @billet = state.State {
+        source = source,
+        signals = signals,
+        ast = ast,
+        heap_bytes = heap_bytes,
+        executor = executor,
+        arena_bytes = platform.arena_bytes,
+        default_heap_bytes = platform.default_heap_bytes
+    }
+    billet = state.collect_top_level(billet)
+    billet = state.header(billet)
+    (billet.words.bytes == 4) {
+        (word.is_zero(billet.heap_bytes.high) == no) { out error.ValueOutsideRange }
+    }
+    billet = state.start(billet)
+    @seen = functions.reach(billet)
+    billet = functions.compile_functions(billet, seen)
+    billet = functions.compile_constants(billet, seen)
+    billet = runtime.append_runtime(billet)
+    billet = platform.append(billet)
+    billet = constants.emit_storage(billet)
+    billet = state.finish_data(billet)
+    out billet
+}
+
+skill compile_machine(ast, heap_bytes, executor, platform) {
+    @billet = compile_state(ast, heap_bytes, executor, platform)
+    out billet.machine
+}
+
+skill compile_machine_from(ast, heap_bytes, executor, platform, source, signals) {
+    @billet = compile_state_from(ast, heap_bytes, executor, platform, source, signals)
+    out billet.machine
+}
+
+skill compile_machine_with_heap(ast, heap_bytes) {
+    out compile_machine(ast, heap_bytes, rv32i.Executor {}, linux.Linux {})
+}
+
+program() {
+    io.show("библиотека компилятора")
+    out none
+}

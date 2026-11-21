@@ -1,0 +1,98 @@
+-- input — ввод программы на Linux: rt_platform_read_line (io.read_line) — одна
+-- строка стандартного ввода без «\n» (и без «\r» перед ним). Читает по байту
+-- (read(0, …, 1)) в буфер на стеке до LINE_LIMIT байт (не в bss: иначе каждая
+-- программа под Linux росла бы на буфер), ставит нуль и отдаёт копию строкой
+-- (rt_cstring). Конец ввода, когда не прочитано ни байта, и ошибка чтения —
+-- File; строка длиннее LINE_LIMIT — остаток придёт следующим вызовом. Байт 0
+-- внутри строки её обрезает. Кадр: возврат, счётчик, буфер.
+--
+-- emit_read_line(billet) — метка rt_platform_read_line
+-- Внутри: grow / shrink(billet) — кадр на стеке; buffer(billet, to) — адрес
+
+use core.system
+use compiler.abi
+use compiler.gorn.backend
+use compiler.gorn.platform
+use compiler.gorn.backend.rv32i.runtime.tails
+
+LINE_LIMIT = 65536
+NEWLINE = 10
+CARRIAGE = 13
+STDIN = 0
+
+skill frame_bytes(words) {
+    out LINE_LIMIT + words.bytes * 3
+}
+
+skill grow(billet) {
+    @executor = billet.executor
+    billet = executor.load_immediate(billet, backend.SCRATCH0, -frame_bytes(billet.words))
+    out executor.add(billet, backend.STACK, backend.STACK, backend.SCRATCH0)
+}
+
+skill shrink(billet) {
+    @executor = billet.executor
+    billet = executor.load(billet, backend.RETURN, backend.STACK, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH0, frame_bytes(billet.words))
+    out executor.add(billet, backend.STACK, backend.STACK, backend.SCRATCH0)
+}
+
+skill buffer(billet, to) {
+    @executor = billet.executor
+    out executor.add_immediate(billet, to, backend.STACK, billet.words.bytes * 2)
+}
+
+skill emit_read_line(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, platform.READ_LINE)
+    billet = grow(billet)
+    billet = executor.store(billet, backend.RETURN, backend.STACK, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH0, 0)
+    billet = executor.store(billet, backend.SCRATCH0, backend.STACK, words.bytes)
+    billet = executor.label(billet, ".L_read_line_next")
+    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes)
+    billet = executor.load_immediate(billet, backend.SCRATCH1, LINE_LIMIT)
+    billet = executor.branch_greater_equal(billet, backend.SCRATCH0, backend.SCRATCH1, ".L_read_line_done")
+    billet = buffer(billet, backend.SCRATCH1)
+    billet = executor.add(billet, backend.ERROR, backend.SCRATCH1, backend.SCRATCH0)
+    billet = executor.load_immediate(billet, backend.VALUE, STDIN)
+    billet = executor.load_immediate(billet, backend.ARG2, 1)
+    billet = executor.syscall(billet, system.SYSCALL_READ)
+    billet = executor.branch_negative(billet, backend.VALUE, ".L_read_line_failed")
+    billet = executor.branch_zero(billet, backend.VALUE, ".L_read_line_end")
+    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes)
+    billet = buffer(billet, backend.SCRATCH1)
+    billet = executor.add(billet, backend.SCRATCH2, backend.SCRATCH1, backend.SCRATCH0)
+    billet = executor.load_byte(billet, backend.SCRATCH3, backend.SCRATCH2, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH4, NEWLINE)
+    billet = executor.branch_equal(billet, backend.SCRATCH3, backend.SCRATCH4, ".L_read_line_done")
+    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, 1)
+    billet = executor.store(billet, backend.SCRATCH0, backend.STACK, words.bytes)
+    billet = executor.jump(billet, ".L_read_line_next")
+    billet = executor.label(billet, ".L_read_line_end")
+    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes)
+    billet = executor.branch_zero(billet, backend.SCRATCH0, ".L_read_line_failed")
+    billet = executor.label(billet, ".L_read_line_done")
+    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes)
+    billet = buffer(billet, backend.SCRATCH1)
+    billet = executor.branch_zero(billet, backend.SCRATCH0, ".L_read_line_cut")
+    billet = executor.add(billet, backend.SCRATCH2, backend.SCRATCH1, backend.SCRATCH0)
+    billet = executor.add_immediate(billet, backend.SCRATCH2, backend.SCRATCH2, -1)
+    billet = executor.load_byte(billet, backend.SCRATCH3, backend.SCRATCH2, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH4, CARRIAGE)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH3, backend.SCRATCH4, ".L_read_line_cut")
+    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, -1)
+    billet = executor.label(billet, ".L_read_line_cut")
+    billet = executor.add(billet, backend.SCRATCH2, backend.SCRATCH1, backend.SCRATCH0)
+    billet = executor.store_byte_zero(billet, backend.SCRATCH2, 0)
+    billet = executor.move(billet, backend.VALUE, backend.SCRATCH1)
+    billet = executor.call(billet, "rt_cstring")
+    billet = shrink(billet)
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_read_line_failed")
+    billet = shrink(billet)
+    billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
+    billet = executor.load_immediate(billet, backend.ERROR, abi.ERROR_FILE)
+    out executor.ret(billet)
+}

@@ -1,0 +1,325 @@
+-- statements — инструкции тела навыка: @имя =, присваивание, поле =, out,
+-- always, drum, pick, условие (…) { … }, выбор по enum (…) { .X => … },
+-- (значение) |имя| { … }, leave и выражение-инструкция; блок { … } — строки
+-- через Lists. Выражения разбирает Expressions.
+--
+-- Statements = Box { look, leaves } — look — Reader, leaves — Literals; навыки:
+-- statement(start) -> Read узла тела; block(start) -> Read "block"
+-- case_body(start) -> Read "block" — ветка => : инструкция или { … } (Q-048)
+-- variable / assign / field_assign / out_statement / always_statement /
+--     drum_statement / pick_statement / paren_statement(start) -> Read своей
+--     инструкции; present_statement(word, value, start) -> Read "present"
+-- words() / lists() -> соседи Expressions и Lists на тех же look и leaves
+
+use core.group
+use compiler.errors
+use compiler.parser.token
+use compiler.parser.syntax.reader
+use compiler.parser.syntax.literals
+use compiler.parser.syntax.expressions
+use compiler.parser.syntax.lists
+
+Statements = Box {
+    look = Reader {},
+    leaves = Literals {}
+
+    skill statement(start) {
+        @word = look.at(start)
+        (word.kind == Token.Kind.AT) {
+            out variable(start)
+        }
+        (word.kind == Token.Kind.OUT) {
+            out out_statement(start)
+        }
+        (word.kind == Token.Kind.DRUM) {
+            out drum_statement(start)
+        }
+        (word.kind == Token.Kind.ALWAYS) {
+            out always_statement(start)
+        }
+        (word.kind == Token.Kind.LEAVE) {
+            out look.ok("leave", look.loc(["leave"], word, look.locations), start + 1)
+        }
+        (word.kind == Token.Kind.PICK) {
+            out pick_statement(start)
+        }
+        (word.kind == Token.Kind.LPAREN) {
+            out paren_statement(start)
+        }
+        (word.kind == Token.Kind.IDENT) {
+            (look.is(start + 1, Token.Kind.ASSIGN) == yes) {
+                out assign(start)
+            }
+            @target = look.path_at(start, no)
+            (look.is(target.next, Token.Kind.ASSIGN) == yes) {
+                out field_assign(start)
+            }
+        }
+        @speaking = words()
+        @value = speaking.expression(start)
+        (value.broken() == yes) {
+            out value
+        }
+        out look.ok("expr", ["expr", value.datum()], value.next)
+    }
+
+    skill block(start) {
+        @word = look.at(start)
+        @open = look.expect(start, Token.Kind.LBRACE, "expected_open_brace")
+        (open.broken() == yes) {
+            out open
+        }
+        @listing = lists()
+        @lines = listing.sequence(open.next, Token.Kind.RBRACE, "statement", "expected_statement", "expected_close_brace", no, no)
+        @items = ["block"]
+        items = look.append_tail(items, lines.datum(), 0)
+        out look.read(look.make_node("block", look.loc(items, word, look.locations)), lines.next, lines.diagnostics)
+    }
+
+    skill variable(start) {
+        @word = look.at(start)
+        (look.is(start + 1, Token.Kind.IDENT) == no) {
+            out look.fail(start + 1, "expected_variable_name")
+        }
+        @name_token = look.at(start + 1)
+        @name = name_token.value
+        @eq = look.expect(start + 2, Token.Kind.ASSIGN, "expected_variable_equals")
+        (eq.broken() == yes) {
+            out eq
+        }
+        @speaking = words()
+        @value = speaking.expression(eq.next)
+        (value.broken() == yes) {
+            out value
+        }
+        out look.ok("var", look.loc(["var", name, value.datum()], word, look.locations), value.next)
+    }
+
+    skill assign(start) {
+        @word = look.at(start)
+        @speaking = words()
+        @value = speaking.expression(start + 2)
+        (value.broken() == yes) {
+            out value
+        }
+        out look.ok("assign", look.loc(["assign", word.value, value.datum()], word, look.locations), value.next)
+    }
+
+    skill field_assign(start) {
+        @word = look.at(start)
+        @target = look.path_at(start, look.locations)
+        (target.broken() == yes) {
+            out target
+        }
+        @eq = look.expect(target.next, Token.Kind.ASSIGN, "expected_equals")
+        (eq.broken() == yes) {
+            out eq
+        }
+        @speaking = words()
+        @value = speaking.expression(eq.next)
+        (value.broken() == yes) {
+            out value
+        }
+        out look.ok("field-assign", look.loc(["field-assign", target.datum(), value.datum()], word, look.locations), value.next)
+    }
+
+    skill out_statement(start) {
+        @word = look.at(start)
+        @speaking = words()
+        @value = speaking.expression(start + 1)
+        (value.broken() == yes) {
+            out value
+        }
+        out look.ok("out", look.loc(["out", value.datum()], word, look.locations), value.next)
+    }
+
+    skill always_statement(start) {
+        @word = look.at(start)
+        @body = block(start + 1)
+        (body.broken() == yes) {
+            out body
+        }
+        out look.ok("always", look.loc(["always", body.datum()], word, look.locations), body.next)
+    }
+
+    skill drum_statement(start) {
+        @word = look.at(start)
+        @open = look.expect(start + 1, Token.Kind.LPAREN, "expected_drum_paren")
+        (open.broken() == yes) {
+            out open
+        }
+        @speaking = words()
+        @count = speaking.expression(open.next)
+        (count.broken() == yes) {
+            out count
+        }
+        @close = look.expect(count.next, Token.Kind.RPAREN, "expected_close_paren")
+        (close.broken() == yes) {
+            out close
+        }
+        @body = block(close.next)
+        (body.broken() == yes) {
+            out body
+        }
+        out look.ok("drum", look.loc(["drum", count.datum(), body.datum()], word, look.locations), body.next)
+    }
+
+    skill pick_statement(start) {
+        @word = look.at(start)
+        @open = look.expect(start + 1, Token.Kind.LBRACE, "expected_pick_open")
+        (open.broken() == yes) {
+            out open
+        }
+        @items = ["pick"]
+        @next = look.skip_lines(open.next)
+        @stream = look.tokens
+        @count = stream.count()
+        drum (count) {
+            pick {
+                (look.is(next, Token.Kind.RBRACE) == yes) {
+                    out look.read(look.make_node("pick", look.loc(items, word, look.locations)), next + 1, [])
+                }
+                (look.is(next, Token.Kind.LBRACE) == yes) {
+                    @fallback_token = look.at(next)
+                    @fallback = block(next)
+                    (fallback.broken() == yes) {
+                        out fallback
+                    }
+                    items = group.add(items, look.loc(["otherwise", fallback.datum()], fallback_token, look.locations))
+                    next = look.skip_lines(fallback.next)
+                }
+                (look.is(next, Token.Kind.LPAREN) == yes) {
+                    @choice = paren_statement(next)
+                    (choice.broken() == yes) {
+                        out choice
+                    }
+                    items = group.add(items, choice.datum())
+                    next = look.skip_lines(choice.next)
+                }
+                {
+                    out look.fail(next, "expected_pick_branch")
+                }
+            }
+        }
+        out look.fail(next, "expected_pick_close")
+    }
+
+    skill paren_statement(start) {
+        @word = look.at(start)
+        @speaking = words()
+        @value = speaking.expression(start + 1)
+        (value.broken() == yes) {
+            out value
+        }
+        @close = look.expect(value.next, Token.Kind.RPAREN, "expected_close_paren")
+        (close.broken() == yes) {
+            out close
+        }
+        (look.is(close.next, Token.Kind.PIPE) == yes) {
+            out present_statement(word, value, close.next)
+        }
+        @open = look.expect(close.next, Token.Kind.LBRACE, "expected_open_brace")
+        (open.broken() == yes) {
+            out open
+        }
+        @next = look.skip_lines(open.next)
+        (look.is(next, Token.Kind.DOT) == yes) {
+            @cases = ["switch", value.datum()]
+            @diagnostics = []
+            @stream = look.tokens
+            drum (stream.count()) {
+                (look.is(next, Token.Kind.RBRACE) == yes) {
+                    next = next + 1
+                    leave
+                }
+                @case_token = look.at(next)
+                @dot = look.expect(next, Token.Kind.DOT, "expected_dot")
+                (dot.broken() == yes) {
+                    diagnostics = dot.diagnostics
+                    leave
+                }
+                (look.is(dot.next, Token.Kind.IDENT) == no) {
+                    @failure = look.fail(dot.next, "expected_case_label")
+                    diagnostics = failure.diagnostics
+                    leave
+                }
+                @tag_token = look.at(dot.next)
+                @tag = tag_token.value
+                @arrow = look.expect(dot.next + 1, Token.Kind.ARROW, "expected_arrow")
+                (arrow.broken() == yes) {
+                    diagnostics = arrow.diagnostics
+                    leave
+                }
+                @body = case_body(arrow.next)
+                (body.broken() == yes) {
+                    diagnostics = body.diagnostics
+                    leave
+                }
+                cases = group.add(cases, look.loc(["case", tag, body.datum()], case_token, look.locations))
+                next = body.next
+                @case_comma = no
+                (look.is(next, Token.Kind.COMMA) == yes) {
+                    next = next + 1
+                    case_comma = yes
+                }
+                next = look.skip_lines(next)
+                (case_comma == yes) {
+                    (look.is(next, Token.Kind.RBRACE) == yes) {
+                        @trailing_failure = look.fail_with(next, errors.trailing_comma())
+                        diagnostics = trailing_failure.diagnostics
+                        leave
+                    }
+                }
+            }
+            out look.read(look.make_node("switch", look.loc(cases, word, look.locations)), next, diagnostics)
+        }
+        @listing = lists()
+        @lines = listing.sequence(next, Token.Kind.RBRACE, "statement", "expected_statement", "expected_close_brace", no, no)
+        @items = ["block"]
+        items = look.append_tail(items, lines.datum(), 0)
+        @located_body = look.loc(items, word, look.locations)
+        out look.read(look.make_node("if", look.loc(["if", value.datum(), located_body], word, look.locations)), lines.next, lines.diagnostics)
+    }
+
+    skill present_statement(word, value, start) {
+        (look.is(start + 1, Token.Kind.IDENT) == no) {
+            out look.fail(start + 1, "expected_present_name")
+        }
+        @name_token = look.at(start + 1)
+        @pipe = look.expect(start + 2, Token.Kind.PIPE, "expected_pipe")
+        (pipe.broken() == yes) {
+            out pipe
+        }
+        @body = block(pipe.next)
+        (body.broken() == yes) {
+            out body
+        }
+        out look.ok("present", look.loc(["present", value.datum(), name_token.value, body.datum()], word, look.locations), body.next)
+    }
+
+    skill case_body(start) {
+        (look.is(start, Token.Kind.LBRACE) == yes) {
+            out block(start)
+        }
+        @single = statement(start)
+        (single.broken() == yes) {
+            out single
+        }
+        @word = look.at(start)
+        out look.ok("block", look.loc(["block", single.datum()], word, look.locations), single.next)
+    }
+
+    skill words() {
+        out Expressions {
+            look = look,
+            leaves = leaves
+        }
+    }
+
+    skill lists() {
+        out Lists {
+            look = look,
+            leaves = leaves
+        }
+    }
+}

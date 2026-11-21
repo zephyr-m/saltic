@@ -1,0 +1,140 @@
+-- model — арифметика кучи без самой кучи: размеры выделений, ёмкость,
+-- занятость. Байты выровнены на object.ALIGNMENT (8); отрицательное или
+-- невыровненное значение считается ошибкой и даёт no / -1.
+-- Константы: DEFAULT_HEAP_BYTES, ARENA_BYTES, ARENA_ALIGNMENT, STORE_* (хранилище:
+-- страница, классы размеров, биты слова учёта, бюджеты), CYCLE_BUDGET (объектов в
+-- одной проверке цикла) и CYCLE_FRONT (сколько детей старого значения поля
+-- помечаются как заведомо безопасные перед проверкой), QUARANTINE_*,
+-- REGION_EXIT_VALUE_*, DRUM_SLACK_BYTES (регион drum сжимается, когда мусор оборотов
+-- превысил живое плюс этот запас) — их читают рантайм и компилятор.
+-- Слово учёта (поле «флаги» заголовка) объекта хранилища: бит STORE_QUARANTINED
+-- — объект в карантине, STORE_BOX_FREE — группа без Box внутри (проверка циклов
+-- его не обходит), STORE_MARK — временная метка обхода, от STORE_RC_SHIFT —
+-- счётчик рёбер хранилище → хранилище. Объект региона: бит FORWARDED — объект
+-- переехал в хранилище, остальные биты слова — адрес переезда.
+--
+-- Allocation = Box { payload_bytes, bytes, static }
+-- aligned(bytes) -> answer
+-- allocation_bytes(payload_bytes) -> байты с заголовком или -1
+-- create(payload_bytes, static) / static(…) / managed(…) -> Allocation; valid(allocation)
+-- valid_capacity(bytes) / valid_usage(capacity, used) -> answer
+-- contains(capacity, offset, width) -> answer
+-- remaining(capacity, used) -> байты или -1
+-- can_allocate / is_exhausted(capacity, used, payload_bytes) -> answer
+-- used_after(capacity, used, payload_bytes) -> новая занятость или -1
+
+use compiler.abi.object
+use compiler.abi.value
+
+ADDRESS_BITS = value.WORD_BITS
+ADDRESS_MAXIMUM_TEXT = "4294967295"
+ADDRESS_SPACE_BYTES_TEXT = "4294967296"
+
+DEFAULT_HEAP_BYTES = 16777216
+ARENA_BYTES = 4194304
+ARENA_ALIGNMENT = 256
+MINIMUM_HEAP_BYTES = object.HEADER_BYTES
+ALIGNMENT = object.ALIGNMENT
+
+STORE_PAGE_BYTES = 4096
+STORE_PAGE_HEADER_BYTES = 32
+STORE_CLASSES = [16, 32, 48, 64, 96, 128, 160, 192, 256, 384, 512]
+STORE_LARGE_LIMIT = 512
+STORE_KIND_FREE = 0
+FORWARDED = 1
+STORE_QUARANTINED = 2
+STORE_BOX_FREE = 4
+STORE_MARK = 8
+STORE_RC_SHIFT = 4
+STORE_RC_UNIT = 16
+STORE_FLAG_BITS = 15
+CYCLE_BUDGET = 4096
+CYCLE_FRONT = 32
+QUARANTINE_BATCH = 64
+QUARANTINE_HEAP_SCAN_WORDS = 65536
+DRUM_SLACK_BYTES = 4096
+
+REGION_EXIT_VALUE_ROOT = 0
+REGION_EXIT_VALUE_SKIPPED = 1
+
+Allocation = Box {
+    payload_bytes = 0,
+    bytes = 0,
+    static = no
+}
+
+skill aligned(bytes) {
+    (bytes < 0) { out no }
+    out bytes / ALIGNMENT * ALIGNMENT == bytes
+}
+
+skill allocation_bytes(payload_bytes) {
+    (payload_bytes < 0) { out -1 }
+    out object.allocation_size(payload_bytes)
+}
+
+skill valid(allocation) {
+    (allocation.payload_bytes < 0) { out no }
+    out allocation.bytes == allocation_bytes(allocation.payload_bytes)
+}
+
+skill create(payload_bytes, static) {
+    out Allocation {
+        payload_bytes = payload_bytes,
+        bytes = allocation_bytes(payload_bytes),
+        static = static
+    }
+}
+
+skill static(payload_bytes) {
+    out create(payload_bytes, yes)
+}
+
+skill managed(payload_bytes) {
+    out create(payload_bytes, no)
+}
+
+skill valid_capacity(bytes) {
+    (bytes < MINIMUM_HEAP_BYTES) { out no }
+    out aligned(bytes)
+}
+
+skill contains(capacity, offset, width) {
+    (capacity < 0) { out no }
+    (offset < 0) { out no }
+    (width < 0) { out no }
+    (offset > capacity) { out no }
+    (width > capacity - offset) { out no }
+    out yes
+}
+
+skill valid_usage(capacity, used) {
+    (valid_capacity(capacity) == no) { out no }
+    (used < 0) { out no }
+    (aligned(used) == no) { out no }
+    (used > capacity) { out no }
+    out yes
+}
+
+skill remaining(capacity, used) {
+    (valid_usage(capacity, used) == no) { out -1 }
+    out capacity - used
+}
+
+skill is_exhausted(capacity, used, payload_bytes) {
+    out can_allocate(capacity, used, payload_bytes) == no
+}
+
+skill can_allocate(capacity, used, payload_bytes) {
+    (valid_usage(capacity, used) == no) { out no }
+    @bytes = allocation_bytes(payload_bytes)
+    (bytes < 0) { out no }
+    (bytes > capacity - used) { out no }
+    out yes
+}
+
+skill used_after(capacity, used, payload_bytes) {
+    (can_allocate(capacity, used, payload_bytes) == no) { out -1 }
+    out used + allocation_bytes(payload_bytes)
+}
+

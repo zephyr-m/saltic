@@ -1,0 +1,208 @@
+-- paths — видимость и разрешение имён: что видно из модуля, псевдонимы
+-- модулей, главный субъект модуля без заикания, полные имена путей и
+-- вызовов, длинные пути; неизвестный Box и часть — с подсказкой.
+
+use core.str
+use core.group
+use compiler.ast
+use compiler.errors
+use compiler.checker.names
+use compiler.checker.notes
+
+Paths = Box {
+    register = Names {},
+    journal = Notes {}
+
+    skill visible(globals, module, name) {
+        (str.contains(name, ".") == no) {
+            (str.bytes(module) > 0) {
+                out no
+            }
+        }
+        out register.table_has(globals, name)
+    }
+
+    skill find_visible(globals, module, name) {
+        (visible(globals, module, name) == no) {
+            out Names.Name {}
+        }
+        out register.table_find(globals, name)
+    }
+
+    skill module_alias(globals, module, name) {
+        @import = register.table_find(globals, ast.alias_key(module, name))
+        (import.kind == "import") {
+            out import.type
+        }
+        out ""
+    }
+
+    skill reaches(alias) {
+        (alias.kind == "import") {
+            out yes
+        }
+        out (alias.kind == "nest")
+    }
+
+    skill lead_name(globals, module, head) {
+        @import = register.table_find(globals, ast.alias_key(module, str.lower(head)))
+        ((import.kind == "import") == no) {
+            out ""
+        }
+        @candidate = "{import.type}.{head}"
+        (register.table_has(globals, candidate) == yes) {
+            out candidate
+        }
+        out ""
+    }
+
+    skill resolve_name(name, module, globals) {
+        (visible(globals, module, name) == yes) {
+            out name
+        }
+        @local = ast.qualified(module, name)
+        (register.table_has(globals, local) == yes) {
+            out local
+        }
+        @head = ast.name_head(name)
+        @import = register.table_find(globals, ast.alias_key(module, head))
+        (reaches(import) == yes) {
+            @candidate = str.concat(import.type, ast.name_tail(name))
+            (register.table_has(globals, candidate) == yes) {
+                out candidate
+            }
+        }
+        @lead = lead_name(globals, module, head)
+        (str.bytes(lead) > 0) {
+            @led = str.concat(lead, ast.name_tail(name))
+            (register.table_has(globals, led) == yes) {
+                out led
+            }
+        }
+        out ""
+    }
+
+    skill resolve_path(node, scope, globals) {
+        @plain = ast.plain(node)
+        @count = group.count(plain)
+        @head = group.get(plain, 1)
+        (count == 2) {
+            (register.has_name(scope.names, head) == yes) {
+                out ""
+            }
+        }
+        @direct = ast.path_text(plain)
+        (visible(globals, scope.module, direct) == yes) {
+            out direct
+        }
+        (count == 2) {
+            @local = ast.qualified(scope.module, head)
+            (register.table_has(globals, local) == yes) {
+                out local
+            }
+        }
+        @import = register.table_find(globals, ast.alias_key(scope.module, head))
+        (reaches(import) == yes) {
+            @candidate = import.type
+            drum (count - 2) {
+                candidate = str.concat(candidate, str.concat(".", group.get(plain, beat + 2)))
+            }
+            (register.table_has(globals, candidate) == yes) {
+                out candidate
+            }
+        }
+        @lead = lead_name(globals, scope.module, head)
+        (str.bytes(lead) > 0) {
+            @led = lead
+            drum (count - 2) {
+                led = str.concat(led, str.concat(".", group.get(plain, beat + 2)))
+            }
+            (register.table_has(globals, led) == yes) {
+                out led
+            }
+        }
+        out ""
+    }
+
+    skill call_name(callee, scope, globals) {
+        @resolved = resolve_path(callee, scope, globals)
+        (str.bytes(resolved) > 0) {
+            @global = register.table_find(globals, resolved)
+            (global.kind == "native") {
+                out resolved
+            }
+        }
+        out ast.path_text(callee)
+    }
+
+    skill path_from_text(text) {
+        out group.concat(["path"], str.split(text, "."))
+    }
+
+    skill long_reference(node, scope, globals) {
+        @plain = ast.plain(node)
+        @count = group.count(plain)
+        (count < 4) {
+            out errors.ok()
+        }
+        @head = group.get(plain, 1)
+        (register.has_name(scope.names, head) == yes) {
+            out errors.ok()
+        }
+        (register.table_has(globals, ast.qualified(scope.module, head)) == yes) {
+            out errors.ok()
+        }
+        @text = ast.path_text(plain)
+        @full = text
+        @import = register.table_find(globals, ast.alias_key(scope.module, head))
+        (import.kind == "import") { full = str.concat(import.type, str.concat(".", str.join(group.slice(plain, 2, count - 1 + 1), "."))) }
+        @segments = path_from_text(full)
+        @size = group.count(segments)
+        drum (size - 2) {
+            @length = size - 1 - beat
+            (register.table_has(globals, str.join(group.slice(segments, 1, length + 1), ".")) == yes) {
+                @module = str.join(group.slice(segments, 1, length - 1 + 1), ".")
+                @short = str.join(group.slice(segments, length - 1, size - 1 + 1), ".")
+                (short == text) {
+                    out errors.ok()
+                }
+                out errors.long_reference(text, module, short)
+            }
+        }
+        out errors.ok()
+    }
+
+    skill ambiguous(name, module, globals) {
+        @part = register.table_find(globals, ast.alias_key(module, name))
+        (part.kind == "nest") {
+            out (part.type == names.AMBIGUOUS)
+        }
+        out no
+    }
+
+    skill missing_box(name, module, globals) {
+        (ambiguous(name, module, globals) == yes) {
+            out errors.ambiguous_part(name)
+        }
+        out errors.unknown_box(name)
+    }
+
+    skill missing_part(name, module, globals) {
+        (ambiguous(name, module, globals) == yes) {
+            out errors.ambiguous_part(name)
+        }
+        out errors.unknown_namespace(name)
+    }
+
+    skill check_module_name(node, name, module, globals, diagnostics) {
+        @target = module_alias(globals, module, name)
+        (str.bytes(target) > 0) {
+            out journal.add_diagnostic(diagnostics, journal.placed(node, errors.name_taken_by_module(name, target)))
+        }
+        @root = register.table_find(globals, ast.alias_key(names.ROOT_MARK, name))
+        (root.kind == "root") {
+            out journal.add_diagnostic(diagnostics, journal.placed(node, errors.name_taken_by_root(name)))
+        }
+        out diagnostics
+    }
+}

@@ -36,7 +36,7 @@ workbench/
 | Программа | Что делает |
 |---|---|
 | `lens/main.saltic` | Saltic смотрит на свой код: `check` (разбор, чекер, лимиты; модуль без `program` — не ошибка), `api` (лицо модуля), `find` (где имя). Само зрение — `lens/look.saltic` |
-| `mcp/main.saltic` | Сервер MCP по stdio, `just lens-serve` (.mcp.json и запись пользователя): инструменты `saltic_check`, `api`, `find`, `build`, `edit`, `rename`, `run`, `test`. Правка и переименование с проверкой — `mcp/edit.saltic`, запуск и тесты — `mcp/run.saltic`. Проверку зовёт `lens` дочерним процессом: JSON из craft и selfhost в одной программе не живут (общие варианты enum) |
+| `mcp/main.saltic` | Сервер MCP по stdio, `just lens-serve` (.mcp.json и запись пользователя): инструменты `saltic_check`, `api`, `find`, `build`, `edit`, `rename`, `run`, `test`. Правка и переименование с проверкой — `mcp/edit.saltic`, запуск и тесты — `mcp/run.saltic`. Проверку зовёт `lens` дочерним процессом: JSON из craft и compiler в одной программе не живут (общие варианты enum) |
 
 ## В корне
 

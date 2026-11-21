@@ -1,0 +1,63 @@
+-- uefi — платформа UEFI на подпрограммах исполнителя (executor.syscall с
+-- номерами ecall): write (64), exit (93), key (29/63), firmware (500), call
+-- (503); родной x86-64 даёт их своими подпрограммами (x86_64_native/uefi).
+-- wait — executor.wait (hlt). Файлы и время — NotSupported. Write, exit и key
+-- — общие с linux. Команды — методами billet.executor (договор backend),
+-- регистры — его роли. До 06.11.2026 жила в переводе RV32I → x86-64 как stub.
+--
+-- Uefi { name } — платформа: append(billet) -> compiler
+-- emit_firmware / emit_call / emit_wait(billet) — rt_platform_firmware / call / wait
+-- куча — свой bss (platform.append_heap_reserve): адреса гостя — смещения от образа (r14),
+--     страницы прошивки в это окно не попадают
+
+use core.system
+use compiler.memory.model
+use compiler.abi
+use compiler.gorn.backend
+use compiler.gorn.platform
+use compiler.gorn.platform.linux
+use compiler.gorn.backend.rv32i.runtime.tails
+
+UNSUPPORTED = ["file_read", "file_write", "now"]
+
+Uefi = Box {
+    name = "uefi",
+    arena_bytes = model.ARENA_BYTES,
+    default_heap_bytes = model.DEFAULT_HEAP_BYTES
+
+    skill append(billet) {
+        billet = linux.emit_write(billet)
+        billet = linux.emit_exit(billet)
+        billet = platform.append_heap_reserve(billet)
+        billet = linux.emit_key(billet)
+        billet = linux.append_key_data(billet)
+        billet = emit_firmware(billet)
+        billet = emit_call(billet)
+        billet = emit_wait(billet)
+        out platform.append_unsupported(billet, UNSUPPORTED)
+    }
+}
+
+skill emit_wait(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, platform.WAIT)
+    billet = executor.wait(billet)
+    billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
+    out tails.ok(billet)
+}
+
+skill emit_firmware(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, platform.FIRMWARE)
+    billet = executor.syscall(billet, system.SYSCALL_FIRMWARE)
+    out tails.ok(billet)
+}
+
+skill emit_call(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, platform.CALL)
+    billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, 16)
+    billet = executor.or(billet, backend.VALUE, backend.VALUE, backend.ERROR)
+    billet = executor.syscall(billet, system.SYSCALL_FIRMWARE_CALL)
+    out tails.ok(billet)
+}

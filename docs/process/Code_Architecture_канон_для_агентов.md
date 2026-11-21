@@ -271,7 +271,7 @@ SDK не является складом потенциально полезны
   предупреждение (решение автора 12.11.2026: проверку не роняет, жёсткий только
   лимит кода). Проверяет `workbench/check/limits/main.saltic`.
 
-Образцы: `soul/seed/selfhost/compiler/codegen/main.saltic`,
+Образцы: `soul/seed/compiler/gorn/codegen/main.saltic`,
 `os/target/uefi_x86_64/platform/firmware.saltic`.
 
 Ресурсы принадлежат использующему их модулю. Общие ресурсы поднимаются к ближайшему

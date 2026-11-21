@@ -1,0 +1,105 @@
+-- operators — обход знаков: сравнения, арифметика, звенья ○ ○○; числа,
+-- фиксированные и дробные по своим правилам.
+
+use core.str
+use core.group
+use compiler.ast
+use compiler.errors
+use compiler.intrinsic.contract
+use compiler.checker.names
+use compiler.checker.names.paths
+use compiler.checker.notes
+use compiler.checker.rules.cycles
+use compiler.checker.rules
+use compiler.checker.rules.numbers
+use compiler.checker.types
+use compiler.checker.types.shapes
+use compiler.checker.types.signatures
+use compiler.checker.walk
+
+NUMERIC_OPERATORS = ["+", "-", "*", "/", "%", ">", "<", ">=", "<="]
+
+Operators = Box {
+    register = Names {},
+    routes = Paths {},
+    journal = Notes {},
+    forms = Shapes {},
+    typing = Types {},
+    signing = Signatures {},
+    arithmetic = Numbers {},
+    law = Rules {},
+    knots = Cycles {}
+
+    skill walk_node(tag, node, plain, scope, globals, diagnostics) {
+        (group.contains(["binary", "logic"], tag) == yes) {
+            out walk_binary(node, plain, scope, globals, diagnostics)
+        }
+        out none
+    }
+
+    skill walk_binary(node, plain, scope, globals, diagnostics) {
+        @walker = walking()
+        @left_node = group.get(plain, 2)
+        @right_node = group.get(plain, 3)
+        @left_walked = walker.check_expression(left_node, scope, globals, diagnostics)
+        @right_walked = walker.check_expression(right_node, scope, globals, left_walked.diagnostics)
+        diagnostics = right_walked.diagnostics
+        @left_type = typing.value_type(left_node, scope, globals)
+        @current = ast.with_part(ast.with_part(node, 2, ast.typed(left_type, left_walked.node)), 3, forms.fraction_marked(typing.value_type(right_node, scope, globals), right_walked.node))
+        @operator = group.get(plain, 1)
+        @numeric = group.contains(NUMERIC_OPERATORS, operator)
+        @partner = arithmetic.fixed_partner(operator, left_type, typing.value_type(right_node, scope, globals))
+        (errors.is_ok(partner) == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, partner)) }
+        @fraction = arithmetic.fraction_partner(operator, left_type, typing.value_type(right_node, scope, globals))
+        (errors.is_ok(fraction) == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, fraction)) }
+        (numeric == yes) {
+            @right_type = typing.value_type(right_node, scope, globals)
+            @known_types = yes
+            (left_type == "unknown") { known_types = no }
+            (right_type == "unknown") { known_types = no }
+            (known_types == yes) {
+                @both_numbers = arithmetic.plain_numbers(left_type, right_type)
+                @fixed = no
+                (contract.is_fixed_type(left_type) == yes) { fixed = yes }
+                (contract.is_fixed_type(right_type) == yes) { fixed = yes }
+                (fixed == yes) {
+                    both_numbers = yes
+                    @problem = errors.ok()
+                    (left_type == "address") { problem = errors.address_arithmetic() }
+                    (right_type == "address") { problem = errors.address_arithmetic() }
+                    (left_type == "bits32") { problem = errors.bits32_operator(operator) }
+                    (right_type == "bits32") { problem = errors.bits32_operator(operator) }
+                    (operator == "%") { problem = errors.fixed_remainder(left_type) }
+                    (errors.is_ok(problem) == yes) {
+                        (left_type == "number") { problem = errors.operator_mixes_number(operator, right_type) }
+                        (right_type == "number") { problem = errors.operator_mixes_number(operator, left_type) }
+                        (errors.is_ok(problem) == yes) {
+                            ((left_type == right_type) == no) { problem = errors.operator_mixes_fixed(operator, left_type, right_type) }
+                        }
+                    }
+                    (errors.is_ok(problem) == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, problem)) }
+                }
+                (both_numbers == no) {
+                    @left_name = forms.type_text(left_type)
+                    @right_name = forms.type_text(right_type)
+                    diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.operator_expects_numbers(operator, left_name, right_name)))
+                }
+            }
+        }
+        out journal.walked(current, diagnostics)
+    }
+
+    skill walking() {
+        out Walk {
+            register = register,
+            routes = routes,
+            journal = journal,
+            forms = forms,
+            typing = typing,
+            signing = signing,
+            arithmetic = arithmetic,
+            law = law,
+            knots = knots
+        }
+    }
+}

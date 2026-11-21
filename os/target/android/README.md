@@ -4,7 +4,7 @@
 `libmain.so` (AArch64) и зовёт `ANativeActivity_onCreate`. Записана 13.11.2026.
 
 - **Сборка:** `just android [имя]` — `toolchain.saltic` пишет `.so`
-  (`compiler/linker/shared`), манифест и zip (`formats/apk`), `apksigner`
+  (`compiler/gorn/linker/shared`), манифест и zip (`formats/apk`), `apksigner`
   подписывает. Готовый APK — `.cache/build/android/<имя>.apk`.
 - **Платформа:** `platform.saltic` — вход, окно, журнал, выход в Android;
   остальное — от платформы Linux (то же ядро).

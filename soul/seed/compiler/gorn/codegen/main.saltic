@@ -1,0 +1,560 @@
+-- codegen — переводит тело навыка из AST в операции договора машины
+-- (backend), которые исполняет billet.executor.
+-- Каждый навык берёт и отдаёт compiler; результат выражения — в VALUE,
+-- значение с меткой типа (abi). Промежуточное — через стек (push/pop).
+-- Арифметика и тяжёлое — вызовы рантайма rt_*, здесь не разворачиваются.
+--
+-- compile_block(billet, block, keep) — тело; keep = yes: значение
+--     последнего оператора остаётся в VALUE. Вход из functions.
+-- compile_statement(billet, node, keep) — один оператор (compile_block ставит
+--     его строку в current_function.line — для пути ошибки); out кладёт
+--     значение в VALUE и прыгает в конец навыка
+-- compile_expression(billet, node) — любое выражение в VALUE; вход из
+--     functions для констант
+-- compile_path(billet, node) — имя, поле, константа, error.Имя
+-- compile_binary(billet, operator, left, right) — операция; * / — через rt_mul / rt_div;
+--     звенья logic ○ / ○○ — коротко: правое считается, только если левое не решило
+-- compile_call(billet, node) — вызов навыка, метода или intrinsic
+-- compile_arguments(billet, args) — аргументы в роли ARG0…; с пометкой чекера
+--     "pack:тип" — упакованным в число (Q-042)
+-- compile_show(billet, args) — io.show: rt_show на каждый, VALUE = none
+-- compile_group(billet, items) — новая группа
+-- compile_box(billet, name, overrides) — новый Box, поля по умолчанию
+--     считаются в модуле самого Box
+-- дробные (Q-041): литерал — emitters.load_fraction, операции — rt_fraction_*,
+--     показ в "{…}" — навык core.fraction.text (constants.FRACTION_TEXT_LABEL)
+-- pack_fixed(billet, stored) — фиксированное в VALUE → обычное число (rt_fixed_pack,
+--     FixedTooBig): так оно ложится в поле Box и группу (Q-035); compile_stored —
+--     group.add и group.replaced: последний аргумент (значение) — упакованным
+-- compile_template(billet, plain) — строка "{…}" склейкой через rt_value_text
+-- compile_rescue(billet, node) — выражение rescue с перехватом ошибки
+--
+-- Внутри: emitters, loops (drum: регион цикла, сжатие по порогу), endless (always: регион на оборот),
+-- failures (ошибки), lookup (имена, типы).
+
+use core.str
+use core.group
+use core.num
+use compiler.abi
+use compiler.abi.value
+use compiler.ast
+use compiler.intrinsic.contract
+use compiler.gorn.state
+use compiler.gorn.constants
+use compiler.gorn.backend
+use compiler.checker.types.shapes
+use compiler.errors
+use compiler.gorn.codegen.lookup
+use compiler.gorn.codegen.emitters
+use compiler.gorn.codegen.loops
+use compiler.gorn.codegen.endless
+use compiler.gorn.codegen.failures
+
+skill compile_path(billet, node) {
+    @executor = billet.executor
+    @parts = ast.plain(node)
+    @count = group.count(parts)
+    @name = group.get(parts, 1)
+    @path_name = ast.path_text(parts)
+    @constant_name = ""
+    @constant = state.Symbol {}
+    (name == "error") {
+        (count == 3) { out failures.load_value(billet, group.get(parts, 2)) }
+    }
+    (count > 2) {
+        @enum_name = lookup.resolve_symbol(billet, billet.enums, ast.path_prefix(parts))
+        (str.bytes(enum_name) > 0) {
+            @full_name = "{enum_name}."
+            full_name = str.concat(full_name, group.get(parts, count - 1))
+            @variant = state.symbol_find(billet.variants, full_name)
+            out executor.load_immediate(billet, backend.VALUE, variant.value)
+        }
+    }
+    (state.symbol_has(billet.current_function.slots, name) == yes) {
+        @slot = state.slot(billet, name)
+        billet = executor.load(billet, backend.VALUE, backend.FRAME, slot)
+    }
+    (state.symbol_has(billet.current_function.slots, name) == no) {
+        constant_name = lookup.resolve_symbol(billet, billet.constants, path_name)
+        constant = state.symbol_find(billet.constants, constant_name)
+        (str.bytes(constant.name) > 0) {
+            (emitters.constant_literal(constant.node) == yes) {
+                billet = compile_expression(billet, constant.node)
+                billet = executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
+            }
+            (emitters.constant_literal(constant.node) == no) {
+                @getter = constants.getter_label(constant.name)
+                billet = executor.call(billet, getter)
+                billet = failures.check(billet)
+            }
+        }
+        (str.bytes(constant.name) == 0) { billet = emitters.load_subject_field(billet, name) }
+    }
+    (str.bytes(constant.name) > 0) { out billet }
+    drum (count - 2) {
+        billet = emitters.emit_field_get(billet, group.get(parts, beat + 2))
+    }
+    out billet
+}
+
+skill compile_binary(billet, operator, left, right) {
+    @executor = billet.executor
+    billet = compile_expression(billet, left)
+    pick {
+        (emitters.simple_operand(billet, right) == yes) { billet = emitters.load_simple(billet, right, backend.ERROR) }
+        {
+            billet = executor.push(billet, backend.VALUE)
+            billet = compile_expression(billet, right)
+            billet = executor.move(billet, backend.ERROR, backend.VALUE)
+            billet = executor.pop(billet, backend.VALUE)
+        }
+    }
+    (emitters.fraction_pair(billet, left, right) == yes) { out failures.check(emitters.fraction_binary(billet, operator)) }
+    @target = ""
+    @fixed_type = lookup.infer_type(billet, left)
+    @fixed = contract.is_fixed_type(fixed_type)
+    (operator == "*") { target = "rt_mul" }
+    (operator == "/") { target = "rt_div" }
+    (operator == "%") { target = "rt_mod" }
+    (fixed == yes) {
+        (operator == "+") { target = "rt_fixed_add" }
+        (operator == "-") { target = "rt_fixed_sub" }
+        (operator == "*") { target = "rt_fixed_mul" }
+        (operator == "/") { target = "rt_fixed_div" }
+        (operator == "==") { target = "rt_fixed_equal" }
+        (operator == ">") { target = "rt_fixed_greater" }
+        (operator == "<") { target = "rt_fixed_less" }
+        (operator == ">=") { target = "rt_fixed_less" }
+        (operator == "<=") { target = "rt_fixed_greater" }
+        billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(fixed_type))
+    }
+    (fixed == no) {
+        (operator == "==") {
+            (emitters.immediate_operand(billet, left) == yes) { out emitters.emit_word_equal(billet) }
+            (emitters.immediate_operand(billet, right) == yes) { out emitters.emit_word_equal(billet) }
+            out emitters.emit_equal_fast_path(billet)
+        }
+        billet = emitters.number_tags(billet, emitters.number_operand(billet, left), emitters.number_operand(billet, right))
+        (operator == "+") { out failures.check(executor.add_checked(billet)) }
+        (operator == "-") { out failures.check(executor.sub_checked(billet)) }
+        (operator == "<") { out emitters.emit_number_less(billet, backend.VALUE, backend.ERROR) }
+        (operator == ">") { out emitters.emit_number_less(billet, backend.ERROR, backend.VALUE) }
+        (operator == ">=") { out emitters.emit_number_not_less(billet, backend.VALUE, backend.ERROR) }
+        (operator == "<=") { out emitters.emit_number_not_less(billet, backend.ERROR, backend.VALUE) }
+    }
+    billet = executor.call(billet, target)
+    billet = failures.check(billet)
+    (operator == ">=") { out emitters.flip_answer(billet) }
+    (operator == "<=") { out emitters.flip_answer(billet) }
+    out billet
+}
+
+skill compile_fixed_from(billet, made, argument) {
+    @executor = billet.executor
+    (emitters.fixed_literal(argument) == yes) {
+        billet = emitters.load_fixed_literal(billet, argument)
+        billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(made))
+        out executor.call(billet, "rt_fixed_new")
+    }
+    @source_type = lookup.infer_type(billet, argument)
+    billet = compile_expression(billet, argument)
+    (contract.is_fixed_type(source_type) == yes) {
+        billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(source_type))
+        billet = executor.load_immediate(billet, backend.FIXED_TARGET_KIND, contract.fixed_kind(made))
+        out executor.call(billet, "rt_fixed_convert")
+    }
+    billet = executor.shift_right_signed(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(made))
+    out executor.call(billet, "rt_fixed_new")
+}
+
+skill compile_rescue(billet, node) {
+    @plain = ast.plain(node)
+    @frame = failures.rescue_frame(billet)
+    billet = failures.enter(billet, frame)
+    billet = compile_expression(billet, group.get(plain, 1))
+    billet = failures.catch(billet, frame, group.get(plain, 2))
+    billet = compile_block(billet, group.get(plain, 3), yes)
+    @executor = billet.executor
+    billet = executor.label(billet, frame.done)
+    out billet
+}
+
+skill compile_arguments(billet, args) {
+    @executor = billet.executor
+    @count = group.count(args)
+    drum (args) {
+        billet = compile_expression(billet, beat)
+        (str.starts_with(ast.type_of(beat), "pack:") == yes) { billet = pack_fixed(billet, beat) }
+        billet = executor.push(billet, backend.VALUE)
+    }
+    drum (count) {
+        billet = executor.load(billet, backend.argument(beat), backend.STACK, constants.stack_source_offset(billet.words, count, beat))
+    }
+    (count > 0) {
+        billet = executor.add_immediate(billet, backend.STACK, backend.STACK, constants.stack_bytes(billet.words, count))
+    }
+    out billet
+}
+
+skill pack_fixed(billet, stored) {
+    (contract.is_fixed_type(lookup.infer_type(billet, stored)) == yes) { out failures.check(emitters.pack_call(billet, stored)) }
+    out billet
+}
+
+skill compile_stored(billet, args) {
+    @executor = billet.executor
+    @last = group.count(args) - 1
+    drum (last) { billet = executor.push(compile_expression(billet, group.get(args, beat)), backend.VALUE) }
+    billet = pack_fixed(compile_expression(billet, group.get(args, last)), group.get(args, last))
+    billet = executor.move(billet, backend.argument(last), backend.VALUE)
+    drum (last) { billet = executor.pop(billet, backend.argument(last - 1 - beat)) }
+    out billet
+}
+
+skill compile_show(billet, args) {
+    @executor = billet.executor
+    billet = compile_expression(billet, group.get(args, 0))
+    billet = executor.call(executor.call(billet, "rt_show"), "rt_newline")
+    out executor.load_immediate(billet, backend.VALUE, abi.NONE)
+}
+
+skill compile_group(billet, items) {
+    @executor = billet.executor
+    @words = billet.words
+    (emitters.static_group(items) == yes) { out emitters.load_static_group(billet, items) }
+    @count = group.count(items)
+    drum (items) {
+        billet = pack_fixed(compile_expression(billet, beat), beat)
+        billet = executor.push(billet, backend.VALUE)
+    }
+    billet = executor.load_immediate(billet, backend.VALUE, constants.group_storage_bytes(billet.words, count))
+    billet = executor.call(billet, "rt_alloc")
+    billet = executor.load_immediate(billet, backend.SCRATCH3, abi.OBJECT_KIND_GROUP)
+    billet = executor.store32(billet, backend.SCRATCH3, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    billet = executor.load_immediate(billet, backend.SCRATCH3, count)
+    billet = executor.store(billet, backend.SCRATCH3, backend.VALUE, words.payload + constants.GROUP_COUNT_OFFSET)
+    drum (count) {
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, constants.stack_source_offset(billet.words, count, beat))
+        billet = executor.store(billet, backend.SCRATCH0, backend.VALUE, words.payload + constants.group_item_offset(billet.words, beat))
+    }
+    (count > 0) { billet = executor.add_immediate(billet, backend.STACK, backend.STACK, constants.stack_bytes(billet.words, count)) }
+    out executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_GROUP)
+}
+
+skill compile_box(billet, name, overrides) {
+    @model = state.symbol_find(billet.boxes, name)
+    @fields = []
+    @member_count = group.count(ast.plain(model.node))
+    drum (member_count - 2) {
+        @member = ast.part(model.node, beat + 2)
+        (ast.tag(member) == "field") { fields = group.add(fields, member) }
+    }
+    @count = group.count(fields)
+    drum (fields) {
+        @field_value = lookup.box_override(overrides, ast.part(beat, 1))
+        @default_value = no
+        (group.count(field_value) == 0) { field_value = ast.part(beat, 2) default_value = yes }
+        @caller_module = billet.current_function.module
+        (default_value == yes) { billet.current_function.module = model.text }
+        billet = pack_fixed(compile_expression(billet, field_value), field_value)
+        billet.current_function.module = caller_module
+        @executor = billet.executor
+        billet = executor.push(billet, backend.VALUE)
+    }
+    @field_ids = []
+    drum (fields) { field_ids = group.add(field_ids, state.field(billet, ast.part(beat, 1))) }
+    out emitters.store_box(billet, field_ids, state.box_number(billet, name))
+}
+
+skill compile_call(billet, node) {
+    @executor = billet.executor
+    @plain = ast.plain(node)
+    @callee = ast.plain(group.get(plain, 1))
+    @args = lookup.call_arguments(node)
+    @name = lookup.call_name(billet, callee)
+    @seed_kind = contract.find(name)
+    (contract.is_show(seed_kind) == yes) { out compile_show(billet, args) }
+    @made = contract.conversion(seed_kind)
+    (str.bytes(made) > 0) { out compile_fixed_from(billet, made, group.get(args, 0)) }
+    (name == "core.num.from") {
+        @argument = group.get(args, 0)
+        @source_type = lookup.infer_type(billet, argument)
+        billet = compile_expression(billet, argument)
+        (contract.is_fixed_type(source_type) == no) { out billet }
+        billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(source_type))
+        billet = executor.call(billet, "rt_fixed_to_number")
+        out failures.check(billet)
+    }
+    @fixed_target = ""
+    (contract.is_fixed_call(seed_kind) == yes) { fixed_target = contract.target(seed_kind, "unknown") }
+    (str.bytes(fixed_target) > 0) {
+        billet = compile_arguments(billet, args)
+        @fixed_type = lookup.infer_type(billet, group.get(args, 0))
+        billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(fixed_type))
+        billet = executor.call(billet, fixed_target)
+        billet = failures.check(billet)
+        out billet
+    }
+    @memory_target = ""
+    (group.count(args) > 0) {
+        @input_type = lookup.infer_type(billet, group.get(args, 0))
+        (contract.is_memory(seed_kind) == yes) { memory_target = contract.target(seed_kind, input_type) }
+    }
+    (str.bytes(memory_target) > 0) {
+        billet = compile_arguments(billet, args)
+        billet = executor.call(billet, memory_target)
+        billet = failures.check(billet)
+        out billet
+    }
+    @resolved_box = lookup.resolve_symbol(billet, billet.boxes, name)
+    (str.bytes(resolved_box) > 0) { out compile_box(billet, resolved_box, []) }
+    @forms = Shapes {}
+    @box_name = forms.box_name(ast.type_of(group.get(plain, 1)))
+    (str.bytes(box_name) > 0) {
+        @receiver = ["path", "$self"]
+        @method = group.get(callee, 1)
+        (group.count(callee) == 3) {
+            receiver = ["path", group.get(callee, 1)]
+            method = group.get(callee, 2)
+        }
+        billet = compile_arguments(billet, group.concat([receiver], args))
+        @target = "{box_name}."
+        target = str.concat(target, method)
+        billet = executor.call(billet, str.concat("saltic_", state.safe(target)))
+        out failures.check(billet)
+    }
+    @target = lookup.intrinsic(name)
+    (str.bytes(target) == 0) {
+        @resolved_skill = lookup.resolve_skill(billet, callee)
+        (str.bytes(resolved_skill) > 0) { target = str.concat("saltic_", state.safe(resolved_skill)) }
+    }
+    (str.bytes(target) == 0) {
+        (group.count(callee) == 3) {
+            (state.symbol_has(billet.current_function.slots, group.get(callee, 1)) == yes) {
+                billet = compile_arguments(billet, group.concat([["path", group.get(callee, 1)]], args))
+                (group.contains(billet.dispatches, group.get(callee, 2)) == no) { billet.dispatches = group.add(billet.dispatches, group.get(callee, 2)) }
+                billet = executor.call(billet, state.dispatch_label(group.get(callee, 2)))
+                out failures.check(billet)
+            }
+        }
+        @call_text = ast.path_text(callee)
+        @problem = errors.unresolved_call(call_text, billet.current_function.name)
+        io.show(problem.message)
+    }
+    (group.contains(["core.group.add", "core.group.replaced"], name) == yes) { out failures.check(executor.call(compile_stored(billet, args), target)) }
+    billet = compile_arguments(billet, args)
+    billet = executor.call(billet, target)
+    out failures.check(billet)
+}
+
+skill compile_template(billet, plain) {
+    @executor = billet.executor
+    billet = compile_expression(billet, ["string", group.get(plain, 1)])
+    billet = executor.push(billet, backend.VALUE)
+    drum ((group.count(plain) - 2) / 2) {
+        @part = group.get(plain, beat * 2 + 2)
+        billet = compile_expression(billet, part)
+        @part_type = lookup.infer_type(billet, part)
+        pick {
+            (contract.is_fixed_type(part_type) == yes) {
+                billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(part_type))
+                billet = executor.call(billet, "rt_fixed_text")
+            }
+            (part_type == "fraction") { billet = failures.check(executor.call(billet, constants.FRACTION_TEXT_LABEL)) }
+            { billet = executor.call(billet, "rt_value_text") }
+        }
+        billet = emitters.emit_string_join(billet)
+        @text = group.get(plain, beat * 2 + 3)
+        (str.bytes(text) > 0) {
+            billet = compile_expression(billet, ["string", text])
+            billet = emitters.emit_string_join(billet)
+        }
+    }
+    out executor.pop(billet, backend.VALUE)
+}
+
+skill compile_expression(billet, node) {
+    @executor = billet.executor
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "number") { out emitters.load_number(billet, group.get(plain, 1)) }
+    (tag == "wide-number") { out emitters.load_wide_number(billet, group.get(plain, 1)) }
+    (tag == "fraction-number") { out emitters.load_fraction(billet, group.get(plain, 1)) }
+    (tag == "template") { out compile_template(billet, plain) }
+    (tag == "string") {
+        @label = emitters.string_label(billet, group.get(plain, 1))
+        billet = executor.load_address(billet, backend.VALUE, label, 0)
+        out executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    }
+    (tag == "answer") {
+        (group.get(plain, 1) == "yes") { out executor.load_immediate(billet, backend.VALUE, abi.YES) }
+        out executor.load_immediate(billet, backend.VALUE, abi.NO)
+    }
+    (tag == "none") { out executor.load_immediate(billet, backend.VALUE, abi.NONE) }
+    (tag == "path") { out compile_path(billet, node) }
+    (tag == "negate") { out failures.check(emitters.negate(compile_expression(billet, group.get(plain, 1)), lookup.infer_type(billet, group.get(plain, 1)))) }
+    (tag == "binary") {
+        (emitters.negative_literal(node) == yes) {
+            @magnitude = ast.plain(group.get(plain, 3))
+            out emitters.load_number(billet, -group.get(magnitude, 1))
+        }
+        out compile_binary(billet, group.get(plain, 1), group.get(plain, 2), group.get(plain, 3))
+    }
+    (tag == "logic") {
+        @end = state.label(billet, "link_end")
+        billet = emitters.jump_by_link(compile_expression(billet, group.get(plain, 2)), group.get(plain, 1), end)
+        out executor.label(compile_expression(billet, group.get(plain, 3)), end)
+    }
+    (tag == "call") { out compile_call(billet, node) }
+    (tag == "group") { out compile_group(billet, group.slice(plain, 1, group.count(plain))) }
+    (tag == "box-new") {
+        @box_name = lookup.resolve_symbol(billet, billet.boxes, group.get(plain, 1))
+        out compile_box(billet, box_name, group.slice(plain, 2, group.count(plain)))
+    }
+    (tag == "rescue") { out compile_rescue(billet, node) }
+    (tag == "enum-value") {
+        @variant = state.symbol_find(billet.variants, group.get(plain, 1))
+        out executor.load_immediate(billet, backend.VALUE, variant.value)
+    }
+    out billet
+}
+
+skill compile_block(billet, block, keep) {
+    @plain = ast.plain(block)
+    @count = group.count(plain)
+    @outer = billet.current_function.line
+    drum (count - 1) {
+        @last = no
+        (keep == yes) {
+            (beat + 2 == count) { last = yes }
+        }
+        billet = compile_statement(state.at_line(billet, group.get(plain, beat + 1)), group.get(plain, beat + 1), last)
+    }
+    billet.current_function.line = outer
+    (keep == yes) {
+        (count == 1) {
+            @executor = billet.executor
+            billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
+        }
+    }
+    out billet
+}
+
+skill compile_statement(billet, node, keep) {
+    @executor = billet.executor
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "var") {
+        billet = compile_expression(billet, group.get(plain, 2))
+        out emitters.store_local(billet, group.get(plain, 1), group.get(plain, 2))
+    }
+    (tag == "assign") {
+        @name = group.get(plain, 1)
+        (emitters.subject_field(billet, name) == yes) {
+            out emitters.store_subject_field(pack_fixed(compile_expression(billet, group.get(plain, 2)), group.get(plain, 2)), name)
+        }
+        billet = compile_expression(billet, group.get(plain, 2))
+        out emitters.store_local(billet, name, group.get(plain, 2))
+    }
+    (tag == "field-assign") {
+        @target = ast.plain(group.get(plain, 1))
+        @part_count = group.count(target)
+        @base = group.slice(target, 0, part_count - 1)
+        billet = compile_expression(billet, base)
+        billet = executor.push(billet, backend.VALUE)
+        billet = pack_fixed(compile_expression(billet, group.get(plain, 2)), group.get(plain, 2))
+        billet = executor.move(billet, backend.ARG2, backend.VALUE)
+        billet = executor.pop(billet, backend.VALUE)
+        out emitters.emit_field_set(billet, group.get(target, part_count - 1))
+    }
+    (tag == "out") {
+        @failure = lookup.failure_name(group.get(plain, 1))
+        pick {
+            (str.bytes(failure) > 0) { billet = failures.trail(failures.load_failure(billet, failure)) }
+            (lookup.infer_type(billet, group.get(plain, 1)) == "error") { billet = failures.trail(failures.raise_value(compile_expression(billet, group.get(plain, 1)))) }
+            { billet = compile_expression(billet, group.get(plain, 1)) }
+        }
+        @value_root = constants.REGION_VALUE_ROOT
+        (value.is_raw(lookup.infer_type(billet, group.get(plain, 1))) == yes) { value_root = constants.REGION_VALUE_SKIPPED }
+        billet = executor.load_immediate(billet, backend.ARG2, value_root)
+        out executor.jump(billet, billet.current_function.end)
+    }
+    (tag == "expr") { out compile_expression(billet, group.get(plain, 1)) }
+    (tag == "pick") {
+        @end = state.label(billet, "pick_end")
+        drum (group.count(plain) - 1) {
+            @choice = ast.plain(group.get(plain, beat + 1))
+            (group.get(choice, 0) == "if") {
+                @next = state.label(billet, "pick_next")
+                billet = compile_expression(billet, group.get(choice, 1))
+                billet = emitters.jump_unless_yes(billet, next)
+                billet = compile_block(billet, group.get(choice, 2), keep)
+                billet = executor.jump(billet, end)
+                billet = executor.label(billet, next)
+            }
+            (group.get(choice, 0) == "otherwise") {
+                billet = compile_block(billet, group.get(choice, 1), keep)
+            }
+        }
+        out executor.label(billet, end)
+    }
+    (tag == "leave") {
+        out executor.jump(billet, billet.current_function.drum_exit)
+    }
+    (tag == "if") {
+        @end = state.label(billet, "if_end")
+        billet = compile_expression(billet, group.get(plain, 1))
+        billet = emitters.jump_unless_yes(billet, end)
+        billet = compile_block(billet, group.get(plain, 2), keep)
+        out executor.label(billet, end)
+    }
+    (tag == "present") {
+        @end = state.label(billet, "present_end")
+        billet = compile_expression(billet, group.get(plain, 1))
+        billet = emitters.store_local(billet, group.get(plain, 2), group.get(plain, 1))
+        billet = executor.load_immediate(billet, backend.SCRATCH0, abi.NONE)
+        billet = executor.jump_if_equal(billet, backend.VALUE, backend.SCRATCH0, end)
+        billet = compile_block(billet, group.get(plain, 3), keep)
+        out executor.label(billet, end)
+    }
+    (tag == "switch") {
+        @end = state.label(billet, "switch_end")
+        billet = compile_expression(billet, group.get(plain, 1))
+        billet = executor.move(billet, backend.SCRATCH2, backend.VALUE)
+        drum (group.count(plain) - 2) {
+            @case_node = ast.plain(group.get(plain, beat + 2))
+            @next = state.label(billet, "case_next")
+            @variant = state.symbol_find(billet.variants, group.get(case_node, 1))
+            billet = executor.load_immediate(billet, backend.SCRATCH0, variant.value)
+            billet = executor.jump_if_not_equal(billet, backend.SCRATCH2, backend.SCRATCH0, next)
+            billet = compile_block(billet, group.get(case_node, 2), no)
+            billet = executor.jump(billet, end)
+            billet = executor.label(billet, next)
+        }
+        out executor.label(billet, end)
+    }
+    (tag == "always") {
+        @turn = endless.head(billet, group.get(plain, 1))
+        billet = compile_block(billet, group.get(plain, 1), no)
+        out endless.tail(billet, turn)
+    }
+    (tag == "drum") {
+        @frame = loops.frame(billet)
+        @body = group.get(plain, 2)
+        @uses_beat = state.block_uses_beat(body)
+        billet = compile_expression(billet, group.get(plain, 1))
+        @region = loops.region_open(billet, frame, body)
+        (uses_beat == no) { billet = loops.light_head(billet, frame) }
+        (uses_beat == yes) { billet = loops.head(billet, frame) }
+        @outer_exit = billet.current_function.drum_exit
+        billet.current_function.drum_exit = frame.end
+        billet = compile_block(billet, body, no)
+        billet.current_function.drum_exit = outer_exit
+        billet = loops.region_close(billet, frame, region)
+        (uses_beat == no) { billet = loops.light_tail(billet, frame) }
+        (uses_beat == yes) { billet = loops.tail(billet, frame) }
+        out loops.region_restore(billet, region)
+    }
+    out billet
+}

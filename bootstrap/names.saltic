@@ -25,7 +25,7 @@
 --     BuildFailed; finish(output, target) — проверить подпись (ELF, у UEFI — MZ)
 --     и поставить право на запуск; NotProgram
 -- Внутри: sha(path), file_name(path), saltic_files(folder), source_volume,
---     sources_line(passport), fresh(own, compiler), remove_others, timed(…)
+--     sources_line(passport), fresh(own, builder), remove_others, timed(…)
 
 use io
 use io.file
@@ -131,11 +131,11 @@ skill line_count(path) {
 }
 
 skill source_volume() {
-    @files = group.concat(saltic_files("soul/seed/core"), saltic_files("soul/seed/selfhost"))
+    @files = group.concat(saltic_files("soul/seed/core"), saltic_files("soul/seed/compiler"))
     @lines = 0
     drum (files) { lines = lines + line_count(beat) }
     @count = group.count(files)
-    out "файлов {count}, строк {lines} (soul/seed/core, selfhost)"
+    out "файлов {count}, строк {lines} (soul/seed/core, compiler)"
 }
 
 skill hundredths(text) {
@@ -234,15 +234,15 @@ skill sources_line(passport) {
     out ""
 }
 
-skill fresh(own, compiler) {
+skill fresh(own, builder) {
     (kit.exists(own) == no) { out no }
     @text = file.read("{own}.txt") rescue |err| { out no }
-    @parent = sha(compiler)
+    @parent = sha(builder)
     (str.contains(text, "sha256 {parent})") == yes) { out yes }
     (str.contains(text, "сходится на x86-64") == no) { out no }
     @line = sources_line("{own}.txt")
     (str.bytes(line) == 0) { out no }
-    out line == sources_line(str.concat(passport_path(compiler), ".txt"))
+    out line == sources_line(str.concat(passport_path(builder), ".txt"))
 }
 
 skill remove_others(ending, keep) {
@@ -272,16 +272,16 @@ skill timed(times, command, log, env) {
 
 skill native_compiler() {
     @own = compiler_path("x86_64", "linux", "")
-    @compiler = bootstrap_compiler()
-    (fresh(own, compiler) == yes) { out own }
-    @name = file_name(compiler)
+    @builder = bootstrap_compiler()
+    (fresh(own, builder) == yes) { out own }
+    @name = file_name(builder)
     io.show("bootstrap: перевожу {name} в x86-64 (под qemu-riscv64)")
     remove_others("-compiler-x86_64-linux", own)
     process.run(["mkdir", "-p", ".cache/build"], "", [])
     @started = time.now()
     @heap = TRANSLATE_HEAP
     @log = ".cache/build/bootstrap-native.log"
-    @command = ["qemu-riscv64", "-B", "0x100000000", compiler, "soul/seed/selfhost/toolchain.saltic", own, heap, "x86_64"]
+    @command = ["qemu-riscv64", "-B", "0x100000000", builder, "soul/seed/compiler/toolchain.saltic", own, heap, "x86_64"]
     @qemu = process.locate("qemu-riscv64") rescue |err| { "" }
     (str.bytes(qemu) == 0) { command = group.concat(["nix", "--extra-experimental-features", "nix-command flakes", "develop", "--command"], command) }
     @code = timed(".cache/build/bootstrap-native.time", command, log, [])
@@ -292,7 +292,7 @@ skill native_compiler() {
     finish(own, "x86_64")
     link(own)
     @spent = kit.seconds_since(started)
-    write_passport(Passport { binary = own, runs_on = "x86_64, linux", emits = "rv32i, rv64, x86_64, arm64", parent = compiler, heap = TRANSLATE_HEAP, how = "переведён из {name}", seconds = spent, times = ".cache/build/bootstrap-native.time" })
+    write_passport(Passport { binary = own, runs_on = "x86_64, linux", emits = "rv32i, rv64, x86_64, arm64", parent = builder, heap = TRANSLATE_HEAP, how = "переведён из {name}", seconds = spent, times = ".cache/build/bootstrap-native.time" })
     out own
 }
 
@@ -347,10 +347,10 @@ skill finish(output, target) {
 }
 
 skill build(source, output, heap, target) {
-    @compiler = native_compiler()
+    @builder = native_compiler()
     @part = "{output}.part"
     process.run(["rm", "-f", part], "", [])
-    @code = process.run([compiler, source, part, heap, target], "", [])
+    @code = process.run([builder, source, part, heap, target], "", [])
     ((code == 0) == no) { out error.BuildFailed }
     finish(part, target)
     out process.run(["mv", "-f", part, output], "", [])

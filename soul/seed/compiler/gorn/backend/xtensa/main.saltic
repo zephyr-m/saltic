@@ -1,0 +1,386 @@
+-- xtensa — исполнитель договора машины для LX6, CALL0, без окон.
+-- Слово 4 байта. Образ собирает asm.image_of.
+
+use compiler.abi.shape
+use compiler.gorn.backend
+use compiler.gorn.backend.xtensa.asm
+use compiler.gorn.backend.xtensa.encode
+use compiler.gorn.backend.xtensa.roles
+use compiler.gorn.backend.xtensa.ops
+use compiler.gorn.backend.xtensa.access
+use compiler.gorn.backend.xtensa.control
+use compiler.machine.word
+
+Executor = Box {
+    skill new_program(billet, entry) {
+        billet.words = shape.of(4)
+        billet.machine = asm.fresh(entry)
+        out billet
+    }
+
+    skill heap_size(billet, bytes) {
+        bytes = bytes
+        out billet
+    }
+
+    skill label(billet, name) {
+        billet.machine = asm.define(billet.machine, asm.SEC_CODE, name)
+        out billet
+    }
+
+    skill data_label(billet, where, name) {
+        billet.machine = asm.define(billet.machine, where, name)
+        out billet
+    }
+
+    skill align(billet, where, boundary) {
+        billet.machine = asm.align_to(billet.machine, where, boundary)
+        out billet
+    }
+
+    skill data_byte(billet, where, value) {
+        billet.machine = asm.add_byte(billet.machine, where, value)
+        out billet
+    }
+
+    skill data32(billet, where, value) {
+        out data_word(billet, where, value)
+    }
+
+    skill data_word(billet, where, value) {
+        billet.machine = asm.add_word(billet.machine, where, value)
+        out billet
+    }
+
+    skill data_text(billet, where, text) {
+        billet.machine = asm.add_text(billet.machine, where, text)
+        billet.machine = asm.add_byte(billet.machine, where, 0)
+        out billet
+    }
+
+    skill reserve(billet, bytes) {
+        (word.is_zero(bytes.high) == no) { out error.ValueOutsideRange }
+        billet.machine = asm.reserve(billet.machine, word.to_number(bytes.low))
+        out billet
+    }
+
+    skill load_immediate(billet, to, value) {
+        @r = roles.reg(to)
+        (r >= 0) { billet.machine = ops.imm_reg(billet.machine, r, value) }
+        (r < 0) {
+            billet.machine = access.spill(billet.machine)
+            billet.machine = ops.imm_reg(billet.machine, 14, value)
+            billet.machine = access.finish(billet.machine, to)
+        }
+        out billet
+    }
+
+    skill load_word(billet, to, value) {
+        @n = value.b0 + value.b1 * 256 + value.b2 * 65536 + value.b3 * 16777216
+        out load_immediate(billet, to, n)
+    }
+
+    skill load_address(billet, to, name, addend) {
+        @r = roles.reg(to)
+        (r < 0) {
+            billet.machine = access.spill(billet.machine)
+            billet.machine = asm.label_addr_fix(billet.machine, 14, name, addend)
+            billet.machine = access.finish(billet.machine, to)
+            out billet
+        }
+        billet.machine = asm.label_addr_fix(billet.machine, r, name, addend)
+        out billet
+    }
+
+    skill move(billet, to, from) {
+        billet.machine = ops.move(billet.machine, to, from)
+        out billet
+    }
+
+    skill negate(billet, to, from) {
+        billet.machine = ops.neg(billet.machine, to, from)
+        out billet
+    }
+
+    skill add_immediate(billet, to, from, value) {
+        billet.machine = ops.binary_imm(billet.machine, to, from, value, 0)
+        out billet
+    }
+
+    skill add(billet, to, left, right) {
+        billet.machine = ops.binary(billet.machine, to, left, right, 0)
+        out billet
+    }
+
+    skill sub(billet, to, left, right) {
+        billet.machine = ops.binary(billet.machine, to, left, right, 1)
+        out billet
+    }
+
+    skill and(billet, to, left, right) {
+        billet.machine = ops.binary(billet.machine, to, left, right, 2)
+        out billet
+    }
+
+    skill or(billet, to, left, right) {
+        billet.machine = ops.binary(billet.machine, to, left, right, 3)
+        out billet
+    }
+
+    skill xor(billet, to, left, right) {
+        billet.machine = ops.binary(billet.machine, to, left, right, 4)
+        out billet
+    }
+
+    skill and_immediate(billet, to, from, value) {
+        billet.machine = ops.binary_imm(billet.machine, to, from, value, 2)
+        out billet
+    }
+
+    skill or_immediate(billet, to, from, value) {
+        billet.machine = ops.binary_imm(billet.machine, to, from, value, 3)
+        out billet
+    }
+
+    skill xor_immediate(billet, to, from, value) {
+        billet.machine = ops.binary_imm(billet.machine, to, from, value, 4)
+        out billet
+    }
+
+    skill shift_left(billet, to, from, count) {
+        billet.machine = ops.shift_c(billet.machine, to, from, count, 0)
+        out billet
+    }
+
+    skill shift_right_signed(billet, to, from, count) {
+        billet.machine = ops.shift_c(billet.machine, to, from, count, 2)
+        out billet
+    }
+
+    skill shift_right_unsigned(billet, to, from, count) {
+        billet.machine = ops.shift_c(billet.machine, to, from, count, 1)
+        out billet
+    }
+
+    skill shift_left_by(billet, to, from, count) {
+        billet.machine = ops.shift_by(billet.machine, to, from, count, 0)
+        out billet
+    }
+
+    skill shift_right_unsigned_by(billet, to, from, count) {
+        billet.machine = ops.shift_by(billet.machine, to, from, count, 1)
+        out billet
+    }
+
+    skill set_less(billet, to, left, right) {
+        billet.machine = ops.flag(billet.machine, to, left, right, 0)
+        out billet
+    }
+
+    skill set_less_unsigned(billet, to, left, right) {
+        billet.machine = ops.flag(billet.machine, to, left, right, 1)
+        out billet
+    }
+
+    skill set_less_unsigned_immediate(billet, to, from, value) {
+        billet.machine = access.spill(billet.machine)
+        billet.machine = access.fetch(billet.machine, from, 14)
+        billet.machine = ops.imm_reg(billet.machine, 15, value)
+        billet.machine = asm.emit3(billet.machine, encode.bltu(14, 15, 9))
+        billet.machine = asm.emit3(billet.machine, encode.movi(14, 0))
+        billet.machine = asm.emit3(billet.machine, encode.jump(6))
+        billet.machine = asm.emit3(billet.machine, encode.movi(14, 1))
+        billet.machine = access.finish(billet.machine, to)
+        out billet
+    }
+
+    skill set_zero(billet, to, from) {
+        billet.machine = ops.flag_zero(billet.machine, to, from, yes)
+        out billet
+    }
+
+    skill set_nonzero(billet, to, from) {
+        billet.machine = ops.flag_zero(billet.machine, to, from, no)
+        out billet
+    }
+
+    skill add_checked(billet) {
+        billet.machine = ops.checked(billet.machine, 0)
+        out billet
+    }
+
+    skill sub_checked(billet) {
+        billet.machine = ops.checked(billet.machine, 1)
+        out billet
+    }
+
+    skill load(billet, to, base, offset) {
+        billet.machine = access.load(billet.machine, to, base, offset, 4)
+        out billet
+    }
+
+    skill load32(billet, to, base, offset) {
+        out load(billet, to, base, offset)
+    }
+
+    skill load_byte(billet, to, base, offset) {
+        billet.machine = access.load(billet.machine, to, base, offset, 1)
+        out billet
+    }
+
+    skill load_half(billet, to, base, offset) {
+        billet.machine = access.load(billet.machine, to, base, offset, 2)
+        out billet
+    }
+
+    skill store(billet, from, base, offset) {
+        billet.machine = access.store(billet.machine, from, base, offset, 4)
+        out billet
+    }
+
+    skill store32(billet, from, base, offset) {
+        out store(billet, from, base, offset)
+    }
+
+    skill store_byte(billet, from, base, offset) {
+        billet.machine = access.store(billet.machine, from, base, offset, 1)
+        out billet
+    }
+
+    skill store_half(billet, from, base, offset) {
+        billet.machine = access.store(billet.machine, from, base, offset, 2)
+        out billet
+    }
+
+    skill store_zero(billet, base, offset) {
+        billet.machine = access.zero(billet.machine, base, offset, 4)
+        out billet
+    }
+
+    skill store_byte_zero(billet, base, offset) {
+        billet.machine = access.zero(billet.machine, base, offset, 1)
+        out billet
+    }
+
+    skill push(billet, from) {
+        billet = add_immediate(billet, backend.STACK, backend.STACK, 0 - billet.words.bytes)
+        out store(billet, from, backend.STACK, 0)
+    }
+
+    skill pop(billet, to) {
+        billet = load(billet, to, backend.STACK, 0)
+        out add_immediate(billet, backend.STACK, backend.STACK, billet.words.bytes)
+    }
+
+    skill branch_equal(billet, left, right, name) {
+        billet.machine = control.pair(billet.machine, left, right, 0, name)
+        out billet
+    }
+
+    skill branch_not_equal(billet, left, right, name) {
+        billet.machine = control.pair(billet.machine, left, right, 1, name)
+        out billet
+    }
+
+    skill branch_less(billet, left, right, name) {
+        billet.machine = control.pair(billet.machine, left, right, 2, name)
+        out billet
+    }
+
+    skill branch_greater_equal(billet, left, right, name) {
+        billet.machine = control.pair(billet.machine, left, right, 3, name)
+        out billet
+    }
+
+    skill branch_less_unsigned(billet, left, right, name) {
+        billet.machine = control.pair(billet.machine, left, right, 4, name)
+        out billet
+    }
+
+    skill branch_greater_equal_unsigned(billet, left, right, name) {
+        billet.machine = control.pair(billet.machine, left, right, 5, name)
+        out billet
+    }
+
+    skill branch_zero(billet, from, name) {
+        billet.machine = control.one(billet.machine, from, 0, name)
+        out billet
+    }
+
+    skill branch_nonzero(billet, from, name) {
+        billet.machine = control.one(billet.machine, from, 1, name)
+        out billet
+    }
+
+    skill branch_negative(billet, from, name) {
+        billet.machine = control.one(billet.machine, from, 2, name)
+        out billet
+    }
+
+    skill branch_not_negative(billet, from, name) {
+        billet.machine = control.one(billet.machine, from, 3, name)
+        out billet
+    }
+
+    skill branch_not_positive(billet, from, name) {
+        billet.machine = control.not_positive(billet.machine, from, name)
+        out billet
+    }
+
+    skill jump(billet, name) {
+        billet.machine = asm.jump_to(billet.machine, name)
+        out billet
+    }
+
+    skill jump_if_equal(billet, left, right, name) {
+        out branch_equal(billet, left, right, name)
+    }
+
+    skill jump_if_not_equal(billet, left, right, name) {
+        out branch_not_equal(billet, left, right, name)
+    }
+
+    skill jump_if_zero(billet, from, name) {
+        out branch_zero(billet, from, name)
+    }
+
+    skill jump_if_nonzero(billet, from, name) {
+        out branch_nonzero(billet, from, name)
+    }
+
+    skill jump_far(billet, name) {
+        out jump(billet, name)
+    }
+
+    skill call(billet, name) {
+        billet.machine = asm.call_to(billet.machine, name)
+        out billet
+    }
+
+    skill ret(billet) {
+        billet.machine = asm.emit3(billet.machine, encode.ret())
+        out billet
+    }
+
+    skill syscall(billet, number) {
+        number = number
+        out load_immediate(billet, backend.VALUE, 0)
+    }
+
+    skill wait(billet) {
+        billet.machine = asm.emit3(billet.machine, encode.waiti(0))
+        out billet
+    }
+
+    skill fence(billet) {
+        billet.machine = asm.emit3(billet.machine, encode.memw())
+        out billet
+    }
+
+    skill read_cycles(billet) {
+        billet.machine = asm.emit3(billet.machine, encode.rsr(2, 234))
+        billet.machine = asm.emit3(billet.machine, encode.slli(2, 2, 4))
+        billet.machine = asm.emit3(billet.machine, encode.srli(2, 2, 4))
+        out billet
+    }
+}

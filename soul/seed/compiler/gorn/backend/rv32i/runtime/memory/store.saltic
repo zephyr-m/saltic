@@ -1,0 +1,345 @@
+-- store — хранилище как раздатчик страниц по 4 КБ с низа хранилища вниз
+-- (STORE_BOTTOM). Верх хранилища (rt_store_top, выровнен на страницу) занимает
+-- карта свободных страниц: бит i (1 — свободна) у страницы rt_store_top − i·4096;
+-- страницы ниже низа карта не описывает (они ещё не взяты). Запрос n страниц —
+-- сначала n подряд свободных по карте (от низа вверх, нулевые байты карты — по 8
+-- страниц за шаг), потом низ хранилища вниз; отказ — разбор карантина до конца
+-- (rt_quarantine_drain) и вторая попытка, потом ERROR_MEMORY_EXHAUSTED.
+-- Мелкие объекты (до STORE_LARGE_LIMIT) — ячейками класса размера; у страницы
+-- свой список свободных ячеек и счётчик занятых (заголовок STORE_PAGE_HEADER_BYTES:
+-- класс, занято, голова списка, prev и next в списке неполных страниц класса);
+-- опустевшая страница возвращается в карту. Крупные — прогон страниц (заголовок:
+-- 0, число страниц), объект за заголовком.
+-- Команды — методами billet.executor (договор backend).
+--
+-- emit_store_init(billet) — rt_store_init: из STORE_BOTTOM = конец квоты делает
+--     верх, карту и низ хранилища; зовёт _start
+-- emit_store_pages(billet) — rt_store_pages(VALUE страниц) -> адрес первой
+-- emit_store_release_pages(billet) — rt_store_release_pages(VALUE адрес, ERROR страниц)
+-- emit_store_run / emit_store_cell(billet) — rt_store_run(VALUE страниц) -> прогон;
+--     rt_store_cell(VALUE байт объекта, кратно 8) -> адрес объекта
+-- emit_store_free(billet) — rt_store_free(VALUE адрес объекта)
+-- Внутри: emit_class_lookup(billet, size, prefix) — SCRATCH3 = смещение класса,
+--     SCRATCH2 = байты класса; emit_unlink_partial(billet, page, prefix) — страница
+--     из списка неполных своего класса
+
+use compiler.abi
+use compiler.memory.model
+use compiler.gorn.backend
+use compiler.gorn.backend.rv32i.runtime.tails
+use compiler.gorn.backend.rv32i.runtime.memory.walk
+
+PAGE_SHIFT = 12
+PAGE_LIVE = 4
+PAGE_FREE = 8
+PAGE_PREV = 16
+PAGE_NEXT = 24
+
+skill emit_store_init(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_store_init")
+    billet = executor.move(billet, backend.SCRATCH0, backend.STORE_BOTTOM)
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.SCRATCH0, PAGE_SHIFT)
+    billet = executor.shift_left(billet, backend.SCRATCH0, backend.SCRATCH0, PAGE_SHIFT)
+    billet = executor.load_address(billet, backend.SCRATCH1, walk.STORE_TOP_LABEL, 0)
+    billet = executor.store(billet, backend.SCRATCH0, backend.SCRATCH1, 0)
+    billet = executor.load_address(billet, backend.SCRATCH1, walk.HEAP_START_LABEL, 0)
+    billet = executor.load(billet, backend.SCRATCH1, backend.SCRATCH1, 0)
+    billet = executor.sub(billet, backend.SCRATCH1, backend.SCRATCH0, backend.SCRATCH1)
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH1, backend.SCRATCH1, PAGE_SHIFT + 3)
+    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, model.STORE_PAGE_BYTES - 1)
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH1, backend.SCRATCH1, PAGE_SHIFT)
+    billet = executor.shift_left(billet, backend.SCRATCH1, backend.SCRATCH1, PAGE_SHIFT)
+    billet = executor.sub(billet, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH1)
+    billet = executor.load_address(billet, backend.SCRATCH1, walk.STORE_BITMAP_LABEL, 0)
+    billet = executor.store(billet, backend.SCRATCH0, backend.SCRATCH1, 0)
+    billet = executor.move(billet, backend.STORE_BOTTOM, backend.SCRATCH0)
+    billet = executor.load_address(billet, backend.SCRATCH1, walk.SWEEP_BATCH_LABEL, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH0, model.QUARANTINE_BATCH)
+    billet = executor.store(billet, backend.SCRATCH0, backend.SCRATCH1, 0)
+    out executor.ret(billet)
+}
+
+skill emit_store_pages(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_store_pages")
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 4)
+    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 3)
+    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * 2)
+    billet = executor.store_zero(billet, backend.STACK, words.bytes)
+    billet = executor.label(billet, ".L_store_pages_try")
+    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * 2)
+    billet = executor.load_address(billet, backend.SCRATCH4, walk.STORE_TOP_LABEL, 0)
+    billet = executor.load(billet, backend.SCRATCH4, backend.SCRATCH4, 0)
+    billet = executor.load_address(billet, backend.ARG7, walk.STORE_BITMAP_LABEL, 0)
+    billet = executor.load(billet, backend.ARG7, backend.ARG7, 0)
+    billet = executor.sub(billet, backend.SCRATCH0, backend.SCRATCH4, backend.STORE_BOTTOM)
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.SCRATCH0, PAGE_SHIFT)
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 0)
+    billet = executor.label(billet, ".L_store_pages_scan")
+    billet = executor.branch_zero(billet, backend.SCRATCH0, ".L_store_pages_frontier")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH2, backend.SCRATCH0, 3)
+    billet = executor.add(billet, backend.SCRATCH2, backend.ARG7, backend.SCRATCH2)
+    billet = executor.load_byte(billet, backend.SCRATCH2, backend.SCRATCH2, 0)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH2, ".L_store_pages_bit")
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 0)
+    billet = executor.and_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, -8)
+    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, -1)
+    billet = executor.branch_negative(billet, backend.SCRATCH0, ".L_store_pages_frontier")
+    billet = executor.jump(billet, ".L_store_pages_scan")
+    billet = executor.label(billet, ".L_store_pages_bit")
+    billet = executor.and_immediate(billet, backend.SCRATCH3, backend.SCRATCH0, 7)
+    billet = executor.shift_right_unsigned_by(billet, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH3)
+    billet = executor.and_immediate(billet, backend.SCRATCH2, backend.SCRATCH2, 1)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH2, ".L_store_pages_free")
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 0)
+    billet = executor.jump(billet, ".L_store_pages_step")
+    billet = executor.label(billet, ".L_store_pages_free")
+    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, 1)
+    billet = executor.branch_equal(billet, backend.SCRATCH1, backend.VALUE, ".L_store_pages_found")
+    billet = executor.label(billet, ".L_store_pages_step")
+    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, -1)
+    billet = executor.jump(billet, ".L_store_pages_scan")
+    billet = executor.label(billet, ".L_store_pages_found")
+    billet = executor.add(billet, backend.SCRATCH1, backend.SCRATCH0, backend.VALUE)
+    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, -1)
+    billet = executor.shift_left(billet, backend.SCRATCH2, backend.SCRATCH1, PAGE_SHIFT)
+    billet = executor.sub(billet, backend.ERROR, backend.SCRATCH4, backend.SCRATCH2)
+    billet = executor.label(billet, ".L_store_pages_clear")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH2, backend.SCRATCH1, 3)
+    billet = executor.add(billet, backend.SCRATCH2, backend.ARG7, backend.SCRATCH2)
+    billet = executor.and_immediate(billet, backend.SCRATCH3, backend.SCRATCH1, 7)
+    billet = executor.load_immediate(billet, backend.SCRATCH4, 1)
+    billet = executor.shift_left_by(billet, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH3)
+    billet = executor.load_byte(billet, backend.SCRATCH3, backend.SCRATCH2, 0)
+    billet = executor.xor(billet, backend.SCRATCH3, backend.SCRATCH3, backend.SCRATCH4)
+    billet = executor.store_byte(billet, backend.SCRATCH3, backend.SCRATCH2, 0)
+    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, -1)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH1, backend.SCRATCH0, ".L_store_pages_taken")
+    billet = executor.jump(billet, ".L_store_pages_clear")
+    billet = executor.label(billet, ".L_store_pages_taken")
+    billet = executor.move(billet, backend.VALUE, backend.ERROR)
+    billet = executor.jump(billet, ".L_store_pages_ok")
+    billet = executor.label(billet, ".L_store_pages_frontier")
+    billet = executor.shift_left(billet, backend.SCRATCH0, backend.VALUE, PAGE_SHIFT)
+    billet = executor.sub(billet, backend.SCRATCH1, backend.STORE_BOTTOM, backend.SCRATCH0)
+    billet = executor.branch_less_unsigned(billet, backend.STORE_BOTTOM, backend.SCRATCH1, ".L_store_pages_refused")
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH1, backend.HEAP_TOP, ".L_store_pages_refused")
+    billet = executor.load_address(billet, backend.SCRATCH2, walk.STORE_FLOOR_LABEL, 0)
+    billet = executor.load(billet, backend.SCRATCH2, backend.SCRATCH2, 0)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH1, backend.SCRATCH2, ".L_store_pages_refused")
+    billet = executor.move(billet, backend.STORE_BOTTOM, backend.SCRATCH1)
+    billet = executor.move(billet, backend.VALUE, backend.SCRATCH1)
+    billet = executor.label(billet, ".L_store_pages_ok")
+    billet = executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
+    billet = executor.jump(billet, ".L_store_pages_return")
+    billet = executor.label(billet, ".L_store_pages_refused")
+    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, ".L_store_pages_failed")
+    billet = executor.load_address(billet, backend.SCRATCH0, walk.SWEEP_BUSY_LABEL, 0)
+    billet = executor.load(billet, backend.SCRATCH0, backend.SCRATCH0, 0)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, ".L_store_pages_failed")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, 1)
+    billet = executor.store(billet, backend.SCRATCH0, backend.STACK, words.bytes)
+    billet = executor.call(billet, "rt_quarantine_drain")
+    billet = executor.jump(billet, ".L_store_pages_try")
+    billet = executor.label(billet, ".L_store_pages_failed")
+    billet = executor.load_immediate(billet, backend.VALUE, 0)
+    billet = executor.load_immediate(billet, backend.ERROR, abi.ERROR_MEMORY_EXHAUSTED)
+    billet = executor.label(billet, ".L_store_pages_return")
+    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 3)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 4)
+    out executor.ret(billet)
+}
+
+skill emit_store_release_pages(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_store_release_pages")
+    billet = executor.load_address(billet, backend.SCRATCH4, walk.STORE_TOP_LABEL, 0)
+    billet = executor.load(billet, backend.SCRATCH4, backend.SCRATCH4, 0)
+    billet = executor.load_address(billet, backend.SCRATCH0, walk.STORE_BITMAP_LABEL, 0)
+    billet = executor.load(billet, backend.SCRATCH0, backend.SCRATCH0, 0)
+    billet = executor.sub(billet, backend.SCRATCH1, backend.SCRATCH4, backend.VALUE)
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH1, backend.SCRATCH1, PAGE_SHIFT)
+    billet = executor.label(billet, ".L_release_pages_loop")
+    billet = executor.branch_zero(billet, backend.ERROR, ".L_release_pages_done")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH2, backend.SCRATCH1, 3)
+    billet = executor.add(billet, backend.SCRATCH2, backend.SCRATCH0, backend.SCRATCH2)
+    billet = executor.and_immediate(billet, backend.SCRATCH3, backend.SCRATCH1, 7)
+    billet = executor.load_immediate(billet, backend.SCRATCH4, 1)
+    billet = executor.shift_left_by(billet, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH3)
+    billet = executor.load_byte(billet, backend.SCRATCH3, backend.SCRATCH2, 0)
+    billet = executor.or(billet, backend.SCRATCH3, backend.SCRATCH3, backend.SCRATCH4)
+    billet = executor.store_byte(billet, backend.SCRATCH3, backend.SCRATCH2, 0)
+    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, -1)
+    billet = executor.add_immediate(billet, backend.ERROR, backend.ERROR, -1)
+    billet = executor.jump(billet, ".L_release_pages_loop")
+    billet = executor.label(billet, ".L_release_pages_done")
+    out executor.ret(billet)
+}
+
+skill emit_store_run(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_store_run")
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 4)
+    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 3)
+    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * 2)
+    billet = executor.call(billet, "rt_store_pages")
+    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 3)
+    billet = executor.load(billet, backend.SCRATCH3, backend.STACK, words.bytes * 2)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 4)
+    billet = executor.branch_nonzero(billet, backend.ERROR, ".L_store_run_refused")
+    billet = executor.load_immediate(billet, backend.SCRATCH2, 0)
+    billet = executor.store32(billet, backend.SCRATCH2, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    billet = executor.store32(billet, backend.SCRATCH3, backend.VALUE, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_store_run_refused")
+    out executor.ret(billet)
+}
+
+skill emit_class_lookup(billet, size, prefix) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.load_address(billet, backend.SCRATCH4, walk.STORE_CLASSES_LABEL, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH3, 0)
+    billet = executor.label(billet, "{prefix}_class")
+    billet = executor.add(billet, backend.SCRATCH2, backend.SCRATCH4, backend.SCRATCH3)
+    billet = executor.load(billet, backend.SCRATCH2, backend.SCRATCH2, 0)
+    billet = executor.branch_greater_equal_unsigned(billet, backend.SCRATCH2, size, "{prefix}_class_found")
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, words.bytes)
+    billet = executor.jump(billet, "{prefix}_class")
+    out executor.label(billet, "{prefix}_class_found")
+}
+
+skill emit_unlink_partial(billet, page, prefix) {
+    @executor = billet.executor
+    billet = executor.load(billet, backend.SCRATCH1, page, PAGE_NEXT)
+    billet = executor.load(billet, backend.SCRATCH0, page, PAGE_PREV)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, "{prefix}_unlink_mid")
+    billet = executor.store(billet, backend.SCRATCH1, backend.SCRATCH4, 0)
+    billet = executor.jump(billet, "{prefix}_unlink_next")
+    billet = executor.label(billet, "{prefix}_unlink_mid")
+    billet = executor.store(billet, backend.SCRATCH1, backend.SCRATCH0, PAGE_NEXT)
+    billet = executor.label(billet, "{prefix}_unlink_next")
+    billet = executor.branch_zero(billet, backend.SCRATCH1, "{prefix}_unlinked")
+    billet = executor.store(billet, backend.SCRATCH0, backend.SCRATCH1, PAGE_PREV)
+    out executor.label(billet, "{prefix}_unlinked")
+}
+
+skill emit_store_cell(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_store_cell")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, model.STORE_LARGE_LIMIT)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH0, backend.VALUE, ".L_store_cell_large")
+    billet = emit_class_lookup(billet, backend.VALUE, ".L_store_cell")
+    billet = executor.load_address(billet, backend.SCRATCH4, walk.STORE_PARTIAL_LABEL, 0)
+    billet = executor.add(billet, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH3)
+    billet = executor.load(billet, backend.SCRATCH0, backend.SCRATCH4, 0)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, ".L_store_cell_take")
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 4)
+    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 3)
+    billet = executor.store(billet, backend.SCRATCH2, backend.STACK, words.bytes * 2)
+    billet = executor.store(billet, backend.SCRATCH4, backend.STACK, words.bytes)
+    billet = executor.load_immediate(billet, backend.VALUE, 1)
+    billet = executor.call(billet, "rt_store_pages")
+    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 3)
+    billet = executor.load(billet, backend.SCRATCH2, backend.STACK, words.bytes * 2)
+    billet = executor.load(billet, backend.SCRATCH4, backend.STACK, words.bytes)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 4)
+    billet = executor.branch_nonzero(billet, backend.ERROR, ".L_store_cell_refused")
+    billet = executor.store32(billet, backend.SCRATCH2, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    billet = executor.load_immediate(billet, backend.SCRATCH3, 0)
+    billet = executor.store32(billet, backend.SCRATCH3, backend.VALUE, PAGE_LIVE)
+    billet = executor.store_zero(billet, backend.VALUE, PAGE_FREE)
+    billet = executor.store_zero(billet, backend.VALUE, PAGE_PREV)
+    billet = executor.store_zero(billet, backend.VALUE, PAGE_NEXT)
+    billet = executor.store(billet, backend.VALUE, backend.SCRATCH4, 0)
+    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.VALUE, model.STORE_PAGE_BYTES)
+    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.VALUE, model.STORE_PAGE_HEADER_BYTES)
+    billet = executor.label(billet, ".L_store_cell_carve")
+    billet = executor.add(billet, backend.SCRATCH3, backend.SCRATCH0, backend.SCRATCH2)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH1, backend.SCRATCH3, ".L_store_cell_carved")
+    billet = executor.load(billet, backend.ARG7, backend.VALUE, PAGE_FREE)
+    billet = executor.store(billet, backend.ARG7, backend.SCRATCH0, words.payload)
+    billet = executor.store(billet, backend.SCRATCH0, backend.VALUE, PAGE_FREE)
+    billet = executor.move(billet, backend.SCRATCH0, backend.SCRATCH3)
+    billet = executor.jump(billet, ".L_store_cell_carve")
+    billet = executor.label(billet, ".L_store_cell_carved")
+    billet = executor.move(billet, backend.SCRATCH0, backend.VALUE)
+    billet = executor.label(billet, ".L_store_cell_take")
+    billet = executor.load(billet, backend.SCRATCH1, backend.SCRATCH0, PAGE_FREE)
+    billet = executor.load(billet, backend.SCRATCH2, backend.SCRATCH1, words.payload)
+    billet = executor.store(billet, backend.SCRATCH2, backend.SCRATCH0, PAGE_FREE)
+    billet = executor.load32(billet, backend.SCRATCH3, backend.SCRATCH0, PAGE_LIVE)
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, 1)
+    billet = executor.store32(billet, backend.SCRATCH3, backend.SCRATCH0, PAGE_LIVE)
+    billet = executor.move(billet, backend.VALUE, backend.SCRATCH1)
+    billet = executor.store_zero(billet, backend.VALUE, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH2, ".L_store_cell_ok")
+    billet = emit_unlink_partial(billet, backend.SCRATCH0, ".L_store_cell")
+    billet = executor.label(billet, ".L_store_cell_ok")
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_store_cell_large")
+    billet = executor.add_immediate(billet, backend.VALUE, backend.VALUE, model.STORE_PAGE_HEADER_BYTES + model.STORE_PAGE_BYTES - 1)
+    billet = executor.shift_right_unsigned(billet, backend.VALUE, backend.VALUE, PAGE_SHIFT)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 4)
+    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 3)
+    billet = executor.call(billet, "rt_store_run")
+    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 3)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 4)
+    billet = executor.branch_nonzero(billet, backend.ERROR, ".L_store_cell_refused")
+    billet = executor.add_immediate(billet, backend.VALUE, backend.VALUE, model.STORE_PAGE_HEADER_BYTES)
+    billet = executor.store_zero(billet, backend.VALUE, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_store_cell_refused")
+    out executor.ret(billet)
+}
+
+skill emit_store_free(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_store_free")
+    billet = walk.emit_object_size(billet, backend.SCRATCH1, backend.VALUE)
+    billet = executor.load_immediate(billet, backend.SCRATCH0, model.STORE_LARGE_LIMIT)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH0, backend.SCRATCH1, ".L_store_free_large")
+    billet = executor.shift_right_unsigned(billet, backend.ARG7, backend.VALUE, PAGE_SHIFT)
+    billet = executor.shift_left(billet, backend.ARG7, backend.ARG7, PAGE_SHIFT)
+    billet = executor.load32(billet, backend.SCRATCH1, backend.ARG7, abi.OBJECT_HEADER_KIND_OFFSET)
+    billet = emit_class_lookup(billet, backend.SCRATCH1, ".L_store_free")
+    billet = executor.load_address(billet, backend.SCRATCH4, walk.STORE_PARTIAL_LABEL, 0)
+    billet = executor.add(billet, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH3)
+    billet = executor.load_immediate(billet, backend.SCRATCH0, model.STORE_KIND_FREE)
+    billet = executor.store32(billet, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    billet = executor.store_zero(billet, backend.VALUE, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    billet = executor.load(billet, backend.SCRATCH2, backend.ARG7, PAGE_FREE)
+    billet = executor.store(billet, backend.SCRATCH2, backend.VALUE, words.payload)
+    billet = executor.store(billet, backend.VALUE, backend.ARG7, PAGE_FREE)
+    billet = executor.load32(billet, backend.SCRATCH3, backend.ARG7, PAGE_LIVE)
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, -1)
+    billet = executor.store32(billet, backend.SCRATCH3, backend.ARG7, PAGE_LIVE)
+    billet = executor.branch_zero(billet, backend.SCRATCH3, ".L_store_free_page")
+    billet = executor.branch_nonzero(billet, backend.SCRATCH2, ".L_store_free_done")
+    billet = executor.load(billet, backend.SCRATCH0, backend.SCRATCH4, 0)
+    billet = executor.store(billet, backend.SCRATCH0, backend.ARG7, PAGE_NEXT)
+    billet = executor.store_zero(billet, backend.ARG7, PAGE_PREV)
+    billet = executor.branch_zero(billet, backend.SCRATCH0, ".L_store_free_front")
+    billet = executor.store(billet, backend.ARG7, backend.SCRATCH0, PAGE_PREV)
+    billet = executor.label(billet, ".L_store_free_front")
+    billet = executor.store(billet, backend.ARG7, backend.SCRATCH4, 0)
+    billet = executor.label(billet, ".L_store_free_done")
+    billet = executor.ret(billet)
+    billet = executor.label(billet, ".L_store_free_page")
+    billet = executor.branch_zero(billet, backend.SCRATCH2, ".L_store_free_release")
+    billet = emit_unlink_partial(billet, backend.ARG7, ".L_store_free")
+    billet = executor.label(billet, ".L_store_free_release")
+    billet = executor.move(billet, backend.VALUE, backend.ARG7)
+    billet = executor.load_immediate(billet, backend.ERROR, 1)
+    billet = executor.jump(billet, "rt_store_release_pages")
+    billet = executor.label(billet, ".L_store_free_large")
+    billet = executor.add_immediate(billet, backend.VALUE, backend.VALUE, -model.STORE_PAGE_HEADER_BYTES)
+    billet = executor.load32(billet, backend.ERROR, backend.VALUE, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
+    out executor.jump(billet, "rt_store_release_pages")
+}

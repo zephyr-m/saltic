@@ -32,7 +32,7 @@
 
 | Часть | Файлов | Строк |
 |---|---:|---:|
-| `seed/selfhost` — компилятор на самом Saltic | 83 | 16 172 |
+| `seed/compiler` — компилятор на самом Saltic | 83 | 16 172 |
 | ↳ `compiler` — генерация кода, бэкенды RV32I и x86-64, машинный слой | 49 | 10 664 |
 | ↳ `parser` — лексер и разбор | 8 | 1 558 |
 | ↳ `checker` — проверка типов и правил | 8 | 1 505 |
@@ -75,13 +75,13 @@ x86-версия с 154:47:128 — родной бэкенд, а не перев
 | `os/fonts/spleen.saltic` | 990 |
 | `os/target/uefi_x86_64/agent/main.saltic` | 773 |
 | `os/uiengine/components/desktop/drop.saltic` | 686 — исключение по решению автора |
-| `soul/seed/selfhost/compiler/backend/rv32i/machine/layout.saltic` | 610 |
+| `soul/seed/compiler/gorn/backend/rv32i/machine/layout.saltic` | 610 |
 | `os/apps/colony/colony.saltic` | 582 |
 | `registry/libraries/uiengine/jtml.saltic` | 566 |
 | `soul/seed/proof/contract.saltic` | 561 |
-| `soul/seed/selfhost/compiler/codegen/main.saltic` | 550 |
-| `soul/seed/selfhost/checker/walk.saltic` | 527 |
-| `soul/seed/selfhost/compiler/state.saltic` | 509 |
+| `soul/seed/compiler/gorn/codegen/main.saltic` | 550 |
+| `soul/seed/compiler/checker/walk.saltic` | 527 |
+| `soul/seed/compiler/gorn/state.saltic` | 509 |
 | `os/target/uefi_x86_64/screen/glyphs.saltic` | 502 |
 
 Самый длинный в прошлый раз — `soul/seed/proof/machine/translation.saltic`

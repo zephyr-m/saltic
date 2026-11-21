@@ -1,0 +1,152 @@
+-- literals — листья выражений: числа, шаблоны строк, приоритет операторов.
+-- Составные выражения (вызов, Box, бинарные, rescue) рекурсивны вместе с
+-- инструкциями и живут в expressions, statements, lists и declarations; здесь —
+-- то, что не зовёт разбор снова.
+--
+-- Literals = Box { look } — look — Reader; навыки:
+-- number_literal(token, sign, digits, next) -> Read number / wide-number / fraction-number
+-- template(token, start) -> Read template; ошибка bad_template_name
+-- precedence(kind) -> 1 звенья ○ ○○, 2 сравнение (и ~=), 3 + -, 4 * / %, -1 не
+--     оператор; linking / comparing(kind) -> звено ли, сравнение ли
+-- order(index, operator, before, linked) -> [] или ошибка у index (решение
+--     автора 21.11.2026: порядок — только скобками): сравнение рядом с ○ / ○○
+--     — в своих скобках (linked — справа звено; before — прошлый знак этого
+--     ряда), ○ и ○○ в одном ряду не смешиваются; голое сравнение вне звеньев
+--     ловит limits (workbench/check/limits/parens), не разбор
+-- joined(operator, left, right) -> узел binary или logic (○ и ○○)
+-- placeholder_path(name) -> ["path", …] или [] для плохого имени в "{…}"
+-- number_value(text) -> число; number_is_wide(text) -> answer (не влезает в 29 бит)
+
+use core.str
+use core.group
+use core.num
+use compiler.errors
+use compiler.abi
+use compiler.abi.fixed
+use compiler.parser.token
+use compiler.parser.syntax.reader
+
+COMPARISONS = [Token.Kind.EQ, Token.Kind.NEAR, Token.Kind.GT, Token.Kind.LT, Token.Kind.GE, Token.Kind.LE]
+COMPARISON_SIGNS = ["==", "~=", ">", "<", ">=", "<="]
+LINK_SIGNS = ["○", "○○"]
+
+Literals = Box {
+    look = Reader {}
+
+    skill number_literal(word, sign, digits, next) {
+        @text = str.concat(sign, digits)
+        (str.contains(digits, ".") == yes) { out look.ok("fraction-number", look.loc(["fraction-number", text], word, look.locations), next) }
+        (number_is_wide(digits) == yes) { out look.ok("wide-number", look.loc(["wide-number", text], word, look.locations), next) }
+        @value = number_value(digits)
+        (sign == "-") { value = -value }
+        out look.ok("number", look.loc(["number", value], word, look.locations), next)
+    }
+
+    skill template(word, start) {
+        @datum = ["template"]
+        drum (group.count(word.parts)) {
+            @part = group.get(word.parts, beat)
+            pick {
+                (beat % 2 == 0) { datum = group.add(datum, part) }
+                {
+                    @segments = placeholder_path(part)
+                    (group.count(segments) == 0) { out look.fail_with(start, errors.bad_template_name(part)) }
+                    datum = group.add(datum, look.loc(segments, word, look.locations))
+                }
+            }
+        }
+        out look.ok("template", look.loc(datum, word, look.locations), start + 1)
+    }
+
+    skill precedence(kind) {
+        (linking(kind) == yes) {
+            out 1
+        }
+        (comparing(kind) == yes) {
+            out 2
+        }
+        (kind == Token.Kind.PLUS) { out 3 }
+        (kind == Token.Kind.MINUS) { out 3 }
+        (kind == Token.Kind.STAR) { out 4 }
+        (kind == Token.Kind.SLASH) { out 4 }
+        (kind == Token.Kind.PERCENT) { out 4 }
+        out -1
+    }
+
+    skill linking(kind) {
+        (kind == Token.Kind.AND) {
+            out yes
+        }
+        out kind == Token.Kind.OR
+    }
+
+    skill comparing(kind) {
+        out group.contains(COMPARISONS, kind)
+    }
+
+    skill order(index, operator, before, linked) {
+        @problem = errors.ok()
+        (comparing(operator.kind) == yes) {
+            (linked == yes) {
+                problem = errors.comparison_needs_parens(operator.value)
+            }
+        }
+        (linking(operator.kind) == yes) {
+            (group.contains(COMPARISON_SIGNS, before) == yes) {
+                problem = errors.comparison_needs_parens(before)
+            }
+            (group.contains(LINK_SIGNS, before) == yes) {
+                ((before == operator.value) == no) {
+                    problem = errors.links_mixed()
+                }
+            }
+        }
+        (errors.is_ok(problem) == yes) {
+            out []
+        }
+        @refused = look.fail_with(index, problem)
+        out refused.diagnostics
+    }
+
+    skill joined(operator, left, right) {
+        @tag = "binary"
+        (linking(operator.kind) == yes) {
+            tag = "logic"
+        }
+        out look.make_node(tag, look.loc([tag, operator.value, left.datum, right], operator, look.locations))
+    }
+
+    skill placeholder_path(name) {
+        (str.bytes(name) == 0) { out [] }
+        (str.starts_with(name, ".") == yes) { out [] }
+        (str.ends_with(name, ".") == yes) { out [] }
+        (str.contains(name, "..") == yes) { out [] }
+        out group.concat(["path"], str.split(name, "."))
+    }
+
+    skill number_value(text) {
+        @whole = 0
+        @fraction = 0
+        @scale = 1
+        @after_dot = no
+        drum (str.bytes(text)) {
+            @ch = str.get(text, beat)
+            (ch == ".") { after_dot = yes }
+            (str.is_digit(ch) == yes) {
+                pick {
+                    (after_dot == no) { whole = whole * 10 + num.digit_value(ch) }
+                    {
+                        fraction = fraction * 10 + num.digit_value(ch)
+                        scale = scale * 10
+                    }
+                }
+            }
+        }
+        out whole + fraction / scale
+    }
+
+    skill number_is_wide(text) {
+        (str.contains(text, ".") == yes) { out no }
+        out fixed.unsigned_greater(text, num.MAXIMUM_TEXT)
+    }
+}

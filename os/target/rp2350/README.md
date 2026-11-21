@@ -3,7 +3,7 @@
 ⬜ **Не начата.** Записана 03.11.2026.
 
 - **Платы:** Pimoroni Pico Plus 2 (520 КБ + 8 МБ PSRAM); голый Pico 2 — только при смелом прогнозе.
-- **Бэкенд:** RV32I на ядрах Hazard3 (без нового бэкенда), потом Thumb-2 на Cortex-M33 — `soul/seed/selfhost/compiler/backend/`.
+- **Бэкенд:** RV32I на ядрах Hazard3 (без нового бэкенда), потом Thumb-2 на Cortex-M33 — `soul/seed/compiler/gorn/backend/`.
 - **Зачем:** первый робот: загрузка с флеша (блок `IMAGE_DEF`), GPIO, таймеры, UART, PIO для моторов.
 - **Когда:** эпоха 3 — ядро ОС и параллельно проверка на железе.
 - **Документация:** RP2350 Datasheet (Raspberry Pi).

@@ -1,0 +1,240 @@
+-- walk — обход тел навыков: раздаёт узлы частям по виду (Values, Operators,
+-- Calls, Bindings, Branches, Loops) — они зовут обход обратно по кругу и не
+-- держат друг друга в полях: часть создаётся в момент вызова на тех же
+-- помощниках. Здесь: блок, rescue и (значение) |имя|, параметры навыка,
+-- выражение без действия (Q-025).
+
+use core.str
+use core.group
+use compiler.ast
+use compiler.errors
+use compiler.intrinsic.contract
+use compiler.checker.names
+use compiler.checker.names.paths
+use compiler.checker.notes
+use compiler.checker.rules.cycles
+use compiler.checker.rules
+use compiler.checker.rules.numbers
+use compiler.checker.types
+use compiler.checker.types.shapes
+use compiler.checker.types.signatures
+use compiler.checker.walk.bindings
+use compiler.checker.walk.branches
+use compiler.checker.walk.calls
+use compiler.checker.walk.loops
+use compiler.checker.walk.operators
+use compiler.checker.walk.values
+
+VALUE_MARKER = "$value_block"
+CASE_MARKER = "$case_block"
+
+Walk = Box {
+    register = Names {},
+    routes = Paths {},
+    journal = Notes {},
+    forms = Shapes {},
+    typing = Types {},
+    signing = Signatures {},
+    arithmetic = Numbers {},
+    law = Rules {},
+    knots = Cycles {}
+
+    skill check_expression(node, scope, globals, diagnostics) {
+        @plain = ast.plain(node)
+        @tag = group.get(plain, 0)
+        ((tag == "fraction-number") ○○ (tag == "wide-number") ○○ (tag == "template") ○○ (tag == "enum-value") ○○ (tag == "path") ○○ (tag == "negate")) {
+            @part = valuing()
+            out part.walk_node(tag, node, plain, scope, globals, diagnostics)
+        }
+        ((tag == "binary") ○○ (tag == "logic")) {
+            @part = operating()
+            out part.walk_node(tag, node, plain, scope, globals, diagnostics)
+        }
+        ((tag == "call") ○○ (tag == "group") ○○ (tag == "box-new")) {
+            @part = calling()
+            out part.walk_node(tag, node, plain, scope, globals, diagnostics)
+        }
+        (tag == "rescue") {
+            out named_block(node, "error", scope, globals, diagnostics)
+        }
+        out journal.walked(node, diagnostics)
+    }
+
+    skill check_statement(node, scope, globals, diagnostics) {
+        @plain = ast.plain(node)
+        @tag = group.get(plain, 0)
+        ((tag == "var") ○○ (tag == "assign") ○○ (tag == "field-assign") ○○ (tag == "out") ○○ (tag == "expr")) {
+            @part = binding()
+            out part.walk_node(tag, node, plain, scope, globals, diagnostics)
+        }
+        ((tag == "pick") ○○ (tag == "if") ○○ (tag == "present") ○○ (tag == "switch")) {
+            @part = branching()
+            out part.walk_node(tag, node, plain, scope, globals, diagnostics)
+        }
+        ((tag == "leave") ○○ (tag == "always") ○○ (tag == "drum")) {
+            @part = looping()
+            out part.walk_node(tag, node, plain, scope, globals, diagnostics)
+        }
+        out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, errors.unknown_statement(tag))))
+    }
+
+    skill check_block(block, scope, globals, diagnostics) {
+        @plain = ast.plain(block)
+        @current = block
+        drum (group.count(plain) - 1) {
+            @statement_walked = check_statement(group.get(plain, beat + 1), scope, globals, check_effect(group.get(plain, beat + 1), (beat + 2 == group.count(plain)), scope, diagnostics))
+            diagnostics = statement_walked.diagnostics
+            current = ast.with_part(current, beat + 1, statement_walked.node)
+        }
+        out journal.walked(current, diagnostics)
+    }
+
+    skill named_block(node, type, scope, globals, diagnostics) {
+        @plain = ast.plain(node)
+        @value_walked = check_expression(group.get(plain, 1), scope, globals, diagnostics)
+        @child = Names.Scope {
+            names = scope.names,
+            subject = scope.subject,
+            module = scope.module
+        }
+        @named = routes.check_module_name(node, group.get(plain, 2), scope.module, globals, value_walked.diagnostics)
+        child.names = register.bind_name(child.names, group.get(plain, 2), "variable", type)
+        (ast.tag(node) == "rescue") { child.names = register.put_name(child.names, VALUE_MARKER, "variable", "unknown") }
+        @block_walked = check_block(group.get(plain, 3), child, globals, named)
+        out journal.walked(ast.with_part(ast.with_part(node, 1, value_walked.node), 3, block_walked.node), block_walked.diagnostics)
+    }
+
+    skill check_params(owner, params, globals, subject, module, body, diagnostics) {
+        @scope = Names.Scope {
+            subject = subject,
+            module = module
+        }
+        @full = signing.owner_name(owner, subject, module)
+        @result = register.table_find(globals, register.result_key(full))
+        (str.bytes(subject) > 0) {
+            @model = register.table_find(globals, subject)
+            drum (group.count(ast.plain(model.node)) - 2) {
+                @member = ast.part(model.node, beat + 2)
+                (ast.tag(member) == "field") { scope.names = register.put_name(scope.names, ast.part(member, 1), "field", forms.stored(typing.field_type(ast.part(member, 2), module, globals))) }
+            }
+        }
+        drum (params) {
+            pick {
+                (register.has_name(scope.names, beat) == yes) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(owner, errors.duplicate_param(beat))) }
+                {
+                    diagnostics = routes.check_module_name(owner, beat, module, globals, diagnostics)
+                    scope.names = register.put_name(scope.names, beat, "parameter", signing.param_type(globals, full, params, beat))
+                }
+            }
+        }
+        (str.bytes(full) > 0) { scope.names = register.put_name(scope.names, signatures.OUT_MARKER, "variable", result.type) }
+        out check_block(body, scope, globals, knots.check_cycles(body, diagnostics))
+    }
+
+    skill check_effect(statement, last, scope, diagnostics) {
+        @plain = ast.plain(statement)
+        ((group.get(plain, 0) == "expr") == no) {
+            out diagnostics
+        }
+        @inner = ast.tag(group.get(plain, 1))
+        (inner == "call") {
+            out diagnostics
+        }
+        (inner == "rescue") {
+            out diagnostics
+        }
+        (register.has_name(scope.names, CASE_MARKER) == yes) {
+            out diagnostics
+        }
+        (last == yes) {
+            (register.has_name(scope.names, VALUE_MARKER) == yes) {
+                out diagnostics
+            }
+        }
+        out journal.add_diagnostic(diagnostics, journal.placed(group.get(plain, 1), errors.expression_without_effect()))
+    }
+
+    skill valuing() {
+        out Values {
+            register = register,
+            routes = routes,
+            journal = journal,
+            forms = forms,
+            typing = typing,
+            signing = signing,
+            arithmetic = arithmetic,
+            law = law,
+            knots = knots
+        }
+    }
+
+    skill operating() {
+        out Operators {
+            register = register,
+            routes = routes,
+            journal = journal,
+            forms = forms,
+            typing = typing,
+            signing = signing,
+            arithmetic = arithmetic,
+            law = law,
+            knots = knots
+        }
+    }
+
+    skill calling() {
+        out Calls {
+            register = register,
+            routes = routes,
+            journal = journal,
+            forms = forms,
+            typing = typing,
+            signing = signing,
+            arithmetic = arithmetic,
+            law = law,
+            knots = knots
+        }
+    }
+
+    skill binding() {
+        out Bindings {
+            register = register,
+            routes = routes,
+            journal = journal,
+            forms = forms,
+            typing = typing,
+            signing = signing,
+            arithmetic = arithmetic,
+            law = law,
+            knots = knots
+        }
+    }
+
+    skill branching() {
+        out Branches {
+            register = register,
+            routes = routes,
+            journal = journal,
+            forms = forms,
+            typing = typing,
+            signing = signing,
+            arithmetic = arithmetic,
+            law = law,
+            knots = knots
+        }
+    }
+
+    skill looping() {
+        out Loops {
+            register = register,
+            routes = routes,
+            journal = journal,
+            forms = forms,
+            typing = typing,
+            signing = signing,
+            arithmetic = arithmetic,
+            law = law,
+            knots = knots
+        }
+    }
+}

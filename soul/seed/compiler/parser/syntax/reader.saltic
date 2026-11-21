@@ -1,0 +1,182 @@
+-- reader — глаза разбора: смотрит на токены по номеру, проверяет, чего ждали,
+-- и отдаёт шаг разбора Read: узел, номер следующего токена и диагностики
+-- (непустые — разбор остановлен). Один способ ходить по токенам — по номеру.
+--
+-- Reader = Box { tokens, path, locations } — поток лексера, путь файла, ставить
+--     ли узлам место:
+--     Node — Box { datum, tag }; Read — Box { node, next, diagnostics }: broken() ->
+--         yes, если шаг сорвался; datum() -> что разобрано
+--     at(index) -> токен; is(index, kind) -> answer
+--     skip_lines(index) -> номер первого токена после переводов строки
+--     fail_with(index, problem) / fail(index, code) -> Read с ошибкой; code — из errors.EXPECTED
+--     expect(index, kind, message) -> Read "token" или ошибка
+--     path_at(start, with_locations) -> Read "path" (a.b.c)
+--     loc(datum, word, locations) / make_node(tag, datum) / ok(tag, datum, next) /
+--         read(node, next, diagnostics) — шаг разбора Read
+--     append_tail(head, tail, start) -> head + tail[start…]
+--     field_follows(place) -> yes, если с place начинается поле, а не вложенный Box или enum
+--     field_comma_message(comma, next_is_field) -> "" или код ошибки запятой после поля
+
+use core.group
+use compiler.ast
+use compiler.diagnostic
+use compiler.errors
+use compiler.parser.lexer
+use compiler.parser.token
+
+Reader = Box {
+    tokens = Lexer.TokenBuffer {},
+    path = "",
+    locations = no
+
+    Node = Box {
+        datum = [],
+        tag = ""
+    }
+
+    Read = Box {
+        node = Node {},
+        next = 0,
+        diagnostics = []
+
+        skill broken() {
+            out group.count(diagnostics) > 0
+        }
+
+        skill datum() {
+            out node.datum
+        }
+    }
+
+    skill at(index) {
+        out tokens.at(index)
+    }
+
+    skill is(index, kind) {
+        @word = at(index)
+        out word.kind == kind
+    }
+
+    skill skip_lines(index) {
+        @next = index
+        @count = tokens.count()
+        drum (count) {
+            (next == count) {
+                out next
+            }
+            (is(next, Token.Kind.NEWLINE) == no) {
+                out next
+            }
+            next = next + 1
+        }
+        out next
+    }
+
+    skill fail_with(index, problem) {
+        @word = at(index)
+        out Read {
+            node = make_node("", []),
+            next = index,
+            diagnostics = [diagnostic.place(problem, path, word.line, word.col)]
+        }
+    }
+
+    skill fail(index, expected) {
+        @word = at(index)
+        out fail_with(index, errors.unexpected_token(expected, word.describe()))
+    }
+
+    skill expect(index, kind, message) {
+        @word = at(index)
+        (is(index, kind) == yes) {
+            out ok("token", [word.value], index + 1)
+        }
+        out fail(index, message)
+    }
+
+    skill path_at(start, with_locations) {
+        (is(start, Token.Kind.IDENT) == no) {
+            out fail(start, "expected_identifier")
+        }
+        @word = at(start)
+        @parts = ["path", word.value]
+        @index = start + 1
+        @count = tokens.count()
+        drum (count) {
+            (index + 1 >= count) {
+                leave
+            }
+            (is(index, Token.Kind.DOT) == no) {
+                leave
+            }
+            (is(index + 1, Token.Kind.IDENT) == no) {
+                leave
+            }
+            @part = at(index + 1)
+            parts = group.add(parts, part.value)
+            index = index + 2
+        }
+        out ok("path", loc(parts, word, with_locations), index)
+    }
+
+    skill loc(datum, word, located) {
+        (located == yes) {
+            out ast.located(datum, word.line, word.col)
+        }
+        out datum
+    }
+
+    skill make_node(tag, datum) {
+        out Node {
+            datum = datum,
+            tag = tag
+        }
+    }
+
+    skill read(node, next, diagnostics) {
+        out Read {
+            node = node,
+            next = next,
+            diagnostics = diagnostics
+        }
+    }
+
+    skill ok(tag, datum, next) {
+        out Read {
+            node = make_node(tag, datum),
+            next = next,
+            diagnostics = []
+        }
+    }
+
+    skill append_tail(head, tail, start) {
+        @count = group.count(tail)
+        (start > count) {
+            out head
+        }
+        out group.concat(head, group.slice(tail, start, count))
+    }
+
+    skill field_follows(place) {
+        (is(place, Token.Kind.IDENT) == no) {
+            out no
+        }
+        (is(place + 1, Token.Kind.ASSIGN) == no) {
+            out yes
+        }
+        (is(place + 2, Token.Kind.ENUM) == yes) {
+            out no
+        }
+        out is(place + 2, Token.Kind.BOX) == no
+    }
+
+    skill field_comma_message(comma, next_is_field) {
+        (comma == next_is_field) {
+            out ""
+        }
+        (comma == yes) {
+            out "field_trailing_comma"
+        }
+        out "missing_field_comma"
+    }
+}

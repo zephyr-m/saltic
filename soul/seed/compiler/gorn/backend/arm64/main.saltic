@@ -1,0 +1,389 @@
+-- arm64 — родной бэкенд AArch64: исполнитель договора машины (Executor) и
+-- запись образа. Слово 8 байт, числа 61-битные, как у x86_64 и rv64. Общих
+-- команд у ARM ни с кем нет — исполнитель целиком свой, раскладка — общая
+-- (rv32i.machine.layout, адрес 65536, без низкой памяти), ELF — общий
+-- (linker.elf64). Все роли в регистрах (roles), стек договора — x28.
+-- Переходы к меткам — правки control.Fixups исполнителя (не layout.Patch):
+-- toolchain создаёт исполнитель со своим списком и отдаёт его в write.
+--
+-- Executor { fixups } — все методы договора backend (../main.saltic), плюс multiply… /
+--     divide… / load_wide / fraction… 8-байтного слова
+-- fresh() -> Executor с пустым списком правок
+-- write(path, machine, fixups) — ELF64 AArch64 для Linux: вход дописан, сегменты
+--     на страницах 64 КБ, правки и патчи разрешены, образ записан; UnresolvedPatch, WriteFailed
+--
+-- Дети: encoder (слова команд), roles (роль → регистр), ops (константы,
+-- арифметика, сравнения), access (память и стек), control (переходы, вызовы,
+-- адреса, вызов ядра, правки), platform (вход Linux).
+
+use compiler.gorn.backend
+use compiler.gorn.backend.rv32i.machine.layout
+use compiler.gorn.backend.arm64.encoder
+use compiler.gorn.backend.arm64.roles
+use compiler.gorn.backend.arm64.ops
+use compiler.gorn.backend.arm64.access
+use compiler.gorn.backend.arm64.control
+use compiler.gorn.backend.arm64.platform
+use compiler.gorn.linker.elf64
+use compiler.abi.shape
+
+Executor = Box {
+    fixups = control.Fixups {}
+
+    skill section(value) {
+        (value == backend.CODE) { out layout.Section.CODE }
+        (value == backend.RODATA) { out layout.Section.RODATA }
+        (value == backend.DATA) { out layout.Section.DATA }
+        out layout.Section.BSS
+    }
+
+    skill new_program(billet, entry) {
+        billet.words = shape.of(8)
+        billet.machine = layout.host(entry)
+        billet.machine.low_memory_size = 0
+        out billet
+    }
+
+    skill heap_size(billet, bytes) {
+        billet.machine.heap_size = bytes
+        out billet
+    }
+
+    skill label(billet, name) {
+        billet.machine = layout.define_label(billet.machine, layout.Section.CODE, name)
+        out billet
+    }
+
+    skill data_label(billet, where, name) {
+        billet.machine = layout.define_label(billet.machine, section(where), name)
+        out billet
+    }
+
+    skill align(billet, where, boundary) {
+        billet.machine = layout.align_section(billet.machine, section(where), boundary)
+        out billet
+    }
+
+    skill data_byte(billet, where, value) {
+        billet.machine = layout.append_section_byte(billet.machine, section(where), value)
+        out billet
+    }
+
+    skill data32(billet, where, value) {
+        billet.machine = layout.append_section_word(billet.machine, section(where), value)
+        out billet
+    }
+
+    skill data_word(billet, where, value) {
+        billet.machine = layout.append_section_word(billet.machine, section(where), value)
+        @fill = 0
+        (value.b3 > 127) { fill = 255 }
+        drum (4) { billet.machine = layout.append_section_byte(billet.machine, section(where), fill) }
+        out billet
+    }
+
+    skill data_text(billet, where, text) {
+        billet.machine = layout.append_section_text(billet.machine, section(where), text, yes)
+        out billet
+    }
+
+    skill reserve(billet, bytes) {
+        billet.machine = layout.reserve_bss(billet.machine, bytes)
+        out billet
+    }
+
+    skill load_immediate(billet, to, value) {
+        out ops.load_immediate(billet, to, value)
+    }
+
+    skill load_word(billet, to, value) {
+        out ops.load_word(billet, to, value)
+    }
+
+    skill load_address(billet, to, name, addend) {
+        out control.load_address(billet, fixups, to, name, addend)
+    }
+
+    skill move(billet, to, from) {
+        out ops.move(billet, to, from)
+    }
+
+    skill negate(billet, to, from) {
+        out ops.negate(billet, to, from)
+    }
+
+    skill add_immediate(billet, to, from, value) {
+        out ops.add_immediate(billet, to, from, value)
+    }
+
+    skill add(billet, to, left, right) {
+        out ops.binary(billet, encoder.ADD, to, left, right)
+    }
+
+    skill sub(billet, to, left, right) {
+        out ops.binary(billet, encoder.SUB, to, left, right)
+    }
+
+    skill and(billet, to, left, right) {
+        out ops.binary(billet, encoder.AND, to, left, right)
+    }
+
+    skill or(billet, to, left, right) {
+        out ops.binary(billet, encoder.ORR, to, left, right)
+    }
+
+    skill xor(billet, to, left, right) {
+        out ops.binary(billet, encoder.EOR, to, left, right)
+    }
+
+    skill and_immediate(billet, to, from, value) {
+        out ops.logical(billet, encoder.AND, to, from, value)
+    }
+
+    skill or_immediate(billet, to, from, value) {
+        out ops.logical(billet, encoder.ORR, to, from, value)
+    }
+
+    skill xor_immediate(billet, to, from, value) {
+        out ops.logical(billet, encoder.EOR, to, from, value)
+    }
+
+    skill shift_left(billet, to, from, count) {
+        out ops.shift(billet, ops.SHIFT_LEFT, to, from, count)
+    }
+
+    skill shift_right_signed(billet, to, from, count) {
+        out ops.shift(billet, ops.SHIFT_ARITHMETIC, to, from, count)
+    }
+
+    skill shift_right_unsigned(billet, to, from, count) {
+        out ops.shift(billet, ops.SHIFT_RIGHT, to, from, count)
+    }
+
+    skill shift_left_by(billet, to, from, count) {
+        out ops.data2(billet, encoder.LSLV, to, from, count)
+    }
+
+    skill shift_right_unsigned_by(billet, to, from, count) {
+        out ops.data2(billet, encoder.LSRV, to, from, count)
+    }
+
+    skill set_less(billet, to, left, right) {
+        out ops.compare(billet, encoder.LT, to, left, right)
+    }
+
+    skill set_less_unsigned(billet, to, left, right) {
+        out ops.compare(billet, encoder.LO, to, left, right)
+    }
+
+    skill set_less_unsigned_immediate(billet, to, from, value) {
+        out ops.compare_immediate(billet, encoder.LO, to, from, value)
+    }
+
+    skill set_zero(billet, to, from) {
+        out ops.compare_immediate(billet, encoder.EQ, to, from, 0)
+    }
+
+    skill set_nonzero(billet, to, from) {
+        out ops.compare_immediate(billet, encoder.NE, to, from, 0)
+    }
+
+    skill add_checked(billet) {
+        out ops.checked(billet, encoder.ADDS)
+    }
+
+    skill sub_checked(billet) {
+        out ops.checked(billet, encoder.SUBS)
+    }
+
+    skill load(billet, to, base, offset) {
+        out access.transfer(billet, encoder.X, yes, roles.register(to), base, offset)
+    }
+
+    skill load32(billet, to, base, offset) {
+        out access.transfer(billet, encoder.W, yes, roles.register(to), base, offset)
+    }
+
+    skill store32(billet, from, base, offset) {
+        out access.transfer(billet, encoder.W, no, roles.register(from), base, offset)
+    }
+
+    skill load_byte(billet, to, base, offset) {
+        out access.transfer(billet, encoder.B, yes, roles.register(to), base, offset)
+    }
+
+    skill load_half(billet, to, base, offset) {
+        out access.transfer(billet, encoder.H, yes, roles.register(to), base, offset)
+    }
+
+    skill store(billet, from, base, offset) {
+        out access.transfer(billet, encoder.X, no, roles.register(from), base, offset)
+    }
+
+    skill store_byte(billet, from, base, offset) {
+        out access.transfer(billet, encoder.B, no, roles.register(from), base, offset)
+    }
+
+    skill store_half(billet, from, base, offset) {
+        out access.transfer(billet, encoder.H, no, roles.register(from), base, offset)
+    }
+
+    skill store_zero(billet, base, offset) {
+        out access.transfer(billet, encoder.X, no, encoder.ZERO_REGISTER, base, offset)
+    }
+
+    skill store_byte_zero(billet, base, offset) {
+        out access.transfer(billet, encoder.B, no, encoder.ZERO_REGISTER, base, offset)
+    }
+
+    skill push(billet, from) {
+        out access.push(billet, from)
+    }
+
+    skill pop(billet, to) {
+        out access.pop(billet, to)
+    }
+
+    skill branch_equal(billet, left, right, name) {
+        out control.branch(billet, fixups, encoder.EQ, left, right, name)
+    }
+
+    skill branch_not_equal(billet, left, right, name) {
+        out control.branch(billet, fixups, encoder.NE, left, right, name)
+    }
+
+    skill branch_less(billet, left, right, name) {
+        out control.branch(billet, fixups, encoder.LT, left, right, name)
+    }
+
+    skill branch_greater_equal(billet, left, right, name) {
+        out control.branch(billet, fixups, encoder.GE, left, right, name)
+    }
+
+    skill branch_less_unsigned(billet, left, right, name) {
+        out control.branch(billet, fixups, encoder.LO, left, right, name)
+    }
+
+    skill branch_greater_equal_unsigned(billet, left, right, name) {
+        out control.branch(billet, fixups, encoder.HS, left, right, name)
+    }
+
+    skill branch_zero(billet, from, name) {
+        out control.branch_test(billet, fixups, control.ZERO, from, name)
+    }
+
+    skill branch_nonzero(billet, from, name) {
+        out control.branch_test(billet, fixups, control.NONZERO, from, name)
+    }
+
+    skill branch_negative(billet, from, name) {
+        out control.branch_test(billet, fixups, encoder.MI, from, name)
+    }
+
+    skill branch_not_negative(billet, from, name) {
+        out control.branch_test(billet, fixups, encoder.PL, from, name)
+    }
+
+    skill branch_not_positive(billet, from, name) {
+        out control.branch_test(billet, fixups, encoder.LE, from, name)
+    }
+
+    skill jump(billet, name) {
+        out control.jump(billet, fixups, name)
+    }
+
+    skill jump_if_equal(billet, left, right, name) {
+        out control.jump_if(billet, fixups, encoder.EQ, left, right, name)
+    }
+
+    skill jump_if_not_equal(billet, left, right, name) {
+        out control.jump_if(billet, fixups, encoder.NE, left, right, name)
+    }
+
+    skill jump_if_zero(billet, from, name) {
+        out control.jump_if_test(billet, fixups, no, from, name)
+    }
+
+    skill jump_if_nonzero(billet, from, name) {
+        out control.jump_if_test(billet, fixups, yes, from, name)
+    }
+
+    skill jump_far(billet, name) {
+        out control.jump(billet, fixups, name)
+    }
+
+    skill call(billet, name) {
+        out control.call(billet, fixups, name)
+    }
+
+    skill ret(billet) {
+        out ops.emit(billet, encoder.ret())
+    }
+
+    skill syscall(billet, number) {
+        out control.syscall(billet, number)
+    }
+
+    skill wait(billet) {
+        out ops.emit(billet, encoder.wfi())
+    }
+
+    skill fence(billet) {
+        out ops.emit(billet, encoder.dmb())
+    }
+
+    skill multiply(billet, to, left, right) {
+        out ops.multiply(billet, encoder.MADD, to, left, right)
+    }
+
+    skill multiply_high(billet, to, left, right) {
+        out ops.multiply(billet, encoder.SMULH, to, left, right)
+    }
+
+    skill multiply_high_unsigned(billet, to, left, right) {
+        out ops.multiply(billet, encoder.UMULH, to, left, right)
+    }
+
+    skill divide(billet, to, left, right) {
+        out ops.data2(billet, encoder.SDIV, to, left, right)
+    }
+
+    skill remainder(billet, to, left, right) {
+        out ops.remainder(billet, encoder.SDIV, to, left, right)
+    }
+
+    skill divide_unsigned(billet, to, left, right) {
+        out ops.data2(billet, encoder.UDIV, to, left, right)
+    }
+
+    skill remainder_unsigned(billet, to, left, right) {
+        out ops.remainder(billet, encoder.UDIV, to, left, right)
+    }
+
+    skill load_wide(billet, to, value) {
+        out ops.load_wide(billet, to, value)
+    }
+
+    skill fraction(billet, op, to, left, right) {
+        out ops.fraction(billet, op, to, left, right)
+    }
+
+    skill fraction_from(billet, to, from) {
+        out ops.fraction_from(billet, to, from)
+    }
+
+    skill fraction_to(billet, to, from, mode) {
+        out ops.fraction_to(billet, to, from, mode)
+    }
+}
+
+skill fresh() {
+    out Executor { fixups = control.Fixups {} }
+}
+
+skill write(path, machine, fixups) {
+    machine = platform.pages(platform.append(machine))
+    machine = control.resolve(machine, fixups) rescue |failure| { out error.UnresolvedPatch }
+    machine = layout.resolve(machine) rescue |failure| { out error.UnresolvedPatch }
+    out elf64.write(path, machine, elf64.AARCH64, platform.PAGE)
+}

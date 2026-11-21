@@ -1,0 +1,107 @@
+-- lookup — имена, ошибки и типы для codegen: поиск по таблицам state.
+-- Тип — текст: "unknown", "box:Имя" и прочие метки ast.type_of.
+--
+-- box_field_symbol(billet, box_name, field_name) -> Symbol поля или пустой
+-- remember_error(billet, name) — завести id пользовательской ошибки
+-- error_id(billet, name) -> id (системный или пользовательский)
+-- failure_name(node) -> имя из error.Имя или ""
+-- resolve_symbol(billet, symbols, name) -> name, если есть, иначе ""
+-- call_name(billet, callee) -> имя native или путь
+-- resolve_skill(billet, path) -> имя навыка или ""
+-- intrinsic(name) -> цель intrinsic из contract или "unknown"
+-- infer_type(billet, node) -> тип из пометки чекера (ast.type_of; "pack:тип" — тип)
+--     или по слоту
+--     переменной; поле Box и выбор метода — только из пометок чекера
+-- box_override(overrides, field_name) -> узел значения или []
+-- call_arguments(node) -> группа аргументов вызова
+
+use core.str
+use core.group
+use compiler.abi
+use compiler.ast
+use compiler.intrinsic.contract
+use compiler.checker.types.shapes
+use compiler.gorn.state
+
+skill box_field_symbol(billet, box_name, field_name) {
+    @box = state.symbol_find(billet.boxes, box_name)
+    @forms = Shapes {}
+    @member = forms.box_member(box.node, field_name)
+    (group.count(member) == 0) { out state.Symbol {} }
+    out state.Symbol { name = field_name, kind = "field", node = member }
+}
+
+skill remember_error(billet, name) {
+    (abi.system_error_id(name) > 0) { out billet }
+    (state.symbol_has(billet.errors, name) == yes) { out billet }
+    @id = abi.user_error_id(group.count(billet.errors))
+    billet.errors = state.symbol_add(billet.errors, name, "error", [], id)
+    out billet
+}
+
+skill error_id(billet, name) {
+    @system = abi.system_error_id(name)
+    (system > 0) { out system }
+    @item = state.symbol_find(billet.errors, name)
+    out item.value
+}
+
+skill failure_name(node) {
+    @parts = ast.plain(node)
+    (group.get(parts, 0) == "path") {
+        (group.count(parts) == 3) {
+            (group.get(parts, 1) == "error") { out group.get(parts, 2) }
+        }
+    }
+    out ""
+}
+
+skill resolve_symbol(billet, symbols, name) {
+    (state.symbol_has(symbols, name) == yes) { out name }
+    out ""
+}
+
+skill call_name(billet, callee) {
+    @name = ast.path_text(callee)
+    @resolved = resolve_symbol(billet, billet.natives, name)
+    (str.bytes(resolved) > 0) { out resolved }
+    out name
+}
+
+skill resolve_skill(billet, path) {
+    out resolve_symbol(billet, billet.skills, ast.path_text(path))
+}
+
+skill intrinsic(name) {
+    out contract.target(contract.find(name), "unknown")
+}
+
+skill infer_type(billet, node) {
+    @known = ast.type_of(node)
+    (str.starts_with(known, "pack:") == yes) { out str.slice(known, 5, str.bytes(known)) }
+    ((known == "unknown") == no) { out known }
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "path") {
+        @name = group.get(plain, 1)
+        @type_item = state.type_find(billet.current_function.types, name)
+        @type = type_item.text
+        (group.count(plain) == 2) { out type }
+        out "unknown"
+    }
+    out "unknown"
+}
+
+skill box_override(overrides, field_name) {
+    @count = group.count(overrides)
+    drum (count) {
+        @field = ast.plain(group.get(overrides, count - 1 - beat))
+        (group.get(field, 1) == field_name) { out group.get(field, 2) }
+    }
+    out []
+}
+
+skill call_arguments(node) {
+    @plain = ast.plain(node)
+    out group.slice(plain, 2, group.count(plain))
+}

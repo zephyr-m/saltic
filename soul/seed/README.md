@@ -14,11 +14,11 @@
   64-битных целях — `core.fraction` и `core.matrix`. Сравнение секретов —
   `craft.protocols.security.crypto` (Q-023).
 - `io/` — вывод (`use io`, вход `main.saltic`), файлы (`use io.file`).
-- `selfhost/` — сам язык: `selfhost.architect`, `selfhost.parser`, `selfhost.checker`,
-  `selfhost.compiler` и всё, на чём они стоят.
+- `compiler/` — сам язык: `compiler.architect`, `compiler.parser`, `compiler.checker`,
+  `compiler.gorn` и всё, на чём они стоят.
 
-Корни `core`, `io` и `selfhost` загрузчик ищет в `soul/seed`, корень
-`canonical` — в `soul` (архитектор, `selfhost/architect/main.saltic`).
+Модуль архитектор ищет по углам: `soul/seed/`, потом `soul/`, потом корень
+проекта (`compiler/architect/main.saltic`).
 
 ## Язык
 
@@ -35,33 +35,33 @@
 освобождается целиком. Нехватка памяти — ошибка `MemoryExhausted`, её ловит
 `rescue`. Сборщика мусора нет. Подробно — `docs/language/MEMORY-MODEL.md`.
 
-## Устройство `selfhost`
+## Устройство `compiler`
 
 - `architect/` — первая ступень: из каких файлов программа и как они связаны (`use` → файл, связи, порядок);
 - `parser/` (`main`, `lexer/`, `syntax/`, `token`, `nest`) — текст файла в дерево;
 - `checker` + `checker/{names,signatures,rules,types,lookup,walk,top_level}` — проверка: верх программы, обход выражений и инструкций, справки об именах;
 - `errors` — каталог ошибок языка: у каждой свой навык с кодом и текстом
   (`errors.unknown_name(name)`); `diagnostic` ставит её на место в файле;
-- `compiler` + `compiler/{codegen,functions,state,constants}` — перевод в
+- `gorn` + `gorn/{codegen,functions,state,constants}` — перевод в
   машинный код: `codegen` — сердце (выражения, инструкции, вызовы) с
   помощниками `codegen/{lookup,emitters,loops,failures}`, `functions` собирает
-  функции и константы; всё это говорит на договоре машины `compiler/backend`
+  функции и константы; всё это говорит на договоре машины `gorn/backend`
   (роли регистров и операции) методами исполнителя `compiler.executor`;
-  исполнители: `compiler/backend/rv32i` (`Executor`), родной x86-64
-  `compiler/backend/x86_64_native` (`Executor` на `encoder`, `roles`, `ops`,
+  исполнители: `gorn/backend/rv32i` (`Executor`), родной x86-64
+  `gorn/backend/x86_64_native` (`Executor` на `encoder`, `roles`, `ops`,
   `access`, `control`; `platform` — вход и syscall Linux, `image` — ELF64,
-  `uefi` и `pe` — UEFI) и RV64 `compiler/backend/rv64`; перевод RV32I →
+  `uefi` и `pe` — UEFI) и RV64 `gorn/backend/rv64`; перевод RV32I →
   x86-64 — на пенсии (`.archive/x86_64_translation/`);
-- `compiler/platform` + `platform/{linux,uefi}` — договор платформы: метки
+- `gorn/platform` + `platform/{linux,uefi}` — договор платформы: метки
   `rt_platform_*` (write, exit, key, file_read, file_write, now, wait, firmware,
   call), которые цель даёт программе; чего не умеет — ошибка `NotSupported`.
   Платформа — Box с методом `append(compiler)`: `platform.linux.Linux`,
   `platform.uefi.Uefi`, `os/target/qemu_virt/platform.Platform`;
-- `compiler/backend/rv32i/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
-  машинный runtime `rt_*` на договоре машины (роли и операции `compiler/backend`,
+- `gorn/backend/rv32i/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
+  машинный runtime `rt_*` на договоре машины (роли и операции `gorn/backend`,
   общий для исполнителей): арифметика, Box и группы, строки,
   фиксированные типы, прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
-- `compiler/backend/rv32i/machine/{instruction,registers,codec,decoder,buffer,layout,image,profile}` —
+- `gorn/backend/rv32i/machine/{instruction,registers,codec,decoder,buffer,layout,image,profile}` —
   команды и регистры RV32I, кодирование и разбор команд, байтовый буфер,
   раскладка, ELF32-образ;
 - `machine/word` — 32-битное слово из четырёх байтов, общее для всех

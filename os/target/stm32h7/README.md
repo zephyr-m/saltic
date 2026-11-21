@@ -3,7 +3,7 @@
 ⬜ **Не начата.** Записана 03.11.2026.
 
 - **Платы:** Discovery или WeAct с внешней SDRAM (1 МБ + 8–32 МБ); Arduino GIGA R1.
-- **Бэкенд:** Thumb-2 (Cortex-M7) — `soul/seed/selfhost/compiler/backend/`.
+- **Бэкенд:** Thumb-2 (Cortex-M7) — `soul/seed/compiler/gorn/backend/`.
 - **Зачем:** сильный Cortex-M с SDRAM.
 - **Когда:** эпоха 3 — ядро ОС и параллельно проверка на железе.
 - **Документация:** RM0433 и даташиты STM32H7 (ST).

@@ -1,0 +1,197 @@
+-- numbers — правила чисел: целое и дробное в литерале, фиксированные типы
+-- рядом с другими, дробное только с дробным (Q-041), звенья ○ ○○ только
+-- yes/no, минус, широкие числа до 2^60 - 1, фиксированное не покидает навык.
+
+use core.str
+use core.group
+use compiler.ast
+use compiler.errors
+use compiler.intrinsic.contract
+use compiler.abi.call
+use compiler.checker.notes
+use compiler.checker.types
+use compiler.checker.types.shapes
+
+WIDE_MARK = "__wide_numbers__"
+WIDE_MAXIMUM_TEXT = "1152921504606846975"
+LINKS = ["○", "○○"]
+
+Numbers = Box {
+    journal = Notes {},
+    forms = Shapes {},
+    typing = Types {}
+
+    skill is_integer_literal(node) {
+        out (str.bytes(forms.integer_text(node)) > 0)
+    }
+
+    skill is_fraction(node) {
+        @plain = ast.plain(node)
+        (ast.tag(plain) == "fraction-number") {
+            out yes
+        }
+        (ast.tag(plain) == "binary") {
+            (ast.part(plain, 1) == "-") {
+                out is_fraction(ast.part(plain, 3))
+            }
+        }
+        out no
+    }
+
+    skill fixed_argument(node, actual_type) {
+        (is_fraction(node) == yes) {
+            out errors.fixed_fraction()
+        }
+        (is_integer_literal(node) == yes) {
+            out errors.ok()
+        }
+        (actual_type == "number") {
+            out errors.ok()
+        }
+        (contract.is_fixed_type(actual_type) == yes) {
+            out errors.ok()
+        }
+        (actual_type == "unknown") {
+            out errors.ok()
+        }
+        out errors.fixed_wrong_value(actual_type)
+    }
+
+    skill fixed_partner(operator, left, right) {
+        (group.contains(LINKS, operator) == yes) {
+            out answered(left, right)
+        }
+        @fixed = contract.is_fixed_type(left)
+        (contract.is_fixed_type(right) == yes) { fixed = yes }
+        (fixed == no) {
+            out errors.ok()
+        }
+        (left == "unknown") {
+            out errors.fixed_unknown_partner(operator, right)
+        }
+        (right == "unknown") {
+            out errors.fixed_unknown_partner(operator, left)
+        }
+        ((operator == "==") == no) {
+            out errors.ok()
+        }
+        (left == right) {
+            out errors.ok()
+        }
+        (left == "number") {
+            out errors.operator_mixes_number("==", right)
+        }
+        (right == "number") {
+            out errors.operator_mixes_number("==", left)
+        }
+        out errors.operator_mixes_fixed("==", left, right)
+    }
+
+    skill negatable(type) {
+        (type == "number") {
+            out yes
+        }
+        (type == "unknown") {
+            out yes
+        }
+        (type == "fraction") {
+            out yes
+        }
+        out contract.is_fixed_type(type)
+    }
+
+    skill plain_numbers(left, right) {
+        (left == "fraction") {
+            out yes
+        }
+        (right == "fraction") {
+            out yes
+        }
+        (left == "number") {
+            out (right == "number")
+        }
+        out no
+    }
+
+    skill answered(left, right) {
+        @wrong = ""
+        ((left == "answer") == no) {
+            wrong = left
+        }
+        ((right == "answer") == no) {
+            wrong = right
+        }
+        (wrong == "") {
+            out errors.ok()
+        }
+        (wrong == "unknown") {
+            out errors.ok()
+        }
+        out errors.link_expects_answer(forms.type_text(wrong))
+    }
+
+    skill fraction_partner(operator, left, right) {
+        @both = no
+        (left == "fraction") { both = (right == "fraction") }
+        (operator == "~=") {
+            (both == yes) {
+                out errors.ok()
+            }
+            out errors.near_expects_fractions(forms.type_text(left), forms.type_text(right))
+        }
+        @any = (left == "fraction")
+        (right == "fraction") { any = yes }
+        (any == no) {
+            out errors.ok()
+        }
+        (both == yes) {
+            (operator == "==") {
+                out errors.fraction_equality()
+            }
+            (operator == "%") {
+                out errors.fraction_remainder()
+            }
+            out errors.ok()
+        }
+        @other = left
+        (left == "fraction") { other = right }
+        (other == "unknown") {
+            out errors.ok()
+        }
+        out errors.fraction_mixes(operator, forms.type_text(other))
+    }
+
+    skill fixed_escape(type, place) {
+        (contract.is_fixed_type(type) == no) {
+            out errors.ok()
+        }
+        out errors.fixed_escape(type, place)
+    }
+
+    skill fits_wide(text) {
+        @length = str.bytes(text)
+        @limit = str.bytes(WIDE_MAXIMUM_TEXT)
+        (length < limit) {
+            out yes
+        }
+        (length > limit) {
+            out no
+        }
+        drum (length) {
+            @actual = str.get(text, beat)
+            @maximum = str.get(WIDE_MAXIMUM_TEXT, beat)
+            ((actual == maximum) == no) {
+                out (str.byte(actual, 0) < str.byte(maximum, 0))
+            }
+        }
+        out yes
+    }
+
+    skill check_fixed_escape(node, value, place, scope, globals, diagnostics) {
+        @problem = fixed_escape(typing.value_type(value, scope, globals), place)
+        (errors.is_ok(problem) == yes) {
+            out diagnostics
+        }
+        out journal.add_diagnostic(diagnostics, journal.placed(node, problem))
+    }
+}

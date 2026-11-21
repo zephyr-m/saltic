@@ -3,7 +3,7 @@
 ⬜ **Не начата.** Записана 03.11.2026.
 
 - **Платы:** Teensy 4.1 (NXP i.MX RT1062, 600 МГц, 1 МБ + 8–16 МБ PSRAM).
-- **Бэкенд:** Thumb-2 (Cortex-M7) — `soul/seed/selfhost/compiler/backend/`.
+- **Бэкенд:** Thumb-2 (Cortex-M7) — `soul/seed/compiler/gorn/backend/`.
 - **Зачем:** самый быстрый популярный микроконтроллер.
 - **Когда:** эпоха 3 — ядро ОС и параллельно проверка на железе.
 - **Документация:** i.MX RT1060 Reference Manual (NXP).

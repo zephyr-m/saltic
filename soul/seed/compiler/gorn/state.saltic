@@ -1,0 +1,446 @@
+-- state — состояние компилятора: таблицы символов, текущий навык, метки,
+-- сбор локальных имён, вход _start и завершение данных.
+-- Таблицы (constants, boxes, skills, …) — группы Symbol, поиск с конца.
+-- Слоты локальных — смещения от FRAME вниз. Команды — только через методы
+-- исполнителя договора (backend) в executor; machine — его программа.
+--
+-- Symbol { name, kind, node, value, text, slot } / Function { name, slots, end,
+--     subject, module, types, next_drum, drum_exit, failure, next_rescue, next_always,
+--     line, lined, stubs } — line — строка текущего оператора; lined — у навыка
+--     есть слот FAIL_LINE (у геттеров констант нет); stubs — заглушки Stub
+-- Stub { label, line, target } — переход на ошибку через заглушку: строка в
+--     FAIL_LINE, затем на target (хвост навыка, цикла или rescue)
+-- Names { names, next_drum, next_rescue, next_always }
+-- State { …, executor, machine, words } — words — раскладка памяти под слово;
+--     arena_bytes, default_heap_bytes — память тела, их даёт платформа
+--     исполнителя (abi.shape, по умолчанию 4 байта); executor (Box исполнителя, сейчас
+--     rv32i.Executor) назначает compiler при создании; machine — его программа
+-- symbol_find / symbol_has / symbol_add / symbol_add_text(symbols, name, …)
+-- type_find(types, name) / type_set(types, name, type)
+-- safe(text) -> имя для метки; label(billet, prefix) -> уникальная метка
+-- at_line(billet, node) -> compiler со строкой node в current_function.line
+-- collect_locals(params, body) -> Names (плюс служебный FAIL_LINE — строка, где
+--     ошибка покинула оператор навыка); make_slots(words, names, first_slot) -> слоты
+-- collect_names(names, node) -> Names: имена и служебные ячейки (drum, always, rescue)
+--     по всему поддереву; обход — ast.children
+-- outer_assigned(block) -> имена снаружи блока, которым блок присваивает
+-- uses_beat(node) / block_uses_beat(block) -> yes/no: есть ли beat (во вложенный drum не
+--     заходит — там свой beat); assigned_names(found, node) — кому присваивают
+-- slot(billet, name) / field(billet, name) -> смещение / id поля
+-- collect_box / collect_enum(billet, item, module) / collect_top_level(billet)
+-- header(billet) — программа исполнителя с входом _start, heap_size
+-- start(billet) — код _start: стек входа — в rt_environment_capture (envp),
+--     куча — кусок heap_bytes у платформы (rt_platform_heap, Q-050; не дали —
+--     rt_out_of_memory), его начало — в слово HEAP_START, STORE_BOTTOM — её конец,
+--     rt_store_init ставит карту страниц и низ хранилища;
+--     свой стек — rt_platform_stack(load_stack_bytes: 1 ГБ на 8-байтном слове, 64 МБ на
+--     4-байтном; 1 ГБ — сдвигом из долей по STACK_MARGIN_BYTES: обычное число
+--     компилятора на 4-байтном хозяине его не вмещает): дала платформа — STACK переключается на него перед saltic_program,
+--     STACK_LIMIT — его низ плюс STACK_MARGIN_BYTES (страж рекурсии); не дала —
+--     стек входа и STACK_LIMIT = 0 (стража нет); верх стека — в слово rt_stack_base
+--     (разбор карантина сканирует стек до него); аргументы через rt_cstring,
+--     вызов saltic_program, rt_platform_exit
+-- finish_data(billet) — выравнивание секций, saltic_arena и слово HEAP_START в bss
+-- box_number(billet, name) -> номер Box (с 1); dispatch_label(method) -> метка
+
+use core.str
+use core.group
+use core.num
+use compiler.abi
+use compiler.abi.shape
+use compiler.ast
+use compiler.memory.model
+use compiler.gorn.backend
+use compiler.machine.word
+use compiler.machine.wide
+
+HEAP_START = "saltic_heap_start"
+FAIL_LINE = "$fail_line"
+STACK_BASE = "rt_stack_base"
+STACK_BYTES_NARROW = 67108864
+STACK_UNITS_WIDE = 4096
+STACK_UNIT_SHIFT = 18
+STACK_MARGIN_BYTES = 262144
+
+Symbol = Box {
+    name = "",
+    kind = "",
+    node = [],
+    value = 0,
+    text = "",
+    slot = 0
+}
+
+Function = Box {
+    name = "",
+    slots = [],
+    end = "",
+    subject = "",
+    module = "",
+    types = [],
+    next_drum = 1,
+    drum_exit = "",
+    failure = "",
+    next_rescue = 1,
+    next_always = 1,
+    line = 0,
+    lined = no,
+    stubs = []
+}
+
+Stub = Box {
+    label = "",
+    line = 0,
+    target = ""
+}
+
+Names = Box {
+    names = [],
+    next_drum = 1,
+    next_rescue = 1,
+    next_always = 1
+}
+
+State = Box {
+    source = "",
+    signals = no,
+    placed = [],
+    ast = [],
+    executor = backend.unassigned(),
+    machine = backend.unassigned(),
+    words = shape.Words {},
+    heap_bytes = wide.Wide {},
+    arena_bytes = model.ARENA_BYTES,
+    default_heap_bytes = model.DEFAULT_HEAP_BYTES,
+    strings = [],
+    serial = 0,
+    constants = [],
+    boxes = [],
+    enums = [],
+    variants = [],
+    errors = [],
+    fields = [],
+    skills = [],
+    natives = [],
+    entry = [],
+    current_function = Function {},
+    next_enum_id = 1,
+    next_field_id = 1,
+    dispatches = []
+}
+
+skill symbol_find(symbols, name) {
+    @count = group.count(symbols)
+    drum (count) {
+        @item = group.get(symbols, count - 1 - beat)
+        (item.name == name) { out item }
+    }
+    out Symbol {}
+}
+
+skill symbol_has(symbols, name) {
+    @item = symbol_find(symbols, name)
+    out str.bytes(item.name) > 0
+}
+
+skill symbol_add(symbols, name, kind, node, value) {
+    out group.add(symbols, Symbol { name = name, kind = kind, node = node, value = value })
+}
+
+skill symbol_add_text(symbols, name, kind, node, text) {
+    out group.add(symbols, Symbol { name = name, kind = kind, node = node, text = text })
+}
+
+skill type_find(types, name) {
+    out symbol_find(types, name)
+}
+
+skill type_set(types, name, type) {
+    @item = symbol_find(types, name)
+    (str.bytes(item.name) == 0) { out group.add(types, Symbol { name = name, kind = "type", text = type }) }
+    item.text = type
+    out types
+}
+
+skill safe(text) {
+    @result = ""
+    @allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    drum (str.bytes(text)) {
+        @ch = str.get(text, beat)
+        pick {
+            (str.contains(allowed, ch) == yes) { result = str.concat(result, ch) }
+            { result = "{result}_" }
+        }
+    }
+    out result
+}
+
+skill label(billet, prefix) {
+    @safe_prefix = safe(prefix)
+    @label = ".L_{safe_prefix}_{billet.serial}"
+    billet.serial = billet.serial + 1
+    out label
+}
+
+skill name_add(names, name) {
+    (symbol_has(names.names, name) == no) { names.names = symbol_add(names.names, name, "local", [], 0) }
+    out names
+}
+
+skill collect_names(names, node) {
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "rescue") {
+        names = name_add(names, "$rescue:{names.next_rescue}")
+        names.next_rescue = names.next_rescue + 1
+        names = collect_names(names, group.get(plain, 1))
+        names = name_add(names, group.get(plain, 2))
+        out collect_names(names, group.get(plain, 3))
+    }
+    (tag == "present") {
+        names = collect_names(names, group.get(plain, 1))
+        names = name_add(names, group.get(plain, 2))
+        out collect_names(names, group.get(plain, 3))
+    }
+    (tag == "var") { names = name_add(names, group.get(plain, 1)) }
+    (tag == "always") {
+        @always_number = num.text(names.next_always)
+        names.next_always = names.next_always + 1
+        names = name_add(names, "$always_mark:{always_number}")
+    }
+    (tag == "drum") {
+        @drum_number = num.text(names.next_drum)
+        names.next_drum = names.next_drum + 1
+        names = name_add(names, "$drum:{drum_number}")
+        names = name_add(names, "$drum_source:{drum_number}")
+        names = name_add(names, "$drum_index:{drum_number}")
+        names = name_add(names, "$drum_saved:{drum_number}")
+        names = name_add(names, "$drum_mark:{drum_number}")
+        names = name_add(names, "$drum_limit:{drum_number}")
+        names = name_add(names, ast.DRUM_BEAT)
+    }
+    drum (ast.children(node)) { names = collect_names(names, beat) }
+    out names
+}
+
+skill assigned_names(found, node) {
+    @plain = ast.plain(node)
+    (group.get(plain, 0) == "assign") { found = name_add(found, group.get(plain, 1)) }
+    drum (ast.children(node)) { found = assigned_names(found, beat) }
+    out found
+}
+
+skill outer_assigned(block) {
+    @declared = collect_names(Names {}, block)
+    @assigned = assigned_names(Names {}, block)
+    @outer = []
+    drum (assigned.names) {
+        (symbol_has(declared.names, beat.name) == no) { outer = group.add(outer, beat.name) }
+    }
+    out outer
+}
+
+skill uses_beat(node) {
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "path") { out group.get(plain, 1) == ast.DRUM_BEAT }
+    (tag == "drum") { out uses_beat(group.get(plain, 1)) }
+    drum (ast.children(node)) {
+        (uses_beat(beat) == yes) { out yes }
+    }
+    out no
+}
+
+skill block_uses_beat(block) {
+    out uses_beat(block)
+}
+
+skill at_line(billet, node) {
+    @place = ast.location(node)
+    (group.get(place, 0) > 0) { billet.current_function.line = group.get(place, 0) }
+    out billet
+}
+
+skill collect_locals(params, body) {
+    @names = Names {}
+    drum (params) { names = name_add(names, beat) }
+    names = name_add(names, FAIL_LINE)
+    out collect_names(names, body)
+}
+
+skill make_slots(words, names, first_slot) {
+    @slots = []
+    @slot = first_slot
+    drum (names) {
+        slots = symbol_add(slots, beat.name, "slot", [], slot)
+        slot = slot - words.bytes
+    }
+    out slots
+}
+
+skill slot(billet, name) {
+    @slot = symbol_find(billet.current_function.slots, name)
+    out slot.value
+}
+
+skill field(billet, name) {
+    @field = symbol_find(billet.fields, name)
+    out field.value
+}
+
+skill collect_box(billet, item, module) {
+    @name = ast.qualified(module, ast.part(item, 1))
+    billet.boxes = symbol_add_text(billet.boxes, name, "box", item, module)
+    @slot = 0
+    drum (group.count(ast.plain(item)) - 2) {
+        @member = ast.part(item, beat + 2)
+        (ast.tag(member) == "field") {
+            @field_name = ast.part(member, 1)
+            (symbol_has(billet.fields, field_name) == no) {
+                billet.fields = group.add(billet.fields, Symbol { name = field_name, kind = "field", node = member, value = billet.next_field_id, slot = slot })
+                billet.next_field_id = billet.next_field_id + 1
+            }
+            slot = slot + 1
+        }
+    }
+    out billet
+}
+
+skill collect_enum(billet, item, module) {
+    @name = ast.qualified(module, ast.part(item, 1))
+    billet.enums = symbol_add_text(billet.enums, name, "enum", item, module)
+    drum (group.count(ast.plain(item)) - 2) {
+        @variant = ast.part(item, beat + 2)
+        @full_name = "{name}."
+        full_name = str.concat(full_name, variant)
+        @value = abi.tagged(billet.next_enum_id, abi.TAG_ENUM)
+        billet.variants = symbol_add(billet.variants, full_name, "variant", item, value)
+        (symbol_has(billet.variants, variant) == no) { billet.variants = symbol_add(billet.variants, variant, "variant", item, value) }
+        billet.next_enum_id = billet.next_enum_id + 1
+    }
+    out billet
+}
+
+skill collect_top_level(billet) {
+    drum (group.count(billet.ast) - 1) {
+        @item = group.get(billet.ast, beat + 1)
+        @tag = ast.tag(item)
+        @module = ast.module_name(item)
+        (tag == "const") { billet.constants = symbol_add_text(billet.constants, ast.qualified(module, ast.part(item, 1)), "const", ast.part(item, 2), module) }
+        (tag == "box") { billet = collect_box(billet, item, module) }
+        (tag == "enum") { billet = collect_enum(billet, item, module) }
+        (tag == "skill") { billet.skills = symbol_add_text(billet.skills, ast.qualified(module, ast.part(item, 1)), "skill", item, module) }
+        (tag == "native") { billet.natives = symbol_add_text(billet.natives, ast.qualified(module, ast.part(item, 1)), "native", item, module) }
+        (tag == "entry") { billet.entry = item }
+    }
+    out billet
+}
+
+skill header(billet) {
+    @executor = billet.executor
+    (wide.is_zero(billet.heap_bytes) == yes) { billet.heap_bytes = wide.from_number(billet.default_heap_bytes) }
+    billet = executor.new_program(billet, "_start")
+    out executor.heap_size(billet, billet.heap_bytes)
+}
+
+skill start(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    @params = ast.part(billet.entry, 1)
+    @param_count = group.count(params)
+    billet = executor.label(billet, "_start")
+    billet = executor.move(billet, backend.VALUE, backend.STACK)
+    billet = executor.call(billet, "rt_environment_capture")
+    billet = executor.load_immediate(billet, backend.FRAME, 0)
+    billet = load_heap_bytes(billet, backend.VALUE)
+    billet = executor.call(billet, "rt_platform_heap")
+    billet = executor.branch_zero(billet, backend.ERROR, ".L_start_heap_ready")
+    billet = executor.call(billet, "rt_out_of_memory")
+    billet = executor.label(billet, ".L_start_heap_ready")
+    billet = executor.move(billet, backend.HEAP_TOP, backend.VALUE)
+    billet = executor.load_address(billet, backend.SCRATCH0, HEAP_START, 0)
+    billet = executor.store(billet, backend.HEAP_TOP, backend.SCRATCH0, 0)
+    billet = load_heap_bytes(billet, backend.STORE_BOTTOM)
+    billet = executor.add(billet, backend.STORE_BOTTOM, backend.HEAP_TOP, backend.STORE_BOTTOM)
+    billet = executor.call(billet, "rt_store_init")
+    billet = executor.move(billet, backend.REGION_MARK, backend.HEAP_TOP)
+    billet = executor.load_immediate(billet, backend.STACK_LIMIT, 0)
+    billet = executor.load_address(billet, backend.SCRATCH0, STACK_BASE, 0)
+    billet = executor.store(billet, backend.STACK, backend.SCRATCH0, 0)
+    billet = load_stack_bytes(billet, backend.VALUE, 0)
+    billet = executor.call(billet, "rt_platform_stack")
+    billet = executor.branch_nonzero(billet, backend.ERROR, ".L_start_stack_ready")
+    billet = executor.load_address(billet, backend.SCRATCH0, STACK_BASE, 0)
+    billet = executor.store(billet, backend.VALUE, backend.SCRATCH0, 0)
+    billet = load_stack_bytes(billet, backend.SCRATCH1, 1)
+    billet = executor.sub(billet, backend.STACK_LIMIT, backend.VALUE, backend.SCRATCH1)
+    billet = executor.label(billet, ".L_start_stack_ready")
+    (billet.signals == yes) { billet = executor.call(billet, "rt_install_signals") }
+    billet = executor.load(billet, backend.VALUE, backend.STACK, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH0, param_count + 1)
+    billet = executor.branch_greater_equal(billet, backend.VALUE, backend.SCRATCH0, ".L_start_args_ready")
+    billet = executor.load_immediate(billet, backend.VALUE, abi.tagged(param_count, abi.TAG_NUMBER))
+    billet = executor.call(billet, "rt_missing_args")
+    billet = executor.label(billet, ".L_start_args_ready")
+    drum (param_count) {
+        billet = executor.load(billet, backend.VALUE, backend.STACK, (2 * beat + 2) * words.bytes)
+        billet = executor.call(billet, "rt_cstring")
+        billet = executor.push(billet, backend.VALUE)
+    }
+    drum (param_count) {
+        billet = executor.load(billet, backend.argument(beat), backend.STACK, (param_count - beat - 1) * words.bytes)
+    }
+    (param_count > 0) {
+        billet = executor.add_immediate(billet, backend.STACK, backend.STACK, param_count * words.bytes)
+    }
+    billet = executor.load_address(billet, backend.SCRATCH0, STACK_BASE, 0)
+    billet = executor.load(billet, backend.STACK, backend.SCRATCH0, 0)
+    billet = executor.call(billet, "saltic_program")
+    billet = executor.branch_zero(billet, backend.ERROR, ".L_start_done")
+    billet = executor.move(billet, backend.VALUE, backend.ERROR)
+    billet = executor.call(billet, "rt_start_failure")
+    billet = executor.label(billet, ".L_start_done")
+    billet = executor.load_immediate(billet, backend.VALUE, 0)
+    out executor.call(billet, "rt_platform_exit")
+}
+
+skill load_stack_bytes(billet, role, margins) {
+    @executor = billet.executor
+    (billet.words.bytes == 8) {
+        billet = executor.load_immediate(billet, role, STACK_UNITS_WIDE - margins)
+        out executor.shift_left(billet, role, role, STACK_UNIT_SHIFT)
+    }
+    out executor.load_immediate(billet, role, STACK_BYTES_NARROW - margins * STACK_MARGIN_BYTES)
+}
+
+skill load_heap_bytes(billet, role) {
+    @executor = billet.executor
+    (billet.words.bytes == 8) { out executor.load_wide(billet, role, billet.heap_bytes) }
+    out executor.load_word(billet, role, wide.to_word(billet.heap_bytes))
+}
+
+skill finish_data(billet) {
+    @executor = billet.executor
+    (wide.is_zero(billet.heap_bytes) == yes) { billet.heap_bytes = wide.from_number(billet.default_heap_bytes) }
+    billet = executor.heap_size(billet, billet.heap_bytes)
+    billet = executor.align(billet, backend.DATA, abi.OBJECT_ALIGNMENT)
+    billet = executor.align(billet, backend.RODATA, abi.OBJECT_ALIGNMENT)
+    billet = executor.align(billet, backend.BSS, model.ARENA_ALIGNMENT)
+    billet = executor.data_label(billet, backend.BSS, "saltic_arena")
+    billet = executor.reserve(billet, wide.from_number(billet.arena_bytes))
+    billet = executor.align(billet, backend.BSS, abi.OBJECT_ALIGNMENT)
+    billet = executor.data_label(billet, backend.BSS, HEAP_START)
+    out executor.reserve(billet, wide.from_number(billet.words.bytes))
+}
+
+skill box_number(billet, name) {
+    drum (group.count(billet.boxes)) {
+        @box = group.get(billet.boxes, beat)
+        (box.name == name) { out beat + 1 }
+    }
+    out 0
+}
+
+skill dispatch_label(method) {
+    out str.concat("rt_method_", safe(method))
+}

@@ -1,0 +1,140 @@
+-- names — таблицы имён чекера: плоский список Name (имена области) и таблица
+-- из NAME_BUCKETS корзин по хэшу (глобальные, полное «модуль.имя»); ключи
+-- выведенных фиксированных типов параметров и результатов, варианты enum.
+-- Поиск отдаёт Name {} с пустым name, если не найдено. ROOT_MARK|корень —
+-- корень модулей программы (закон: переменная не зовётся корнем модуля).
+
+use core.str
+use core.group
+use compiler.ast
+use compiler.errors
+
+NAME_BUCKETS = 64
+NAME_HASH_LIMIT = 65521
+AMBIGUOUS = "$ambiguous"
+ROOT_MARK = "$root"
+
+Names = Box {
+    Name = Box {
+        name = "",
+        kind = "",
+        type = "unknown",
+        node = []
+    }
+
+    Scope = Box {
+        names = [],
+        subject = "",
+        module = ""
+    }
+
+    skill variant_key(name) {
+        out "__enum_variant__|{name}"
+    }
+
+    skill enum_variant_key(enum_name, variant) {
+        out "__enum_variant__|{enum_name}.{variant}"
+    }
+
+    skill param_key(name, index) {
+        out "__param__|{name}|{index}"
+    }
+
+    skill result_key(name) {
+        out "__result__|{name}"
+    }
+
+    skill find_name(names, name) {
+        drum (names) {
+            (beat.name == name) {
+                out beat
+            }
+        }
+        out Name {}
+    }
+
+    skill has_name(names, name) {
+        @found = find_name(names, name)
+        out (str.bytes(found.name) > 0)
+    }
+
+    skill bucket_of(name) {
+        @size = str.bytes(name)
+        @from = 0
+        (size > 8) { from = size - 8 }
+        @code = size
+        drum (size - from) {
+            code = (code * 31 + str.byte(name, from + beat)) % NAME_HASH_LIMIT
+        }
+        out code % NAME_BUCKETS
+    }
+
+    skill table_find(table, name) {
+        (group.count(table) == 0) {
+            out Name {}
+        }
+        out find_name(group.get(table, bucket_of(name)), name)
+    }
+
+    skill table_has(table, name) {
+        @found = table_find(table, name)
+        out (str.bytes(found.name) > 0)
+    }
+
+    skill table_put_node(table, name, kind, type, node) {
+        @buckets = table
+        (group.count(buckets) == 0) {
+            drum (NAME_BUCKETS) {
+                buckets = group.add(buckets, [])
+            }
+        }
+        @index = bucket_of(name)
+        @bucket = put_name_node(group.get(buckets, index), name, kind, type, node)
+        out group.tree_replaced(buckets, index, bucket)
+    }
+
+    skill table_update(table, name, type) {
+        @index = bucket_of(name)
+        out group.tree_replaced(table, index, update_name(group.get(table, index), name, type))
+    }
+
+    skill table_put(table, name, kind, type) {
+        out table_put_node(table, name, kind, type, [])
+    }
+
+    skill put_name(names, name, kind, type) {
+        @fresh = Name {
+            name = name,
+            kind = kind,
+            type = type
+        }
+        out group.add(names, fresh)
+    }
+
+    skill put_name_node(names, name, kind, type, node) {
+        @fresh = Name {
+            name = name,
+            kind = kind,
+            type = type,
+            node = node
+        }
+        out group.add(names, fresh)
+    }
+
+    skill update_name(names, name, type) {
+        @result = []
+        drum (names) {
+            @next_type = beat.type
+            (beat.name == name) { next_type = type }
+            result = put_name_node(result, beat.name, beat.kind, next_type, beat.node)
+        }
+        out result
+    }
+
+    skill bind_name(names, name, kind, type) {
+        (has_name(names, name) == yes) {
+            out update_name(names, name, type)
+        }
+        out put_name(names, name, kind, type)
+    }
+}
