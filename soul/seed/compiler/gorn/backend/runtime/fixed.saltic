@@ -1,0 +1,566 @@
+-- fixed — рантайм фиксированных целых u8/u16/u32/i32: арифметика с
+-- проверкой переполнения, сравнения, память, печать, преобразование.
+-- Каждый навык берёт и отдаёт billet, определяя метку rt_fixed_* в коде.
+-- Команды — методами billet.executor (договор backend), регистры — его роли.
+-- Значения — сырые 32 бита в VALUE/ERROR без тега; тип — в FIXED_SOURCE_KIND
+-- (abi.FIXED_*), целевой тип convert — в FIXED_TARGET_KIND. Результат проходит
+-- через rt_fixed_new, который режет по ширине и даёт rt_fixed_overflow
+-- (ERROR_FIXED_INTEGER_OVERFLOW). Ответы yes/no — метками numbers.EQUAL_YES /
+-- EQUAL_NO. rt_fixed_mem_load32 / store32 проваливаются в
+-- rt_fixed_mem_load / store — внутри одного навыка. Временные — SCRATCH0…5 и
+-- ARG2…ARG5; rt_fixed_mul считает итерации в ERROR (операнды уже в SCRATCH2/3).
+--
+-- emit_fixed_overflow(billet) — rt_fixed_overflow: ошибка FixedIntegerOverflow
+-- emit_fixed_new(billet) — rt_fixed_new: проверка диапазона u8/u16; на 8-байтном
+--     слове (emit_fixed_new_wide) — по ширине вида: u8/u16/u32/bits32 без знака,
+--     i32 со знаком, usize/address — всё слово; emit_fixed_wrap — rt_fixed_wrap:
+--     not и сдвиг влево 32-битных видов обрезаются до 32 бит, как на RV32;
+--     emit_fixed_mul_wide / emit_fixed_div_wide — mul / mulhu / div / divu
+-- emit_fixed_equal / emit_fixed_less / emit_fixed_greater(billet)
+-- emit_fixed_add / emit_fixed_sub / emit_fixed_mul / emit_fixed_div(billet)
+-- emit_fixed_and / emit_fixed_or / emit_fixed_xor / emit_fixed_not(billet)
+-- emit_fixed_shift_left / emit_fixed_shift_right(billet)
+-- emit_fixed_convert(billet) — rt_fixed_convert между типами
+-- emit_fixed_to_number(billet, label, failure) — label: фиксированное → обычное
+--     число с тегом; не влезает — прыжок в failure (rt_fixed_to_number — NumberOverflow,
+--     rt_fixed_pack — FixedTooBig, упаковка в поле Box и группу)
+-- emit_fixed_mem_load / _load8 / _load16(billet) — чтение по адресу (load даёт
+--     и rt_fixed_mem_load32); emit_fixed_mem_store / _store8 / _store16(billet) — запись
+-- emit_fixed_text(billet) — rt_fixed_text: десятичный текст строкой (для подстановки
+--     "{x}" с фиксированным x)
+
+use compiler.abi
+use compiler.abi.fixed
+use compiler.gorn.backend
+use compiler.gorn.backend.runtime.numbers
+use compiler.machine.word
+use compiler.gorn.backend.runtime.tails
+
+I32_SIGN_WORD = word.from_bytes(0, 0, 0, 128)
+I32_MAX_WORD = word.from_bytes(255, 255, 255, 127)
+
+skill emit_fixed_overflow(billet) {
+    @executor = billet.executor
+    out tails.fail(billet, "rt_fixed_overflow", abi.ERROR_FIXED_INTEGER_OVERFLOW)
+}
+
+skill emit_fixed_equal(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_equal")
+    billet = executor.branch_equal(billet, backend.VALUE, backend.ERROR, numbers.EQUAL_YES)
+    billet = executor.jump(billet, numbers.EQUAL_NO)
+    out billet
+}
+
+skill emit_fixed_less(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_less")
+    billet = executor.load_immediate(billet, backend.SCRATCH3, fixed.I32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH3, ".L_fixed_less_signed")
+    billet = executor.branch_less_unsigned(billet, backend.VALUE, backend.ERROR, numbers.EQUAL_YES)
+    billet = executor.jump(billet, numbers.EQUAL_NO)
+    billet = executor.label(billet, ".L_fixed_less_signed")
+    billet = executor.branch_less(billet, backend.VALUE, backend.ERROR, numbers.EQUAL_YES)
+    billet = executor.jump(billet, numbers.EQUAL_NO)
+    out billet
+}
+
+skill emit_fixed_greater(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_greater")
+    billet = executor.move(billet, backend.ARG2, backend.VALUE)
+    billet = executor.move(billet, backend.VALUE, backend.ERROR)
+    billet = executor.move(billet, backend.ERROR, backend.ARG2)
+    billet = executor.jump(billet, "rt_fixed_less")
+    out billet
+}
+
+skill emit_fixed_new_wide(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_new")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.U8)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u8")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.U16)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u16")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.U32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u32")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.BITS32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u32")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.I32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_i32")
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_fixed_check_u8")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.VALUE, 8)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, "rt_fixed_overflow")
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_fixed_check_u16")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.VALUE, 16)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, "rt_fixed_overflow")
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_fixed_check_u32")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.VALUE, 32)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, "rt_fixed_overflow")
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_fixed_check_i32")
+    billet = executor.shift_left(billet, backend.SCRATCH0, backend.VALUE, 32)
+    billet = executor.shift_right_signed(billet, backend.SCRATCH0, backend.SCRATCH0, 32)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.VALUE, "rt_fixed_overflow")
+    out tails.ok(billet)
+}
+
+skill emit_fixed_wrap(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_wrap")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.I32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_wrap_signed")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.U32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_wrap_unsigned")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.BITS32)
+    billet = executor.branch_not_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, "rt_fixed_new")
+    billet = executor.label(billet, ".L_fixed_wrap_unsigned")
+    billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, 32)
+    billet = executor.shift_right_unsigned(billet, backend.VALUE, backend.VALUE, 32)
+    billet = executor.jump(billet, "rt_fixed_new")
+    billet = executor.label(billet, ".L_fixed_wrap_signed")
+    billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, 32)
+    billet = executor.shift_right_signed(billet, backend.VALUE, backend.VALUE, 32)
+    out executor.jump(billet, "rt_fixed_new")
+}
+
+skill emit_fixed_mul_wide(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_mul")
+    billet = executor.multiply(billet, backend.SCRATCH2, backend.VALUE, backend.ERROR)
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.USIZE)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_mul_wide_high")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.ADDRESS)
+    billet = executor.branch_not_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_mul_wide_done")
+    billet = executor.label(billet, ".L_fixed_mul_wide_high")
+    billet = executor.multiply_high_unsigned(billet, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, "rt_fixed_overflow")
+    billet = executor.label(billet, ".L_fixed_mul_wide_done")
+    billet = executor.move(billet, backend.VALUE, backend.SCRATCH2)
+    out executor.jump(billet, "rt_fixed_new")
+}
+
+skill emit_fixed_div_wide(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_div")
+    billet = executor.branch_nonzero(billet, backend.ERROR, ".L_fixed_div_nonzero")
+    billet = executor.jump(billet, "rt_division_by_zero")
+    billet = executor.label(billet, ".L_fixed_div_nonzero")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.I32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_div_wide_signed")
+    billet = executor.divide_unsigned(billet, backend.VALUE, backend.VALUE, backend.ERROR)
+    billet = executor.jump(billet, "rt_fixed_new")
+    billet = executor.label(billet, ".L_fixed_div_wide_signed")
+    billet = executor.divide(billet, backend.VALUE, backend.VALUE, backend.ERROR)
+    out executor.jump(billet, "rt_fixed_new")
+}
+
+skill emit_fixed_new(billet) {
+    (billet.words.bytes == 8) { out emit_fixed_new_wide(billet) }
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_new")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.U8)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u8")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.U16)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_check_u16")
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_fixed_check_u8")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.VALUE, 8)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, "rt_fixed_overflow")
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_fixed_check_u16")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.VALUE, 16)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, "rt_fixed_overflow")
+    out tails.ok(billet)
+}
+
+skill emit_fixed_mem_load8(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_mem_load8")
+    billet = executor.load_immediate(billet, backend.ARG2, fixed.U8)
+    billet = executor.jump(billet, "rt_fixed_mem_load")
+    out billet
+}
+
+skill emit_fixed_mem_load16(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_mem_load16")
+    billet = executor.load_immediate(billet, backend.ARG2, fixed.U16)
+    billet = executor.jump(billet, "rt_fixed_mem_load")
+    out billet
+}
+
+skill emit_fixed_mem_load(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_mem_load32")
+    billet = executor.load_immediate(billet, backend.ARG2, fixed.U32)
+    billet = executor.label(billet, "rt_fixed_mem_load")
+    billet = executor.add(billet, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    billet = executor.load_immediate(billet, backend.SCRATCH1, fixed.U8)
+    billet = executor.branch_equal(billet, backend.ARG2, backend.SCRATCH1, ".L_fixed_mem_load8")
+    billet = executor.load_immediate(billet, backend.SCRATCH1, fixed.U16)
+    billet = executor.branch_equal(billet, backend.ARG2, backend.SCRATCH1, ".L_fixed_mem_load16")
+    billet = executor.load32(billet, backend.VALUE, backend.SCRATCH0, 0)
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_fixed_mem_load8")
+    billet = executor.load_byte(billet, backend.VALUE, backend.SCRATCH0, 0)
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_fixed_mem_load16")
+    billet = executor.load_half(billet, backend.VALUE, backend.SCRATCH0, 0)
+    billet = tails.ok(billet)
+    out billet
+}
+
+skill emit_fixed_mem_store8(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_mem_store8")
+    billet = executor.load_immediate(billet, backend.SCRATCH3, 1)
+    billet = executor.jump(billet, "rt_fixed_mem_store")
+    out billet
+}
+
+skill emit_fixed_mem_store16(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_mem_store16")
+    billet = executor.load_immediate(billet, backend.SCRATCH3, 2)
+    billet = executor.jump(billet, "rt_fixed_mem_store")
+    out billet
+}
+
+skill emit_fixed_mem_store(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_mem_store32")
+    billet = executor.load_immediate(billet, backend.SCRATCH3, 3)
+    billet = executor.label(billet, "rt_fixed_mem_store")
+    billet = executor.add(billet, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 1)
+    billet = executor.branch_equal(billet, backend.SCRATCH3, backend.SCRATCH1, ".L_fixed_mem_store8")
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 2)
+    billet = executor.branch_equal(billet, backend.SCRATCH3, backend.SCRATCH1, ".L_fixed_mem_store16")
+    billet = executor.store32(billet, backend.ARG2, backend.SCRATCH0, 0)
+    billet = executor.jump(billet, ".L_fixed_mem_store_done")
+    billet = executor.label(billet, ".L_fixed_mem_store8")
+    billet = executor.store_byte(billet, backend.ARG2, backend.SCRATCH0, 0)
+    billet = executor.jump(billet, ".L_fixed_mem_store_done")
+    billet = executor.label(billet, ".L_fixed_mem_store16")
+    billet = executor.store_half(billet, backend.ARG2, backend.SCRATCH0, 0)
+    billet = executor.label(billet, ".L_fixed_mem_store_done")
+    billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
+    out tails.ok(billet)
+}
+
+skill emit_fixed_text(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_fixed_text")
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 16)
+    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 15)
+    billet = executor.move(billet, backend.SCRATCH0, backend.VALUE)
+    billet = executor.load_immediate(billet, backend.SCRATCH2, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH3, fixed.I32)
+    billet = executor.branch_not_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH3, ".L_fixed_text_digits")
+    billet = executor.branch_not_negative(billet, backend.SCRATCH0, ".L_fixed_text_digits")
+    billet = executor.load_immediate(billet, backend.SCRATCH2, 1)
+    billet = executor.negate(billet, backend.SCRATCH0, backend.SCRATCH0)
+    billet = executor.label(billet, ".L_fixed_text_digits")
+    billet = executor.load_immediate(billet, backend.SCRATCH3, 0)
+    billet = executor.label(billet, ".L_fixed_text_digit")
+    pick {
+        (words.bytes == 8) {
+            billet = executor.load_immediate(billet, backend.ARG4, 10)
+            billet = executor.divide_unsigned(billet, backend.SCRATCH4, backend.SCRATCH0, backend.ARG4)
+            billet = executor.remainder_unsigned(billet, backend.SCRATCH5, backend.SCRATCH0, backend.ARG4)
+        }
+        {
+            billet = executor.load_immediate(billet, backend.SCRATCH4, 0)
+            billet = executor.load_immediate(billet, backend.SCRATCH5, 0)
+            billet = executor.load_immediate(billet, backend.ARG2, 32)
+            billet = executor.move(billet, backend.ARG3, backend.SCRATCH0)
+            billet = executor.label(billet, ".L_fixed_text_div10")
+            billet = executor.shift_right_unsigned(billet, backend.ARG4, backend.ARG3, 31)
+            billet = executor.shift_left(billet, backend.ARG3, backend.ARG3, 1)
+            billet = executor.shift_left(billet, backend.SCRATCH5, backend.SCRATCH5, 1)
+            billet = executor.or(billet, backend.SCRATCH5, backend.SCRATCH5, backend.ARG4)
+            billet = executor.shift_left(billet, backend.SCRATCH4, backend.SCRATCH4, 1)
+            billet = executor.load_immediate(billet, backend.ARG4, 10)
+            billet = executor.branch_less_unsigned(billet, backend.SCRATCH5, backend.ARG4, ".L_fixed_text_div10_next")
+            billet = executor.add_immediate(billet, backend.SCRATCH5, backend.SCRATCH5, -10)
+            billet = executor.or_immediate(billet, backend.SCRATCH4, backend.SCRATCH4, 1)
+            billet = executor.label(billet, ".L_fixed_text_div10_next")
+            billet = executor.add_immediate(billet, backend.ARG2, backend.ARG2, -1)
+            billet = executor.branch_nonzero(billet, backend.ARG2, ".L_fixed_text_div10")
+        }
+    }
+    billet = executor.add_immediate(billet, backend.SCRATCH5, backend.SCRATCH5, 48)
+    billet = executor.add(billet, backend.ARG4, backend.STACK, backend.SCRATCH3)
+    billet = executor.store_byte(billet, backend.SCRATCH5, backend.ARG4, 0)
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, 1)
+    billet = executor.move(billet, backend.SCRATCH0, backend.SCRATCH4)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, ".L_fixed_text_digit")
+    billet = executor.add(billet, backend.SCRATCH4, backend.SCRATCH3, backend.SCRATCH2)
+    billet = executor.store(billet, backend.SCRATCH3, backend.STACK, words.bytes * 14)
+    billet = executor.store(billet, backend.SCRATCH2, backend.STACK, words.bytes * 13)
+    billet = executor.store(billet, backend.SCRATCH4, backend.STACK, words.bytes * 12)
+    billet = executor.add_immediate(billet, backend.VALUE, backend.SCRATCH4, words.string_data + 1)
+    billet = executor.call(billet, "rt_alloc")
+    billet = executor.load(billet, backend.SCRATCH3, backend.STACK, words.bytes * 14)
+    billet = executor.load(billet, backend.SCRATCH2, backend.STACK, words.bytes * 13)
+    billet = executor.load(billet, backend.SCRATCH4, backend.STACK, words.bytes * 12)
+    billet = executor.load_immediate(billet, backend.SCRATCH5, abi.OBJECT_KIND_STRING)
+    billet = executor.store32(billet, backend.SCRATCH5, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    billet = executor.store(billet, backend.SCRATCH4, backend.VALUE, words.payload)
+    billet = executor.load_immediate(billet, backend.SCRATCH5, 0)
+    billet = executor.branch_zero(billet, backend.SCRATCH2, ".L_fixed_text_copy")
+    billet = executor.load_immediate(billet, backend.ARG2, 45)
+    billet = executor.store_byte(billet, backend.ARG2, backend.VALUE, words.payload + words.string_data)
+    billet = executor.load_immediate(billet, backend.SCRATCH5, 1)
+    billet = executor.label(billet, ".L_fixed_text_copy")
+    billet = executor.branch_zero(billet, backend.SCRATCH3, ".L_fixed_text_done")
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, -1)
+    billet = executor.add(billet, backend.ARG2, backend.STACK, backend.SCRATCH3)
+    billet = executor.load_byte(billet, backend.ARG2, backend.ARG2, 0)
+    billet = executor.add(billet, backend.ARG3, backend.VALUE, backend.SCRATCH5)
+    billet = executor.store_byte(billet, backend.ARG2, backend.ARG3, words.payload + words.string_data)
+    billet = executor.add_immediate(billet, backend.SCRATCH5, backend.SCRATCH5, 1)
+    billet = executor.jump(billet, ".L_fixed_text_copy")
+    billet = executor.label(billet, ".L_fixed_text_done")
+    billet = executor.add(billet, backend.ARG3, backend.VALUE, backend.SCRATCH4)
+    billet = executor.store_byte_zero(billet, backend.ARG3, words.payload + words.string_data)
+    billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 15)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 16)
+    out tails.ok(billet)
+}
+
+skill emit_fixed_add(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_add")
+    billet = executor.move(billet, backend.SCRATCH2, backend.VALUE)
+    billet = executor.move(billet, backend.SCRATCH3, backend.ERROR)
+    billet = executor.add(billet, backend.VALUE, backend.SCRATCH2, backend.SCRATCH3)
+    billet = executor.load_immediate(billet, backend.SCRATCH4, fixed.I32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH4, ".L_fixed_add_signed")
+    billet = executor.branch_less_unsigned(billet, backend.VALUE, backend.SCRATCH2, "rt_fixed_overflow")
+    billet = executor.jump(billet, "rt_fixed_new")
+    billet = executor.label(billet, ".L_fixed_add_signed")
+    billet = executor.xor(billet, backend.SCRATCH4, backend.VALUE, backend.SCRATCH2)
+    billet = executor.xor(billet, backend.SCRATCH5, backend.VALUE, backend.SCRATCH3)
+    billet = executor.and(billet, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH5)
+    billet = executor.branch_negative(billet, backend.SCRATCH4, "rt_fixed_overflow")
+    billet = executor.jump(billet, "rt_fixed_new")
+    out billet
+}
+
+skill emit_fixed_sub(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_sub")
+    billet = executor.move(billet, backend.SCRATCH2, backend.VALUE)
+    billet = executor.move(billet, backend.SCRATCH3, backend.ERROR)
+    billet = executor.sub(billet, backend.VALUE, backend.SCRATCH2, backend.SCRATCH3)
+    billet = executor.load_immediate(billet, backend.SCRATCH4, fixed.I32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH4, ".L_fixed_sub_signed")
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH2, backend.SCRATCH3, "rt_fixed_overflow")
+    billet = executor.jump(billet, "rt_fixed_new")
+    billet = executor.label(billet, ".L_fixed_sub_signed")
+    billet = executor.xor(billet, backend.SCRATCH4, backend.SCRATCH2, backend.SCRATCH3)
+    billet = executor.xor(billet, backend.SCRATCH5, backend.VALUE, backend.SCRATCH2)
+    billet = executor.and(billet, backend.SCRATCH4, backend.SCRATCH4, backend.SCRATCH5)
+    billet = executor.branch_negative(billet, backend.SCRATCH4, "rt_fixed_overflow")
+    billet = executor.jump(billet, "rt_fixed_new")
+    out billet
+}
+
+skill emit_fixed_mul(billet) {
+    (billet.words.bytes == 8) { out emit_fixed_mul_wide(billet) }
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_mul")
+    billet = executor.move(billet, backend.SCRATCH2, backend.VALUE)
+    billet = executor.move(billet, backend.SCRATCH3, backend.ERROR)
+    billet = executor.load_immediate(billet, backend.ARG5, 0)
+    billet = executor.load_immediate(billet, backend.ARG2, fixed.I32)
+    billet = executor.branch_not_equal(billet, backend.FIXED_SOURCE_KIND, backend.ARG2, ".L_fixed_mul_unsigned")
+    billet = executor.branch_not_negative(billet, backend.SCRATCH2, ".L_fixed_mul_left_ready")
+    billet = executor.negate(billet, backend.SCRATCH2, backend.SCRATCH2)
+    billet = executor.xor_immediate(billet, backend.ARG5, backend.ARG5, 1)
+    billet = executor.label(billet, ".L_fixed_mul_left_ready")
+    billet = executor.branch_not_negative(billet, backend.SCRATCH3, ".L_fixed_mul_unsigned")
+    billet = executor.negate(billet, backend.SCRATCH3, backend.SCRATCH3)
+    billet = executor.xor_immediate(billet, backend.ARG5, backend.ARG5, 1)
+    billet = executor.label(billet, ".L_fixed_mul_unsigned")
+    billet = executor.load_immediate(billet, backend.SCRATCH4, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH5, 0)
+    billet = executor.load_immediate(billet, backend.ARG4, 0)
+    billet = executor.load_immediate(billet, backend.ERROR, 32)
+    billet = executor.label(billet, ".L_fixed_mul_loop")
+    billet = executor.and_immediate(billet, backend.ARG2, backend.SCRATCH3, 1)
+    billet = executor.branch_zero(billet, backend.ARG2, ".L_fixed_mul_shift")
+    billet = executor.add(billet, backend.ARG2, backend.SCRATCH4, backend.SCRATCH2)
+    billet = executor.set_less_unsigned(billet, backend.ARG3, backend.ARG2, backend.SCRATCH4)
+    billet = executor.add(billet, backend.SCRATCH5, backend.SCRATCH5, backend.ARG4)
+    billet = executor.add(billet, backend.SCRATCH5, backend.SCRATCH5, backend.ARG3)
+    billet = executor.move(billet, backend.SCRATCH4, backend.ARG2)
+    billet = executor.label(billet, ".L_fixed_mul_shift")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH3, backend.SCRATCH3, 1)
+    billet = executor.shift_right_unsigned(billet, backend.ARG2, backend.SCRATCH2, 31)
+    billet = executor.shift_left(billet, backend.SCRATCH2, backend.SCRATCH2, 1)
+    billet = executor.shift_left(billet, backend.ARG4, backend.ARG4, 1)
+    billet = executor.or(billet, backend.ARG4, backend.ARG4, backend.ARG2)
+    billet = executor.add_immediate(billet, backend.ERROR, backend.ERROR, -1)
+    billet = executor.branch_nonzero(billet, backend.ERROR, ".L_fixed_mul_loop")
+    billet = executor.branch_nonzero(billet, backend.SCRATCH5, ".L_fixed_mul_overflow")
+    billet = executor.load_immediate(billet, backend.ARG2, fixed.I32)
+    billet = executor.branch_not_equal(billet, backend.FIXED_SOURCE_KIND, backend.ARG2, ".L_fixed_mul_ready")
+    billet = executor.branch_zero(billet, backend.ARG5, ".L_fixed_mul_positive")
+    billet = executor.load_word(billet, backend.ARG2, I32_SIGN_WORD)
+    billet = executor.branch_less_unsigned(billet, backend.ARG2, backend.SCRATCH4, ".L_fixed_mul_overflow")
+    billet = executor.negate(billet, backend.SCRATCH4, backend.SCRATCH4)
+    billet = executor.jump(billet, ".L_fixed_mul_ready")
+    billet = executor.label(billet, ".L_fixed_mul_positive")
+    billet = executor.load_word(billet, backend.ARG2, I32_MAX_WORD)
+    billet = executor.branch_less_unsigned(billet, backend.ARG2, backend.SCRATCH4, ".L_fixed_mul_overflow")
+    billet = executor.label(billet, ".L_fixed_mul_ready")
+    billet = executor.move(billet, backend.VALUE, backend.SCRATCH4)
+    billet = executor.jump(billet, "rt_fixed_new")
+    billet = executor.label(billet, ".L_fixed_mul_overflow")
+    billet = executor.jump(billet, "rt_fixed_overflow")
+    out billet
+}
+
+skill emit_fixed_div(billet) {
+    (billet.words.bytes == 8) { out emit_fixed_div_wide(billet) }
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_div")
+    billet = executor.move(billet, backend.SCRATCH2, backend.VALUE)
+    billet = executor.move(billet, backend.SCRATCH3, backend.ERROR)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH3, ".L_fixed_div_nonzero")
+    billet = executor.jump(billet, "rt_division_by_zero")
+    billet = executor.label(billet, ".L_fixed_div_nonzero")
+    billet = executor.load_immediate(billet, backend.ARG4, 0)
+    billet = executor.load_immediate(billet, backend.ARG2, fixed.I32)
+    billet = executor.branch_not_equal(billet, backend.FIXED_SOURCE_KIND, backend.ARG2, ".L_fixed_div_unsigned")
+    billet = executor.branch_not_negative(billet, backend.SCRATCH2, ".L_fixed_div_left_ready")
+    billet = executor.negate(billet, backend.SCRATCH2, backend.SCRATCH2)
+    billet = executor.xor_immediate(billet, backend.ARG4, backend.ARG4, 1)
+    billet = executor.label(billet, ".L_fixed_div_left_ready")
+    billet = executor.branch_not_negative(billet, backend.SCRATCH3, ".L_fixed_div_unsigned")
+    billet = executor.negate(billet, backend.SCRATCH3, backend.SCRATCH3)
+    billet = executor.xor_immediate(billet, backend.ARG4, backend.ARG4, 1)
+    billet = executor.label(billet, ".L_fixed_div_unsigned")
+    billet = executor.load_immediate(billet, backend.SCRATCH4, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH5, 0)
+    billet = executor.load_immediate(billet, backend.ARG3, 32)
+    billet = executor.label(billet, ".L_fixed_div_loop")
+    billet = executor.shift_right_unsigned(billet, backend.ARG2, backend.SCRATCH2, 31)
+    billet = executor.shift_left(billet, backend.SCRATCH2, backend.SCRATCH2, 1)
+    billet = executor.shift_left(billet, backend.SCRATCH5, backend.SCRATCH5, 1)
+    billet = executor.or(billet, backend.SCRATCH5, backend.SCRATCH5, backend.ARG2)
+    billet = executor.shift_left(billet, backend.SCRATCH4, backend.SCRATCH4, 1)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH5, backend.SCRATCH3, ".L_fixed_div_next")
+    billet = executor.sub(billet, backend.SCRATCH5, backend.SCRATCH5, backend.SCRATCH3)
+    billet = executor.or_immediate(billet, backend.SCRATCH4, backend.SCRATCH4, 1)
+    billet = executor.label(billet, ".L_fixed_div_next")
+    billet = executor.add_immediate(billet, backend.ARG3, backend.ARG3, -1)
+    billet = executor.branch_nonzero(billet, backend.ARG3, ".L_fixed_div_loop")
+    billet = executor.branch_zero(billet, backend.ARG4, ".L_fixed_div_positive")
+    billet = executor.negate(billet, backend.SCRATCH4, backend.SCRATCH4)
+    billet = executor.jump(billet, ".L_fixed_div_ready")
+    billet = executor.label(billet, ".L_fixed_div_positive")
+    billet = executor.load_immediate(billet, backend.ARG2, fixed.I32)
+    billet = executor.branch_not_equal(billet, backend.FIXED_SOURCE_KIND, backend.ARG2, ".L_fixed_div_ready")
+    billet = executor.branch_negative(billet, backend.SCRATCH4, "rt_fixed_overflow")
+    billet = executor.label(billet, ".L_fixed_div_ready")
+    billet = executor.move(billet, backend.VALUE, backend.SCRATCH4)
+    billet = executor.jump(billet, "rt_fixed_new")
+    out billet
+}
+
+skill emit_fixed_and(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_and")
+    billet = executor.and(billet, backend.VALUE, backend.VALUE, backend.ERROR)
+    billet = executor.jump(billet, "rt_fixed_new")
+    out billet
+}
+
+skill emit_fixed_or(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_or")
+    billet = executor.or(billet, backend.VALUE, backend.VALUE, backend.ERROR)
+    billet = executor.jump(billet, "rt_fixed_new")
+    out billet
+}
+
+skill emit_fixed_xor(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_xor")
+    billet = executor.xor(billet, backend.VALUE, backend.VALUE, backend.ERROR)
+    billet = executor.jump(billet, "rt_fixed_new")
+    out billet
+}
+
+skill wrap_label(billet) {
+    (billet.words.bytes == 8) { out "rt_fixed_wrap" }
+    out "rt_fixed_new"
+}
+
+skill emit_fixed_not(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_not")
+    billet = executor.xor_immediate(billet, backend.VALUE, backend.VALUE, -1)
+    billet = executor.jump(billet, wrap_label(billet))
+    out billet
+}
+
+skill emit_fixed_shift_left(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_shift_left")
+    billet = executor.shift_left_by(billet, backend.VALUE, backend.VALUE, backend.ERROR)
+    billet = executor.jump(billet, wrap_label(billet))
+    out billet
+}
+
+skill emit_fixed_shift_right(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_shift_right")
+    billet = executor.shift_right_unsigned_by(billet, backend.VALUE, backend.VALUE, backend.ERROR)
+    billet = executor.jump(billet, "rt_fixed_new")
+    out billet
+}
+
+skill emit_fixed_convert(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_fixed_convert")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.I32)
+    billet = executor.branch_not_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_fixed_convert_to_signed")
+    billet = executor.branch_negative(billet, backend.VALUE, "rt_fixed_overflow")
+    billet = executor.label(billet, ".L_fixed_convert_to_signed")
+    billet = executor.branch_not_equal(billet, backend.FIXED_TARGET_KIND, backend.SCRATCH0, ".L_fixed_convert_ready")
+    billet = executor.branch_negative(billet, backend.VALUE, "rt_fixed_overflow")
+    billet = executor.label(billet, ".L_fixed_convert_ready")
+    billet = executor.move(billet, backend.FIXED_SOURCE_KIND, backend.FIXED_TARGET_KIND)
+    billet = executor.jump(billet, "rt_fixed_new")
+    out billet
+}
+
+skill emit_fixed_to_number(billet, label, failure) {
+    @executor = billet.executor
+    billet = executor.label(billet, label)
+    billet = executor.load_immediate(billet, backend.SCRATCH0, fixed.I32)
+    billet = executor.branch_equal(billet, backend.FIXED_SOURCE_KIND, backend.SCRATCH0, ".L_{label}_signed")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH1, backend.VALUE, billet.words.bits - 1 - abi.TAG_SHIFT)
+    billet = executor.load_immediate(billet, backend.SCRATCH2, 0)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH1, backend.SCRATCH2, ".L_{label}_overflow")
+    billet = executor.jump(billet, ".L_{label}_ready")
+    billet = executor.label(billet, ".L_{label}_signed")
+    billet = executor.shift_left(billet, backend.SCRATCH1, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.shift_right_signed(billet, backend.SCRATCH1, backend.SCRATCH1, abi.TAG_SHIFT)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH1, backend.VALUE, ".L_{label}_overflow")
+    billet = executor.label(billet, ".L_{label}_ready")
+    billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    billet = tails.ok(billet)
+    billet = executor.label(billet, ".L_{label}_overflow")
+    out executor.jump(billet, failure)
+}

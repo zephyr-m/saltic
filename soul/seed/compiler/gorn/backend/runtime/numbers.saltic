@@ -1,0 +1,450 @@
+-- numbers — рантайм чисел: арифметика, сравнения, число в текст.
+-- Каждый навык берёт и отдаёт billet, определяя метку rt_* в коде.
+-- Команды — методами billet.executor (договор backend), регистры — его роли.
+-- Аргументы — помеченные значения в VALUE/ERROR, результат в VALUE, ERROR = CALL_NO_ERROR.
+-- mul/div — сдвигами и сложением, переполнение — rt_number_overflow.
+--
+-- emit_mul / emit_div / emit_mod(billet) — rt_mul / rt_div / rt_mod (остаток со
+--     знаком делимого, как у деления к нулю); overflow, division_by_zero;
+--     на 8-байтном слове — emit_mul_wide / emit_div_wide на mul, mulh, div
+--     (переполнение — по 61 биту числа); текст числа — divu / remu
+-- emit_number_overflow / emit_division_by_zero(billet) — метки ошибок
+-- emit_equal(billet) — rt_equal: слова, строки побайтно -> yes/no
+-- emit_value_equal(billet) — rt_value_equal: то, что зовёт `==`; группы
+--     вглубь (число элементов, затем каждый элемент им же), остальное —
+--     rt_equal; Box и bytes — по памяти. Нужны rt_group_count и rt_group_at
+-- EQUAL_YES / EQUAL_NO — метки ответов rt_equal, в них прыгает и fixed
+--     (rt_fixed_equal / rt_fixed_less / rt_fixed_greater)
+-- GROUP_* — кадр rt_value_equal на стеке в словах; GROUP_STEP — единица в числе с
+--     тегом (1 << abi.TAG_SHIFT), шаг индекса
+-- emit_number_text(billet) — rt_number_text -> строка (rt_alloc)
+-- emit_bits(billet) — биты обычного числа (Q-024): rt_num_and / or / xor(VALUE, ERROR),
+--     rt_num_shift_left / shift_right(VALUE, ERROR сдвиг), rt_num_bit(VALUE, ERROR n) -> yes/no;
+--     сдвиг 0…ширина числа − 1, иначе и при переполнении влево — NumberOverflow
+
+use compiler.abi
+use compiler.abi.value
+use compiler.memory.model
+use compiler.gorn.backend
+use compiler.gorn.backend.runtime.tails
+
+EQUAL_YES = ".L_equal_yes"
+EQUAL_NO = ".L_equal_no"
+GROUP_FRAME_WORDS = 8
+GROUP_RETURN = 0
+GROUP_LEFT = 1
+GROUP_RIGHT = 2
+GROUP_COUNT = 3
+GROUP_INDEX = 4
+GROUP_ITEM = 5
+GROUP_STEP = 8
+
+skill emit_mul_wide(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_mul")
+    billet = executor.shift_right_signed(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.multiply(billet, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    billet = executor.multiply_high(billet, backend.SCRATCH1, backend.VALUE, backend.ERROR)
+    billet = executor.shift_right_signed(billet, backend.SCRATCH2, backend.SCRATCH0, billet.words.bits - 1)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH1, backend.SCRATCH2, "rt_number_overflow")
+    billet = executor.move(billet, backend.VALUE, backend.SCRATCH0)
+    out tails.ok(billet)
+}
+
+skill emit_div_wide(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_div")
+    billet = executor.shift_right_signed(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.shift_right_signed(billet, backend.ERROR, backend.ERROR, abi.TAG_SHIFT)
+    billet = executor.branch_zero(billet, backend.ERROR, "rt_division_by_zero")
+    billet = executor.divide(billet, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    billet = executor.shift_left(billet, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
+    billet = executor.shift_right_signed(billet, backend.SCRATCH1, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH1, backend.SCRATCH0, "rt_number_overflow")
+    out tails.ok(billet)
+}
+
+skill emit_mod(billet) {
+    (billet.words.bytes == 8) { out emit_mod_wide(billet) }
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_mod")
+    billet = executor.shift_right_signed(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.shift_right_signed(billet, backend.ERROR, backend.ERROR, abi.TAG_SHIFT)
+    billet = executor.branch_zero(billet, backend.ERROR, "rt_division_by_zero")
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 0)
+    billet = executor.branch_not_negative(billet, backend.VALUE, ".L_mod_left")
+    billet = executor.negate(billet, backend.VALUE, backend.VALUE)
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 1)
+    billet = executor.label(billet, ".L_mod_left")
+    billet = executor.branch_not_negative(billet, backend.ERROR, ".L_mod_right")
+    billet = executor.negate(billet, backend.ERROR, backend.ERROR)
+    billet = executor.label(billet, ".L_mod_right")
+    billet = executor.load_immediate(billet, backend.SCRATCH2, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH3, abi.VALUE_WORD_BITS)
+    billet = executor.label(billet, ".L_mod_loop")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH4, backend.VALUE, abi.VALUE_WORD_BITS - 1)
+    billet = executor.shift_left(billet, backend.SCRATCH2, backend.SCRATCH2, 1)
+    billet = executor.or(billet, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH4)
+    billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, 1)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH2, backend.ERROR, ".L_mod_next")
+    billet = executor.sub(billet, backend.SCRATCH2, backend.SCRATCH2, backend.ERROR)
+    billet = executor.label(billet, ".L_mod_next")
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, -1)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH3, ".L_mod_loop")
+    billet = executor.branch_zero(billet, backend.SCRATCH1, ".L_mod_positive")
+    billet = executor.negate(billet, backend.SCRATCH2, backend.SCRATCH2)
+    billet = executor.label(billet, ".L_mod_positive")
+    billet = executor.shift_left(billet, backend.VALUE, backend.SCRATCH2, abi.TAG_SHIFT)
+    out tails.ok(billet)
+}
+
+skill emit_mod_wide(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_mod")
+    billet = executor.shift_right_signed(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.shift_right_signed(billet, backend.ERROR, backend.ERROR, abi.TAG_SHIFT)
+    billet = executor.branch_zero(billet, backend.ERROR, "rt_division_by_zero")
+    billet = executor.remainder(billet, backend.SCRATCH0, backend.VALUE, backend.ERROR)
+    billet = executor.shift_left(billet, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
+    out tails.ok(billet)
+}
+
+skill emit_mul(billet) {
+    (billet.words.bytes == 8) { out emit_mul_wide(billet) }
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_mul")
+    billet = executor.shift_right_signed(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.shift_right_signed(billet, backend.SCRATCH1, backend.ERROR, abi.TAG_SHIFT)
+    billet = executor.xor(billet, backend.SCRATCH3, backend.VALUE, backend.SCRATCH1)
+    billet = executor.branch_not_negative(billet, backend.VALUE, ".L_mul_left")
+    billet = executor.negate(billet, backend.VALUE, backend.VALUE)
+    billet = executor.label(billet, ".L_mul_left")
+    billet = executor.branch_not_negative(billet, backend.SCRATCH1, ".L_mul_right")
+    billet = executor.negate(billet, backend.SCRATCH1, backend.SCRATCH1)
+    billet = executor.label(billet, ".L_mul_right")
+    billet = executor.load_immediate(billet, backend.ERROR, value.NUMBER_MAXIMUM)
+    billet = executor.add_immediate(billet, backend.ERROR, backend.ERROR, 1)
+    billet = executor.load_immediate(billet, backend.SCRATCH0, 0)
+    billet = executor.branch_zero(billet, backend.SCRATCH1, ".L_mul_done")
+    billet = executor.label(billet, ".L_mul_loop")
+    billet = executor.and_immediate(billet, backend.SCRATCH2, backend.SCRATCH1, 1)
+    billet = executor.branch_zero(billet, backend.SCRATCH2, ".L_mul_skip")
+    billet = executor.add(billet, backend.SCRATCH0, backend.SCRATCH0, backend.VALUE)
+    billet = executor.branch_less_unsigned(billet, backend.ERROR, backend.SCRATCH0, "rt_number_overflow")
+    billet = executor.label(billet, ".L_mul_skip")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH1, backend.SCRATCH1, 1)
+    billet = executor.branch_zero(billet, backend.SCRATCH1, ".L_mul_done")
+    billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, 1)
+    billet = executor.branch_less_unsigned(billet, backend.ERROR, backend.VALUE, "rt_number_overflow")
+    billet = executor.jump(billet, ".L_mul_loop")
+    billet = executor.label(billet, ".L_mul_done")
+    billet = executor.branch_not_negative(billet, backend.SCRATCH3, ".L_mul_positive")
+    billet = executor.negate(billet, backend.SCRATCH0, backend.SCRATCH0)
+    billet = executor.jump(billet, ".L_mul_encode")
+    billet = executor.label(billet, ".L_mul_positive")
+    billet = executor.branch_equal(billet, backend.SCRATCH0, backend.ERROR, "rt_number_overflow")
+    billet = executor.label(billet, ".L_mul_encode")
+    billet = executor.shift_left(billet, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
+    out tails.ok(billet)
+}
+
+skill emit_div(billet) {
+    (billet.words.bytes == 8) { out emit_div_wide(billet) }
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_div")
+    billet = executor.shift_right_signed(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.shift_right_signed(billet, backend.ERROR, backend.ERROR, abi.TAG_SHIFT)
+    billet = executor.branch_zero(billet, backend.ERROR, "rt_division_by_zero")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 0)
+    billet = executor.branch_not_negative(billet, backend.VALUE, ".L_div_left")
+    billet = executor.negate(billet, backend.VALUE, backend.VALUE)
+    billet = executor.xor_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, 1)
+    billet = executor.label(billet, ".L_div_left")
+    billet = executor.branch_not_negative(billet, backend.ERROR, ".L_div_right")
+    billet = executor.negate(billet, backend.ERROR, backend.ERROR)
+    billet = executor.xor_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, 1)
+    billet = executor.label(billet, ".L_div_right")
+    billet = executor.branch_less_unsigned(billet, backend.VALUE, backend.ERROR, ".L_div_done")
+    billet = executor.add_immediate(billet, backend.SCRATCH2, backend.ERROR, -1)
+    billet = executor.and(billet, backend.SCRATCH2, backend.SCRATCH2, backend.ERROR)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH2, ".L_div_long")
+    billet = executor.load_immediate(billet, backend.SCRATCH2, 1)
+    billet = executor.label(billet, ".L_div_shift")
+    billet = executor.branch_equal(billet, backend.ERROR, backend.SCRATCH2, ".L_div_shifted")
+    billet = executor.shift_right_unsigned(billet, backend.ERROR, backend.ERROR, 1)
+    billet = executor.shift_right_unsigned(billet, backend.VALUE, backend.VALUE, 1)
+    billet = executor.jump(billet, ".L_div_shift")
+    billet = executor.label(billet, ".L_div_shifted")
+    billet = executor.move(billet, backend.SCRATCH0, backend.VALUE)
+    billet = executor.jump(billet, ".L_div_done")
+    billet = executor.label(billet, ".L_div_long")
+    billet = executor.load_immediate(billet, backend.SCRATCH2, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH3, abi.VALUE_WORD_BITS)
+    billet = executor.label(billet, ".L_div_loop")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH4, backend.VALUE, abi.VALUE_WORD_BITS - 1)
+    billet = executor.shift_left(billet, backend.SCRATCH2, backend.SCRATCH2, 1)
+    billet = executor.or(billet, backend.SCRATCH2, backend.SCRATCH2, backend.SCRATCH4)
+    billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, 1)
+    billet = executor.shift_left(billet, backend.SCRATCH0, backend.SCRATCH0, 1)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH2, backend.ERROR, ".L_div_next")
+    billet = executor.sub(billet, backend.SCRATCH2, backend.SCRATCH2, backend.ERROR)
+    billet = executor.or_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, 1)
+    billet = executor.label(billet, ".L_div_next")
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, -1)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH3, ".L_div_loop")
+    billet = executor.label(billet, ".L_div_done")
+    billet = executor.branch_zero(billet, backend.SCRATCH1, ".L_div_positive")
+    billet = executor.negate(billet, backend.SCRATCH0, backend.SCRATCH0)
+    billet = executor.jump(billet, ".L_div_encode")
+    billet = executor.label(billet, ".L_div_positive")
+    billet = executor.load_immediate(billet, backend.SCRATCH2, value.NUMBER_MAXIMUM)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH2, backend.SCRATCH0, "rt_number_overflow")
+    billet = executor.label(billet, ".L_div_encode")
+    billet = executor.shift_left(billet, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
+    out tails.ok(billet)
+}
+
+skill emit_number_overflow(billet) {
+    @executor = billet.executor
+    out tails.fail(billet, "rt_number_overflow", abi.ERROR_NUMBER_OVERFLOW)
+}
+
+skill emit_division_by_zero(billet) {
+    @executor = billet.executor
+    out tails.fail(billet, "rt_division_by_zero", abi.ERROR_DIVISION_BY_ZERO)
+}
+
+skill emit_equal(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_equal")
+    billet = executor.branch_equal(billet, backend.VALUE, backend.ERROR, EQUAL_YES)
+    billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.TAG_MASK)
+    billet = executor.and_immediate(billet, backend.SCRATCH1, backend.ERROR, abi.TAG_MASK)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH1, EQUAL_NO)
+    billet = executor.load_immediate(billet, backend.SCRATCH2, abi.TAG_BOX)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH2, ".L_equal_not_box")
+    billet = executor.and_immediate(billet, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
+    billet = executor.and_immediate(billet, backend.ERROR, backend.ERROR, abi.PAYLOAD_MASK)
+    billet = executor.load(billet, backend.SCRATCH3, backend.VALUE, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    billet = executor.and_immediate(billet, backend.SCRATCH4, backend.SCRATCH3, model.FORWARDED)
+    billet = executor.branch_zero(billet, backend.SCRATCH4, ".L_equal_left_box")
+    billet = executor.and_immediate(billet, backend.VALUE, backend.SCRATCH3, abi.PAYLOAD_MASK)
+    billet = executor.label(billet, ".L_equal_left_box")
+    billet = executor.load(billet, backend.SCRATCH3, backend.ERROR, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    billet = executor.and_immediate(billet, backend.SCRATCH4, backend.SCRATCH3, model.FORWARDED)
+    billet = executor.branch_zero(billet, backend.SCRATCH4, ".L_equal_right_box")
+    billet = executor.and_immediate(billet, backend.ERROR, backend.SCRATCH3, abi.PAYLOAD_MASK)
+    billet = executor.label(billet, ".L_equal_right_box")
+    billet = executor.branch_equal(billet, backend.VALUE, backend.ERROR, EQUAL_YES)
+    billet = executor.jump(billet, EQUAL_NO)
+    billet = executor.label(billet, ".L_equal_not_box")
+    billet = executor.load_immediate(billet, backend.SCRATCH2, abi.TAG_STRING)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH2, EQUAL_NO)
+    billet = executor.and_immediate(billet, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK)
+    billet = executor.and_immediate(billet, backend.ERROR, backend.ERROR, abi.PAYLOAD_MASK)
+    billet = executor.load(billet, backend.SCRATCH0, backend.VALUE, words.payload)
+    billet = executor.load(billet, backend.SCRATCH1, backend.ERROR, words.payload)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH1, EQUAL_NO)
+    billet = executor.load_immediate(billet, backend.SCRATCH2, 0)
+    billet = executor.label(billet, ".L_equal_string")
+    billet = executor.branch_equal(billet, backend.SCRATCH2, backend.SCRATCH0, EQUAL_YES)
+    billet = executor.add(billet, backend.SCRATCH3, backend.VALUE, backend.SCRATCH2)
+    billet = executor.add(billet, backend.SCRATCH4, backend.ERROR, backend.SCRATCH2)
+    billet = executor.load_byte(billet, backend.SCRATCH3, backend.SCRATCH3, words.payload + words.string_data)
+    billet = executor.load_byte(billet, backend.SCRATCH4, backend.SCRATCH4, words.payload + words.string_data)
+    billet = executor.branch_not_equal(billet, backend.SCRATCH3, backend.SCRATCH4, EQUAL_NO)
+    billet = executor.add_immediate(billet, backend.SCRATCH2, backend.SCRATCH2, 1)
+    billet = executor.jump(billet, ".L_equal_string")
+    billet = executor.label(billet, EQUAL_YES)
+    billet = executor.load_immediate(billet, backend.VALUE, abi.YES)
+    billet = tails.ok(billet)
+    billet = executor.label(billet, EQUAL_NO)
+    billet = executor.load_immediate(billet, backend.VALUE, abi.NO)
+    out tails.ok(billet)
+}
+
+skill emit_value_equal(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_value_equal")
+    billet = executor.jump_if_equal(billet, backend.VALUE, backend.ERROR, EQUAL_YES)
+    billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.TAG_MASK)
+    billet = executor.and_immediate(billet, backend.SCRATCH1, backend.ERROR, abi.TAG_MASK)
+    billet = executor.load_immediate(billet, backend.SCRATCH2, abi.TAG_GROUP)
+    billet = executor.jump_if_not_equal(billet, backend.SCRATCH0, backend.SCRATCH2, "rt_equal")
+    billet = executor.jump_if_not_equal(billet, backend.SCRATCH1, backend.SCRATCH2, EQUAL_NO)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * GROUP_FRAME_WORDS)
+    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * GROUP_RETURN)
+    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * GROUP_LEFT)
+    billet = executor.store(billet, backend.ERROR, backend.STACK, words.bytes * GROUP_RIGHT)
+    billet = executor.call(billet, "rt_group_count")
+    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * GROUP_COUNT)
+    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * GROUP_RIGHT)
+    billet = executor.call(billet, "rt_group_count")
+    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * GROUP_COUNT)
+    billet = executor.branch_not_equal(billet, backend.VALUE, backend.SCRATCH0, ".L_value_equal_no")
+    billet = executor.store_zero(billet, backend.STACK, words.bytes * GROUP_INDEX)
+    billet = executor.label(billet, ".L_value_equal_next")
+    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * GROUP_INDEX)
+    billet = executor.load(billet, backend.SCRATCH1, backend.STACK, words.bytes * GROUP_COUNT)
+    billet = executor.branch_equal(billet, backend.SCRATCH0, backend.SCRATCH1, ".L_value_equal_yes")
+    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * GROUP_LEFT)
+    billet = executor.move(billet, backend.ERROR, backend.SCRATCH0)
+    billet = executor.call(billet, "rt_group_at")
+    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * GROUP_ITEM)
+    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * GROUP_RIGHT)
+    billet = executor.load(billet, backend.ERROR, backend.STACK, words.bytes * GROUP_INDEX)
+    billet = executor.call(billet, "rt_group_at")
+    billet = executor.move(billet, backend.ERROR, backend.VALUE)
+    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * GROUP_ITEM)
+    billet = executor.call(billet, "rt_value_equal")
+    billet = executor.load_immediate(billet, backend.SCRATCH0, abi.YES)
+    billet = executor.branch_not_equal(billet, backend.VALUE, backend.SCRATCH0, ".L_value_equal_no")
+    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * GROUP_INDEX)
+    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, GROUP_STEP)
+    billet = executor.store(billet, backend.SCRATCH0, backend.STACK, words.bytes * GROUP_INDEX)
+    billet = executor.jump(billet, ".L_value_equal_next")
+    billet = executor.label(billet, ".L_value_equal_yes")
+    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * GROUP_RETURN)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * GROUP_FRAME_WORDS)
+    billet = executor.jump(billet, EQUAL_YES)
+    billet = executor.label(billet, ".L_value_equal_no")
+    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * GROUP_RETURN)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * GROUP_FRAME_WORDS)
+    out executor.jump(billet, EQUAL_NO)
+}
+
+skill emit_number_text(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_number_text")
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 12)
+    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 11)
+    billet = executor.shift_right_signed(billet, backend.SCRATCH0, backend.VALUE, abi.TAG_SHIFT)
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 0)
+    billet = executor.branch_not_negative(billet, backend.SCRATCH0, ".L_number_abs")
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 1)
+    billet = executor.negate(billet, backend.SCRATCH0, backend.SCRATCH0)
+    billet = executor.label(billet, ".L_number_abs")
+    billet = executor.move(billet, backend.SCRATCH2, backend.STACK)
+    billet = executor.load_immediate(billet, backend.SCRATCH3, 0)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, ".L_number_digits")
+    billet = executor.load_immediate(billet, backend.SCRATCH4, 48)
+    billet = executor.store_byte(billet, backend.SCRATCH4, backend.SCRATCH2, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH3, 1)
+    billet = executor.jump(billet, ".L_number_ready")
+    billet = executor.label(billet, ".L_number_digits")
+    billet = executor.load_immediate(billet, backend.SCRATCH4, 10)
+    billet = executor.label(billet, ".L_number_digit_loop")
+    pick {
+        (words.bytes == 8) {
+            billet = executor.divide_unsigned(billet, backend.SCRATCH5, backend.SCRATCH0, backend.SCRATCH4)
+            billet = executor.remainder_unsigned(billet, backend.ARG2, backend.SCRATCH0, backend.SCRATCH4)
+        }
+        {
+            billet = executor.load_immediate(billet, backend.SCRATCH5, 0)
+            billet = executor.move(billet, backend.ARG2, backend.SCRATCH0)
+            billet = executor.label(billet, ".L_number_div10")
+            billet = executor.branch_less_unsigned(billet, backend.ARG2, backend.SCRATCH4, ".L_number_remainder")
+            billet = executor.add_immediate(billet, backend.ARG2, backend.ARG2, -10)
+            billet = executor.add_immediate(billet, backend.SCRATCH5, backend.SCRATCH5, 1)
+            billet = executor.jump(billet, ".L_number_div10")
+        }
+    }
+    billet = executor.label(billet, ".L_number_remainder")
+    billet = executor.add_immediate(billet, backend.ARG2, backend.ARG2, 48)
+    billet = executor.add(billet, backend.SCRATCH4, backend.SCRATCH2, backend.SCRATCH3)
+    billet = executor.store_byte(billet, backend.ARG2, backend.SCRATCH4, 0)
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, 1)
+    billet = executor.move(billet, backend.SCRATCH0, backend.SCRATCH5)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, ".L_number_digits")
+    billet = executor.label(billet, ".L_number_ready")
+    billet = executor.branch_zero(billet, backend.SCRATCH1, ".L_number_alloc")
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, 1)
+    billet = executor.label(billet, ".L_number_alloc")
+    billet = executor.store(billet, backend.SCRATCH3, backend.STACK, words.bytes * 10)
+    billet = executor.store(billet, backend.SCRATCH1, backend.STACK, words.bytes * 9)
+    billet = executor.store(billet, backend.SCRATCH2, backend.STACK, words.bytes * 8)
+    billet = executor.add_immediate(billet, backend.VALUE, backend.SCRATCH3, words.string_data + 1)
+    billet = executor.call(billet, "rt_alloc")
+    billet = executor.load(billet, backend.SCRATCH3, backend.STACK, words.bytes * 10)
+    billet = executor.load(billet, backend.SCRATCH1, backend.STACK, words.bytes * 9)
+    billet = executor.load(billet, backend.SCRATCH2, backend.STACK, words.bytes * 8)
+    billet = executor.load_immediate(billet, backend.SCRATCH4, abi.OBJECT_KIND_STRING)
+    billet = executor.store32(billet, backend.SCRATCH4, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+    billet = executor.store(billet, backend.SCRATCH3, backend.VALUE, words.payload)
+    billet = executor.load_immediate(billet, backend.SCRATCH4, 0)
+    billet = executor.branch_zero(billet, backend.SCRATCH1, ".L_number_copy")
+    billet = executor.load_immediate(billet, backend.SCRATCH5, 45)
+    billet = executor.store_byte(billet, backend.SCRATCH5, backend.VALUE, words.payload + words.string_data)
+    billet = executor.load_immediate(billet, backend.SCRATCH4, 1)
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, -1)
+    billet = executor.label(billet, ".L_number_copy")
+    billet = executor.branch_zero(billet, backend.SCRATCH3, ".L_number_done")
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, -1)
+    billet = executor.add(billet, backend.SCRATCH5, backend.SCRATCH2, backend.SCRATCH3)
+    billet = executor.load_byte(billet, backend.ARG2, backend.SCRATCH5, 0)
+    billet = executor.add(billet, backend.SCRATCH5, backend.VALUE, backend.SCRATCH4)
+    billet = executor.store_byte(billet, backend.ARG2, backend.SCRATCH5, words.payload + words.string_data)
+    billet = executor.add_immediate(billet, backend.SCRATCH4, backend.SCRATCH4, 1)
+    billet = executor.jump(billet, ".L_number_copy")
+    billet = executor.label(billet, ".L_number_done")
+    billet = executor.add(billet, backend.SCRATCH5, backend.VALUE, backend.SCRATCH4)
+    billet = executor.store_byte_zero(billet, backend.SCRATCH5, words.payload + words.string_data)
+    billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 11)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 12)
+    out tails.ok(billet)
+}
+
+skill emit_arithmetic_right(billet, to, from, count, name) {
+    @executor = billet.executor
+    billet = executor.branch_not_negative(billet, from, ".L_{name}_plus")
+    billet = executor.xor_immediate(billet, to, from, -1)
+    billet = executor.shift_right_unsigned_by(billet, to, to, count)
+    billet = executor.xor_immediate(billet, to, to, -1)
+    billet = executor.jump(billet, ".L_{name}_done")
+    billet = executor.label(billet, ".L_{name}_plus")
+    billet = executor.shift_right_unsigned_by(billet, to, from, count)
+    out executor.label(billet, ".L_{name}_done")
+}
+
+skill emit_shift_count(billet, name) {
+    @executor = billet.executor
+    billet = executor.label(billet, name)
+    billet = executor.shift_right_signed(billet, backend.SCRATCH3, backend.ERROR, abi.TAG_SHIFT)
+    billet = executor.branch_not_negative(billet, backend.SCRATCH3, ".L_{name}_low")
+    billet = executor.jump(billet, "rt_number_overflow")
+    billet = executor.label(billet, ".L_{name}_low")
+    billet = executor.load_immediate(billet, backend.SCRATCH4, billet.words.bits - abi.TAG_SHIFT)
+    billet = executor.branch_less(billet, backend.SCRATCH3, backend.SCRATCH4, ".L_{name}_fits")
+    billet = executor.jump(billet, "rt_number_overflow")
+    out executor.label(billet, ".L_{name}_fits")
+}
+
+skill emit_bits(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_num_and")
+    billet = tails.ok(executor.and(billet, backend.VALUE, backend.VALUE, backend.ERROR))
+    billet = executor.label(billet, "rt_num_or")
+    billet = tails.ok(executor.or(billet, backend.VALUE, backend.VALUE, backend.ERROR))
+    billet = executor.label(billet, "rt_num_xor")
+    billet = tails.ok(executor.xor(billet, backend.VALUE, backend.VALUE, backend.ERROR))
+    billet = emit_shift_count(billet, "rt_num_shift_left")
+    billet = executor.shift_left_by(billet, backend.SCRATCH5, backend.VALUE, backend.SCRATCH3)
+    billet = emit_arithmetic_right(billet, backend.SCRATCH4, backend.SCRATCH5, backend.SCRATCH3, "num_shift_back")
+    billet = executor.jump_if_not_equal(billet, backend.SCRATCH4, backend.VALUE, "rt_number_overflow")
+    billet = executor.move(billet, backend.VALUE, backend.SCRATCH5)
+    billet = tails.ok(billet)
+    billet = emit_shift_count(billet, "rt_num_shift_right")
+    billet = emit_arithmetic_right(billet, backend.VALUE, backend.VALUE, backend.SCRATCH3, "num_shift_right")
+    billet = tails.ok(executor.and_immediate(billet, backend.VALUE, backend.VALUE, abi.PAYLOAD_MASK))
+    billet = emit_shift_count(billet, "rt_num_bit")
+    billet = executor.add_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, abi.TAG_SHIFT)
+    billet = emit_arithmetic_right(billet, backend.VALUE, backend.VALUE, backend.SCRATCH3, "num_bit")
+    billet = executor.and_immediate(billet, backend.VALUE, backend.VALUE, 1)
+    billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+    out tails.ok(executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.NO))
+}

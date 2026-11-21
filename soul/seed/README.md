@@ -47,21 +47,21 @@
   помощниками `codegen/{lookup,emitters,loops,failures}`, `functions` собирает
   функции и константы; всё это говорит на договоре машины `gorn/backend`
   (роли регистров и операции) методами исполнителя `compiler.executor`;
-  исполнители: `gorn/backend/rv32i` (`Executor`), родной x86-64
-  `gorn/backend/x86_64_native` (`Executor` на `encoder`, `roles`, `ops`,
+  исполнители: `gorn/backend/riscv/rv32i` (`Executor`), родной x86-64
+  `gorn/backend/x86/x86_64` (`Executor` на `encoder`, `roles`, `ops`,
   `access`, `control`; `platform` — вход и syscall Linux, `image` — ELF64,
-  `uefi` и `pe` — UEFI) и RV64 `gorn/backend/rv64`; перевод RV32I →
+  `uefi` и `pe` — UEFI) и RV64 `gorn/backend/riscv/rv64`; перевод RV32I →
   x86-64 — на пенсии (`.archive/x86_64_translation/`);
 - `gorn/platform` + `platform/{linux,uefi}` — договор платформы: метки
   `rt_platform_*` (write, exit, key, file_read, file_write, now, wait, firmware,
   call), которые цель даёт программе; чего не умеет — ошибка `NotSupported`.
   Платформа — Box с методом `append(compiler)`: `platform.linux.Linux`,
   `platform.uefi.Uefi`, `os/target/qemu_virt/platform.Platform`;
-- `gorn/backend/rv32i/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
+- `gorn/backend/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
   машинный runtime `rt_*` на договоре машины (роли и операции `gorn/backend`,
   общий для исполнителей): арифметика, Box и группы, строки,
   фиксированные типы, прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
-- `gorn/backend/rv32i/machine/{instruction,registers,codec,decoder,buffer,layout,image,profile}` —
+- `gorn/backend/riscv/rv32i/{instruction,registers,codec,decoder,buffer,layout,image,profile}` —
   команды и регистры RV32I, кодирование и разбор команд, байтовый буфер,
   раскладка, ELF32-образ;
 - `machine/word` — 32-битное слово из четырёх байтов, общее для всех

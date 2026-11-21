@@ -1,0 +1,61 @@
+-- raw_memory — рантайм core.mem без чтения и записи: адрес своей арены и
+-- занятость кучи (чтение и запись по address — rt_fixed_mem_* в fixed; по
+-- парам [hi, lo] больше нет, Q-040). Каждый навык берёт и отдаёт billet,
+-- определяя метку rt_mem_* в коде; команды — методами billet.executor.
+--
+-- emit_mem_arena(billet) — rt_mem_arena(VALUE half) -> hi или lo адреса saltic_arena
+-- emit_mem_heap(billet) — rt_mem_heap(VALUE piece) -> байт кучи: 0 — занято регионами
+--     (HEAP_TOP − начало кучи из saltic_heap_start), 1 — страницы хранилища (конец
+--     кучи − STORE_BOTTOM), 3 — записей в карантине (rt_quarantine_count), иначе —
+--     квота (heap_bytes сборки)
+
+use compiler.abi
+use compiler.gorn.backend
+use compiler.gorn.backend.runtime.tails
+use compiler.machine.wide
+
+skill emit_mem_arena(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_mem_arena")
+    billet = executor.load_address(billet, backend.SCRATCH0, "saltic_arena", 0)
+    billet = executor.branch_zero(billet, backend.VALUE, ".L_mem_arena_low")
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.SCRATCH0, 16)
+    billet = executor.label(billet, ".L_mem_arena_low")
+    billet = executor.shift_left(billet, backend.SCRATCH0, backend.SCRATCH0, words.bits - 16)
+    billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.SCRATCH0, words.bits - 16)
+    billet = executor.shift_left(billet, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
+    out tails.ok(billet)
+}
+
+skill emit_mem_heap(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_mem_heap")
+    billet = executor.load_address(billet, backend.SCRATCH0, "saltic_heap_start", 0)
+    billet = executor.load(billet, backend.SCRATCH0, backend.SCRATCH0, 0)
+    pick {
+        (words.bytes == 8) { billet = executor.load_wide(billet, backend.SCRATCH1, billet.heap_bytes) }
+        { billet = executor.load_word(billet, backend.SCRATCH1, wide.to_word(billet.heap_bytes)) }
+    }
+    billet = executor.branch_zero(billet, backend.VALUE, ".L_mem_heap_used")
+    billet = executor.load_immediate(billet, backend.SCRATCH2, abi.tagged(1, abi.TAG_NUMBER))
+    billet = executor.branch_equal(billet, backend.VALUE, backend.SCRATCH2, ".L_mem_heap_store")
+    billet = executor.load_immediate(billet, backend.SCRATCH2, abi.tagged(3, abi.TAG_NUMBER))
+    billet = executor.branch_not_equal(billet, backend.VALUE, backend.SCRATCH2, ".L_mem_heap_quota")
+    billet = executor.load_address(billet, backend.SCRATCH0, "rt_quarantine_count", 0)
+    billet = executor.load(billet, backend.SCRATCH0, backend.SCRATCH0, 0)
+    billet = executor.jump(billet, ".L_mem_heap_done")
+    billet = executor.label(billet, ".L_mem_heap_store")
+    billet = executor.add(billet, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH1)
+    billet = executor.sub(billet, backend.SCRATCH0, backend.SCRATCH0, backend.STORE_BOTTOM)
+    billet = executor.jump(billet, ".L_mem_heap_done")
+    billet = executor.label(billet, ".L_mem_heap_used")
+    billet = executor.sub(billet, backend.SCRATCH0, backend.HEAP_TOP, backend.SCRATCH0)
+    billet = executor.jump(billet, ".L_mem_heap_done")
+    billet = executor.label(billet, ".L_mem_heap_quota")
+    billet = executor.move(billet, backend.SCRATCH0, backend.SCRATCH1)
+    billet = executor.label(billet, ".L_mem_heap_done")
+    billet = executor.shift_left(billet, backend.VALUE, backend.SCRATCH0, abi.TAG_SHIFT)
+    out tails.ok(billet)
+}

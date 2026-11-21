@@ -8,9 +8,9 @@
 
 | Что | Где | Состояние |
 |---|---|---|
-| ELF64 для Linux, номер машины и страница — параметры (RISC-V 243 и 4 КБ, AArch64 183 и 64 КБ) | `elf64.saltic` | ✅ переехал из `compiler/gorn/backend/rv64/machine/elf64` (12.11.2026); пишет RV64 и ARM64 |
+| ELF64 для Linux, номер машины и страница — параметры (RISC-V 243 и 4 КБ, AArch64 183 и 64 КБ) | `elf64.saltic` | ✅ переехал из `compiler/gorn/backend/riscv/rv64/machine/elf64` (12.11.2026); пишет RV64 и ARM64 |
 | Разделяемая библиотека ELF64 (`.so`) для Android/AArch64: импорт функций через GOT, экспорт, `.dynamic` | `shared.saltic` | 🟡 13.11.2026, ветка apk: readelf AArch64 читает целиком; на телефоне ещё не была |
 
 Позже, по черновику: раскладка по адресам и заплатки меток (`layout`, сейчас
-`compiler/gorn/backend/rv32i/machine/layout`), PE32+ для UEFI (сейчас в
-`x86_64_native`). APK — `formats/apk` (zip, манифест), `.so` — здесь.
+`compiler/gorn/backend/layout`), PE32+ для UEFI (сейчас в
+`x86/x86_64`). APK — `formats/apk` (zip, манифест), `.so` — здесь.

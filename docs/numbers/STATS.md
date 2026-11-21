@@ -75,7 +75,7 @@ x86-версия с 154:47:128 — родной бэкенд, а не перев
 | `os/fonts/spleen.saltic` | 990 |
 | `os/target/uefi_x86_64/agent/main.saltic` | 773 |
 | `os/uiengine/components/desktop/drop.saltic` | 686 — исключение по решению автора |
-| `soul/seed/compiler/gorn/backend/rv32i/machine/layout.saltic` | 610 |
+| `soul/seed/compiler/gorn/backend/layout.saltic` | 610 |
 | `os/apps/colony/colony.saltic` | 582 |
 | `registry/libraries/uiengine/jtml.saltic` | 566 |
 | `soul/seed/proof/contract.saltic` | 561 |

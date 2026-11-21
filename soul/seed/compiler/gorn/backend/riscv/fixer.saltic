@@ -1,0 +1,143 @@
+-- fixer — правки семьи RISC-V: переходы и адреса riscv.emit пишет заглушками,
+-- запоминает правкой (Fix) в Fixer программы (Program.fixer), а layout.resolve
+-- зовёт fixed, и Fixer доводит их по раскладке. Общие правки (ADDRESS_WORD,
+-- REL32, ABS32) — у layout, свои — здесь: общее не знает семью.
+-- Половинки адреса для lui/addi и auipc — здесь же.
+--
+-- FixKind = enum { BRANCH, JUMP, RELATIVE_HIGH, RELATIVE_LOW, ABSOLUTE_HIGH, ABSOLUTE_LOW }
+-- Fix { kind, instruction_kind, offset, base, label, addend, rd, rs1, rs2, next }
+-- Fixer { first, last, count } — правки одной программы по порядку:
+--     noted(fix) — в конец списка; fixed(program, layout) -> program;
+--     mended(program, layout, fix) -> program; UnknownLabel, PatchOutsideRange
+-- address_upper / address_low(word) -> части для lui/addi; relative_high /
+--     relative_low(n) -> части для auipc; floor_div(value, divisor) -> число
+
+use core.str
+use io
+use compiler.errors
+use compiler.gorn.backend.layout
+use compiler.gorn.backend.riscv.codec
+use compiler.gorn.backend.riscv.instruction
+use compiler.gorn.backend.riscv.registers
+
+FixKind = enum {
+    BRANCH,
+    JUMP,
+    RELATIVE_HIGH,
+    RELATIVE_LOW,
+    ABSOLUTE_HIGH,
+    ABSOLUTE_LOW
+}
+
+Fix = Box {
+    kind = FixKind.BRANCH,
+    instruction_kind = instruction.Kind.BEQ,
+    offset = 0,
+    base = 0,
+    label = "",
+    addend = 0,
+    rd = 0,
+    rs1 = 0,
+    rs2 = 0,
+    next = none
+}
+
+Fixer = Box {
+    first = none,
+    last = none,
+    count = 0
+
+    skill noted(fix) {
+        (last) |tail| { tail.next = fix }
+        (first == none) { first = fix }
+        last = fix
+        count = count + 1
+        out none
+    }
+
+    skill mended(value, current_layout, fix) {
+        @label_base = layout.label_offset(value, current_layout, fix.label) rescue |failure| {
+            (str.bytes(fix.label) > 0) {
+                @problem = errors.missing_label(fix.label)
+                io.show(problem.message)
+            }
+            out error.UnknownLabel
+        }
+        @target_offset = label_base + fix.addend
+        (fix.kind == FixKind.BRANCH) {
+            @distance = target_offset - fix.offset
+            @encoded = codec.encode_kind(fix.instruction_kind, registers.ZERO, fix.rs1, fix.rs2, distance) rescue |failure| {
+                out error.PatchOutsideRange
+            }
+            out layout.set_section_word(value, layout.Section.CODE, fix.offset, encoded)
+        }
+        (fix.kind == FixKind.JUMP) {
+            @distance = target_offset - fix.offset
+            @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, registers.ZERO, registers.ZERO, distance) rescue |failure| {
+                out error.PatchOutsideRange
+            }
+            out layout.set_section_word(value, layout.Section.CODE, fix.offset, encoded)
+        }
+        (fix.kind == FixKind.RELATIVE_HIGH) {
+            @distance = target_offset - fix.base
+            @upper = codec.signed_value(relative_high(distance), codec.IMMEDIATE20_LIMIT)
+            @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, registers.ZERO, registers.ZERO, upper)
+            out layout.set_section_word(value, layout.Section.CODE, fix.offset, encoded)
+        }
+        (fix.kind == FixKind.RELATIVE_LOW) {
+            @distance = target_offset - fix.base
+            @low = relative_low(distance)
+            @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, fix.rs1, registers.ZERO, low)
+            out layout.set_section_word(value, layout.Section.CODE, fix.offset, encoded)
+        }
+        @target = layout.label_address(value, current_layout, fix.label, fix.addend)
+        (fix.kind == FixKind.ABSOLUTE_HIGH) {
+            @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, registers.ZERO, registers.ZERO, address_upper(target))
+            out layout.set_section_word(value, layout.Section.CODE, fix.offset, encoded)
+        }
+        @encoded = codec.encode_kind(fix.instruction_kind, fix.rd, fix.rs1, registers.ZERO, address_low(target))
+        out layout.set_section_word(value, layout.Section.CODE, fix.offset, encoded)
+    }
+
+    skill fixed(value, current_layout) {
+        @fix = first
+        drum (count) {
+            (fix) |item| {
+                value = mended(value, current_layout, item)
+                fix = item.next
+            }
+        }
+        out value
+    }
+}
+
+skill address_upper(value) {
+    @upper = value.b1 / 16 + value.b2 * 16 + value.b3 * 4096
+    @low = value.b0 + value.b1 % 16 * 256
+    (low > 2047) { upper = (upper + 1) % 1048576 }
+    out upper
+}
+
+skill address_low(value) {
+    @low = value.b0 + value.b1 % 16 * 256
+    (low > 2047) { low = low - 4096 }
+    out low
+}
+
+skill floor_div(value, divisor) {
+    @quotient = value / divisor
+    @remainder = value - quotient * divisor
+    (value < 0) {
+        ((remainder == 0) == no) { quotient = quotient - 1 }
+    }
+    out quotient
+}
+
+skill relative_high(value) {
+    out floor_div(value + 2048, 4096)
+}
+
+skill relative_low(value) {
+    @high = relative_high(value)
+    out value - high * 4096
+}

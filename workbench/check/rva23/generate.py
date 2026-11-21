@@ -4,7 +4,7 @@
 каждым битом каждого операнда, перевёрнутым по одному; разница кодировок
 говорит, в какие биты команды попадает бит операнда. Команды, которые
 ассемблер не принял или разобрал под другим именем, выбрасываются и
-перечисляются в отчёте. Пишет soul/seed/compiler/gorn/backend/rv64/
+перечисляются в отчёте. Пишет soul/seed/compiler/gorn/backend/riscv/rv64/
 machine/generated/rva23.saltic.
 
 Запуск (нужен riscv32-none-elf-as из flake.nix):
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import instructions  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-OUT = os.path.join(ROOT, "soul/seed/compiler/gorn/backend/rv64/machine/generated/rva23.saltic")
+OUT = os.path.join(ROOT, "soul/seed/compiler/gorn/backend/riscv/rv64/machine/generated/rva23.saltic")
 MARCH = ("rv64gcv_zba_zbb_zbs_zicond_zfa_zcb_zimop_zcmop_zicbom_zicboz_zicbop_zawrs_"
          "zihintntl_zihintpause_zfhmin_zvfhmin_zvbb_zvkt_zacas")
 

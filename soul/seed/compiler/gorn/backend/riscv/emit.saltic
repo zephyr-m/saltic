@@ -1,0 +1,156 @@
+-- emit — команды семьи RISC-V в программу layout: команда по таблице,
+-- переходы, вызовы и адреса меток. Переход или адрес пишется заглушкой,
+-- правка (fixer.Fix) уходит в Fixer программы — его кладёт первая же правка.
+-- Ошибки кодирования копятся в Program.encoding_errors, resolve их покажет.
+-- far_calls = yes у программы — call через auipc+jalr вместо jal.
+--
+-- op(program, kind, rd, rs1, rs2, immediate) — команда
+-- pending(program, fix, placeholder) — заглушка и правка к ней
+-- branch(program, kind, rs1, rs2, label); InvalidBranchInstruction
+-- branch_unsigned_greater(program, rs1, rs2, label) — bltu с переставленными
+-- jump(program, rd, label) / call(program, label)
+-- load_immediate(program, rd, n) / load_word(program, rd, word)
+-- relative_address / absolute_address(program, rd, label, addend)
+
+use compiler.machine.word
+use compiler.gorn.backend.layout
+use compiler.gorn.backend.riscv.codec
+use compiler.gorn.backend.riscv.fixer
+use compiler.gorn.backend.riscv.instruction
+use compiler.gorn.backend.riscv.registers
+
+skill op(value, kind, rd, rs1, rs2, immediate) {
+    @encoded = codec.encode_kind(kind, rd, rs1, rs2, immediate) rescue |failure| {
+        value.encoding_errors = value.encoding_errors + 1
+        word.from_bytes(0, 0, 0, 0)
+    }
+    out layout.emit_word(value, encoded)
+}
+
+skill pending(value, fix, placeholder) {
+    fix.offset = value.code.length
+    (value.fixer == none) { value.fixer = fixer.Fixer {} }
+    (value.fixer) |keeper| { keeper.noted(fix) }
+    out layout.emit_word(value, placeholder)
+}
+
+skill branch(value, kind, rs1, rs2, label) {
+    @item = instruction.find_kind(kind)
+    ((item.form == instruction.Form.B) == no) {
+        out error.InvalidBranchInstruction
+    }
+    @placeholder = codec.encode(item, registers.ZERO, rs1, rs2, 0)
+    out pending(value, fixer.Fix {
+        kind = fixer.FixKind.BRANCH,
+        instruction_kind = kind,
+        label = label,
+        rs1 = rs1,
+        rs2 = rs2
+    }, placeholder)
+}
+
+skill jump(value, rd, label) {
+    @placeholder = codec.encode_kind(instruction.Kind.JAL, rd, registers.ZERO, registers.ZERO, 0)
+    out pending(value, fixer.Fix {
+        kind = fixer.FixKind.JUMP,
+        instruction_kind = instruction.Kind.JAL,
+        label = label,
+        rd = rd
+    }, placeholder)
+}
+
+skill load_immediate(value, rd, immediate) {
+    (immediate > -2049) {
+        (immediate < 2048) {
+            @encoded = codec.encode_kind(instruction.Kind.ADDI, rd, registers.ZERO, registers.ZERO, immediate)
+            out layout.emit_word(value, encoded)
+        }
+    }
+    out load_word(value, rd, word.from_signed(immediate))
+}
+
+skill load_word(value, rd, immediate) {
+    @lui = codec.encode_kind(instruction.Kind.LUI, rd, registers.ZERO, registers.ZERO, fixer.address_upper(immediate))
+    value = layout.emit_word(value, lui)
+    @addi = codec.encode_kind(instruction.Kind.ADDI, rd, rd, registers.ZERO, fixer.address_low(immediate))
+    out layout.emit_word(value, addi)
+}
+
+skill branch_unsigned_greater(value, rs1, rs2, label) {
+    @item = instruction.find_kind(instruction.Kind.BLTU)
+    @placeholder = codec.encode(item, registers.ZERO, rs2, rs1, 0)
+    out pending(value, fixer.Fix {
+        kind = fixer.FixKind.BRANCH,
+        instruction_kind = instruction.Kind.BLTU,
+        label = label,
+        rs1 = rs2,
+        rs2 = rs1
+    }, placeholder)
+}
+
+skill relative_address(value, rd, label, addend) {
+    @base = value.code.length
+    @high = codec.encode_kind(instruction.Kind.AUIPC, rd, registers.ZERO, registers.ZERO, 0)
+    value = pending(value, fixer.Fix {
+        kind = fixer.FixKind.RELATIVE_HIGH,
+        instruction_kind = instruction.Kind.AUIPC,
+        base = base,
+        label = label,
+        addend = addend,
+        rd = rd
+    }, high)
+    @low = codec.encode_kind(instruction.Kind.ADDI, rd, rd, registers.ZERO, 0)
+    out pending(value, fixer.Fix {
+        kind = fixer.FixKind.RELATIVE_LOW,
+        instruction_kind = instruction.Kind.ADDI,
+        base = base,
+        label = label,
+        addend = addend,
+        rd = rd,
+        rs1 = rd
+    }, low)
+}
+
+skill call(value, label) {
+    (value.far_calls == no) {
+        out jump(value, registers.RA, label)
+    }
+    @base = value.code.length
+    @high = codec.encode_kind(instruction.Kind.AUIPC, registers.RA, registers.ZERO, registers.ZERO, 0)
+    value = pending(value, fixer.Fix {
+        kind = fixer.FixKind.RELATIVE_HIGH,
+        instruction_kind = instruction.Kind.AUIPC,
+        base = base,
+        label = label,
+        rd = registers.RA
+    }, high)
+    @low = codec.encode_kind(instruction.Kind.JALR, registers.RA, registers.RA, registers.ZERO, 0)
+    out pending(value, fixer.Fix {
+        kind = fixer.FixKind.RELATIVE_LOW,
+        instruction_kind = instruction.Kind.JALR,
+        base = base,
+        label = label,
+        rd = registers.RA,
+        rs1 = registers.RA
+    }, low)
+}
+
+skill absolute_address(value, rd, label, addend) {
+    @high = codec.encode_kind(instruction.Kind.LUI, rd, registers.ZERO, registers.ZERO, 0)
+    value = pending(value, fixer.Fix {
+        kind = fixer.FixKind.ABSOLUTE_HIGH,
+        instruction_kind = instruction.Kind.LUI,
+        label = label,
+        addend = addend,
+        rd = rd
+    }, high)
+    @low = codec.encode_kind(instruction.Kind.ADDI, rd, rd, registers.ZERO, 0)
+    out pending(value, fixer.Fix {
+        kind = fixer.FixKind.ABSOLUTE_LOW,
+        instruction_kind = instruction.Kind.ADDI,
+        label = label,
+        addend = addend,
+        rd = rd,
+        rs1 = rd
+    }, low)
+}

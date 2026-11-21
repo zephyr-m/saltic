@@ -1,0 +1,299 @@
+-- memory — рантайм памяти: rt_alloc и регионы (выход из навыка сжимает кучу,
+-- перенося наружу только живые объекты), а дети — хранилище долгого: store
+-- (страницы, классы, прогоны), move (переезд значения в хранилище), cycles
+-- (проверка цикла при записи), quarantine (освобождение без рёбер при выходе
+-- региона); общие обходы и метки — walk. Модель и биты слова учёта — memory.model.
+-- Регистры — роли договора backend: HEAP_TOP — вершина кучи, STORE_BOTTOM — низ
+-- хранилища (растёт вниз), REGION_MARK — метка региона, STACK_LIMIT — граница стека.
+-- Куча: [saltic_heap_start, HEAP_TOP) — регионы, [STORE_BOTTOM, конец квоты) —
+-- страницы хранилища; между ними — свободно (и рабочие массивы переноса над HEAP_TOP).
+-- Команды — методами billet.executor (договор backend).
+--
+-- emit_alloc(billet) — rt_alloc(VALUE байт) -> адрес в регионе; rt_out_of_memory
+-- emit_out_of_memory(billet) — ERROR_MEMORY_EXHAUSTED вызывающему текущего навыка
+--     или выход процесса; emit_stack_exhausted — rt_stack_exhausted: ERROR_STACK_EXHAUSTED
+-- emit_region_exit(billet) — rt_region_exit(VALUE, ERROR, ARG2 = REGION_EXIT_VALUE_SKIPPED
+--     — значение не корень, ARG3 — откуда сканировать стек при разборе карантина):
+--     копирование, перенос, сжатие, потом rt_quarantine_sweep (и когда регион пуст)
+-- emit_region_forward / emit_region_relocate / emit_region_restore(billet)
+--     — посетители одного указателя в ARG7; объект, переехавший в хранилище
+--     (FORWARDED), копировальщик не копирует — подставляет адрес переезда
+-- Сдвиг переноса — слово walk.DELTA_LABEL в bss; нехватка места при копировании —
+--     флаг walk.ABORT_LABEL, rt_region_exit откатывает (.L_region_abort)
+-- emit_block_walk / emit_copies_walk / emit_slide — части выхода региона
+-- append_runtime(billet) — все метки памяти, таблица классов и слова bss
+
+use core.group
+use compiler.abi
+use compiler.memory.model
+use core.system
+use compiler.gorn.constants
+use compiler.gorn.backend
+use compiler.machine.word
+use compiler.machine.wide
+use compiler.gorn.backend.runtime.tails
+use compiler.gorn.backend.runtime.memory.walk
+use compiler.gorn.backend.runtime.memory.store
+use compiler.gorn.backend.runtime.memory.move
+use compiler.gorn.backend.runtime.memory.cycles
+use compiler.gorn.backend.runtime.memory.quarantine
+
+EXIT_FRAME_WORDS = 4
+EXIT_VALUE_WORD = 1
+EXIT_ERROR_WORD = 2
+EXIT_RETURN_WORD = 3
+
+skill emit_alloc(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_alloc")
+    billet = executor.move(billet, backend.SCRATCH1, backend.VALUE)
+    billet = executor.branch_less_unsigned(billet, backend.STORE_BOTTOM, backend.HEAP_TOP, "rt_out_of_memory")
+    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.VALUE, billet.words.header + abi.OBJECT_ALIGNMENT - 1)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH0, backend.VALUE, "rt_out_of_memory")
+    billet = executor.and_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, -abi.OBJECT_ALIGNMENT)
+    billet = executor.sub(billet, backend.SCRATCH2, backend.STORE_BOTTOM, backend.HEAP_TOP)
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH2, backend.SCRATCH0, "rt_out_of_memory")
+    billet = executor.move(billet, backend.VALUE, backend.HEAP_TOP)
+    billet = executor.add(billet, backend.HEAP_TOP, backend.HEAP_TOP, backend.SCRATCH0)
+    billet = executor.store32(billet, backend.SCRATCH1, backend.VALUE, abi.OBJECT_HEADER_PAYLOAD_BYTES_OFFSET)
+    billet = executor.store_zero(billet, backend.VALUE, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    out tails.ok(billet)
+}
+
+skill emit_out_of_memory(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_out_of_memory")
+    billet = executor.branch_zero(billet, backend.FRAME, ".L_out_of_memory_exit")
+    billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
+    billet = executor.load_immediate(billet, backend.ERROR, abi.ERROR_MEMORY_EXHAUSTED)
+    billet = executor.load_immediate(billet, backend.ARG2, model.REGION_EXIT_VALUE_SKIPPED)
+    billet = executor.move(billet, backend.ARG3, backend.FRAME)
+    billet = executor.call(billet, "rt_region_exit")
+    billet = executor.load(billet, backend.RETURN, backend.FRAME, constants.return_address_load_offset(billet.words))
+    billet = executor.load(billet, backend.REGION_MARK, backend.FRAME, constants.region_mark_load_offset(billet.words))
+    billet = executor.load(billet, backend.SCRATCH0, backend.FRAME, constants.previous_frame_load_offset(billet.words))
+    billet = executor.move(billet, backend.STACK, backend.FRAME)
+    billet = executor.move(billet, backend.FRAME, backend.SCRATCH0)
+    billet = executor.ret(billet)
+    billet = executor.label(billet, ".L_out_of_memory_exit")
+    billet = executor.load_immediate(billet, backend.VALUE, system.EXIT_OUT_OF_MEMORY)
+    billet = executor.jump(billet, "rt_platform_exit")
+    out billet
+}
+
+skill emit_stack_exhausted(billet) {
+    out tails.fail(billet, "rt_stack_exhausted", abi.ERROR_STACK_EXHAUSTED)
+}
+
+skill emit_block_walk(billet, visitor, prefix) {
+    @executor = billet.executor
+    @loop = "{prefix}_block"
+    @done = "{prefix}_block_done"
+    billet = executor.move(billet, backend.ARG5, backend.ARG3)
+    billet = executor.label(billet, loop)
+    billet = executor.branch_greater_equal_unsigned(billet, backend.ARG5, backend.ARG4, done)
+    billet = executor.move(billet, backend.ERROR, backend.ARG5)
+    billet = walk.emit_object_walk(billet, visitor, "{prefix}_walk")
+    billet = walk.emit_object_size(billet, backend.SCRATCH0, backend.ERROR)
+    billet = executor.add(billet, backend.ARG5, backend.ERROR, backend.SCRATCH0)
+    billet = executor.jump(billet, loop)
+    billet = executor.label(billet, done)
+    out billet
+}
+
+skill emit_region_forward(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_region_forward")
+    billet = walk.emit_pointer_address(billet, ".L_region_forward_done")
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH2, backend.REGION_MARK, ".L_region_forward_done")
+    billet = executor.branch_greater_equal_unsigned(billet, backend.SCRATCH2, backend.ARG3, ".L_region_forward_done")
+    billet = executor.load(billet, backend.SCRATCH3, backend.SCRATCH2, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    billet = executor.and_immediate(billet, backend.SCRATCH1, backend.SCRATCH3, model.FORWARDED)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH1, ".L_region_forward_stored")
+    billet = executor.load32(billet, backend.SCRATCH3, backend.SCRATCH2, abi.OBJECT_HEADER_KIND_OFFSET)
+    billet = executor.set_less_unsigned_immediate(billet, backend.SCRATCH1, backend.SCRATCH3, walk.KIND_LIMIT)
+    billet = executor.branch_zero(billet, backend.SCRATCH1, ".L_region_forward_moved")
+    billet = walk.emit_object_size(billet, backend.SCRATCH4, backend.SCRATCH2)
+    billet = executor.add(billet, backend.SCRATCH5, backend.ARG4, backend.SCRATCH4)
+    billet = executor.branch_less_unsigned(billet, backend.STORE_BOTTOM, backend.SCRATCH5, ".L_region_forward_full")
+    billet = executor.load_immediate(billet, backend.SCRATCH1, 0)
+    billet = executor.label(billet, ".L_region_forward_copy")
+    billet = executor.branch_equal(billet, backend.SCRATCH1, backend.SCRATCH4, ".L_region_forward_copied")
+    billet = executor.add(billet, backend.SCRATCH5, backend.SCRATCH2, backend.SCRATCH1)
+    billet = executor.load(billet, backend.SCRATCH5, backend.SCRATCH5, 0)
+    billet = executor.add(billet, backend.SCRATCH3, backend.ARG4, backend.SCRATCH1)
+    billet = executor.store(billet, backend.SCRATCH5, backend.SCRATCH3, 0)
+    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, words.bytes)
+    billet = executor.jump(billet, ".L_region_forward_copy")
+    billet = executor.label(billet, ".L_region_forward_copied")
+    billet = executor.store32(billet, backend.SCRATCH2, backend.ARG4, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    billet = executor.store32(billet, backend.ARG4, backend.SCRATCH2, abi.OBJECT_HEADER_KIND_OFFSET)
+    billet = executor.or(billet, backend.ARG7, backend.ARG4, backend.SCRATCH0)
+    billet = executor.add(billet, backend.ARG4, backend.ARG4, backend.SCRATCH4)
+    billet = executor.ret(billet)
+    billet = executor.label(billet, ".L_region_forward_stored")
+    billet = executor.and_immediate(billet, backend.SCRATCH3, backend.SCRATCH3, abi.PAYLOAD_MASK)
+    billet = executor.label(billet, ".L_region_forward_moved")
+    billet = executor.or(billet, backend.ARG7, backend.SCRATCH3, backend.SCRATCH0)
+    billet = executor.label(billet, ".L_region_forward_done")
+    billet = executor.ret(billet)
+    billet = executor.label(billet, ".L_region_forward_full")
+    billet = executor.load_address(billet, backend.SCRATCH3, walk.ABORT_LABEL, 0)
+    billet = executor.load_immediate(billet, backend.SCRATCH5, 1)
+    billet = executor.store(billet, backend.SCRATCH5, backend.SCRATCH3, 0)
+    out executor.ret(billet)
+}
+
+skill emit_region_relocate(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_region_relocate")
+    billet = walk.emit_pointer_address(billet, ".L_region_relocate_done")
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH2, backend.ARG3, ".L_region_relocate_done")
+    billet = executor.branch_greater_equal_unsigned(billet, backend.SCRATCH2, backend.ARG4, ".L_region_relocate_done")
+    billet = executor.load_address(billet, backend.SCRATCH1, walk.DELTA_LABEL, 0)
+    billet = executor.load(billet, backend.SCRATCH1, backend.SCRATCH1, 0)
+    billet = executor.sub(billet, backend.ARG7, backend.ARG7, backend.SCRATCH1)
+    billet = executor.label(billet, ".L_region_relocate_done")
+    out executor.ret(billet)
+}
+
+skill emit_region_restore(billet) {
+    @executor = billet.executor
+    billet = executor.label(billet, "rt_region_restore")
+    billet = walk.emit_pointer_address(billet, ".L_region_restore_done")
+    billet = executor.branch_less_unsigned(billet, backend.SCRATCH2, backend.ARG3, ".L_region_restore_done")
+    billet = executor.branch_greater_equal_unsigned(billet, backend.SCRATCH2, backend.ARG4, ".L_region_restore_done")
+    billet = executor.load32(billet, backend.SCRATCH2, backend.SCRATCH2, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    billet = executor.or(billet, backend.ARG7, backend.SCRATCH2, backend.SCRATCH0)
+    billet = executor.label(billet, ".L_region_restore_done")
+    out executor.ret(billet)
+}
+
+skill emit_copies_walk(billet, prefix, undo) {
+    @executor = billet.executor
+    @loop = "{prefix}_copies"
+    @done = "{prefix}_copies_done"
+    billet = executor.move(billet, backend.ARG5, backend.ARG3)
+    billet = executor.label(billet, loop)
+    billet = executor.branch_greater_equal_unsigned(billet, backend.ARG5, backend.ARG4, done)
+    (undo == no) {
+        billet = executor.store_zero(billet, backend.ARG5, abi.OBJECT_HEADER_FLAGS_OFFSET)
+    }
+    (undo == yes) {
+        billet = executor.load32(billet, backend.SCRATCH0, backend.ARG5, abi.OBJECT_HEADER_FLAGS_OFFSET)
+        billet = executor.load32(billet, backend.SCRATCH1, backend.ARG5, abi.OBJECT_HEADER_KIND_OFFSET)
+        billet = executor.store32(billet, backend.SCRATCH1, backend.SCRATCH0, abi.OBJECT_HEADER_KIND_OFFSET)
+    }
+    billet = walk.emit_object_size(billet, backend.SCRATCH0, backend.ARG5)
+    billet = executor.add(billet, backend.ARG5, backend.ARG5, backend.SCRATCH0)
+    billet = executor.jump(billet, loop)
+    billet = executor.label(billet, done)
+    out billet
+}
+
+skill emit_slide(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.move(billet, backend.SCRATCH0, backend.ARG3)
+    billet = executor.move(billet, backend.SCRATCH1, backend.REGION_MARK)
+    billet = executor.label(billet, ".L_region_slide")
+    billet = executor.branch_greater_equal_unsigned(billet, backend.SCRATCH0, backend.ARG4, ".L_region_slid")
+    billet = executor.load(billet, backend.SCRATCH2, backend.SCRATCH0, 0)
+    billet = executor.store(billet, backend.SCRATCH2, backend.SCRATCH1, 0)
+    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, words.bytes)
+    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, words.bytes)
+    billet = executor.jump(billet, ".L_region_slide")
+    billet = executor.label(billet, ".L_region_slid")
+    billet = executor.sub(billet, backend.SCRATCH0, backend.ARG4, backend.ARG3)
+    out executor.add(billet, backend.HEAP_TOP, backend.REGION_MARK, backend.SCRATCH0)
+}
+
+skill emit_region_exit(billet) {
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.label(billet, "rt_region_exit")
+    billet = executor.load_address(billet, backend.SCRATCH0, walk.SWEEP_FROM_LABEL, 0)
+    billet = executor.store(billet, backend.ARG3, backend.SCRATCH0, 0)
+    billet = executor.branch_not_equal(billet, backend.HEAP_TOP, backend.REGION_MARK, ".L_region_exit_work")
+    billet = executor.load_address(billet, backend.SCRATCH0, walk.QUARANTINE_COUNT_LABEL, 0)
+    billet = executor.load(billet, backend.SCRATCH0, backend.SCRATCH0, 0)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, ".L_region_exit_work")
+    billet = executor.ret(billet)
+    billet = executor.label(billet, ".L_region_exit_work")
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * EXIT_FRAME_WORDS)
+    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * EXIT_RETURN_WORD)
+    billet = executor.store(billet, backend.ERROR, backend.STACK, words.bytes * EXIT_ERROR_WORD)
+    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * EXIT_VALUE_WORD)
+    billet = executor.branch_equal(billet, backend.HEAP_TOP, backend.REGION_MARK, ".L_region_exit_sweep")
+    billet = executor.move(billet, backend.ARG3, backend.HEAP_TOP)
+    billet = executor.move(billet, backend.ARG4, backend.HEAP_TOP)
+    billet = executor.load_address(billet, backend.SCRATCH0, walk.ABORT_LABEL, 0)
+    billet = executor.store_zero(billet, backend.SCRATCH0, 0)
+    billet = executor.branch_nonzero(billet, backend.ARG2, ".L_region_exit_roots")
+    billet = walk.emit_visit(billet, "rt_region_forward", backend.STACK, words.bytes * EXIT_VALUE_WORD)
+    billet = executor.label(billet, ".L_region_exit_roots")
+    billet = emit_block_walk(billet, "rt_region_forward", ".L_region_scan")
+    billet = executor.load_address(billet, backend.SCRATCH0, walk.ABORT_LABEL, 0)
+    billet = executor.load(billet, backend.SCRATCH0, backend.SCRATCH0, 0)
+    billet = executor.branch_nonzero(billet, backend.SCRATCH0, ".L_region_abort")
+    billet = emit_copies_walk(billet, ".L_region_settle", no)
+    billet = executor.sub(billet, backend.SCRATCH0, backend.ARG3, backend.REGION_MARK)
+    billet = executor.load_address(billet, backend.SCRATCH1, walk.DELTA_LABEL, 0)
+    billet = executor.store(billet, backend.SCRATCH0, backend.SCRATCH1, 0)
+    billet = walk.emit_visit(billet, "rt_region_relocate", backend.STACK, words.bytes * EXIT_VALUE_WORD)
+    billet = emit_block_walk(billet, "rt_region_relocate", ".L_region_relocated")
+    billet = emit_slide(billet)
+    billet = executor.jump(billet, ".L_region_exit_sweep")
+    billet = executor.label(billet, ".L_region_abort")
+    billet = emit_copies_walk(billet, ".L_region_undo", yes)
+    billet = walk.emit_visit(billet, "rt_region_restore", backend.STACK, words.bytes * EXIT_VALUE_WORD)
+    billet = executor.label(billet, ".L_region_exit_sweep")
+    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * EXIT_VALUE_WORD)
+    billet = executor.load_address(billet, backend.SCRATCH0, walk.SWEEP_VALUE_LABEL, 0)
+    billet = executor.store(billet, backend.VALUE, backend.SCRATCH0, 0)
+    billet = executor.call(billet, "rt_quarantine_sweep")
+    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * EXIT_VALUE_WORD)
+    billet = executor.load(billet, backend.ERROR, backend.STACK, words.bytes * EXIT_ERROR_WORD)
+    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * EXIT_RETURN_WORD)
+    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * EXIT_FRAME_WORDS)
+    out executor.ret(billet)
+}
+
+skill append_runtime(billet) {
+    billet = emit_alloc(billet)
+    billet = emit_out_of_memory(billet)
+    billet = emit_stack_exhausted(billet)
+    billet = emit_region_exit(billet)
+    billet = emit_region_forward(billet)
+    billet = emit_region_relocate(billet)
+    billet = emit_region_restore(billet)
+    billet = store.emit_store_init(billet)
+    billet = store.emit_store_pages(billet)
+    billet = store.emit_store_release_pages(billet)
+    billet = store.emit_store_run(billet)
+    billet = store.emit_store_cell(billet)
+    billet = store.emit_store_free(billet)
+    billet = move.emit_store_copy(billet)
+    billet = move.emit_store_visit_copy(billet)
+    billet = move.emit_store_visit_count(billet)
+    billet = move.emit_store_visit_peel(billet)
+    billet = move.emit_store_visit_rc(billet)
+    billet = move.emit_store_visit_boxfree(billet)
+    billet = move.emit_store_move(billet)
+    billet = move.emit_store_keep(billet)
+    billet = cycles.emit_store_visit_reach(billet)
+    billet = cycles.emit_cycle_reach(billet)
+    billet = quarantine.emit_store_visit_drop(billet)
+    billet = quarantine.emit_quarantine(billet)
+    @executor = billet.executor
+    @words = billet.words
+    billet = executor.align(billet, backend.RODATA, words.bytes)
+    billet = executor.data_label(billet, backend.RODATA, walk.STORE_CLASSES_LABEL)
+    drum (model.STORE_CLASSES) { billet = executor.data_word(billet, backend.RODATA, word.from_number(beat)) }
+    billet = executor.align(billet, backend.BSS, words.bytes)
+    drum (walk.BSS_WORDS) { billet = walk.reserve_word(billet, beat) }
+    billet = executor.data_label(billet, backend.BSS, walk.STORE_PARTIAL_LABEL)
+    out executor.reserve(billet, wide.from_number(words.bytes * group.count(model.STORE_CLASSES)))
+}
