@@ -5,12 +5,11 @@
 -- resolve чинит общие сам (resolve_own), остальное отдаёт fixer.fixed.
 -- Раскладка: rodata на 8, data на 4096, bss на 8 после data. Метки — хеш-корзины.
 --
--- Section = enum { CODE, RODATA, DATA, BSS }; PatchKind = enum { ADDRESS_WORD, REL32, ABS32 }
 -- Label { name, section, offset, present, next } / LabelBucket { labels } — в корзине
 --     копии меток без next (иначе проверка цикла обходила бы все новые)
--- Patch { kind, section, offset, label, addend } — REL32: rel32 от конца поля,
---     ABS32 — адрес метки + addend, ADDRESS_WORD — слово-адрес в секции
+-- Patch — общая правка, свой модуль layout/patch (снаружи Patch.Kind.REL32)
 -- Layout { code_offset, rodata_offset, data_offset, bss_offset, file_size, memory_size }
+--     — Section = enum { CODE, RODATA, DATA, BSS } (снаружи Layout.Section.CODE)
 -- Program { load_address, low_memory_size, entry, code, rodata, data, bss_size,
 --     heap_size, labels_*, patches_*, resolved, far_calls, encoding_errors, fixer }:
 --     меняют: emit_word(word), note_patch(Patch), define_label(section, name) —
@@ -36,25 +35,13 @@ use compiler.machine.word
 use compiler.machine.wide
 use compiler.gorn.backend.buffer
 use compiler.errors
-
-Section = enum {
-    CODE,
-    RODATA,
-    DATA,
-    BSS
-}
-
-PatchKind = enum {
-    ADDRESS_WORD,
-    REL32,
-    ABS32
-}
+use compiler.gorn.backend.layout.patch
 
 LABEL_BUCKETS = 512
 
 Label = Box {
     name = "",
-    section = Section.CODE,
+    section = Layout.Section.CODE,
     offset = 0,
     present = no,
     next = none
@@ -64,15 +51,6 @@ LabelBucket = Box {
     labels = []
 }
 
-Patch = Box {
-    kind = PatchKind.ADDRESS_WORD,
-    section = Section.CODE,
-    offset = 0,
-    label = "",
-    addend = 0,
-    next = none
-}
-
 Layout = Box {
     code_offset = 0,
     rodata_offset = 0,
@@ -80,6 +58,13 @@ Layout = Box {
     bss_offset = 0,
     file_size = 0,
     memory_size = wide.Wide {}
+
+    Section = enum {
+        CODE,
+        RODATA,
+        DATA,
+        BSS
+    }
 }
 
 Program = Box {
@@ -104,9 +89,9 @@ Program = Box {
     fixer = none
 
     skill assign_section(section, target) {
-        (section == Section.CODE) { code = target }
-        (section == Section.RODATA) { rodata = target }
-        (section == Section.DATA) { data = target }
+        (section == Layout.Section.CODE) { code = target }
+        (section == Layout.Section.RODATA) { rodata = target }
+        (section == Layout.Section.DATA) { data = target }
         resolved = no
         out none
     }
@@ -117,10 +102,10 @@ Program = Box {
         out none
     }
 
-    skill note_patch(patch) {
-        (patch_count == 0) { patches_first = patch }
-        (patch_count > 0) { patches_last.next = patch }
-        patches_last = patch
+    skill note_patch(item) {
+        (patch_count == 0) { patches_first = item }
+        (patch_count > 0) { patches_last.next = item }
+        patches_last = item
         patch_count = patch_count + 1
         resolved = no
         out none
@@ -175,7 +160,7 @@ Program = Box {
     }
 
     skill align_section(section, boundary) {
-        (section == Section.BSS) {
+        (section == Layout.Section.BSS) {
             bss_size = wide.align(bss_size, boundary)
             resolved = no
             out none
@@ -191,16 +176,16 @@ Program = Box {
         @offset = target.length
         target.append_word(word.from_bytes(0, 0, 0, 0))
         assign_section(section, target)
-        @patch = Patch {
-            kind = PatchKind.ADDRESS_WORD,
+        @item = Patch {
+            kind = Patch.Kind.ADDRESS_WORD,
             section = section,
             offset = offset,
             label = label,
             addend = addend
         }
-        (patch_count == 0) { patches_first = patch }
-        (patch_count > 0) { patches_last.next = patch }
-        patches_last = patch
+        (patch_count == 0) { patches_first = item }
+        (patch_count > 0) { patches_last.next = item }
+        patches_last = item
         patch_count = patch_count + 1
         resolved = no
         out none
@@ -213,28 +198,28 @@ Program = Box {
         out none
     }
 
-    skill resolve_patch(current_layout, patch) {
-        @label_base = label_offset(current_layout, patch.label) rescue |failure| {
-            (str.bytes(patch.label) > 0) {
-                @problem = errors.missing_label(patch.label)
+    skill resolve_patch(current_layout, item) {
+        @label_base = label_offset(current_layout, item.label) rescue |failure| {
+            (str.bytes(item.label) > 0) {
+                @problem = errors.missing_label(item.label)
                 io.show(problem.message)
             }
             out error.UnknownLabel
         }
-        @target_offset = label_base + patch.addend
-        (patch.kind == PatchKind.ADDRESS_WORD) {
-            @target = label_address(current_layout, patch.label, patch.addend)
-            set_section_word(patch.section, patch.offset, target)
+        @target_offset = label_base + item.addend
+        (item.kind == Patch.Kind.ADDRESS_WORD) {
+            @target = label_address(current_layout, item.label, item.addend)
+            set_section_word(item.section, item.offset, target)
             out none
         }
-        (patch.kind == PatchKind.REL32) {
-            @distance = target_offset - patch.offset - 4
-            set_section_word(Section.CODE, patch.offset, word.from_signed(distance))
+        (item.kind == Patch.Kind.REL32) {
+            @distance = target_offset - item.offset - 4
+            set_section_word(Layout.Section.CODE, item.offset, word.from_signed(distance))
             out none
         }
-        (patch.kind == PatchKind.ABS32) {
-            @target = label_address(current_layout, patch.label, patch.addend)
-            set_section_word(Section.CODE, patch.offset, target)
+        (item.kind == Patch.Kind.ABS32) {
+            @target = label_address(current_layout, item.label, item.addend)
+            set_section_word(Layout.Section.CODE, item.offset, target)
             out none
         }
         out error.UnknownPatch
@@ -247,29 +232,29 @@ Program = Box {
             out error.InstructionEncoding
         }
         @current_layout = layout()
-        @patch = patches_first
+        @pending = patches_first
         drum (patch_count) {
-            (patch) |item| {
+            (pending) |item| {
                 resolve_patch(current_layout, item) rescue |failure| {
                     out error.UnresolvedPatch
                 }
-                patch = item.next
+                pending = item.next
             }
         }
         out none
     }
 
     skill section_buffer(section) {
-        (section == Section.CODE) { out code }
-        (section == Section.RODATA) { out rodata }
-        (section == Section.DATA) { out data }
+        (section == Layout.Section.CODE) { out code }
+        (section == Layout.Section.RODATA) { out rodata }
+        (section == Layout.Section.DATA) { out data }
         out error.SectionHasNoFileData
     }
 
     skill section_length(section) {
-        (section == Section.CODE) { out code.length }
-        (section == Section.RODATA) { out rodata.length }
-        (section == Section.DATA) { out data.length }
+        (section == Layout.Section.CODE) { out code.length }
+        (section == Layout.Section.RODATA) { out rodata.length }
+        (section == Layout.Section.DATA) { out data.length }
         out wide.to_word(bss_size)
     }
 
@@ -308,7 +293,7 @@ Program = Box {
     skill label_offset(current_layout, name) {
         @label = find_label(name)
         (label.present == no) { out error.UnknownLabel }
-        (label.section == Section.BSS) {
+        (label.section == Layout.Section.BSS) {
             out word.to_number(word.add_number(label.offset, current_layout.bss_offset))
         }
         out section_offset(current_layout, label.section) + label.offset
@@ -317,7 +302,7 @@ Program = Box {
     skill label_address(current_layout, name, addend) {
         @label = find_label(name)
         (label.present == no) { out error.UnknownLabel }
-        (label.section == Section.BSS) {
+        (label.section == Layout.Section.BSS) {
             @offset = word.add_number(label.offset, current_layout.bss_offset + addend)
             out word.add(load_address, offset)
         }
@@ -409,9 +394,9 @@ skill index_label(bucket, label) {
 }
 
 skill section_offset(current_layout, section) {
-    (section == Section.CODE) { out current_layout.code_offset }
-    (section == Section.RODATA) { out current_layout.rodata_offset }
-    (section == Section.DATA) { out current_layout.data_offset }
+    (section == Layout.Section.CODE) { out current_layout.code_offset }
+    (section == Layout.Section.RODATA) { out current_layout.rodata_offset }
+    (section == Layout.Section.DATA) { out current_layout.data_offset }
     out current_layout.bss_offset
 }
 
