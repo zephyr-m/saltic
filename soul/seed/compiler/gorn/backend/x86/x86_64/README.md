@@ -2,7 +2,7 @@
 
 ✅ **Есть (шаг 4, 04.11.2026): Linux.** Вход — `main.saltic`:
 исполнитель договора машины `Executor { firmware, wide }` (все методы
-`../main.saltic`) и `write(path, machine)` — ELF64 для Linux. Цель
+`../../main.saltic`) и `write(path, machine)` — ELF64 для Linux. Цель
 `toolchain` — `x86_64` и `x86_64-uefi` (с 04.11.2026; старые имена `x86_64-native`
 и `x86_64-uefi-native` убраны 07.11.2026). Перевод RV32I → x86-64, бывший
 оракулом, — на пенсии с 06.11.2026 (`.archive/x86_64_translation/`).

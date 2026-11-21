@@ -23,7 +23,7 @@ backend/
   riscv/      общее семьи: instruction, registers, codec, decoder, assembler,
               emit (команды и переходы), fixer (правки RISC-V)
     rv32i/  rv64/
-  x86/x86_64/    arm/arm64/    xtensa/    wasm/
+  x86/x86_64/    arm/arm64/    xtensa/lx6/    wasm/wasm32/
 ```
 
 Правки (переходы и адреса по меткам): общие — `layout` (ADDRESS_WORD, REL32,
@@ -37,5 +37,5 @@ ABS32), правки семьи — её чинильщик в `Program.fixer` (
 | x86-64 родной | `x86/x86_64/` (вход `main.saltic`) | Linux, UEFI на Acer | ✅ `Executor` на договоре, кодировщик, ELF64 и PE32+, слово 8 байт; цели `x86_64` и `x86_64-uefi`; агент на Acer — родной |
 | x86-64 перевод | `.archive/x86_64_translation/` | — | 🗄 на пенсии с 06.11.2026: переводил готовый RV32I, был оракулом родного |
 | Thumb-2 | — | STM32H7, Teensy 4.1, RP2350 на ARM | ⬜ не начат (в плане — `docs/plan/PLAN-3.md`) |
-| Xtensa (LX6) | `xtensa/` (вход `main.saltic`) | ESP32, ESP32-S3 | 🟡 голое железо ESP32 (13.11.2026): CALL0 без окон, слово 4 байта, образ `formats/esp`; на DevKit работают группы, рекурсия, Box, деление, текст. Кодировщик сверен с GNU as Espressif (`tests/xtensa-encoder`). Нет: окон регистров, Wi-Fi, канона на плате |
+| Xtensa (LX6) | `xtensa/lx6/` (вход `main.saltic`) | ESP32, ESP32-S3 | 🟡 голое железо ESP32 (13.11.2026): CALL0 без окон, слово 4 байта, образ `formats/esp`; на DevKit работают группы, рекурсия, Box, деление, текст. Кодировщик сверен с GNU as Espressif (`tests/xtensa-encoder`). Нет: окон регистров, Wi-Fi, канона на плате |
 | ARM64 | `arm/arm64/` (вход `main.saltic`) | Linux; Raspberry Pi, Orange Pi, телефоны, Android | ✅ Linux под qemu-aarch64 (12.11.2026): свой исполнитель, все роли в регистрах, ELF — общий `../linker/elf64`; канон, самосборка — неподвижная точка |
