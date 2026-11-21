@@ -68,7 +68,7 @@
   и `io.file.list` под rv32i, x86_64 и rv64;
 - `always` — регион на оборот: 200 000 оборотов с Box в куче 1 МБ, внешние
   переменные, поля Box, `out`, ошибки и вложенный `always`; под rv32i и x86_64;
-- `seed-contract` — контракт ядра (`soul/seed/tests/contract.saltic`);
+- `seed-contract` — контракт ядра (`soul/seed/tests/contract/`, вход `main.saltic`, дети-субъекты по темам);
 - `machine` — машинный слой RV32I и провал набора `craft.testing`;
 - `abi` — теги значений, пространство ошибок, упаковка;
 - `memory` — модель памяти и `MemoryExhausted`; пытки памяти

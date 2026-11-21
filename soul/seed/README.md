@@ -14,11 +14,11 @@
   64-битных целях — `core.fraction` и `core.matrix`. Сравнение секретов —
   `craft.protocols.security.crypto` (Q-023).
 - `io.saltic` и `io/` — вывод (`use io`), файлы (`use io.file`).
-- `selfhost/` — сам язык: `selfhost.parser`, `selfhost.checker`,
+- `selfhost/` — сам язык: `selfhost.architect`, `selfhost.parser`, `selfhost.checker`,
   `selfhost.compiler` и всё, на чём они стоят.
 
 Корни `core`, `io` и `selfhost` загрузчик ищет в `soul/seed`, корень
-`canonical` — в `soul` (`selfhost/parser/loader.saltic`).
+`canonical` — в `soul` (архитектор, `selfhost/architect/main.saltic`).
 
 ## Язык
 
@@ -37,7 +37,8 @@
 
 ## Устройство `selfhost`
 
-- `parser` + `parser/{lexer,loader,syntax}` — текст в дерево, загрузка модулей;
+- `architect/` — первая ступень: из каких файлов программа и как они связаны (`use` → файл, связи, порядок);
+- `parser/` (`main`, `lexer/`, `syntax/`, `token`, `nest`) — текст файла в дерево;
 - `checker` + `checker/{names,signatures,rules,types,lookup,walk,top_level}` — проверка: верх программы, обход выражений и инструкций, справки об именах;
 - `errors` — каталог ошибок языка: у каждой свой навык с кодом и текстом
   (`errors.unknown_name(name)`); `diagnostic` ставит её на место в файле;

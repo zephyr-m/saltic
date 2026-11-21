@@ -1,0 +1,157 @@
+-- flow — контракт хода программы: pick (первое совпадение, умолчание, leave
+-- изнутри), drum (beat — элемент или номер шага, leave, вложенные циклы, счёт
+-- ноль и отрицательный) и подстановка "{имя}" в текст.
+--
+-- Flow = Box { sample } — пробный разбор:
+--     prove(suite) -> suite — все проверки хода
+--     choice(suite), beats(suite), templates(suite) -> suite
+--     sign_of(x), size_of(x) — материал pick; first_above(values, limit),
+--         beat_trace() — материал drum; count_down(count) -> число шагов
+--     Spot — Box { x } — поле для подстановки
+
+use core.str
+use core.num
+use core.group
+use craft.testing
+use seed.tests.contract.sample
+
+Flow = Box {
+    sample = Sample {}
+
+    Spot = Box {
+        x = 5
+    }
+
+    skill prove(suite) {
+        suite = choice(suite)
+        suite = beats(suite)
+        out templates(suite)
+    }
+
+    skill sign_of(x) {
+        pick {
+            (x < 0) {
+                out "минус"
+            }
+            (x == 0) {
+                out "ноль"
+            }
+            {
+                out "плюс"
+            }
+        }
+        out "недостижимо"
+    }
+
+    skill size_of(x) {
+        @label = "?"
+        pick {
+            (x < 10) { label = "маленькое" }
+            (x < 100) { label = "среднее" }
+        }
+        out label
+    }
+
+    skill first_above(values, limit) {
+        @found = -1
+        drum (values) {
+            (beat > limit) {
+                found = beat
+                leave
+            }
+        }
+        out found
+    }
+
+    skill beat_trace() {
+        @trace = ""
+        drum ([["a", "b"], ["c"]]) {
+            @row = beat
+            drum (row) {
+                trace = str.concat(trace, beat)
+                (beat == "a") { leave }
+            }
+            trace = str.concat(trace, num.text(group.count(beat)))
+        }
+        out trace
+    }
+
+    skill count_down(count) {
+        @steps = 0
+        drum (count) {
+            steps = steps + 1
+        }
+        out steps
+    }
+
+    skill choice(suite) {
+        suite = testing.test_equal(suite, "pick: первый вариант", sign_of(-5), "минус")
+        suite = testing.test_equal(suite, "pick: второй вариант", sign_of(0), "ноль")
+        suite = testing.test_equal(suite, "pick: вариант по умолчанию", sign_of(7), "плюс")
+        suite = testing.test_equal(suite, "pick: только первое совпадение", size_of(5), "маленькое")
+        suite = testing.test_equal(suite, "pick: без совпадений ничего не делает", size_of(500), "?")
+        @first_big = 0
+        drum ([3, 15, 120, 400]) {
+            pick {
+                (beat > 100) {
+                    first_big = beat
+                    leave
+                }
+            }
+        }
+        suite = testing.test_equal(suite, "pick: leave изнутри выходит из drum", first_big, 120)
+        out suite
+    }
+
+    skill beats(suite) {
+        @total = 0
+        drum ([10, 20, 30]) {
+            total = total + beat
+        }
+        suite = testing.test_equal(suite, "drum: beat — элемент группы", total, 60)
+        @steps = 0
+        drum (4) {
+            steps = steps + beat
+        }
+        suite = testing.test_equal(suite, "drum: beat — номер шага", steps, 6)
+        @empty = 0
+        drum ([]) {
+            empty = empty + 1
+        }
+        suite = testing.test_equal(suite, "drum: пустая группа", empty, 0)
+        suite = testing.test_equal(suite, "drum: leave выходит из цикла", first_above([3, 8, 12, 20], 7), 8)
+        suite = testing.test_equal(suite, "drum: leave без совпадения", first_above([1, 2], 7), -1)
+        suite = testing.test_equal(suite, "drum: вложенный leave и восстановление beat", beat_trace(), "a2c1")
+        @negative = count_down(-2) rescue |err| { "ошибка" }
+        suite = testing.test_equal(suite, "drum: отрицательный счёт — ошибка", negative, "ошибка")
+        suite = testing.test_equal(suite, "drum: нулевой счёт — ни одного шага", count_down(0), 0)
+        suite = testing.test_equal(suite, "drum: обычный счёт", count_down(3), 3)
+        out suite
+    }
+
+    skill templates(suite) {
+        @name = "мир"
+        @count = 42
+        @minus = -7
+        @flag = yes
+        @spot = Spot {}
+        suite = testing.test_equal(suite, "подстановка: текст", "привет, {name}!", "привет, мир!")
+        suite = testing.test_equal(suite, "подстановка: число", "{count} шт", "42 шт")
+        suite = testing.test_equal(suite, "подстановка: отрицательное", "{minus}", "-7")
+        suite = testing.test_equal(suite, "подстановка: yes", "флаг {flag}", "флаг yes")
+        suite = testing.test_equal(suite, "подстановка: поле Box", "x={spot.x}", "x=5")
+        suite = testing.test_equal(suite, "подстановка: несколько", "{name}{count}{name}", "мир42мир")
+        @line = ""
+        drum ([1, 2, 3]) {
+            line = "{line}[{beat}]"
+        }
+        suite = testing.test_equal(suite, "подстановка: beat", line, "[1][2][3]")
+        suite = testing.test_equal(suite, "подстановка: экранированные скобки", "\{name\}", "\{name\}")
+        suite = testing.test_equal(suite, "подстановка: пустая — ошибка", sample.faults("program() \{\n    @x = \"\{\}\"\n    out none\n\}\n"), 1)
+        suite = testing.test_equal(suite, "подстановка: выражение — ошибка", sample.faults("program() \{\n    @x = \"\{1 + 2\}\"\n    out none\n\}\n"), 1)
+        suite = testing.test_equal(suite, "подстановка: одиночная скобка — ошибка", sample.faults("program() \{\n    @x = \"a \} b\"\n    out none\n\}\n"), 1)
+        suite = testing.test_equal(suite, "подстановка: группа — ошибка типа", sample.verdicts("program() \{\n    @items = [1]\n    @x = \"\{items\}\"\n    out none\n\}\n"), "template_type")
+        suite = testing.test_equal(suite, "подстановка: неизвестное имя — ошибка", sample.verdicts("program() \{\n    @x = \"\{missing\}\"\n    out none\n\}\n"), "unknown_name")
+        out suite
+    }
+}
