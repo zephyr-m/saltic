@@ -1,0 +1,132 @@
+-- wasi — вызовы WASI из модуля WASM: открыть, закрыть, аргументы, часы.
+-- Импорты WASI — IMPORTS (имя и номер типа), типы — TYPES строками: i — i32,
+-- I — i64, до «:» — параметры, после — результат. SCRATCH_AT — служебные байты
+-- под ответы WASI ниже данных (asm.BASE). Вынесено из lower (22.11.2026).
+-- Хозяин — Wasi (СОП): wasi_open / wasi_close / wasi_args / wasi_now(buf),
+--     argc / rounded / after_argv — их части; buf — буфер кода функции.
+
+use compiler.gorn.backend
+use formats.wasm.encode
+
+SCRATCH_AT = 1024
+IMPORT_WRITE = 0
+IMPORT_EXIT = 1
+IMPORT_CLOCK = 2
+IMPORT_OPEN = 3
+IMPORT_READ = 4
+IMPORT_CLOSE = 5
+IMPORT_SIZES = 6
+IMPORT_ARGS = 7
+IMPORTS = [["fd_write", 0], ["proc_exit", 1], ["clock_time_get", 2], ["path_open", 4], ["fd_read", 0], ["fd_close", 5], ["args_sizes_get", 6], ["args_get", 6]]
+TYPES = ["iiii:i", "i:", "iIi:i", ":", "iiiiiIIii:i", "i:i", "ii:i"]
+MAIN_TYPE = 3
+
+Wasi = Box {
+    skill wasi_open(buf) {
+        buf = encode.iconst(buf, 3)
+        buf = encode.iconst(buf, 0)
+        buf = encode.get(buf, backend.VALUE)
+        buf = encode.get(buf, backend.ERROR)
+        buf = encode.get(buf, backend.ARG2)
+        buf = encode.op(buf, encode.CONST64)
+        buf = encode.sleb(buf, 70)
+        buf = encode.op(buf, encode.CONST64)
+        buf = encode.sleb(buf, 0)
+        buf = encode.iconst(buf, 0)
+        buf = encode.get(buf, backend.ARG3)
+        buf = encode.call(buf, IMPORT_OPEN)
+        buf = encode.setl(buf, backend.ERROR)
+        buf = encode.get(buf, backend.ARG3)
+        buf = encode.mem(buf, encode.LOAD)
+        out encode.setl(buf, backend.VALUE)
+    }
+
+    skill argc(buf) {
+        buf = encode.iconst(buf, SCRATCH_AT)
+        out encode.mem(buf, encode.LOAD)
+    }
+
+    skill wasi_args(buf) {
+        buf = encode.iconst(buf, SCRATCH_AT)
+        buf = encode.iconst(buf, SCRATCH_AT + 4)
+        buf = encode.call(buf, IMPORT_SIZES)
+        buf = encode.op(buf, encode.DROP)
+        buf = encode.get(buf, backend.STACK)
+        buf = encode.iconst(buf, SCRATCH_AT + 4)
+        buf = encode.mem(buf, encode.LOAD)
+        buf = rounded(buf)
+        buf = encode.op(buf, encode.SUB)
+        buf = encode.setl(buf, backend.STACK)
+        buf = encode.get(buf, backend.STACK)
+        buf = encode.setl(buf, backend.SCRATCH0)
+        buf = encode.get(buf, backend.STACK)
+        buf = argc(buf)
+        buf = encode.iconst(buf, 3)
+        buf = encode.op(buf, encode.ADD)
+        buf = encode.iconst(buf, 2)
+        buf = encode.op(buf, encode.SHL)
+        buf = rounded(buf)
+        buf = encode.op(buf, encode.SUB)
+        buf = encode.setl(buf, backend.STACK)
+        buf = encode.get(buf, backend.STACK)
+        buf = argc(buf)
+        buf = encode.mem(buf, encode.STORE)
+        buf = encode.get(buf, backend.STACK)
+        buf = encode.iconst(buf, 4)
+        buf = encode.op(buf, encode.ADD)
+        buf = encode.get(buf, backend.SCRATCH0)
+        buf = encode.call(buf, IMPORT_ARGS)
+        buf = encode.op(buf, encode.DROP)
+        buf = after_argv(buf, 4)
+        buf = encode.iconst(buf, 0)
+        buf = encode.mem(buf, encode.STORE)
+        buf = after_argv(buf, 8)
+        buf = encode.iconst(buf, 0)
+        out encode.mem(buf, encode.STORE)
+    }
+
+    skill rounded(buf) {
+        buf = encode.iconst(buf, 15)
+        buf = encode.op(buf, encode.ADD)
+        buf = encode.iconst(buf, -16)
+        out encode.op(buf, encode.AND)
+    }
+
+    skill after_argv(buf, extra) {
+        buf = encode.get(buf, backend.STACK)
+        buf = argc(buf)
+        buf = encode.iconst(buf, 2)
+        buf = encode.op(buf, encode.SHL)
+        buf = encode.op(buf, encode.ADD)
+        buf = encode.iconst(buf, extra)
+        out encode.op(buf, encode.ADD)
+    }
+
+    skill wasi_close(buf) {
+        buf = encode.get(buf, backend.VALUE)
+        buf = encode.call(buf, IMPORT_CLOSE)
+        out encode.op(buf, encode.DROP)
+    }
+
+    skill wasi_now(buf) {
+        buf = encode.iconst(buf, 0)
+        buf = encode.op(buf, encode.CONST64)
+        buf = encode.sleb(buf, 0)
+        buf = encode.iconst(buf, SCRATCH_AT)
+        buf = encode.call(buf, IMPORT_CLOCK)
+        buf = encode.op(buf, encode.DROP)
+        buf = encode.iconst(buf, SCRATCH_AT)
+        buf = encode.op(buf, encode.LOAD64)
+        buf = encode.uleb(buf, 3)
+        buf = encode.uleb(buf, 0)
+        buf = encode.op(buf, encode.CONST64)
+        buf = encode.sleb(buf, 1000000)
+        buf = encode.op(buf, encode.DIV64_U)
+        buf = encode.op(buf, encode.CONST64)
+        buf = encode.sleb(buf, 86400000)
+        buf = encode.op(buf, encode.REM64_U)
+        buf = encode.op(buf, encode.WRAP64)
+        buf = encode.setl(buf, 0)
+        out encode.iconst(buf, 0)
+    }
+}
