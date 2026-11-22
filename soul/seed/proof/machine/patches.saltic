@@ -3,6 +3,7 @@
 --
 -- word_is(bytes, offset, b0, b1, b2, b3) -> yes/no
 -- fixture() -> разрешённая цель с четырьмя метками и восемью исправлениями
+-- far_fixture() -> дальний условный переход (far_calls): bne на +12, auipc t6, jalr x0
 -- run(suite) -> suite
 
 use craft.testing
@@ -12,14 +13,9 @@ use compiler.gorn.backend.buffer
 use compiler.gorn.backend.riscv.emit
 
 skill word_is(bytes, offset, b0, b1, b2, b3) {
-    (bytes.byte_at(offset) == b0) {
-        (bytes.byte_at(offset + 1) == b1) {
-            (bytes.byte_at(offset + 2) == b2) {
-                out bytes.byte_at(offset + 3) == b3
-            }
-        }
-    }
-    out no
+    @first = (bytes.byte_at(offset) == b0) ○ (bytes.byte_at(offset + 1) == b1)
+    @second = (bytes.byte_at(offset + 2) == b2) ○ (bytes.byte_at(offset + 3) == b3)
+    out first ○ second
 }
 
 skill fixture() {
@@ -42,6 +38,16 @@ skill fixture() {
     out layout.resolve(target)
 }
 
+skill far_fixture() {
+    @writer = emit.Emit {}
+    @target = layout.host("_start")
+    target.far_calls = yes
+    target.define_label(Layout.Section.CODE, "_start")
+    writer.branch(target, Instruction.Kind.BEQ, 1, 2, "far")
+    target.define_label(Layout.Section.CODE, "far")
+    out layout.resolve(target)
+}
+
 skill run(suite) {
     @target = fixture()
     suite = testing.test_equal(suite, "patches: четыре метки сохранены", target.label_count, 4)
@@ -54,5 +60,10 @@ skill run(suite) {
     suite = testing.test_yes(suite, "patch absolute high: перенос low", word_is(target.code, 28, 183, 19, 1, 0))
     suite = testing.test_yes(suite, "patch absolute low: отрицательный остаток", word_is(target.code, 32, 147, 131, 99, 129))
     suite = testing.test_yes(suite, "patch address word", word_is(target.data, 0, 22, 8, 1, 0))
+    @far = far_fixture()
+    suite = testing.test_equal(suite, "patch far branch: три команды", far.code.length, 12)
+    suite = testing.test_yes(suite, "patch far branch: обратное условие на +12", word_is(far.code, 0, 99, 150, 32, 0))
+    suite = testing.test_yes(suite, "patch far branch: auipc t6", word_is(far.code, 4, 151, 15, 0, 0))
+    suite = testing.test_yes(suite, "patch far branch: jalr x0, t6, +8", word_is(far.code, 8, 103, 128, 143, 0))
     out suite
 }

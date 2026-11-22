@@ -11,7 +11,12 @@
 -- Emit { coder }: op(program, kind, rd, rs1, rs2, immediate) — команда;
 --     wide_op(program, …) — то же, смещение шире 12 бит через T6 (ADDI, load/store);
 --     pending(program, fix, placeholder) — заглушка и правка к ней;
---     branch(program, kind, rs1, rs2, label) — InvalidBranchInstruction;
+--     branch(program, kind, rs1, rs2, label) — InvalidBranchInstruction; при
+--     far_calls = yes — дальний: обратное условие (opposite) на +12 и дальний
+--     переход (B-переход достаёт на ±4 КБ, jal — на ±1 МБ; решение автора 22.11.2026);
+--     far_transfer(program, link, through, label) — auipc through + jalr link, through:
+--     дальний call (ra, ra) и дальний jal x0 (x0, t6) — один способ;
+--     jump_skip(program) -> на сколько перескочить условием через один jump: 8 или 12;
 --     branch_unsigned_greater(program, rs1, rs2, label) — bltu с переставленными;
 --     jal(program, rd, label) / call(program, label); load_immediate(program, rd, n)
 --     / load_word(program, rd, word); relative_address / absolute_address(program,
@@ -25,6 +30,8 @@ use compiler.gorn.backend.riscv.instruction
 use compiler.gorn.backend.riscv.registers
 
 WIDE_OFFSET_REGISTER = registers.T6
+FAR_BRANCH_SKIP = 12
+NEAR_JUMP_SKIP = 8
 
 Emit = Box {
     coder = codec.Codec {}
@@ -52,6 +59,11 @@ Emit = Box {
         ((item.form == Instruction.Form.B) == no) {
             out error.InvalidBranchInstruction
         }
+        (value.far_calls == yes) {
+            op(value, opposite(kind), registers.ZERO, rs1, rs2, FAR_BRANCH_SKIP)
+            jal(value, registers.ZERO, label)
+            out none
+        }
         @placeholder = coder.encode(item, registers.ZERO, rs1, rs2, 0)
         pending(value, fixer.Fix {
             kind = Fixer.Kind.BRANCH,
@@ -63,7 +75,37 @@ Emit = Box {
         out none
     }
 
+    skill jump_skip(value) {
+        (value.far_calls == yes) {
+            out FAR_BRANCH_SKIP
+        }
+        out NEAR_JUMP_SKIP
+    }
+
+    skill opposite(kind) {
+        (kind == Instruction.Kind.BEQ) {
+            out Instruction.Kind.BNE
+        }
+        (kind == Instruction.Kind.BNE) {
+            out Instruction.Kind.BEQ
+        }
+        (kind == Instruction.Kind.BLT) {
+            out Instruction.Kind.BGE
+        }
+        (kind == Instruction.Kind.BGE) {
+            out Instruction.Kind.BLT
+        }
+        (kind == Instruction.Kind.BLTU) {
+            out Instruction.Kind.BGEU
+        }
+        out Instruction.Kind.BLTU
+    }
+
     skill jal(value, rd, label) {
+        ((value.far_calls == yes) ○ (rd == registers.ZERO)) {
+            far_transfer(value, registers.ZERO, WIDE_OFFSET_REGISTER, label)
+            out none
+        }
         @placeholder = coder.encode_kind(Instruction.Kind.JAL, rd, registers.ZERO, registers.ZERO, 0)
         pending(value, fixer.Fix {
             kind = Fixer.Kind.JUMP,
@@ -93,16 +135,7 @@ Emit = Box {
     }
 
     skill branch_unsigned_greater(value, rs1, rs2, label) {
-        @catalog = coder.catalog
-        @item = catalog.find_kind(Instruction.Kind.BLTU)
-        @placeholder = coder.encode(item, registers.ZERO, rs2, rs1, 0)
-        pending(value, fixer.Fix {
-            kind = Fixer.Kind.BRANCH,
-            instruction_kind = Instruction.Kind.BLTU,
-            label = label,
-            rs1 = rs2,
-            rs2 = rs1
-        }, placeholder)
+        branch(value, Instruction.Kind.BLTU, rs2, rs1, label)
         out none
     }
 
@@ -135,23 +168,28 @@ Emit = Box {
             jal(value, registers.RA, label)
             out none
         }
+        far_transfer(value, registers.RA, registers.RA, label)
+        out none
+    }
+
+    skill far_transfer(value, link, through, label) {
         @base = value.code.length
-        @high = coder.encode_kind(Instruction.Kind.AUIPC, registers.RA, registers.ZERO, registers.ZERO, 0)
+        @high = coder.encode_kind(Instruction.Kind.AUIPC, through, registers.ZERO, registers.ZERO, 0)
         pending(value, fixer.Fix {
             kind = Fixer.Kind.RELATIVE_HIGH,
             instruction_kind = Instruction.Kind.AUIPC,
             base = base,
             label = label,
-            rd = registers.RA
+            rd = through
         }, high)
-        @low = coder.encode_kind(Instruction.Kind.JALR, registers.RA, registers.RA, registers.ZERO, 0)
+        @low = coder.encode_kind(Instruction.Kind.JALR, link, through, registers.ZERO, 0)
         pending(value, fixer.Fix {
             kind = Fixer.Kind.RELATIVE_LOW,
             instruction_kind = Instruction.Kind.JALR,
             base = base,
             label = label,
-            rd = registers.RA,
-            rs1 = registers.RA
+            rd = link,
+            rs1 = through
         }, low)
         out none
     }
