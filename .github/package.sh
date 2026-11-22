@@ -30,7 +30,9 @@ files=(
     .github
     .vscode
     workbench/vscode
-    os
+    workbench/tarantul
+    tarantul.json
+    formats
     soul
     tests
 )
