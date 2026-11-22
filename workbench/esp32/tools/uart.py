@@ -1,6 +1,6 @@
 # uart — сброс ESP32 DevKit через RTS и чтение UART0 115200: всё, что плата
 # напишет за секунды, — в stdout. Запуск (pyserial есть рядом с esptool):
-#   nix-shell -p esptool --run "python3 os/target/esp32/tools/uart.py /dev/ttyUSB0 4"
+#   nix-shell -p esptool --run "python3 workbench/esp32/tools/uart.py /dev/ttyUSB0 4"
 import sys
 import time
 

@@ -1,7 +1,7 @@
 # WebAssembly
 
 - **Расширение:** `.wasm`.
-- **Где запускается:** WASI и страница `os/target/wasm/page.html` (те же импорты `wasi_snapshot_preview1`).
+- **Где запускается:** WASI и страница `soul/toolchains/wasm/page.html` (те же импорты `wasi_snapshot_preview1`).
 - **Состояние:** ✅ программа Saltic собирается в модуль и работает.
 - **Умеет:** аргументы командной строки (`args_get`), `io.show`, выход, `core.time.now` (миллисекунды от полуночи UTC), `io.file.read` / `io.file.write`, `io.read_line`.
 - **Канон:** первые 35 строк из 57 совпадают с эталоном, дальше — процессы, их в WASI нет.
@@ -12,7 +12,7 @@
 Сборка из корня репозитория:
 
 ```
-bootstrap/saltic-284-77-272-compiler-x86_64-linux os/target/wasm/toolchain.saltic /tmp/wasm-cc 1073741824 x86_64
+bootstrap/saltic-284-77-272-compiler-x86_64-linux soul/toolchains/wasm/main.saltic /tmp/wasm-cc 1073741824 x86_64
 /tmp/wasm-cc os/target/wasm/smoke.saltic /tmp/saltic-smoke.wasm 65536
 ```
 

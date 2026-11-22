@@ -26,11 +26,11 @@ qemu file="os/target/qemu_virt/smoke.saltic": (tarantul "get")
     bootstrap/saltic "$1" .cache/build/qemu_virt/program.elf 536870912 rv32i
 
 qemu-graphics: _dirs (tarantul "get")
-    bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
+    bootstrap/saltic workbench/qemu/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
     nix --extra-experimental-features "nix-command flakes" develop --command bash -c '.cache/build/workbench/build-graphics "" && qemu-system-riscv32 -machine virt -global virtio-mmio.force-legacy=false -device ramfb -device virtio-keyboard-device -device virtio-tablet-device -audiodev pipewire,id=saltic_audio -device virtio-sound-device,audiodev=saltic_audio -display gtk -serial stdio -monitor none -bios none -kernel .cache/build/qemu-graphics/program.elf'
 
 os port="46321": _dirs (tarantul "get")
-    bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
+    bootstrap/saltic workbench/qemu/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
     nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/build-graphics ""
 
 os-send command port="46321":
@@ -45,10 +45,10 @@ os-send command port="46321":
     printf '%s\n' "$response"
 
 qemu-graphics-check: _dirs (tarantul "get")
-    bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
+    bootstrap/saltic workbench/qemu/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
     nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/build-graphics --check
 
-bootstrap-refresh source="soul/seed/compiler/main.saltic": _dirs
+bootstrap-refresh source="soul/toolchains/saltic/main.saltic": _dirs
     bootstrap/saltic bootstrap/refresh.saltic .cache/build/workbench/refresh 536870912 x86_64
     .cache/build/workbench/refresh "$1"
 
@@ -130,14 +130,14 @@ tarantul command="get": _dirs
     .cache/build/workbench/tarantul "$1"
 
 esp32: _dirs (tarantul "get")
-    bootstrap/saltic os/target/esp32/toolchain.saltic .cache/build/workbench/esp32-toolchain 536870912 x86_64
+    bootstrap/saltic soul/toolchains/esp32/main.saltic .cache/build/workbench/esp32-toolchain 536870912 x86_64
     bootstrap/saltic workbench/check/esp32.saltic .cache/build/workbench/esp32 536870912 x86_64
     .cache/build/workbench/esp32
 
 # Залить программу из os/target/esp32 на плату: `just esp32-flash` — куб,
 # `just esp32-flash oled` — любая другая по имени файла
 esp32-flash name="cube": _dirs (tarantul "get")
-    bootstrap/saltic os/target/esp32/toolchain.saltic .cache/build/workbench/esp32-toolchain 536870912 x86_64
+    bootstrap/saltic soul/toolchains/esp32/main.saltic .cache/build/workbench/esp32-toolchain 536870912 x86_64
     .cache/build/workbench/esp32-toolchain os/target/esp32/{{name}}.saltic .cache/build/workbench/esp32-{{name}}.bin 65536
     nix-shell -p esptool --run "esptool --chip esp32 --port /dev/ttyUSB0 --no-stub write-flash 0x1000 .cache/build/workbench/esp32-{{name}}.bin"
 
@@ -147,7 +147,7 @@ esp32-flash name="cube": _dirs (tarantul "get")
 # .cache/build/android/<имя>.apk: скинуть на телефон и поставить.
 android name="hello": _dirs (tarantul "get")
     mkdir -p .cache/build/android
-    bootstrap/saltic os/target/android/toolchain.saltic .cache/build/workbench/android-toolchain 1073741824 x86_64
+    bootstrap/saltic soul/toolchains/android/main.saltic .cache/build/workbench/android-toolchain 1073741824 x86_64
     .cache/build/workbench/android-toolchain os/target/android/{{name}}.saltic .cache/build/android/{{name}}-unsigned.apk 67108864
     test -f .cache/build/android/key.pk8 || (openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out .cache/build/android/key.pem && openssl pkcs8 -topk8 -nocrypt -outform DER -in .cache/build/android/key.pem -out .cache/build/android/key.pk8 && openssl req -new -x509 -key .cache/build/android/key.pem -days 10000 -subj "/CN=Saltic" -out .cache/build/android/cert.pem)
     nix-shell -p apksigner --run "apksigner sign --key .cache/build/android/key.pk8 --cert .cache/build/android/cert.pem --min-sdk-version 24 --out .cache/build/android/{{name}}.apk .cache/build/android/{{name}}-unsigned.apk && apksigner verify --verbose .cache/build/android/{{name}}.apk"

@@ -74,9 +74,9 @@ Saltic на ноутбуке без Linux: программа собираетс
 
 ## Флешка
 
-1. Собрать: `SALTIC_TARGET=x86_64 bash bootstrap/build.sh os/target/uefi_x86_64/build.saltic .cache/build/workbench/uefi-build && .cache/build/workbench/uefi-build ""` — папка образа
+1. Собрать: `SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/uefi/build.saltic .cache/build/workbench/uefi-build && .cache/build/workbench/uefi-build ""` — папка образа
    `.cache/build/uefi_x86_64/image`.
-2. Проверить в QEMU: `SALTIC_TARGET=x86_64 bash bootstrap/build.sh os/target/uefi_x86_64/run.saltic .cache/build/workbench/uefi-run && .cache/build/workbench/uefi-run ""`.
+2. Проверить в QEMU: `SALTIC_TARGET=x86_64 bash bootstrap/build.sh workbench/uefi/run.saltic .cache/build/workbench/uefi-run && .cache/build/workbench/uefi-run ""`.
 3. Флешку отформатировать в FAT32 (`sudo mkfs.vfat -F 32 /dev/sdX1`,
    где `sdX1` — раздел флешки, проверить по `lsblk`), смонтировать и
    скопировать туда папку `EFI` из образа:

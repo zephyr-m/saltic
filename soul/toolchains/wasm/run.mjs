@@ -1,5 +1,5 @@
 // run — модуль Saltic под WASI в Node:
-//   node os/target/wasm/run.mjs <модуль.wasm> [аргументы…]
+//   node soul/toolchains/wasm/run.mjs <модуль.wasm> [аргументы…]
 // Каталог программы (fd 3) — текущий. Код выхода — код программы.
 import { readFile } from "node:fs/promises";
 import { WASI } from "node:wasi";
