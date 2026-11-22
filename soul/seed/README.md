@@ -56,7 +56,7 @@
   `rt_platform_*` (write, exit, key, file_read, file_write, now, wait, firmware,
   call), которые цель даёт программе; чего не умеет — ошибка `NotSupported`.
   Платформа — Box с методом `append(compiler)`: `platform.linux.Linux`,
-  `platform.uefi.Uefi`, `os/target/qemu_virt/platform.Platform`;
+  `platform.uefi.Uefi`, `soul/seed/compiler/gorn/platform/qemu_virt.Platform`;
 - `gorn/backend/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
   машинный runtime `rt_*` на договоре машины (роли и операции `gorn/backend`,
   общий для исполнителей): арифметика, Box и группы, строки,

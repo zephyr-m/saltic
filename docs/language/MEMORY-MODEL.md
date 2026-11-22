@@ -48,7 +48,7 @@ saltic_heap_start                                                конец кв
 `STORE_QUARANTINED` (в карантине), `STORE_BOX_FREE` (группа без Box внутри),
 `STORE_MARK` (временная метка обхода) и от бита 4 — **счётчик рёбер
 хранилище → хранилище**. Слоты стека и объекты регионов в счётчике не участвуют.
-Константы — в `compiler.memory.model`.
+Константы — в `compiler.gorn.memory.model`.
 
 ## Хранилище
 

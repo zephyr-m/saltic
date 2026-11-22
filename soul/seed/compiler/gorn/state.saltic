@@ -24,7 +24,7 @@
 -- collect_locals(params, body) -> Names (плюс служебный FAIL_LINE — строка, где
 --     ошибка покинула оператор навыка); make_slots(words, names, first_slot) -> слоты
 -- collect_names(names, node) -> Names: имена и служебные ячейки (drum, always, rescue)
---     по всему поддереву; обход — ast.children
+--     по всему поддереву; обход — nodes.children
 -- outer_assigned(block) -> имена снаружи блока, которым блок присваивает
 -- uses_beat(node) / block_uses_beat(block) -> yes/no: есть ли beat (во вложенный drum не
 --     заходит — там свой beat); assigned_names(found, node) — кому присваивают
@@ -48,13 +48,13 @@
 use core.str
 use core.group
 use core.num
-use compiler.abi
-use compiler.abi.shape
-use compiler.ast
-use compiler.memory.model
+use compiler.contract.abi
+use compiler.contract.abi.shape
+use compiler.nodes
+use compiler.gorn.memory.model
 use compiler.gorn.backend
-use compiler.machine.word
-use compiler.machine.wide
+use compiler.gorn.machine.word
+use compiler.gorn.machine.wide
 use compiler.gorn.codegen
 use compiler.gorn.codegen.calls
 use compiler.gorn.codegen.statements
@@ -226,7 +226,7 @@ State = Box {
     }
 
     skill at_line(node) {
-        @place = ast.location(node)
+        @place = nodes.location(node)
         (group.get(place, 0) > 0) {
             current_function.line = group.get(place, 0)
         }
@@ -246,14 +246,14 @@ State = Box {
     }
 
     skill collect_box(item, module) {
-        @name = ast.qualified(module, ast.part(item, 1))
+        @name = nodes.qualified(module, nodes.part(item, 1))
         @billet_boxes = boxes
         billet_boxes.add_named(name, "box", item, module)
         @slot = 0
-        drum (group.count(ast.plain(item)) - 2) {
-            @member = ast.part(item, beat + 2)
-            (ast.tag(member) == "field") {
-                @field_name = ast.part(member, 1)
+        drum (group.count(nodes.plain(item)) - 2) {
+            @member = nodes.part(item, beat + 2)
+            (nodes.tag(member) == "field") {
+                @field_name = nodes.part(member, 1)
                 @billet_fields = fields
                 (billet_fields.has(field_name) == no) {
                     billet_fields.keep(Symbol {
@@ -272,11 +272,11 @@ State = Box {
     }
 
     skill collect_enum(item, module) {
-        @name = ast.qualified(module, ast.part(item, 1))
+        @name = nodes.qualified(module, nodes.part(item, 1))
         @billet_enums = enums
         billet_enums.add_named(name, "enum", item, module)
-        drum (group.count(ast.plain(item)) - 2) {
-            @variant = ast.part(item, beat + 2)
+        drum (group.count(nodes.plain(item)) - 2) {
+            @variant = nodes.part(item, beat + 2)
             @full_name = "{name}."
             full_name = str.concat(full_name, variant)
             @value = abi.tagged(next_enum_id, abi.TAG_ENUM)
@@ -293,11 +293,11 @@ State = Box {
     skill collect_top_level() {
         drum (group.count(tree) - 1) {
             @item = group.get(tree, beat + 1)
-            @tag = ast.tag(item)
-            @module = ast.module_name(item)
+            @tag = nodes.tag(item)
+            @module = nodes.module_name(item)
             (tag == "const") {
                 @billet_constants = constants
-                billet_constants.add_named(ast.qualified(module, ast.part(item, 1)), "const", ast.part(item, 2), module)
+                billet_constants.add_named(nodes.qualified(module, nodes.part(item, 1)), "const", nodes.part(item, 2), module)
             }
             (tag == "box") {
                 collect_box(item, module)
@@ -307,11 +307,11 @@ State = Box {
             }
             (tag == "skill") {
                 @billet_skills = skills
-                billet_skills.add_named(ast.qualified(module, ast.part(item, 1)), "skill", item, module)
+                billet_skills.add_named(nodes.qualified(module, nodes.part(item, 1)), "skill", item, module)
             }
             (tag == "native") {
                 @billet_natives = natives
-                billet_natives.add_named(ast.qualified(module, ast.part(item, 1)), "native", item, module)
+                billet_natives.add_named(nodes.qualified(module, nodes.part(item, 1)), "native", item, module)
             }
             (tag == "entry") {
                 entry = item
@@ -341,7 +341,7 @@ skill name_add(names, name) {
 }
 
 skill collect_names(names, node) {
-    @plain = ast.plain(node)
+    @plain = nodes.plain(node)
     @tag = group.get(plain, 0)
     (tag == "rescue") {
         names = name_add(names, "$rescue:{names.next_rescue}")
@@ -372,20 +372,20 @@ skill collect_names(names, node) {
         names = name_add(names, "$drum_saved:{drum_number}")
         names = name_add(names, "$drum_mark:{drum_number}")
         names = name_add(names, "$drum_limit:{drum_number}")
-        names = name_add(names, ast.DRUM_BEAT)
+        names = name_add(names, nodes.DRUM_BEAT)
     }
-    drum (ast.children(node)) {
+    drum (nodes.children(node)) {
         names = collect_names(names, beat)
     }
     out names
 }
 
 skill assigned_names(found, node) {
-    @plain = ast.plain(node)
+    @plain = nodes.plain(node)
     (group.get(plain, 0) == "assign") {
         found = name_add(found, group.get(plain, 1))
     }
-    drum (ast.children(node)) {
+    drum (nodes.children(node)) {
         found = assigned_names(found, beat)
     }
     out found
@@ -405,15 +405,15 @@ skill outer_assigned(block) {
 }
 
 skill uses_beat(node) {
-    @plain = ast.plain(node)
+    @plain = nodes.plain(node)
     @tag = group.get(plain, 0)
     (tag == "path") {
-        out group.get(plain, 1) == ast.DRUM_BEAT
+        out group.get(plain, 1) == nodes.DRUM_BEAT
     }
     (tag == "drum") {
         out uses_beat(group.get(plain, 1))
     }
-    drum (ast.children(node)) {
+    drum (nodes.children(node)) {
         (uses_beat(beat) == yes) {
             out yes
         }
@@ -456,7 +456,7 @@ skill header(billet) {
 skill start(billet) {
     @executor = billet.executor
     @words = billet.words
-    @params = ast.part(billet.entry, 1)
+    @params = nodes.part(billet.entry, 1)
     @param_count = group.count(params)
     billet = executor.label(billet, "_start")
     billet = executor.move(billet, backend.VALUE, backend.STACK)

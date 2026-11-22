@@ -48,7 +48,7 @@ qemu-graphics-check: _dirs (tarantul "get")
     bootstrap/saltic os/target/qemu_virt/build-graphics.saltic .cache/build/workbench/build-graphics 536870912 x86_64
     nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/build-graphics --check
 
-bootstrap-refresh source="soul/seed/compiler/toolchain.saltic": _dirs
+bootstrap-refresh source="soul/seed/compiler/main.saltic": _dirs
     bootstrap/saltic bootstrap/refresh.saltic .cache/build/workbench/refresh 536870912 x86_64
     .cache/build/workbench/refresh "$1"
 
