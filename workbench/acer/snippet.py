@@ -18,7 +18,7 @@ from pathlib import Path
 
 from acer_address import route
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[2]
 TOOLS = Path(__file__).resolve().parent
 HEAP = "67108864"
 DATA_OFFSET = 1 << 20

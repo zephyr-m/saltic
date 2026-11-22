@@ -4,7 +4,7 @@
 # пустой пакет с того же порта — файрвол хоста тогда считает строки Acer
 # ответом и пропускает их без правки настроек. Ctrl+C — выход.
 #
-#   python3 os/target/uefi_x86_64/tools/log_receiver.py [файл]
+#   python3 workbench/acer/log_receiver.py [файл]
 
 import os
 import socket

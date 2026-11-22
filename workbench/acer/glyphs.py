@@ -2,7 +2,7 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "os/fonts/spleen.saltic"
 TARGET = ROOT / "os/screen/glyphs.saltic"
 SIZES = [("8X16", 8, 16), ("12X24", 12, 24), ("16X32", 16, 32)]
