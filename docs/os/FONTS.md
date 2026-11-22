@@ -19,18 +19,18 @@
 
 TTF читается и рисуется:
 
-- `os/fonts/ttf.saltic` — разбор таблиц `head`, `maxp`, `hhea`, `hmtx`,
+- `ttf` (библиотека реестра fonts) — разбор таблиц `head`, `maxp`, `hhea`, `hmtx`,
   `cmap` (формат 4), `loca` и `glyf`, составные буквы (Й, ё у Inter);
-- `os/fonts/raster.saltic` — растеризатор: контуры квадратичными кривыми →
+- `raster` (fonts) — растеризатор: контуры квадратичными кривыми →
   заливка с гладкими краями;
 - шрифты в репозитории: Inter (обычный и жирный) и JetBrains Mono
-  (`os/fonts/inter/`, `os/fonts/jetbrains-mono/`); ими рисует UIEngine на
+  (`inter/`, `jetbrains-mono/` в библиотеке fonts; пути — `fonts.REGULAR`, `fonts.BOLD`, `fonts.MONO`); ими рисует UIEngine на
   Linux, Acer и Android; проверка — `tests/ttf.saltic`.
 
 Вышло около 570 строк (оценка была 800–1500). Кернинга пока нет.
 
-Spleen — таблица точек шести размеров (`os/fonts/spleen.saltic`, рисует
-`os/drivers/font.saltic`) — остался там, где TTF ещё нет: старые программы,
+Spleen — таблица точек шести размеров (`spleen` в библиотеке fonts, рисует
+`ink/font (реестр)`) — остался там, где TTF ещё нет: старые программы,
 ESP32 (экран SSD1306), запасной шрифт Acer и Android, когда файла шрифта нет.
 Кириллица у Spleen рукописная (т как m, д как g) — уйдёт вместе с ним.
 

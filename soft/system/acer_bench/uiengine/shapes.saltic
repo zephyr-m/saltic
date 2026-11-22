@@ -1,0 +1,244 @@
+-- shapes — примитивы рисования UIEngine: скругления, рамки, тени, линии, стекло, затемнение.
+-- Координаты в пикселях экрана graphics.Screen; under — цвет под фигурой, нужен
+-- для сглаживания краёв (покрытие угла по 4×4 пробам).
+-- keep_rows/put_back_rows берут память у прошивки (AllocatePool) — только x86_64-uefi.
+--
+-- rounded(screen, x, y, width, height, radius, color, under) — скруглённый прямоугольник
+-- framed_box(screen, x, y, width, height, radius, style, under) — то же по Look, с рамкой если framed
+-- hairline(screen, x, y, width, color) — линия в 1 пиксель
+-- shadow(screen, x, y, width, height, radius, under, blur) — тень под рамкой
+-- soft_shadow(screen, x, y, width, height, radius, blur) — мягкая тень через glass
+-- dim(screen, keep) — затемнить весь экран до keep процентов
+-- stroke(screen, x0, y0, x1, y1, width, color, under) — сглаженный отрезок любой толщины
+-- glass(screen, x, y, width, height, radius, tint, amount) — полупрозрачная заливка, amount в %
+-- gradient_box(screen, x, y, size, radius, top, bottom) — квадрат с вертикальным градиентом
+-- keep_rows(screen, x, y, width, rows) -> адрес сохранённых строк; MemoryExhausted
+-- put_back_rows(screen, pool, x, y, width, rows) — вернуть строки и освободить память
+-- Внутри: coverage, dim_row, copy_row, stroke_cover; константы пула POOL_AT, BOOT_* берёт drop.
+
+use core.mem
+use tarantul.firmware.firmware
+use tarantul.graphics.graphics
+use tarantul.firmware.firmware.uefi
+use soft.system.acer_bench.uiengine.canvas
+use core.num
+use core.usize
+use core.address
+use core.u32
+
+SAMPLES = 4
+FULL = 16
+SHADOW_STEP = 8
+BOOT_ALLOCATE_POOL = 64
+BOOT_FREE_POOL = 72
+BOOT_COPY_MEM = 352
+LOADER_DATA = 2
+POOL_AT = 96
+
+skill coverage(column, row, radius) {
+    @limit = 64 * radius * radius
+    @inside = 0
+    drum (SAMPLES) {
+        @dx = 8 * column + 2 * beat + 1 - 8 * radius
+        drum (SAMPLES) {
+            @dy = 8 * row + 2 * beat + 1 - 8 * radius
+            (dx * dx + dy * dy <= limit) { inside = inside + 1 }
+        }
+    }
+    out inside
+}
+
+skill rounded(screen, x, y, width, height, radius, color, under) {
+    @solid = canvas.paint(screen, color)
+    drum (height) {
+        @row = beat
+        @from_edge = row
+        (row >= height - radius) { from_edge = height - 1 - row }
+        pick {
+            (from_edge < radius) {
+                drum (radius) {
+                    @shade = canvas.paint(screen, canvas.mix(under, color, coverage(beat, from_edge, radius), FULL))
+                    graphics.fill(screen, x + beat, y + row, 1, 1, shade)
+                    graphics.fill(screen, x + width - 1 - beat, y + row, 1, 1, shade)
+                }
+                graphics.fill(screen, x + radius, y + row, width - 2 * radius, 1, solid)
+            }
+            { graphics.fill(screen, x, y + row, width, 1, solid) }
+        }
+    }
+    out none
+}
+
+skill framed_box(screen, x, y, width, height, radius, style, under) {
+    (style.framed == no) { out rounded(screen, x, y, width, height, radius, style.fill, under) }
+    rounded(screen, x, y, width, height, radius, style.edge, under)
+    out rounded(screen, x + 1, y + 1, width - 2, height - 2, radius - 1, style.fill, style.edge)
+}
+
+skill hairline(screen, x, y, width, color) {
+    out graphics.fill(screen, x, y, width, 1, canvas.paint(screen, color))
+}
+
+skill shadow(screen, x, y, width, height, radius, under, blur) {
+    @drop = blur / 3 + 1
+    drum (blur) {
+        @spread = blur - beat
+        @strength = (beat + 1) * SHADOW_STEP
+        rounded(screen, x - spread, y - spread + drop, width + 2 * spread, height + 2 * spread, radius + spread, canvas.mix(under, canvas.BLACK, strength, 1000), under)
+    }
+    out none
+}
+
+skill dim_row(screen, row, keep) {
+    @start = row * screen.stride * graphics.PIXEL_BYTES
+    drum (screen.width) {
+        @at = start + beat * graphics.PIXEL_BYTES
+        @value = num.from(mem.load32(address.from(screen.memory), usize.from(at)))
+        @high = value / 65536 % 256 * keep / 100
+        @middle = value / 256 % 256 * keep / 100
+        @low = value % 256 * keep / 100
+        mem.store32(address.from(screen.memory), usize.from(at), u32.from(high * 65536 + middle * 256 + low))
+    }
+    out none
+}
+
+skill dim(screen, keep) {
+    drum (screen.height) { dim_row(screen, beat, keep) }
+    out none
+}
+
+skill stroke_cover(px, py, ax, ay, bx, by, half) {
+    @dx = bx - ax
+    @dy = by - ay
+    @length = dx * dx + dy * dy
+    @inside = 0
+    drum (SAMPLES) {
+        @sx = px * 4 + beat
+        drum (SAMPLES) {
+            @sy = py * 4 + beat
+            @along = (sx - ax) * dx + (sy - ay) * dy
+            @t = 0
+            (length > 4096) { t = along / (length / 64) }
+            (length > 0) {
+                (length < 4097) { t = along * 64 / length }
+            }
+            (t < 0) { t = 0 }
+            (t > 64) { t = 64 }
+            @ex = sx - ax - dx * t / 64
+            @ey = sy - ay - dy * t / 64
+            (ex * ex + ey * ey <= half * half) { inside = inside + 1 }
+        }
+    }
+    out inside
+}
+
+skill stroke(screen, x0, y0, x1, y1, width, color, under) {
+    @half = width * 2
+    @left = x0
+    (x1 < left) { left = x1 }
+    @top = y0
+    (y1 < top) { top = y1 }
+    @wide = x0 + x1 - 2 * left + width + 2
+    @tall = y0 + y1 - 2 * top + width + 2
+    @from_x = left - width / 2 - 1
+    @from_y = top - width / 2 - 1
+    drum (tall) {
+        @py = from_y + beat
+        drum (wide) {
+            @px = from_x + beat
+            @cover = stroke_cover(px, py, x0 * 4 + 2, y0 * 4 + 2, x1 * 4 + 2, y1 * 4 + 2, half)
+            (cover > 0) {
+                @at = (py * screen.stride + px) * graphics.PIXEL_BYTES
+                @below = canvas.unpack(screen, num.from(mem.load32(address.from(screen.memory), usize.from(at))))
+                mem.store32(address.from(screen.memory), usize.from(at), u32.from(canvas.paint(screen, canvas.mix(below, color, cover, FULL))))
+            }
+        }
+    }
+    out none
+}
+
+skill keep_rows(screen, x, y, width, rows) {
+    @base = firmware.guest_base()
+    @services = uefi.boot_services(base)
+    @row_bytes = width * graphics.PIXEL_BYTES
+    @at = firmware.scratch(base, POOL_AT)
+    @got = firmware.call(base, firmware.pointer(services, base, BOOT_ALLOCATE_POOL), [firmware.number(LOADER_DATA), firmware.number(row_bytes * rows), at])
+    (got.failed == yes) { out error.MemoryExhausted }
+    @pool = firmware.pointer(at, base, 0)
+    drum (rows) { copy_row(screen, services, firmware.add(pool, beat * row_bytes), x, y + beat, width, yes) }
+    out pool
+}
+
+skill put_back_rows(screen, pool, x, y, width, rows) {
+    @base = firmware.guest_base()
+    @services = uefi.boot_services(base)
+    @row_bytes = width * graphics.PIXEL_BYTES
+    drum (rows) { copy_row(screen, services, firmware.add(pool, beat * row_bytes), x, y + beat, width, no) }
+    out firmware.call(base, firmware.pointer(services, base, BOOT_FREE_POOL), [pool])
+}
+
+skill copy_row(screen, services, place, x, y, width, saving) {
+    @base = firmware.guest_base()
+    @pixel = firmware.add(screen.frame, (y * screen.stride + x) * graphics.PIXEL_BYTES)
+    @copy = firmware.pointer(services, base, BOOT_COPY_MEM)
+    @bytes = firmware.number(width * graphics.PIXEL_BYTES)
+    (saving == yes) { out firmware.call(base, copy, [place, pixel, bytes]) }
+    out firmware.call(base, copy, [pixel, place, bytes])
+}
+
+skill glass(screen, x, y, width, height, radius, tint, amount) {
+    drum (height) {
+        @row = beat
+        @from_edge = row
+        (row >= height - radius) { from_edge = height - 1 - row }
+        @start = ((y + row) * screen.stride + x) * graphics.PIXEL_BYTES
+        drum (width) {
+            @column = beat
+            @from_side = column
+            (column >= width - radius) { from_side = width - 1 - column }
+            @cover = FULL
+            (from_edge < radius) {
+                (from_side < radius) { cover = coverage(from_side, from_edge, radius) }
+            }
+            (cover > 0) {
+                @at = start + column * graphics.PIXEL_BYTES
+                @below = canvas.unpack(screen, num.from(mem.load32(address.from(screen.memory), usize.from(at))))
+                mem.store32(address.from(screen.memory), usize.from(at), u32.from(canvas.paint(screen, canvas.mix(below, tint, amount * cover / FULL, 100))))
+            }
+        }
+    }
+    out none
+}
+
+skill gradient_box(screen, x, y, size, radius, top, bottom) {
+    drum (size) {
+        @row = beat
+        @color = canvas.mix(top, bottom, row, size)
+        @from_edge = row
+        (row >= size - radius) { from_edge = size - 1 - row }
+        @start = ((y + row) * screen.stride + x) * graphics.PIXEL_BYTES
+        drum (size) {
+            @column = beat
+            @from_side = column
+            (column >= size - radius) { from_side = size - 1 - column }
+            @cover = FULL
+            (from_edge < radius) {
+                (from_side < radius) { cover = coverage(from_side, from_edge, radius) }
+            }
+            (cover > 0) {
+                @at = start + column * graphics.PIXEL_BYTES
+                @below = canvas.unpack(screen, num.from(mem.load32(address.from(screen.memory), usize.from(at))))
+                mem.store32(address.from(screen.memory), usize.from(at), u32.from(canvas.paint(screen, canvas.mix(below, color, cover, FULL))))
+            }
+        }
+    }
+    out none
+}
+
+skill soft_shadow(screen, x, y, width, height, radius, blur) {
+    drum (blur) {
+        @spread = blur - beat
+        glass(screen, x - spread, y - spread + blur / 2, width + 2 * spread, height + 2 * spread, radius + spread, canvas.BLACK, 2)
+    }
+    out none
+}

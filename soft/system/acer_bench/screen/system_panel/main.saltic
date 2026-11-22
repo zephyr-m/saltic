@@ -1,0 +1,217 @@
+-- system_panel — сведения правой панели «Система»: память, диск и сеть, только
+-- то, что прошивка и карта знают точно; рисует её screen/sides (жителями
+-- UIEngine), здесь — только данные. Числа, которые должны пережить смену
+-- программы (байты сети, место на диске), лежат в заголовке netlog по
+-- смещениям ниже. Скорость — байты карты с прошлого tick, делённые на
+-- прошедшие секунды.
+--
+-- Memory { total_mb, free_mb } — ОЗУ по карте памяти прошивки
+-- memory(base) -> Memory; NoMemoryMap
+-- measure_disk(base) — размер и свободное место тома Saltic в netlog
+--     (агент зовёт при старте и после записи на диск); нет тома — нули
+-- Meter { rounds, mark, rates, received, hidden } — кадры программы: rounds —
+--     сколько раз она позвала сеть (раз в кадр), rates — кадров в секунду за
+--     последние RATES секунд (у агента rounds = 0, графика кадров нет);
+--     received — приём по кабелю, байт в секунду за те же секунды; hidden = yes
+--     — панель только в холст, на экран не кладёт (экран занят хранителем)
+-- tick(base, card, meter) -> yes, если прошла секунда: счётчики карты в
+--     netlog, кадры в meter; чаще — ничего не делает и no
+-- flush(base, card) — счётчики карты в итоги netlog и в ноль (перед сменой образа)
+-- Facts { memory_used, memory_total (МБ), disk_used, disk_total (МБ), heap_used,
+--     heap_total (КБ), escapes, cable, linked, incoming, outgoing, received, sent,
+--     wifi_step, wifi_text, rates, heard } — всё, что показывает панель
+-- facts(base, card, meter) -> Facts
+-- signature(text) -> отпечаток подписей (SIGNATURE в netlog — перерисовать ли)
+-- link_speed(status) -> «100 Мбит/с» или «нет»; cable_text(status) —
+--     «подключён · 1000 Мбит/с · дуплекс» или «не подключён»
+-- Куча программы (core.mem.heap) — того, кто рисует панель: агента или
+-- запущенной программы; растёт у вечной программы — утечка.
+-- Внутри: record — кадры за секунду в meter; add_bytes — КБ и остаток
+
+use core.str
+use core.group
+use core.mem
+use tarantul.firmware.firmware
+use tarantul.firmware.firmware.uefi
+use tarantul.rtl8111.rtl8111
+use tarantul.qca9377.qca9377.handoff
+use tarantul.files.files
+use soft.system.acer_bench.network.netlog
+use soft.system.acer_bench.screen.system_panel.sizes
+
+BOOT_GET_MEMORY_MAP = 56
+SCRATCH_MAP_SIZE = 12224
+SCRATCH_MAP_KEY = 12232
+SCRATCH_MAP_STEP = 12240
+SCRATCH_MAP_VERSION = 12248
+SCRATCH_MAP = 12288
+MAP_BYTES = 16384
+CONVENTIONAL = 7
+PAGES_PER_MB = 256
+MARK = 16
+RX_KB = 20
+TX_KB = 24
+RX_REST = 28
+TX_REST = 32
+RX_SPEED = 36
+TX_SPEED = 40
+DISK_SIZE = 44
+DISK_FREE = 48
+RIGHT_CANVAS = 56
+SIGNATURE = 60
+SIGNATURE_MOD = 65521
+SECONDS_PER_HOUR = 3600
+RATES = 40
+FLOOR_RATE = 30
+FLOOR_BYTES = 1024
+
+Meter = Box {
+    rounds = 0,
+    mark = 0,
+    rates = [],
+    received = [],
+    hidden = no
+}
+
+Memory = Box {
+    total_mb = 0,
+    free_mb = 0
+}
+
+Facts = Box {
+    memory_used = 0,
+    memory_total = 0,
+    disk_used = 0,
+    disk_total = 0,
+    heap_used = 0,
+    heap_total = 0,
+    escapes = "",
+    cable = "",
+    linked = no,
+    incoming = "",
+    outgoing = "",
+    received = "",
+    sent = "",
+    wifi_step = 0,
+    wifi_text = "",
+    rates = [],
+    heard = []
+}
+
+skill counted(kind) {
+    (kind == 9) { out yes }
+    (kind == 10) { out yes }
+    (kind < 1) { out no }
+    out kind < 8
+}
+
+skill memory(base) {
+    @size_at = firmware.scratch(base, SCRATCH_MAP_SIZE)
+    firmware.write64(size_at, base, 0, firmware.number(MAP_BYTES))
+    @map = firmware.scratch(base, SCRATCH_MAP)
+    @step_at = firmware.scratch(base, SCRATCH_MAP_STEP)
+    @asked = firmware.call(base, firmware.pointer(uefi.boot_services(base), base, BOOT_GET_MEMORY_MAP), [size_at, map, firmware.scratch(base, SCRATCH_MAP_KEY), step_at, firmware.scratch(base, SCRATCH_MAP_VERSION)])
+    (asked.failed == yes) { out error.NoMemoryMap }
+    @size = firmware.read16(size_at, base, 0) + firmware.read16(size_at, base, 2) * 65536
+    @step = firmware.read16(step_at, base, 0)
+    (step < 1) { out error.NoMemoryMap }
+    @total = 0
+    @free = 0
+    drum (size / step) {
+        @entry = firmware.add(map, beat * step)
+        @kind = firmware.read16(entry, base, 0)
+        @pages = firmware.read16(entry, base, 24) + firmware.read16(entry, base, 26) * 65536
+        (counted(kind) == yes) { total = total + pages }
+        (kind == CONVENTIONAL) { free = free + pages }
+    }
+    out Memory { total_mb = total / PAGES_PER_MB, free_mb = free / PAGES_PER_MB }
+}
+
+skill measure_disk(base) {
+    @log = netlog.find(base)
+    @space = [0, 0]
+    @root = files.saltic_root(base) rescue |err| { none }
+    (root) |root| {
+        space = files.volume_space(base, root) rescue |err| { [0, 0] }
+        files.close_file(base, root)
+    }
+    netlog.set_number(base, log, DISK_SIZE, group.get(space, 0))
+    out netlog.set_number(base, log, DISK_FREE, group.get(space, 1))
+}
+
+skill add_bytes(base, log, kb_at, rest_at, bytes) {
+    @rest = netlog.number_at(base, log, rest_at) + bytes
+    netlog.set_number(base, log, kb_at, netlog.number_at(base, log, kb_at) + rest / 1024)
+    out netlog.set_number(base, log, rest_at, rest % 1024)
+}
+
+skill flush(base, card) {
+    @log = netlog.find(base)
+    add_bytes(base, log, RX_KB, RX_REST, card.received_bytes)
+    add_bytes(base, log, TX_KB, TX_REST, card.sent_bytes)
+    card.received_bytes = 0
+    card.sent_bytes = 0
+    out none
+}
+
+skill record(meter, elapsed) {
+    @rate = (meter.rounds - meter.mark) / elapsed
+    meter.mark = meter.rounds
+    @rates = group.add(meter.rates, rate)
+    (group.count(rates) > RATES) { rates = group.slice(rates, group.count(rates) - RATES, group.count(rates)) }
+    meter.rates = rates
+    out none
+}
+
+skill tick(base, card, meter) {
+    @log = netlog.find(base)
+    @moment = uefi.now(base)
+    @mark = moment.minute * 60 + moment.second
+    @elapsed = (mark - netlog.number_at(base, log, MARK) + SECONDS_PER_HOUR) % SECONDS_PER_HOUR
+    (elapsed == 0) { out no }
+    netlog.set_number(base, log, MARK, mark)
+    netlog.set_number(base, log, RX_SPEED, card.received_bytes / elapsed)
+    netlog.set_number(base, log, TX_SPEED, card.sent_bytes / elapsed)
+    @received = group.add(meter.received, card.received_bytes / elapsed)
+    (group.count(received) > RATES) { received = group.slice(received, group.count(received) - RATES, group.count(received)) }
+    meter.received = received
+    flush(base, card)
+    (meter.rounds > 0) { record(meter, elapsed) }
+    out yes
+}
+
+skill link_speed(status) {
+    (rtl8111.has_bit(status, rtl8111.PHY_LINK) == no) { out "нет" }
+    (rtl8111.has_bit(status, rtl8111.PHY_1000) == yes) { out "1000 Мбит/с" }
+    (rtl8111.has_bit(status, rtl8111.PHY_100) == yes) { out "100 Мбит/с" }
+    out "10 Мбит/с"
+}
+
+skill cable_text(status) {
+    (rtl8111.has_bit(status, rtl8111.PHY_LINK) == no) { out "не подключён" }
+    @duplex = "полудуплекс"
+    (rtl8111.has_bit(status, rtl8111.PHY_FULL_DUPLEX) == yes) { duplex = "дуплекс" }
+    @speed = link_speed(status)
+    out "подключён · {speed} · {duplex}"
+}
+
+
+skill signature(text) {
+    @mark = 0
+    drum (str.bytes(text)) { mark = (mark * 31 + str.byte(text, beat)) % SIGNATURE_MOD }
+    out mark
+}
+
+
+
+
+
+skill facts(base, card, meter) {
+    @log = netlog.find(base)
+    @known = memory(base) rescue |err| { Memory {} }
+    @disk_total = netlog.number_at(base, log, DISK_SIZE)
+    @status = rtl8111.status(card)
+    @wifi = handoff.stage(base)
+    out Facts { memory_used = known.total_mb - known.free_mb, memory_total = known.total_mb, disk_used = disk_total - netlog.number_at(base, log, DISK_FREE), disk_total = disk_total, heap_used = mem.heap(0) / 1024, heap_total = mem.heap(2) / 1024, escapes = sizes.kb_text(mem.heap(1) / 1024), cable = cable_text(status), linked = rtl8111.has_bit(status, rtl8111.PHY_LINK), incoming = sizes.speed_text(netlog.number_at(base, log, RX_SPEED)), outgoing = sizes.speed_text(netlog.number_at(base, log, TX_SPEED)), received = sizes.kb_text(netlog.number_at(base, log, RX_KB)), sent = sizes.kb_text(netlog.number_at(base, log, TX_KB)), wifi_step = group.get(wifi, 0), wifi_text = group.get(wifi, 1), rates = meter.rates, heard = meter.received }
+}
+

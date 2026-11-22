@@ -1,0 +1,351 @@
+-- remote — сеть для программ, пока агент ждёт их возвращения: программа раз
+-- в кадр зовёт serve. Общий протокол, который remote ведёт сам за любую
+-- программу (порт 5555, команды текстом):
+--   quit — на главный экран агента (reply.home); state — текст программы из
+--   tell; shot — снимок экрана (tools/shot.py); key <клавиша или текст> —
+--   нажатие в очередь keys, программа читает его через uefi.poll_key
+-- shot-stream — снимок потоком: заголовок и сразу все куски подряд в этом же
+-- заходе serve (только кабель; Wi-Fi — по кускам), чтобы снимок не зависел
+-- от того, как долго программа рисует кадр
+-- state, quit, key и help — и по mRPC (network.mrpc), чужой cmd — unknown_cmd
+-- со списком. Прочие пакеты UDP на 5555 — программе, у неё свои команды.
+-- Вход — кабель (rtl8111) и Wi-Fi, поднятый агентом (qca9377.handoff): ответ
+-- уходит тем входом, откуда пришёл последний пакет (via); счётчики колец
+-- Wi-Fi — обратно на страницу передачи каждый круг serve.
+-- Каждый запрос и ответ (и программы) пишется в netlog — панель слева, кроме
+-- кусков shot-part. Раз в PANEL_EVERY вызовов serve — system_panel.tick
+-- (панель справа) со счётчиком кадров: один serve — один кадр.
+-- Журнал к нам в файл (stream, только кабель): открытие сети, пульс раз в
+-- HEARTBEAT кругов с кольцами карты (rtl8111.rings), каждый принятый кадр и ответ.
+-- Каждый круг serve сбрасывает регистр прерываний карты (rtl8111.interrupts):
+-- кольцо приёма — 4 ячейки, пачка кадров его заполняет, карта поднимает
+-- RX_RING_FULL и не принимает, пока флаг не сброшен, — программа глохла.
+--
+-- Remote — карта, Wi-Fi (или none), via, состояние программы текстом, байты
+--     последнего снимка, meter — счётчик кадров для системной панели
+-- open_remote() -> Remote; нет ни кабеля, ни Wi-Fi от агента — NoLink
+-- my_ip(remote) / our_mac(remote) / transmit(remote, frame) — по входу via
+-- serve(remote) -> группа пакетов Udp для программы
+-- tell(remote, text) — сообщить своё состояние (отвечает на state)
+-- own(remote, place, pages) — страницы прошивки, которые вернуть при quit
+-- offer(remote, commands) — свои команды mRPC (mrpc.Command): видны в help,
+--     такие запросы remote отдаёт программе пакетом
+-- reply_mrpc / fail_mrpc(remote, packet, …) — ответ программы: текст / ошибка;
+--     reply_data(remote, packet, fields) — объектом data (mrpc.success_data)
+-- hide_panels(remote) — не рисовать панели и не писать журнал: весь экран
+-- own_panels(remote) — журнал и счётчики ведутся, но панели не рисуются:
+--     их рисует программа сама (пульт)
+-- Панели по бокам рисует screen/sides; палитра со шрифтами агента — skin(),
+--     собирается один раз на программу (кэш букв у шрифтов свой)
+-- Внутри: logged(remote, kind, bytes) — строка в журнал по panels и drawn;
+--     painted(remote) -> палитра панелей
+-- reply_text(remote, packet, text) — ответить отправителю
+-- send_to(remote, packet, port, text_bytes) — ответить на другой порт
+-- answer(remote, bytes) -> пакет или none — разбор одного кадра (для serve)
+-- answer_mrpc(remote, packet) — ответ mRPC: state, quit, key, help, иначе unknown_cmd
+-- key_reply(text) -> текст — нажатия в очередь keys
+
+use core.str
+use core.group
+use tarantul.rtl8111.rtl8111
+use tarantul.qca9377.qca9377.handoff
+use tarantul.qca9377.qca9377.traffic
+use tarantul.net.net
+use soft.system.acer_bench.network.shot
+use craft.text.parse
+use soft.system.acer_bench.network.reply
+use soft.system.acer_bench.network.netlog
+use soft.system.acer_bench.network.netlog.journal
+use soft.system.acer_bench.network.stream
+use soft.system.acer_bench.screen.system_panel
+use soft.system.acer_bench.screen.sides
+use tarantul.uiengine.draw.atoms
+use tarantul.firmware.firmware
+use tarantul.firmware.firmware.uefi
+use soft.system.acer_bench.network.mrpc
+use craft.text.utf8
+use tarantul.firmware.firmware.keys
+
+MY_IP = [10, 0, 0, 2]
+PORT = 5555
+PART = "shot-part "
+STREAM = "shot-stream"
+
+PANEL_EVERY = 8
+HEARTBEAT = 100
+WIFI_FRAMES = 4
+REPLY_LIMIT = 1400
+QUIET_STATE = "программа не рассказала о себе (нет remote.tell)"
+COMMANDS = [
+    mrpc.Command { name = "state", kind = "query", about = "что программа сообщила о себе" },
+    mrpc.Command { name = "quit", kind = "exec", about = "выйти на главный экран агента" },
+    mrpc.Command { name = "key", kind = "exec", params = ["key"], about = "нажать клавишу или набрать текст" }
+]
+
+Remote = Box {
+    card = rtl8111.Card {},
+    shot_bytes = 0,
+    state = "",
+    owned = [],
+    commands = [],
+    panels = yes,
+    drawn = yes,
+    skinned = no,
+    skin = atoms.Palette {},
+    rounds = 0,
+    meter = system_panel.Meter {},
+    wifi = none,
+    cabled = no,
+    via = "cable"
+}
+
+skill open_remote() {
+    @card = rtl8111.open()
+    rtl8111.configure(card)
+    rtl8111.wait_link(card) rescue |err| { none }
+    @cabled = rtl8111.has_bit(rtl8111.status(card), rtl8111.PHY_LINK)
+    @remote = Remote { card = card, cabled = cabled }
+    @rings = rtl8111.rings(card)
+    stream.send(card, "программа: сеть открыта, кабель {cabled}, {rings}")
+    @wifi = handoff.adopt(card.base) rescue |err| { none }
+    remote.wifi = wifi
+    (cabled == no) {
+        (wifi == none) { out error.NoLink }
+        remote.via = "wifi"
+    }
+    out remote
+}
+
+skill my_ip(remote) {
+    (remote.via == "wifi") { out remote.wifi.ip }
+    out MY_IP
+}
+
+skill our_mac(remote) {
+    (remote.via == "wifi") { out remote.wifi.mac }
+    out remote.card.mac
+}
+
+skill transmit(remote, frame) {
+    (remote.via == "wifi") {
+        traffic.send(remote.wifi, remote.wifi.point, frame)
+        out group.count(frame)
+    }
+    out rtl8111.send(remote.card, frame)
+}
+
+skill reply_text(remote, packet, text) {
+    logged(remote, journal.SAY, journal.bytes_of(text))
+    stream.send(remote.card, "программа: ответ «{text}»")
+    out transmit(remote, net.udp_frame(our_mac(remote), my_ip(remote), packet.from_mac, packet.from_ip, PORT, packet.from_port, text))
+}
+
+skill answer(remote, bytes) {
+    (remote.via == "wifi") { traffic.answer_arp(remote.wifi, remote.wifi.point, bytes) }
+    (net.is_arp_request_for(bytes, MY_IP) == yes) {
+        (remote.via == "cable") { rtl8111.send(remote.card, net.arp_reply(remote.card.mac, MY_IP, bytes)) }
+        out none
+    }
+    (net.is_udp_to(bytes, PORT) == no) { out none }
+    @packet = net.udp(bytes)
+    (str.starts_with(packet.text, PART) == yes) {
+        (remote.via == "wifi") {
+            @piece = shot.chunk_frame(remote.wifi.mac, remote.wifi.ip, remote.card.base, remote.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(PART), str.bytes(packet.text))))
+            (piece) |piece| { transmit(remote, piece) }
+            out none
+        }
+        shot.send_chunk(remote.card, remote.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(PART), str.bytes(packet.text))))
+        out none
+    }
+    logged(remote, journal.ASK, packet.payload)
+    (mrpc.is_request(packet.payload) == yes) {
+        (theirs(remote, packet) == yes) { out packet }
+        answer_mrpc(remote, packet)
+        out none
+    }
+    (packet.text == "shot") {
+        @taken = shot.capture(remote.card) rescue |err| {
+            reply_text(remote, packet, "снимок не сделан: {err} (участок shot — половина экрана до 1920 × 1080)")
+            out none
+        }
+        remote.shot_bytes = taken
+        reply_text(remote, packet, shot.caption(remote.card, remote.shot_bytes))
+        out none
+    }
+    (packet.text == STREAM) {
+        @taken = shot.capture(remote.card) rescue |err| {
+            reply_text(remote, packet, "снимок не сделан: {err} (участок shot — половина экрана до 1920 × 1080)")
+            out none
+        }
+        remote.shot_bytes = taken
+        reply_text(remote, packet, shot.caption(remote.card, taken))
+        (remote.via == "cable") {
+            drum ((taken + shot.SHOT_CHUNK - 1) / shot.SHOT_CHUNK) { shot.send_chunk(remote.card, taken, packet, beat) }
+        }
+        out none
+    }
+    (str.starts_with(packet.text, "key ") == yes) {
+        reply_text(remote, packet, key_reply(str.slice(packet.text, 4, str.bytes(packet.text))))
+        out none
+    }
+    (packet.text == "state") {
+        @told = remote.state
+        (str.bytes(told) == 0) { told = QUIET_STATE }
+        reply_text(remote, packet, told)
+        out none
+    }
+    (packet.text == "quit") {
+        reply_text(remote, packet, "выхожу на главный экран")
+        drum (remote.owned) { uefi.free_pages(firmware.guest_base(), group.get(beat, 0), group.get(beat, 1)) }
+        reply.home("вышла по команде quit")
+        out none
+    }
+    out packet
+}
+
+skill key_reply(text) {
+    @count = keys.push(firmware.guest_base(), text) rescue |err| { out "клавиша не принята: {err}" }
+    out "принято нажатий: {count}"
+}
+
+skill answer_mrpc(remote, packet) {
+    @call = mrpc.decode(packet.text)
+    (call.ok == no) { out send_to(remote, packet, packet.from_port, mrpc.failure(call, "invalid_param", call.message, "", 0)) }
+    (call.cmd == "state") {
+        @told = remote.state
+        (str.bytes(told) == 0) { told = QUIET_STATE }
+        out send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode(told), 0, REPLY_LIMIT))
+    }
+    (call.cmd == "quit") {
+        send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode("выхожу на главный экран"), 0, REPLY_LIMIT))
+        drum (remote.owned) { uefi.free_pages(firmware.guest_base(), group.get(beat, 0), group.get(beat, 1)) }
+        reply.home("вышла по команде quit")
+        out none
+    }
+    (call.cmd == "key") {
+        @asked = mrpc.line(call, mrpc.find(COMMANDS, "key"))
+        (asked.ok == no) { out send_to(remote, packet, packet.from_port, mrpc.failure(call, "missing_param", "нужен параметр key", "key", 0)) }
+        out send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode(key_reply(str.slice(asked.text, 4, str.bytes(asked.text)))), 0, REPLY_LIMIT))
+    }
+    @registry = group.concat(COMMANDS, remote.commands)
+    (call.cmd == "help") { out send_to(remote, packet, packet.from_port, mrpc.help(call, registry, 0, REPLY_LIMIT)) }
+    out send_to(remote, packet, packet.from_port, mrpc.unknown(call, registry, 0))
+}
+
+skill serve(remote) {
+    remote.rounds = remote.rounds + 1
+    @rounds = remote.rounds
+    @pending = rtl8111.interrupts(remote.card)
+    (rtl8111.has_bit(pending, rtl8111.RX_RING_FULL) == yes) {
+        @isr = firmware.hex(pending, 4)
+        stream.send(remote.card, "программа: круг {rounds}, isr 0x{isr} — кольцо приёма было полным, сбросила")
+    }
+    (rounds % HEARTBEAT == 0) {
+        @rings = rtl8111.rings(remote.card)
+        stream.send(remote.card, "программа: круг {rounds}, {rings}")
+    }
+    @meter = remote.meter
+    meter.rounds = remote.rounds
+    (remote.rounds % PANEL_EVERY == 0) {
+        (remote.panels == yes) {
+            pick {
+                (remote.drawn == yes) { sides.tick(remote.card.base, remote.card, meter, painted(remote)) rescue |err| { none } }
+                { system_panel.tick(remote.card.base, remote.card, meter) rescue |err| { none } }
+            }
+        }
+    }
+    @packets = []
+    drum (rtl8111.RX_COUNT) {
+        (rtl8111.received(remote.card, beat) == yes) {
+            @bytes = rtl8111.read_frame(remote.card, beat)
+            rtl8111.release(remote.card, beat)
+            @size = group.count(bytes)
+            stream.send(remote.card, "программа: круг {rounds}, принят кадр {size} байт в ячейке {beat}")
+            remote.via = "cable"
+            @packet = answer(remote, bytes)
+            (packet) |packet| { packets = group.add(packets, packet) }
+        }
+    }
+    (remote.wifi == none) { out packets }
+    drum (WIFI_FRAMES) {
+        @bytes = traffic.poll(remote.wifi)
+        (bytes == none) { leave }
+        remote.via = "wifi"
+        @packet = answer(remote, bytes)
+        (packet) |packet| { packets = group.add(packets, packet) }
+    }
+    handoff.write_counters(remote.wifi)
+    out packets
+}
+
+skill send_to(remote, packet, port, text_bytes) {
+    logged(remote, journal.SAY, text_bytes)
+    @size = group.count(text_bytes)
+    stream.send(remote.card, "программа: ответ {size} байт на порт {port}")
+    out transmit(remote, net.udp_frame_bytes(our_mac(remote), my_ip(remote), packet.from_mac, packet.from_ip, PORT, port, text_bytes))
+}
+
+skill tell(remote, text) {
+    remote.state = text
+    out none
+}
+
+skill offer(remote, commands) {
+    remote.commands = commands
+    out none
+}
+
+skill theirs(remote, packet) {
+    @call = mrpc.decode(packet.text)
+    (call.ok == no) { out no }
+    @found = mrpc.find(remote.commands, call.cmd)
+    (found) |found| { out yes }
+    out no
+}
+
+skill reply_mrpc(remote, packet, text) {
+    @call = mrpc.decode(packet.text)
+    out send_to(remote, packet, packet.from_port, mrpc.success(call, utf8.encode(text), 0, REPLY_LIMIT))
+}
+
+skill reply_data(remote, packet, fields) {
+    @call = mrpc.decode(packet.text)
+    out send_to(remote, packet, packet.from_port, mrpc.success_data(call, fields, 0, REPLY_LIMIT))
+}
+
+skill fail_mrpc(remote, packet, message) {
+    @call = mrpc.decode(packet.text)
+    out send_to(remote, packet, packet.from_port, mrpc.failure(call, "invalid_param", message, "", 0))
+}
+
+skill painted(remote) {
+    (remote.skinned == no) {
+        remote.skin = sides.skin(remote.card.base)
+        remote.skinned = yes
+    }
+    out remote.skin
+}
+
+skill logged(remote, kind, bytes) {
+    (remote.panels == no) { out none }
+    netlog.add(remote.card.base, kind, bytes) rescue |err| { none }
+    (remote.drawn == no) { out none }
+    out sides.log(remote.card.base, painted(remote)) rescue |err| { none }
+}
+
+skill own_panels(remote) {
+    remote.drawn = no
+    @meter = remote.meter
+    meter.hidden = yes
+    out none
+}
+
+skill hide_panels(remote) {
+    remote.panels = no
+    out none
+}
+
+skill own(remote, place, pages) {
+    remote.owned = group.add(remote.owned, [place, pages])
+    out none
+}

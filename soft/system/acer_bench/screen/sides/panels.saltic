@@ -1,0 +1,129 @@
+-- panels — боковые панели «Сеть» и «Система» текстом JTML на жителях UIEngine:
+-- console-panel, строки журнала console-line (запросы — info, заметки агента —
+-- mustard, ответы — ink; перенос journal.wrap по ширине моноширинного
+-- шрифта, новые снизу), link-row (Wi-Fi, кабель), gauge (память, диск, куча),
+-- graph из bar (кадры, приём). Одни и те же у агента Acer (screen/sides) и у
+-- пульта (programs/console) — решение автора 17.11.2026.
+--
+-- Look { radius, line, label, small, wide, high, grow } — вид: скругление
+--     панелей, кегли строк журнала, подписей и мелкого текста, ширина панели,
+--     высота под строки журнала, grow — тянуть ли панель в высоту (1 — да)
+-- network(look, lines) -> панель «Сеть»; lines — netlog.entries
+-- system(look, told) -> панель «Система»; told — system_panel.Facts или
+--     none (сети нет)
+-- INSET — ширина рамки и отступов панели: нутро = wide - INSET
+-- Внутри: text_of(bytes) -> строка; share(inner, part, whole) -> ширина
+--     заливки; line_tone(kind); gauge_of, graph_of — один прибор
+
+use core.str
+use core.group
+use core.bytes
+use tarantul.uiengine.jtml.calls
+use soft.system.acer_bench.network.netlog.journal
+use soft.system.acer_bench.screen.system_panel
+use soft.system.acer_bench.screen.system_panel.sizes
+use tarantul.qca9377.qca9377.handoff
+
+INSET = 30
+BARS = 40
+BAR_WIDE = 5
+GRAPH_HIGH = 52
+
+Look = Box {
+    radius = 14,
+    line = 12,
+    label = 14,
+    small = 12,
+    wide = 300,
+    high = 640,
+    grow = 0
+}
+
+skill text_of(list) {
+    @buffer = bytes.new(group.count(list))
+    drum (group.count(list)) { bytes.set(buffer, beat, group.get(list, beat)) }
+    out str.from_bytes(buffer)
+}
+
+skill share(inner, part, whole) {
+    (whole < 1) { out 0 }
+    out inner * sizes.percent(part, whole) / 100
+}
+
+skill line_tone(kind) {
+    (kind == journal.ASK) { out "info" }
+    (kind == journal.NOTE) { out "mustard" }
+    out "ink"
+}
+
+skill network(look, lines) {
+    @letters = (look.wide - INSET) * 10 / (look.line * 6)
+    @room = look.high / (look.line + 9)
+    @rows = []
+    drum (lines) {
+        @tone = line_tone(group.get(beat, 0))
+        @pieces = journal.wrap(group.get(beat, 1), letters)
+        @count = group.count(pieces)
+        (group.count(rows) + count > room) { leave }
+        drum (count) {
+            @piece = group.get(pieces, count - 1 - beat)
+            rows = group.add(rows, calls.call("console-line", [["text", calls.quoted(text_of(piece))], ["tone", calls.quoted(tone)], ["size", "{look.line}"]]))
+        }
+    }
+    @shown = []
+    drum (group.count(rows)) { shown = group.add(shown, group.get(rows, group.count(rows) - 1 - beat)) }
+    (group.count(shown) == 0) { shown = [calls.call("console-line", [["text", calls.quoted("журнал пуст")], ["tone", calls.quoted("quiet")], ["size", "{look.line}"]])] }
+    @body = calls.call("stack", [["gap", "3"], ["justify", calls.quoted("end")], ["grow", "1"], ["children", calls.listed(shown)]])
+    out calls.call("console-panel", [["title", calls.quoted("Сеть")], ["note", calls.quoted("10.0.0.2:5555")], ["width", "{look.wide}"], ["radius", "{look.radius}"], ["grow", "{look.grow}"], ["children", calls.listed([body])]])
+}
+
+skill gauge_of(look, label, used_kb, total_kb) {
+    (total_kb < 1) { out calls.call("gauge", [["label", calls.quoted(label)], ["fill", "0"], ["tone", calls.quoted("accent")], ["text", calls.quoted("нет сведений")], ["size", "{look.label}"], ["small", "{look.small}"]]) }
+    @used = sizes.kb_text(used_kb)
+    @total = sizes.kb_text(total_kb)
+    @part = sizes.percent(used_kb, total_kb)
+    @tone = "accent"
+    (part > 85) { tone = "down" }
+    @fill = share(look.wide - INSET, used_kb, total_kb)
+    out calls.call("gauge", [["label", calls.quoted(label)], ["fill", "{fill}"], ["tone", calls.quoted(tone)], ["text", calls.quoted("занято {used} из {total}, {part} %")], ["size", "{look.label}"], ["small", "{look.small}"]])
+}
+
+skill graph_of(look, title, values, floor, note, tone) {
+    @most = floor
+    drum (values) {
+        (beat > most) { most = beat }
+    }
+    @bars = []
+    drum (BARS - group.count(values)) { bars = group.add(bars, calls.call("bar", [["width", "{BAR_WIDE}"], ["height", "1"], ["tone", calls.quoted("well")], ["radius", "0"]])) }
+    drum (values) {
+        @tall = beat * GRAPH_HIGH / most
+        (tall < 1) { tall = 1 }
+        bars = group.add(bars, calls.call("bar", [["width", "{BAR_WIDE}"], ["height", "{tall}"], ["tone", calls.quoted(tone)], ["radius", "1"]]))
+    }
+    @scale = "{most}"
+    (floor > 100) { scale = sizes.speed_text(most) }
+    out calls.call("graph", [["title", calls.quoted(title)], ["bars", calls.listed(bars)], ["note", calls.quoted("{note}, шкала до {scale}")], ["size", "{look.label}"], ["small", "{look.small}"]])
+}
+
+skill system(look, told) {
+    (told == none) { out calls.call("console-panel", [["title", calls.quoted("Система")], ["note", calls.quoted("Acer")], ["width", "{look.wide}"], ["radius", "{look.radius}"], ["grow", "{look.grow}"], ["children", calls.listed([calls.call("label", [["text", calls.quoted("сети нет: ни кабеля, ни Wi-Fi от агента")]])])]]) }
+    @wifi_tone = "quiet"
+    (told.wifi_step == handoff.CONNECTED) { wifi_tone = "accent" }
+    @wifi_text = told.wifi_text
+    (str.bytes(wifi_text) == 0) { wifi_text = "выключен" }
+    @cable_tone = "quiet"
+    (told.linked == yes) { cable_tone = "accent" }
+    @last = 0
+    (group.count(told.rates) > 0) { last = group.get(told.rates, group.count(told.rates) - 1) }
+    @parts = [calls.call("link-row", [["icon", calls.quoted("wifi")], ["tone", calls.quoted(wifi_tone)], ["title", calls.quoted("Wi-Fi")], ["text", calls.quoted(wifi_text)], ["size", "{look.label}"], ["small", "{look.small}"]])]
+    parts = group.add(parts, gauge_of(look, "память", told.memory_used * 1024, told.memory_total * 1024))
+    parts = group.add(parts, gauge_of(look, "диск Saltic", told.disk_used * 1024, told.disk_total * 1024))
+    parts = group.add(parts, gauge_of(look, "куча программы · побеги {told.escapes}", told.heap_used, told.heap_total))
+    parts = group.add(parts, calls.call("link-row", [["icon", calls.quoted("ethernet-port")], ["tone", calls.quoted(cable_tone)], ["title", calls.quoted("кабель")], ["text", calls.quoted(told.cable)], ["size", "{look.label}"], ["small", "{look.small}"]]))
+    parts = group.add(parts, calls.call("console-line", [["text", calls.quoted("приём {told.incoming} · отправка {told.outgoing}")], ["tone", calls.quoted("quiet")], ["size", "{look.small}"]]))
+    parts = group.add(parts, calls.call("console-line", [["text", calls.quoted("всего: принято {told.received}, отправлено {told.sent}")], ["tone", calls.quoted("quiet")], ["size", "{look.small}"]]))
+    parts = group.add(parts, graph_of(look, "кадры: {last} в секунду", told.rates, system_panel.FLOOR_RATE, "за {BARS} с", "accent"))
+    parts = group.add(parts, graph_of(look, "приём", told.heard, system_panel.FLOOR_BYTES, "за {BARS} с", "up"))
+    out calls.call("console-panel", [["title", calls.quoted("Система")], ["note", calls.quoted("Acer · живое")], ["width", "{look.wide}"], ["radius", "{look.radius}"], ["grow", "{look.grow}"], ["children", calls.listed(parts)]])
+}
+

@@ -1,0 +1,169 @@
+-- front — середина экрана агента жителями UIEngine (решение автора 17.11.2026),
+-- в одном языке с боковыми панелями (screen/sides): шапка — strip с «Saltic»,
+-- меткой версии (badge), адресом и часами; «Ответы» — console-panel с
+-- последними строками ленты (команда: время, кто, текст; ответ; код —
+-- моноширинно; крупная строка — figure), перенос по ширине; приём программы —
+-- gauge, пока идёт; «Программы» — console-panel с плитками program-tile рядами
+-- по ширине, выбранная — горчичная. Рисует всю середину заново палитрой
+-- trace.skin в свой задний буфер (agent.back — страницы заводятся один раз) и
+-- кладёт на экран одним копированием, иначе каждую секунду видно, как фон
+-- заливается раньше панелей.
+--
+-- Entry { kind, time, who, bytes } — строка ленты: kind — COMMAND, REPLY, CODE, BIG
+-- remember(agent, entry) — в agent.lines, последние KEEP
+-- draw(agent) — середина целиком
+-- Внутри: head(agent, clock) / answers(agent, wide, high) / progress(agent) /
+--     programs(agent, wide) — части страницы; icon_of(name) -> значок Lucide;
+--     tile_width(name) -> ширина плитки
+
+use core.str
+use core.group
+use tarantul.firmware.firmware.uefi
+use tarantul.firmware.firmware.clock
+use tarantul.graphics.graphics
+use tarantul.gop.gop
+use soft.system.acer_bench.network.netlog.journal
+use soft.system.acer_bench.screen.sides.panels
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use tarantul.uiengine.jtml.calls
+use tarantul.uiengine.draw.atoms
+
+COMMAND = 0
+REPLY = 1
+CODE = 2
+BIG = 3
+KEEP = 60
+PAD = 16
+LINE = 13
+HEAD = 40
+SHELF = 150
+GAUGE = 56
+ICONS = [["PAUK", "bug"], ["SPIDER", "bug"], ["GALLERY", "images"], ["JUMPER", "gamepad-2"], ["CHAT", "message-circle"], ["CUBE", "cuboid"], ["FRACTAL", "sparkles"], ["RAYTRACE", "orbit"], ["WEB", "globe"], ["LAND", "layers"], ["CAREOS", "monitor"], ["WIRE", "cable"], ["CLAY", "palette"], ["SALTICIDE", "code"], ["IDE", "code"], ["ALCHEMY", "languages"], ["EXCHANGE", "chart-candlestick"], ["TASKS", "kanban"], ["CONSOLE", "gauge"], ["NODUS", "workflow"]]
+
+Entry = Box {
+    kind = 1,
+    time = "",
+    who = "",
+    bytes = []
+}
+
+skill remember(agent, entry) {
+    @kept = group.add(agent.lines, entry)
+    (group.count(kept) > KEEP) { kept = group.slice(kept, group.count(kept) - KEEP, group.count(kept)) }
+    agent.lines = kept
+    out none
+}
+
+skill icon_of(name) {
+    drum (ICONS) {
+        (group.get(beat, 0) == name) { out group.get(beat, 1) }
+    }
+    out "app-window"
+}
+
+skill tile_width(name) {
+    out str.count(name) * 9 + 50
+}
+
+skill head(agent, moment) {
+    @title = calls.call("figure", [["text", calls.quoted("Saltic")], ["size", "20"], ["tone", calls.quoted("ink")]])
+    @badge = calls.call("badge", [["text", calls.quoted(agent.badge)], ["tone", calls.quoted("mustard")]])
+    @where = calls.call("label", [["text", calls.quoted(agent.address)]])
+    @left = calls.call("strip", [["gap", "12"], ["children", calls.listed([title, badge, where])]])
+    @time = calls.call("strip", [["gap", "8"], ["children", calls.listed([calls.call("dot", [["tone", calls.quoted("up")]]), calls.call("number", [["text", calls.quoted(moment)], ["tone", calls.quoted("ink")]])])]])
+    out calls.call("strip", [["gap", "16"], ["justify", calls.quoted("between")], ["children", calls.listed([left, time])]])
+}
+
+skill answers(agent, wide, high) {
+    @letters = (wide - panels.INSET) * 10 / (LINE * 6)
+    @room = high / (LINE + 8)
+    @rows = []
+    @index = group.count(agent.lines)
+    drum (group.count(agent.lines)) {
+        index = index - 1
+        @entry = group.get(agent.lines, index)
+        @tone = "ink"
+        @prefix = []
+        (entry.kind == COMMAND) {
+            tone = "quiet"
+            prefix = journal.bytes_of("{entry.time}  {entry.who}  ")
+        }
+        (entry.kind == CODE) { tone = "info" }
+        @pieces = journal.wrap(group.concat(prefix, entry.bytes), letters)
+        @count = group.count(pieces)
+        (group.count(rows) + count > room) { leave }
+        drum (count) {
+            @piece = panels.text_of(group.get(pieces, count - 1 - beat))
+            pick {
+                (entry.kind == BIG) { rows = group.add(rows, calls.call("figure", [["text", calls.quoted(piece)], ["size", "18"], ["tone", calls.quoted("ink")]])) }
+                { rows = group.add(rows, calls.call("console-line", [["text", calls.quoted(piece)], ["tone", calls.quoted(tone)], ["size", "{LINE}"]])) }
+            }
+        }
+    }
+    @shown = []
+    drum (group.count(rows)) { shown = group.add(shown, group.get(rows, group.count(rows) - 1 - beat)) }
+    (group.count(shown) == 0) { shown = [calls.call("label", [["text", calls.quoted("пока тихо")]])] }
+    @body = calls.call("stack", [["gap", "4"], ["justify", calls.quoted("end")], ["grow", "1"], ["children", calls.listed(shown)]])
+    out calls.call("console-panel", [["title", calls.quoted("Ответы")], ["note", calls.quoted("команды и ответы агента")], ["width", "0"], ["radius", "14"], ["grow", "1"], ["children", calls.listed([body])]])
+}
+
+skill progress(agent, wide) {
+    (agent.expected < 1) { out [] }
+    @done = agent.received / 1024
+    @total = agent.expected / 1024
+    @percent = done * 100 / total
+    @text = "{done} КБ из {total} КБ, {percent} %"
+    (agent.received == agent.expected) { text = "принята целиком: {total} КБ" }
+    @fill = (wide - panels.INSET) * percent / 100
+    out [calls.call("gauge", [["label", calls.quoted("приём программы")], ["fill", "{fill}"], ["tone", calls.quoted("accent")], ["text", calls.quoted(text)], ["size", "14"], ["small", "12"]])]
+}
+
+skill programs(agent, wide) {
+    @room = wide - panels.INSET
+    @lines = []
+    @line = []
+    @used = 0
+    drum (group.count(agent.names)) {
+        @name = group.get(agent.names, beat)
+        @size = tile_width(name)
+        (used + size > room) {
+            (group.count(line) > 0) {
+                lines = group.add(lines, calls.call("strip", [["gap", "8"], ["children", calls.listed(line)]]))
+                line = []
+                used = 0
+            }
+        }
+        @fill = "panel"
+        @tone = "ink"
+        (beat == agent.chosen) {
+            fill = "mustard"
+            tone = "ground"
+        }
+        line = group.add(line, calls.call("program-tile", [["name", calls.quoted(name)], ["icon", calls.quoted(icon_of(name))], ["fill", calls.quoted(fill)], ["tone", calls.quoted(tone)]]))
+        used = used + size + 8
+    }
+    (group.count(line) > 0) { lines = group.add(lines, calls.call("strip", [["gap", "8"], ["children", calls.listed(line)]])) }
+    (group.count(lines) == 0) { lines = [calls.call("label", [["text", calls.quoted("пока пусто: залей программу и скажи keep <имя>")]])] }
+    out calls.call("console-panel", [["title", calls.quoted("Программы")], ["note", calls.quoted("← → выбрать · Enter — открыть")], ["width", "0"], ["radius", "14"], ["grow", "0"], ["children", calls.listed(lines)]])
+}
+
+skill draw(agent) {
+    @base = agent.card.base
+    @whole = gop.open_whole(base)
+    @side = gop.side_width(whole.width)
+    @width = whole.width - 2 * side
+    (agent.back == 0) { agent.back = uefi.pages_in_window(base, (width * whole.height * graphics.PIXEL_BYTES + 4095) / 4096) }
+    @screen = gop.canvas_at(base, agent.back, width, whole.height, whole)
+    @wide = screen.width - 2 * PAD
+    @moment = clock.clock_text(clock.local_time(uefi.now(agent.card.base)))
+    @extra = progress(agent, wide)
+    @high = screen.height - 2 * PAD - HEAD - SHELF - 60
+    (group.count(extra) > 0) { high = high - GAUGE }
+    @text = calls.call("agent-deck", [["head", head(agent, moment)], ["feed", answers(agent, wide, high)], ["extra", calls.listed(extra)], ["programs", programs(agent, wide)]])
+    @tracer = agent.trace
+    @palette = tracer.skin
+    @tree = atoms.fitted(read.page(text), no, palette)
+    atoms.draw(screen, jtml.mount(screen, tree), palette)
+    out gop.put(base, screen, whole, side)
+}

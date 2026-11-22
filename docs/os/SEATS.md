@@ -115,7 +115,7 @@ flowchart TB
 - Raspberry Pi Zero 2 W. Прайс $15, в магазинах ноября 2026 около €22–41.
 - Orange Pi Zero 3. Около $40.
 
-ESP32, ESP32-S3, Teensy 4.1, STM32H7 и RP2350 в `os/target` есть, но это не
+ESP32, ESP32-S3, Teensy 4.1, STM32H7 и RP2350 в `docs/hardware/boards` есть, но это не
 свисток в офисный HDMI. У Zero и Orange Pi выход на монитор уже на плате.
 Обе цели пока заглушки.
 
@@ -144,7 +144,7 @@ ESP32, ESP32-S3, Teensy 4.1, STM32H7 и RP2350 в `os/target` есть, но э�
 ## Что уже есть в коде
 
 - Экран Acer и экран Wayland на этом ноуте принимают один и тот же рисунок
-  страницы. Адаптер — `os/target/linux/screen.saltic`. Проверка — SalticIDE:
+  страницы. Адаптер — `адаптер реестра wayland (registry/adapters/linux/wayland/wayland/screen)`. Проверка — SalticIDE:
   `soft/development/salticide/linux/main.saltic`.
 - Свистка, принтера на нём и нескольких мест сразу ещё нет. Это картина, не
   готовый кабинет.

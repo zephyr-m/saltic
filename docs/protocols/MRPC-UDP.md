@@ -3,7 +3,7 @@
 Черновик раздела «UDP (optional)» для спецификации mRPC (автор протокола —
 Зэф, github.com/zephyr-m/mRpc, `SPEC.md`). Решение автора 04.11.2026:
 дописать в спецификацию; пока раздел живёт здесь, перенос — пункт в
-[PLAN-3.md](../plan/PLAN-3.md), «Инструменты». Реализация в Saltic: `os/network/mrpc/main.saltic`
+[PLAN-3.md](../plan/PLAN-3.md), «Инструменты». Реализация в Saltic: `soft/system/acer_bench/network/mrpc/main.saltic`
 (агент Acer и программы с сетью), мост `workbench/acer/mrpc_bridge.py`.
 
 Ключевые слова MUST / SHOULD / MAY — по RFC 2119, как во всей спецификации.

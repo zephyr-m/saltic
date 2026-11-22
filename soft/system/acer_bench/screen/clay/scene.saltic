@@ -1,0 +1,311 @@
+-- scene — процедурная полянка «Пластилина». Зерно задаёт рельеф (clay/land),
+-- время года и вечер (clay/season), сколько и где стоит деревьев, камней,
+-- домиков, цветов, где стоит снеговик или лежат тыквы. Предметы не налезают
+-- друг на друга и на пруд; под каждым — тень-клякса. Свет — мягкий
+-- пластилиновый (mesh.clay) в каждой вершине, видеокарта смешивает его по
+-- грани.
+--
+-- Scene { ground, flats, bodies, land, season, top, low, evening, seed,
+--     taken } — земля, вода и тени, предметы, рельеф, сезон, небо сверху и у
+--     горизонта, вечер ли, зерно, занятые места [x, z, радиус]
+-- CELLS × CELL — сетка земли
+-- build(screen, seed) -> Scene — сцена с покрашенными вершинами
+-- quads(scene) -> сколько граней в сцене
+
+use core.group
+use soft.system.acer_bench.uiengine.canvas
+use soft.system.acer_bench.screen.clay.mesh
+use soft.system.acer_bench.screen.clay.forms
+use soft.system.acer_bench.screen.clay.dice
+use soft.system.acer_bench.screen.clay.land
+use soft.system.acer_bench.screen.clay.season
+
+CELLS = 12
+CELL = 66
+ROOM = 330
+TRIES = 40
+GAP = 14
+WALLS = [[244, 228, 196], [236, 214, 190], [226, 232, 240]]
+SNOW = [246, 248, 255]
+WATER = [96, 150, 196]
+ICE = [204, 226, 242]
+MUD = [132, 116, 84]
+DUSK = [30, 50, 80]
+CARROT = [240, 128, 40]
+PUMPKIN = [236, 128, 40]
+STEM = [96, 128, 60]
+
+Scene = Box {
+    ground = mesh.Body {},
+    flats = [],
+    bodies = [],
+    land = land.Land {},
+    season = season.Season {},
+    top = [150, 196, 238],
+    low = [252, 232, 214],
+    evening = no,
+    seed = 0,
+    taken = []
+}
+
+skill limit(value) {
+    (value > 255) { out 255 }
+    (value < 0) { out 0 }
+    out value
+}
+
+skill shore(world, x, z) {
+    @radius = group.get(world.land.pond, 2)
+    (radius == 0) { out no }
+    @dx = x - group.get(world.land.pond, 0)
+    @dz = z - group.get(world.land.pond, 1)
+    @edge = radius * 5 / 4
+    out dx * dx + dz * dz < edge * edge
+}
+
+skill grass(world, luck, x, z, h) {
+    @color = world.season.grass
+    (shore(world, x, z) == yes) { color = season.mix(color, MUD, 45) }
+    @lift = h / 2 + dice.between(luck, -5, 5)
+    (world.season.snow == yes) { lift = lift / 3 }
+    out [limit(group.get(color, 0) + lift), limit(group.get(color, 1) + lift), limit(group.get(color, 2) + lift / 2)]
+}
+
+skill rise(points, side, row, column) {
+    @r = row
+    @c = column
+    (r < 0) { r = 0 }
+    (c < 0) { c = 0 }
+    (r > side - 1) { r = side - 1 }
+    (c > side - 1) { c = side - 1 }
+    out group.get(group.get(points, r * side + c), 1)
+}
+
+skill field(screen, world, luck) {
+    @half = CELLS * CELL / 2
+    @side = CELLS + 1
+    @body = mesh.Body { center = [0, 0, 0] }
+    @points = []
+    drum (side) {
+        @z = beat * CELL - half
+        drum (side) {
+            @x = beat * CELL - half
+            points = group.add(points, [x, land.height(world.land, x, z), z])
+        }
+    }
+    @normals = []
+    @tints = []
+    drum (side) {
+        @row = beat
+        drum (side) {
+            @p = group.get(points, row * side + beat)
+            normals = group.add(normals, mesh.unit(rise(points, side, row, beat - 1) - rise(points, side, row, beat + 1), 2 * CELL, rise(points, side, row - 1, beat) - rise(points, side, row + 1, beat)))
+            tints = group.add(tints, grass(world, luck, group.get(p, 0), group.get(p, 2), group.get(p, 1)))
+        }
+    }
+    body.points = points
+    body.normals = normals
+    body.tints = tints
+    drum (CELLS) {
+        @row = beat
+        drum (CELLS) {
+            @a = row * side + beat
+            body = mesh.face(screen, body, a, a + 1, a + side + 1, a + side, group.get(normals, a), season.rgb(group.get(tints, a)))
+        }
+    }
+    out body
+}
+
+skill pond(screen, world) {
+    @radius = group.get(world.land.pond, 2)
+    (radius == 0) { out [] }
+    @color = WATER
+    (world.season.snow == yes) { color = ICE }
+    out [forms.blot(screen, [group.get(world.land.pond, 0), land.water(world.land), group.get(world.land.pond, 1)], radius, radius, season.rgb(color))]
+}
+
+skill spot(world, luck, radius, keep) {
+    drum (TRIES) {
+        @x = dice.between(luck, -ROOM, ROOM)
+        @z = dice.between(luck, -ROOM, ROOM)
+        @free = land.near_pond(world.land, x, z, radius) == no
+        drum (group.count(world.taken)) {
+            @other = group.get(world.taken, beat)
+            @dx = x - group.get(other, 0)
+            @dz = z - group.get(other, 1)
+            @need = radius + group.get(other, 2) + GAP
+            (dx * dx + dz * dz < need * need) { free = no }
+        }
+        (free == yes) {
+            (keep == yes) { world.taken = group.add(world.taken, [x, z, radius]) }
+            out [x, z]
+        }
+    }
+    out none
+}
+
+skill on_ground(world, x, z, lift) {
+    out [x, land.height(world.land, x, z) + lift, z]
+}
+
+skill ball(screen, world, x, z, lift, radii, color, rings) {
+    out forms.ellipsoid(screen, on_ground(world, x, z, lift), radii, season.rgb(color), rings)
+}
+
+skill capped(screen, world, x, z, lift, radii, color, rings) {
+    @made = [ball(screen, world, x, z, lift, radii, color, rings)]
+    (world.season.snow == yes) {
+        @r = group.get(radii, 0)
+        made = group.add(made, ball(screen, world, x, z, lift + group.get(radii, 1) * 2 / 3, [r * 4 / 5, r * 2 / 5, r * 4 / 5], SNOW, 5))
+    }
+    out made
+}
+
+skill tree(screen, world, luck, size) {
+    @found = spot(world, luck, size + 8, yes)
+    (found) |place| {
+        @x = group.get(place, 0)
+        @z = group.get(place, 1)
+        @crown = dice.pick_one(luck, world.season.crowns)
+        @bark = world.season.bark
+        @kind = dice.roll(luck, 3)
+        (world.season.snow == yes) { kind = 2 }
+        (kind == 0) { out group.concat([ball(screen, world, x, z, 40, [9, 42, 9], bark, 4)], capped(screen, world, x, z, 82 + size / 2, [size, size + 6, size], crown, 7)) }
+        (kind == 1) { out group.concat([ball(screen, world, x, z, 50, [8, 52, 8], bark, 4)], capped(screen, world, x, z, 96 + size * 3 / 4, [size * 3 / 4, size * 3 / 2, size * 3 / 4], crown, 7)) }
+        @parts = [ball(screen, world, x, z, 28, [8, 30, 8], bark, 4)]
+        @lift = 56
+        @r = size
+        drum (3) {
+            parts = group.concat(parts, capped(screen, world, x, z, lift, [r, r * 3 / 5, r], crown, 6))
+            lift = lift + r * 3 / 4
+            r = r * 3 / 4
+        }
+        out parts
+    }
+    out []
+}
+
+skill rock(screen, world, luck) {
+    @size = dice.between(luck, 18, 36)
+    @found = spot(world, luck, size + 8, yes)
+    (found) |place| { out capped(screen, world, group.get(place, 0), group.get(place, 1), size / 2, [size + 8, size * 2 / 3, size], world.season.stone, 5) }
+    out []
+}
+
+skill house(screen, world, luck) {
+    @scale = dice.between(luck, 80, 120)
+    @found = spot(world, luck, 90 * scale / 100, yes)
+    (found) |place| {
+        @x = group.get(place, 0)
+        @z = group.get(place, 1)
+        @roof = dice.pick_one(luck, world.season.roofs)
+        @parts = [forms.rounded(screen, on_ground(world, x, z, 50 * scale / 100), [72 * scale / 100, 56 * scale / 100, 60 * scale / 100], season.rgb(dice.pick_one(luck, WALLS)), 6)]
+        parts = group.add(parts, forms.rounded(screen, on_ground(world, x, z, 120 * scale / 100), [86 * scale / 100, 22 * scale / 100, 72 * scale / 100], season.rgb(roof), 6))
+        out group.add(parts, forms.rounded(screen, on_ground(world, x + 40 * scale / 100, z - 20 * scale / 100, 150 * scale / 100), [12, 24, 12], season.rgb(roof), 3))
+    }
+    out []
+}
+
+skill snowman(screen, world, luck) {
+    @found = spot(world, luck, 36, yes)
+    (found) |place| {
+        @x = group.get(place, 0)
+        @z = group.get(place, 1)
+        @parts = [ball(screen, world, x, z, 28, [32, 28, 32], SNOW, 7), ball(screen, world, x, z, 74, [23, 21, 23], SNOW, 6), ball(screen, world, x, z, 108, [15, 14, 15], SNOW, 5)]
+        parts = group.add(parts, ball(screen, world, x - 6, z + 13, 112, [3, 3, 3], [40, 40, 48], 2))
+        parts = group.add(parts, ball(screen, world, x + 6, z + 13, 112, [3, 3, 3], [40, 40, 48], 2))
+        out group.add(parts, ball(screen, world, x, z + 19, 106, [3, 3, 9], CARROT, 3))
+    }
+    out []
+}
+
+skill pumpkin(screen, world, luck) {
+    @size = dice.between(luck, 12, 20)
+    @found = spot(world, luck, size + 4, yes)
+    (found) |place| {
+        @x = group.get(place, 0)
+        @z = group.get(place, 1)
+        out [ball(screen, world, x, z, size * 2 / 3, [size, size * 3 / 4, size], PUMPKIN, 6), ball(screen, world, x, z, size * 3 / 2, [3, 6, 3], STEM, 2)]
+    }
+    out []
+}
+
+skill flowers(screen, world, luck) {
+    @blooms = world.season.blooms
+    @count = dice.between(luck, group.get(blooms, 0), group.get(blooms, 1))
+    (count == 0) { out [] }
+    @posy = mesh.Body { center = [0, 0, 0] }
+    drum (count) {
+        @found = spot(world, luck, 5, no)
+        (found) |place| { posy = mesh.join(posy, ball(screen, world, group.get(place, 0), group.get(place, 1), 6, [5, 4, 5], dice.pick_one(luck, world.season.flowers), 2)) }
+    }
+    out [posy]
+}
+
+skill sky(world, luck) {
+    @chosen = world.season
+    world.top = chosen.top
+    world.low = chosen.low
+    world.evening = dice.chance(luck, 30)
+    (world.evening == yes) {
+        world.top = season.EVENING_TOP
+        world.low = season.EVENING_LOW
+    }
+    out none
+}
+
+skill build(screen, seed) {
+    @luck = dice.Dice { state = seed }
+    @world = Scene { seed = seed }
+    world.land = land.raise(luck)
+    world.season = dice.pick_one(luck, season.SEASONS)
+    sky(world, luck)
+    world.ground = field(screen, world, luck)
+    world.flats = pond(screen, world)
+    @bodies = []
+    drum (dice.between(luck, 1, 2)) { bodies = group.concat(bodies, house(screen, world, luck)) }
+    (world.season.extra == season.SNOWMAN) { bodies = group.concat(bodies, snowman(screen, world, luck)) }
+    drum (dice.between(luck, 4, 7)) { bodies = group.concat(bodies, tree(screen, world, luck, dice.between(luck, 34, 54))) }
+    drum (dice.between(luck, 2, 4)) { bodies = group.concat(bodies, rock(screen, world, luck)) }
+    (world.season.extra == season.PUMPKINS) {
+        drum (dice.between(luck, 2, 4)) { bodies = group.concat(bodies, pumpkin(screen, world, luck)) }
+    }
+    bodies = group.concat(bodies, flowers(screen, world, luck))
+    world.bodies = bodies
+    world.flats = group.concat(world.flats, blots(screen, world))
+    paint(screen, world)
+    out world
+}
+
+skill blots(screen, world) {
+    @tint = season.rgb(season.mix(world.season.grass, DUSK, 30))
+    @made = []
+    drum (group.count(world.taken)) {
+        @spot = group.get(world.taken, beat)
+        @x = group.get(spot, 0)
+        @z = group.get(spot, 1)
+        @size = group.get(spot, 2)
+        made = group.add(made, forms.blot(screen, on_ground(world, x, z, 3), size, size * 3 / 4, tint))
+    }
+    out made
+}
+
+skill paint(screen, world) {
+    mesh.paint(screen, world.ground)
+    drum (group.count(world.flats)) { mesh.paint(screen, group.get(world.flats, beat)) }
+    drum (group.count(world.bodies)) { mesh.paint(screen, group.get(world.bodies, beat)) }
+    out none
+}
+
+skill quads(world) {
+    @count = group.count(world.ground.quads)
+    drum (group.count(world.flats)) {
+        @flat = group.get(world.flats, beat)
+        count = count + group.count(flat.quads)
+    }
+    drum (group.count(world.bodies)) {
+        @body = group.get(world.bodies, beat)
+        count = count + group.count(body.quads)
+    }
+    out count
+}

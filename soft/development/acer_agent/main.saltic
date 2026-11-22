@@ -1,0 +1,954 @@
+-- agent — программа-агент для Acer: слушает команды по UDP (10.0.0.2:5555 по
+-- кабелю и адрес по DHCP в Wi-Fi), принимает программы по порту 5556,
+-- запускает их, держит полку на диске. Wi-Fi: посылка прошивки лежит в
+-- \SALTIC\FIRMWARE\QCA9377.BIN (команда wifi-keep), при старте агент
+-- грузит её в причал и подключается к открытой сети WIFI_NETWORK; ответ уходит
+-- тем же входом, откуда пришла команда (via).
+-- Только x86_64-uefi; куча 1073741824. Никогда не выходит. Команды — реестр
+-- agent.commands; на том же порту — mRPC/1.0 (пакет-объект JSON, network.mrpc).
+-- Agent — всё состояние цикла; card.base — guest_base. Ответ на команду —
+-- текст до REPLY_LIMIT байт плюс вывод запущенной программы (reply.*).
+--
+-- Agent { card, frames, commands, arp, expected, received, total, spent, columns,
+--     rows, line, cursor, console, shown_second, rounds, failures, last_error,
+--     shot_bytes, restart, output, lent, bay, bay_pages, names, chosen, lines,
+--     badge, address, back (лента, шапка и задний буфер середины — agent/front), limit,
+--     linked, opening, saver, active_at, wifi, wifi_text, dream, via, trace }
+--     spent — принятое уже запускалось: пока оно работало, его буфер (bay) мог
+--     занять кто угодно, поэтому после возврата принятое забывается, а run
+--     отвечает «залей заново», а не прыгает в затёртый образ (зависал)
+-- Входы (кабель, Wi-Fi: transmit, wifi_up, …) — agent.inputs; журнал сети
+--     для отладки (экран и \SALTIC\agent.log) — agent.trace, поле trace
+-- wifi_keep(agent) -> текст — посылку из причала на диск
+-- keep_file_command(agent, words) -> текст — keep-file <папка> <имя>: принятый
+--     файл в \SALTIC\папка\имя (шрифты в FONTS, данные программ)
+-- poll_wifi(agent) — до WIFI_FRAMES кадров из Wi-Fi в handle с via = wifi;
+--     точка выгнала (chip.lost) — подключиться заново
+-- day_second(base) -> секунда суток / wake(agent) -> yes, если снят хранитель;
+--     отмечает активность / doze(agent) — хранитель после SAVER_AFTER секунд простоя
+-- dream(agent, seen) — круг хранителя: Wi-Fi, клавиша и кадр пластилина —
+--     только если за круг не пришло ни одного кадра сети (seen — счётчик
+--     кадров в начале круга): снимок и заливка идут сотнями пакетов подряд
+-- log(agent, message) — в консоль, пока console = yes
+-- begin_upload / upload_state / launch / keep_program / drop_program / open_by_word /
+--     memory_dump / prepare_disk / install_image / time_reply / show_code /
+--     device_list / information / draw_test / clear_screen / home_state /
+--     print_line / restart_later(agent[, words|payload]) -> текст ответа команды
+-- execute(agent, text, payload) -> текст — разбор команды по первому слову
+-- key_reply(base, text) -> текст — нажатия в очередь keys (их читает press)
+-- mrpc_reply(agent, packet) -> байты ответа mRPC: help/describe, info —
+--     полями (info_fields), иначе текст команды из реестра → execute
+-- Info { mac, ip, … } / gather(agent) -> Info — что знает о себе агент;
+--     information(agent) -> текст / info_fields(info) -> члены mrpc.data
+-- link_russian(status) -> текст линка / has_link(card) -> yes/no
+-- refresh_shelf(agent) / open_program(agent) / press(agent, key) — полка и клавиши
+-- answer(agent, bytes) -> agent — UDP-команда или кусок shot; команда и ответ —
+--     ещё и в netlog, панель внизу экрана; не mRPC и не команда из реестра —
+--     мусор (так стучатся чужие устройства в сети), молча мимо
+-- store_chunk(agent, bytes) -> agent — кусок программы в bay, ответ "ok N"
+-- handle(agent, bytes) -> agent — ARP или UDP по портам
+-- greet(card) / watch_link(agent) / last_cry(card, message) — сеть и баннеры
+-- wait_second(base) / countdown(agent, seconds) — отсчёт; нет памяти — без него
+-- draw_progress(agent) — полоса приёма, если экран наш
+-- tick(agent) — один круг: кадры, клавиши раз в KEY_EVERY, часы и системная
+--     панель раз в CLOCK_EVERY
+-- survive(agent) — tick с перехватом сбоя / serve(agent) — вечный цикл
+-- take_bay(agent, bytes) — причал под программу: до участка арены "bay" —
+--     он, больше — страницы в окне агента ровно по размеру; свои страницы того
+--     же размера остаются на месте (snippet.py узнаёт адрес до сборки), иные
+--     отдаются; NoUploadRoom / trim_bay(agent, size) — отдать хвост
+-- run() — открыть карту, проверить arena_map, сразу главный экран, линк кабеля —
+--     watch_link, serve. Wi-Fi сам не поднимается (только командой wifi): после
+--     попытки перенастройка кабеля иногда глушит приём насовсем (08.11.2026)
+-- program() — вход: run с баннером при сбое, затем вечное ожидание
+
+use io
+use core.str
+use core.group
+use core.mem
+use tarantul.firmware.firmware
+use tarantul.firmware.firmware.arena_map
+use tarantul.firmware.firmware.pci
+use tarantul.rtl8111.rtl8111
+use tarantul.qca9377.qca9377
+use tarantul.qca9377.qca9377.traffic
+use tarantul.qca9377.qca9377.handoff
+use tarantul.net.net
+use tarantul.firmware.firmware.uefi
+use tarantul.graphics.graphics
+use tarantul.gop.gop
+use tarantul.lettering.lettering
+use soft.system.acer_bench.screen.sides
+use tarantul.uiengine.draw.atoms
+use tarantul.files.files
+use soft.system.acer_bench.storage.disk
+use tarantul.firmware.firmware.clock
+use craft.text.parse
+use soft.system.acer_bench.screen.spider
+use tarantul.usb.usb
+use soft.development.acer_agent.feed
+use tarantul.camera.camera
+use soft.system.acer_bench.network.shot
+use soft.system.acer_bench.network.reply
+use soft.system.acer_bench.network.netlog
+use soft.system.acer_bench.network.netlog.journal
+use soft.system.acer_bench.screen.system_panel
+use soft.development.acer_agent.programs
+use soft.development.acer_agent.front
+use soft.development.acer_agent.saver
+use soft.development.acer_agent.commands
+use tarantul.firmware.firmware.keys
+use soft.system.acer_bench.network.mrpc
+use soft.system.acer_bench.network.mrpc.data
+use craft.text.utf8
+use soft.development.acer_agent.inputs
+use soft.development.acer_agent.trace
+use tarantul.uiengine.themes
+
+VERSION = 58
+KEY_EVERY = 256
+ENTER = 13
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+REPLY_LIMIT = 1400
+PORT = 5555
+DATA_PORT = 5556
+UPLOAD_LIMIT = 33554432
+PAGE_BYTES = 4096
+REPORT_EVERY = 32768
+MY_IP = [10, 0, 0, 2]
+WIFI_NETWORK = "POCO X6 Pro 5G"
+WIFI_FOLDER = "FIRMWARE"
+WIFI_FILE = "QCA9377.BIN"
+WIFI_EVERY = 8
+WIFI_FRAMES = 4
+
+Agent = Box {
+    card = rtl8111.Card {},
+    frames = 0,
+    commands = 0,
+    arp = 0,
+    expected = 0,
+    received = 0,
+    total = 0,
+    spent = no,
+    bar = 0,
+    columns = 0,
+    rows = 0,
+    line = 0,
+    cursor = 0,
+    console = yes,
+    shown_second = -1,
+    rounds = 0,
+    failures = 0,
+    last_error = "нет",
+    shot_bytes = 0,
+    restart = no,
+    output = [],
+    lent = no,
+    bay = 0,
+    bay_pages = 0,
+    names = [],
+    lines = [],
+    badge = "",
+    address = "",
+    back = 0,
+    chosen = 0,
+    limit = 0,
+    linked = no,
+    opening = "",
+    saver = no,
+    active_at = 0,
+    wifi = none,
+    wifi_text = "выключен — команда wifi",
+    dream = none,
+    wifi_tried = 0,
+    via = "cable",
+    meter = system_panel.Meter {},
+    trace = trace.Trace {}
+}
+
+COUNTDOWN = 5
+SECOND_WAIT = 50000000
+SHOT_PREFIX = "shot-part "
+CLOCK_EVERY = 20000
+TRACE_EVERY = 1000
+SAVER_AFTER = 900
+DAY_SECONDS = 86400
+ERASE_WORD = "ERASE-ACER-DISK"
+
+skill log(agent, message) {
+    (agent.console == yes) { io.show(message) }
+    out none
+}
+
+skill take_bay(agent, bytes) {
+    @base = agent.card.base
+    @spare = arena_map.region("bay")
+    @pages = (bytes + PAGE_BYTES - 1) / PAGE_BYTES
+    (bytes > spare.bytes) {
+        (agent.bay_pages == pages) { out none }
+    }
+    (agent.bay_pages > 0) {
+        uefi.free_pages(base, agent.bay, agent.bay_pages)
+        agent.bay_pages = 0
+    }
+    agent.bay = firmware.region(base, "bay")
+    (bytes <= spare.bytes) { out none }
+    @place = uefi.pages_in_window(base, pages) rescue |err| { out error.NoUploadRoom }
+    agent.bay = place
+    agent.bay_pages = pages
+    out none
+}
+
+skill trim_bay(agent, size) {
+    @keep = (size + PAGE_BYTES - 1) / PAGE_BYTES
+    (agent.bay_pages > keep) {
+        uefi.free_pages(agent.card.base, firmware.add(agent.bay, keep * PAGE_BYTES), agent.bay_pages - keep)
+        agent.bay_pages = keep
+    }
+    out none
+}
+
+skill begin_upload(agent, words) {
+    (group.count(words) < 2) { out "как: upload <байт>" }
+    @size = parse.parse_size(group.get(words, 1))
+    (size < 1) { out "плохой размер" }
+    (size > agent.limit) {
+        @limit = agent.limit
+        out "слишком много: предел {limit} байт"
+    }
+    agent.expected = 0
+    take_bay(agent, size) rescue |err| { out "нет памяти под {size} байт" }
+    agent.expected = size
+    agent.received = 0
+    agent.total = 0
+    agent.spent = no
+    log(agent, "upload: waiting for {size} bytes on port 5556")
+    out "жду {size} байт на порту 5556"
+}
+
+skill upload_state(agent) {
+    @received = agent.received
+    @expected = agent.expected
+    @total = agent.total
+    out "принято {received} из {expected} байт, сумма {total}"
+}
+
+skill launch(agent) {
+    (agent.spent == yes) { out "принятая программа уже отработала: её буфер могла занять она сама — залей заново (upload)" }
+    (agent.expected == 0) { out "ничего не принято" }
+    ((agent.received == agent.expected) == no) { out str.concat("приём не закончен: ", upload_state(agent)) }
+    @size = agent.expected
+    log(agent, "run: starting uploaded image, {size} bytes")
+    system_panel.flush(agent.card.base, agent.card) rescue |err| { none }
+    (agent.wifi) |wifi| { handoff.write_counters(wifi) }
+    @launched = uefi.start_image(agent.card.base, agent.bay, size)
+    agent.output = launched.output
+    agent.lent = yes
+    @outcome = launched.outcome
+    @code = outcome.value
+    @status = "{code}"
+    (outcome.failed == yes) { status = "ошибка прошивки {code}" }
+    log(agent, "run: image returned")
+    agent.expected = 0
+    agent.received = 0
+    agent.spent = yes
+    rtl8111.configure(agent.card)
+    rtl8111.wait_link(agent.card) rescue |err| { none }
+    agent.linked = has_link(agent.card)
+    log(agent, "run: card configured again, listening")
+    trace.urgent(agent.trace, agent.card.base, "program returned code {code}, firmware failure {outcome.failed}; card configured again")
+    (agent.wifi) |wifi| {
+        handoff.take_back(wifi)
+        (inputs.wifi_alive(agent) == no) {
+            log(agent, "run: Wi-Fi was reset by the program, bringing it up again")
+            inputs.wifi_up(agent, WIFI_NETWORK, VERSION) rescue |err| { none }
+        }
+    }
+    agent.active_at = day_second(agent.card.base)
+    (outcome.failed == no) {
+        (code == reply.HOME) { clear_screen(agent) }
+    }
+    (group.count(agent.output) > 0) {
+        clear_screen(agent)
+        feed.show_reply(agent, agent.output)
+    }
+    out "программа закончила работу, статус {status}"
+}
+
+skill memory_dump(agent, words) {
+    (group.count(words) < 2) { out "как: mem <адрес hex> [байт]" }
+    @at = parse.parse_hex(group.get(words, 1)) rescue |err| { out "плохой адрес: {err}" }
+    @count = parse.MEMORY_DEFAULT
+    (group.count(words) > 2) { count = parse.parse_count(group.get(words, 2)) }
+    @dump = []
+    @row = ""
+    drum (count) {
+        (beat % 16 == 0) {
+            (beat > 0) { dump = group.add(dump, row) }
+            @where = firmware.phys_text(firmware.add(at, beat))
+            row = "{where}:"
+        }
+        @value = firmware.hex(firmware.read8(at, agent.card.base, beat), 2)
+        row = "{row} {value}"
+    }
+    dump = group.add(dump, row)
+    out str.join(dump, "\n")
+}
+
+skill link_russian(status) {
+    (rtl8111.has_bit(status, rtl8111.PHY_LINK) == no) { out "нет" }
+    @speed = "?"
+    (rtl8111.has_bit(status, rtl8111.PHY_10) == yes) { speed = "10" }
+    (rtl8111.has_bit(status, rtl8111.PHY_100) == yes) { speed = "100" }
+    (rtl8111.has_bit(status, rtl8111.PHY_1000) == yes) { speed = "1000" }
+    @duplex = "полудуплекс"
+    (rtl8111.has_bit(status, rtl8111.PHY_FULL_DUPLEX) == yes) { duplex = "полный дуплекс" }
+    out "есть, {speed} Мбит/с, {duplex}"
+}
+
+Info = Box {
+    mac = "",
+    ip = "",
+    arena = "",
+    bay = "",
+    held = 0,
+    limit = 0,
+    link = "",
+    up = no,
+    mbps = 0,
+    full = no,
+    frames = 0,
+    handled = 0,
+    arp = 0,
+    columns = 0,
+    rows = 0,
+    failures = 0,
+    last_error = "",
+    wifi = ""
+}
+
+skill gather(agent) {
+    @status = rtl8111.status(agent.card)
+    @mbps = 0
+    (rtl8111.has_bit(status, rtl8111.PHY_10) == yes) { mbps = 10 }
+    (rtl8111.has_bit(status, rtl8111.PHY_100) == yes) { mbps = 100 }
+    (rtl8111.has_bit(status, rtl8111.PHY_1000) == yes) { mbps = 1000 }
+    out Info {
+        mac = net.mac_text(agent.card.mac),
+        ip = net.ip_text(MY_IP),
+        arena = firmware.phys_text(firmware.arena(agent.card.base)),
+        bay = firmware.phys_text(agent.bay),
+        held = agent.bay_pages * PAGE_BYTES / 1024,
+        limit = agent.limit,
+        link = link_russian(status),
+        up = rtl8111.has_bit(status, rtl8111.PHY_LINK),
+        mbps = mbps,
+        full = rtl8111.has_bit(status, rtl8111.PHY_FULL_DUPLEX),
+        frames = agent.frames,
+        handled = agent.commands,
+        arp = agent.arp,
+        columns = agent.columns,
+        rows = agent.rows,
+        failures = agent.failures,
+        last_error = agent.last_error,
+        wifi = inputs.wifi_line(agent)
+    }
+}
+
+skill information(agent) {
+    @info = gather(agent)
+    out "агент Saltic {VERSION} на Acer Aspire E5-575G\nmac {info.mac}, ip {info.ip}, udp-порт 5555\nлинк {info.link}\nWi-Fi {info.wifi}\nарена DMA {info.arena}, приём программ {info.bay}, своих страниц {info.held} КБ, предел {info.limit} байт\nкадров {info.frames}, команд {info.handled}, ответов ARP {info.arp}\nэкран {info.columns} × {info.rows} символов\nсбоев в цикле {info.failures}, последний: {info.last_error}"
+}
+
+skill info_fields(info) {
+    @duplex = "half"
+    (info.full == yes) { duplex = "full" }
+    @link = [data.answer("up", info.up), data.number("mbps", info.mbps), data.text("duplex", duplex)]
+    @screen = [data.number("columns", info.columns), data.number("rows", info.rows)]
+    out [
+        data.number("agent", VERSION),
+        data.text("mac", info.mac),
+        data.text("ip", info.ip),
+        data.object("link", link),
+        data.text("arena", info.arena),
+        data.text("bay", info.bay),
+        data.number("bay_kb", info.held),
+        data.number("limit", info.limit),
+        data.number("frames", info.frames),
+        data.number("commands", info.handled),
+        data.number("arp", info.arp),
+        data.object("screen", screen),
+        data.object("heap", [data.number("used", mem.heap(0)), data.number("escapes", mem.heap(1)), data.number("quota", mem.heap(2))]),
+        data.number("failures", info.failures),
+        data.text("last_error", info.last_error),
+        data.text("wifi", info.wifi)
+    ]
+}
+
+skill draw_test(agent) {
+    @screen = gop.open(agent.card.base)
+    @gray = graphics.color(screen, 161, 161, 170)
+    @left = (screen.width - 400) / 2
+    @top = (screen.height - 260) / 2
+    gop.fill(screen, left - 4, top - 4, 408, 208, graphics.color(screen, 250, 250, 250))
+    gop.fill(screen, left, top, 400, 200, gray)
+    gop.fill(screen, left, top + 220, 120, 40, graphics.color(screen, 239, 68, 68))
+    gop.fill(screen, left + 140, top + 220, 120, 40, graphics.color(screen, 34, 197, 94))
+    gop.fill(screen, left + 280, top + 220, 120, 40, graphics.color(screen, 59, 130, 246))
+    @width = screen.width
+    @height = screen.height
+    @stride = screen.stride
+    @format = graphics.format_name(screen)
+    @frame = firmware.phys_text(screen.frame)
+    out "графика: {width} × {height}, формат {format}, строка {stride} пикселей, кадр по адресу {frame}\nнарисовал серый прямоугольник 400 × 200 и красный, зелёный, синий квадраты"
+}
+
+skill clear_screen(agent) {
+    @screen = gop.open(agent.card.base)
+    gop.fill(screen, 0, 0, screen.width, screen.height, feed.paper(screen))
+    feed.draw_header(agent, VERSION, "10.0.0.2:5555")
+    agent.line = 0
+    agent.cursor = feed.TOP
+    agent.console = no
+    agent.lent = no
+    refresh_shelf(agent)
+    @tracer = agent.trace
+    sides.log(agent.card.base, tracer.skin) rescue |err| { none }
+    sides.system(agent.card.base, agent.card, agent.meter, yes, tracer.skin) rescue |err| { none }
+    out "экран очищен"
+}
+
+skill refresh_shelf(agent) {
+    agent.names = programs.shelf_names(agent.card.base) rescue |err| { [] }
+    (agent.chosen >= group.count(agent.names)) { agent.chosen = 0 }
+    out front.draw(agent)
+}
+
+skill keep_program(agent, words) {
+    (group.count(words) < 2) { out "как: keep <имя>" }
+    (agent.expected == 0) { out "ничего не принято" }
+    @name = group.get(words, 1)
+    @written = programs.keep(agent.card.base, agent.bay, agent.expected, name)
+    system_panel.measure_disk(agent.card.base) rescue |err| { none }
+    (agent.lent == no) { refresh_shelf(agent) }
+    out "сохранил {name}: {written} байт в \\SALTIC\\BIN"
+}
+
+skill drop_program(agent, words) {
+    (group.count(words) < 2) { out "как: drop <имя>" }
+    @name = group.get(words, 1)
+    @removed = programs.drop(agent.card.base, name)
+    (removed == no) { out "{name} на полке нет" }
+    system_panel.measure_disk(agent.card.base) rescue |err| { none }
+    (agent.lent == no) { refresh_shelf(agent) }
+    out "удалил {name} с полки \\SALTIC\\BIN"
+}
+
+skill home_state(agent) {
+    @shelf_list = str.join(agent.names, ", ")
+    @chosen = "нет"
+    (group.count(agent.names) > 0) { chosen = group.get(agent.names, agent.chosen) }
+    @link = link_russian(rtl8111.status(agent.card))
+    out "главный экран агента {VERSION}; программы в панели: {shelf_list}; выбрана: {chosen}; линк: {link}"
+}
+
+skill open_by_word(agent, words) {
+    (group.count(words) < 2) { out "как: open <имя>" }
+    @wanted = str.upper(group.get(words, 1))
+    drum (group.count(agent.names)) {
+        (group.get(agent.names, beat) == wanted) {
+            agent.chosen = beat
+            agent.opening = wanted
+            out "открываю {wanted}"
+        }
+    }
+    @known = str.join(agent.names, ", ")
+    out "нет программы {wanted} в панели; есть: {known}"
+}
+
+skill open_program(agent) {
+    (group.count(agent.names) == 0) { out none }
+    @name = group.get(agent.names, agent.chosen)
+    agent.expected = 0
+    take_bay(agent, agent.limit)
+    @size = programs.load(agent.card.base, name, agent.bay, agent.limit)
+    trim_bay(agent, size)
+    agent.expected = size
+    agent.received = size
+    agent.spent = no
+    feed.show_command(agent, "клавиатура", feed.text_bytes("открываю {name}", 64))
+    @result = launch(agent)
+    out feed.show_reply(agent, feed.text_bytes(result, 200))
+}
+
+skill day_second(base) {
+    @moment = uefi.now(base)
+    out moment.hour * 3600 + moment.minute * 60 + moment.second
+}
+
+skill wake(agent) {
+    agent.active_at = day_second(agent.card.base)
+    (agent.saver == no) { out no }
+    agent.saver = no
+    agent.meter.hidden = no
+    clear_screen(agent)
+    out yes
+}
+
+skill doze(agent) {
+    @idle = (day_second(agent.card.base) - agent.active_at + DAY_SECONDS) % DAY_SECONDS
+    (idle < SAVER_AFTER) { out none }
+    (agent.dream) |dream| { saver.again(dream, agent.card.base) }
+    (agent.dream == none) { agent.dream = saver.start(agent.card.base) rescue |err| { out none } }
+    agent.saver = yes
+    agent.meter.hidden = yes
+    out none
+}
+
+skill dream(agent, seen) {
+    poll_wifi(agent)
+    press(agent, uefi.poll_key(agent.card.base, 0))
+    (agent.saver == no) { out none }
+    (agent.frames > seen) { out none }
+    out saver.frame(agent.dream, agent.card.base) rescue |err| { none }
+}
+
+skill press(agent, key) {
+    (key.ready == no) { out none }
+    (wake(agent) == yes) { out none }
+    (agent.lent == yes) { out clear_screen(agent) }
+    @count = group.count(agent.names)
+    (count == 0) { out none }
+    (key.scan == SCAN_RIGHT) { agent.chosen = (agent.chosen + 1) % count }
+    (key.scan == SCAN_LEFT) { agent.chosen = (agent.chosen + count - 1) % count }
+    (key.char == ENTER) { out open_program(agent) rescue |err| { feed.show_reply(agent, feed.text_bytes("не открылась: {err}", 200)) } }
+    out front.draw(agent)
+}
+
+skill print_line(agent, line_bytes) {
+    feed.print_big(agent, line_bytes)
+    agent.line = agent.line + 1
+    out "напечатал строку {agent.line}"
+}
+
+skill prepare_disk(agent, words) {
+    @base = agent.card.base
+    @target = disk.find_target(base, files.handles_with(base, files.BY_PROTOCOL, files.BLOCK_IO_GUID), files.BLOCK_IO_GUID)
+    @size = target.megabytes
+    (group.count(words) < 2) { out "будет стёрт целый несъёмный диск, около {size} МБ. Чтобы стереть и разметить: prepare-disk {ERASE_WORD}" }
+    ((group.get(words, 1) == ERASE_WORD) == no) { out "кодовое слово не то, ничего не записано" }
+    log(agent, "disk: erasing {size} MB disk, writing GPT")
+    disk.write_table(base, target)
+    log(agent, "disk: writing FAT32")
+    disk.write_fat(base, target)
+    disk.reconnect(base, target)
+    out str.concat("диск размечен: GPT, раздел EFI 512 МБ, FAT32 'SALTIC'\n", files.report(base))
+}
+
+skill install_image(agent) {
+    (agent.expected == 0) { out "сначала upload программы" }
+    ((agent.received == agent.expected) == no) { out str.concat("приём не закончен: ", upload_state(agent)) }
+    @written = files.install(agent.card.base, agent.bay, agent.expected)
+    system_panel.measure_disk(agent.card.base) rescue |err| { none }
+    out "записал \\EFI\\BOOT\\BOOTX64.EFI на том SALTIC: {written} байт"
+}
+
+skill time_reply(agent) {
+    @moment = clock.local_time(uefi.now(agent.card.base))
+    @moment_text = clock.clock_text(moment)
+    @date = clock.date_text(moment)
+    out "{date} {moment_text} (UTC+5, по часам ноутбука)"
+}
+
+skill show_code(agent, payload) {
+    @lines = feed.split_lines(group.slice(payload, 5, group.count(payload)))
+    @count = group.count(lines)
+    feed.show_code(agent, group.slice(payload, 5, group.count(payload)))
+    out "показал кусок: {count} строк"
+}
+
+skill device_list(agent) {
+    @base = agent.card.base
+    out str.join(pci.device_lines(base, firmware.ecam(base)), "\n")
+}
+
+skill execute(agent, text, payload) {
+    @words = str.split(text, " ")
+    @name = group.get(words, 0)
+    (name == "help") { out commands.help_text() }
+    (name == "info") { out information(agent) }
+    (name == "pci") { out device_list(agent) }
+    (name == "mem") { out memory_dump(agent, words) }
+    (name == "echo") { out str.slice(text, 4, str.bytes(text)) }
+    (name == "upload") { out begin_upload(agent, words) }
+    (name == "check") { out upload_state(agent) }
+    (name == "run") { out launch(agent) }
+    (name == "screen") { out draw_test(agent) }
+    (name == "clear") { out clear_screen(agent) }
+    (name == "volumes") { out files.report(agent.card.base) }
+    (name == "usb") { out usb.report(agent.card.base) }
+    (name == "code") { out show_code(agent, payload) }
+    (name == "keep") { out keep_program(agent, words) }
+    (name == "drop") { out drop_program(agent, words) }
+    (name == "open") { out open_by_word(agent, words) }
+    (name == "state") { out home_state(agent) }
+    (name == "camera") { out camera.report(agent.card.base) }
+    (name == "protocols") { out usb.protocols(agent.card.base, words) }
+    (name == "time") { out time_reply(agent) }
+    (name == "key") { out key_reply(agent.card.base, str.slice(text, 4, str.bytes(text))) }
+    (name == "reboot") { out restart_later(agent) }
+    (name == "shot") {
+        @taken = shot.capture(agent.card) rescue |err| { out "снимок не сделан: {err} (участок shot — половина экрана до 1920 × 1080)" }
+        agent.shot_bytes = taken
+        out shot.caption(agent.card, agent.shot_bytes)
+    }
+    (name == "prepare-disk") { out prepare_disk(agent, words) }
+    (name == "install") { out install_image(agent) }
+    (name == "wifi") {
+        @network = WIFI_NETWORK
+        (group.count(words) > 1) { network = str.slice(text, 5, str.bytes(text)) }
+        out inputs.wifi_up(agent, network, VERSION)
+    }
+    (name == "wifi-keep") { out wifi_keep(agent) }
+    (name == "keep-file") { out keep_file_command(agent, words) }
+    (name == "log") { out trace.level(agent.trace, agent.card.base, words) }
+    (name == "print") { out print_line(agent, group.slice(payload, 6, group.count(payload))) }
+    @help = commands.help_text()
+    out "не знаю команду '{name}'. {help}"
+}
+
+skill mrpc_reply(agent, packet) {
+    @started = day_second(agent.card.base)
+    @call = mrpc.decode(packet.text)
+    @registry = commands.REGISTRY
+    (call.ok == no) { out mrpc.failure(call, "invalid_param", call.message, "", 0) }
+    (call.cmd == "help") { out mrpc.help(call, registry, 0, REPLY_LIMIT) }
+    (call.cmd == "describe") { out mrpc.describe(call, registry, 0) }
+    (call.cmd == "info") { out data.reply(call, info_fields(gather(agent)), 0) }
+    @command = mrpc.find(registry, call.cmd)
+    (command == none) { out mrpc.unknown(call, registry, 0) }
+    @line = mrpc.line(call, command)
+    (line.ok == no) { out mrpc.failure(call, "missing_param", "нужен параметр {line.param}", line.param, 0) }
+    @said = execute(agent, line.text, utf8.encode(line.text)) rescue |err| {
+        @spent = (day_second(agent.card.base) - started + DAY_SECONDS) % DAY_SECONDS * 1000
+        out mrpc.failure(call, "internal", "{err}", "", spent)
+    }
+    @bytes = utf8.encode(said)
+    (group.count(agent.output) > 0) { bytes = group.concat(group.add(bytes, 10), agent.output) }
+    agent.output = []
+    @ms = (day_second(agent.card.base) - started + DAY_SECONDS) % DAY_SECONDS * 1000
+    out mrpc.success(call, bytes, ms, REPLY_LIMIT)
+}
+
+skill key_reply(base, text) {
+    @count = keys.push(base, text) rescue |err| { out "клавиша не принята: {err}" }
+    out "принято нажатий: {count}"
+}
+
+skill wait_second(base) {
+    @first = uefi.now(base)
+    drum (SECOND_WAIT) {
+        @moment = uefi.now(base)
+        ((moment.second == first.second) == no) { out none }
+    }
+    out none
+}
+
+skill countdown(agent, seconds) {
+    drum (seconds) {
+        @left = seconds - beat
+        feed.banner(agent.card.base, "перезагрузка через {left}...")
+        wait_second(agent.card.base)
+    }
+    feed.banner(agent.card.base, "перезагружаюсь")
+    out none
+}
+
+skill restart_later(agent) {
+    agent.restart = yes
+    out "перезагружаюсь через {COUNTDOWN} секунд"
+}
+
+skill answer(agent, bytes) {
+    @packet = net.udp(bytes)
+    (str.starts_with(packet.text, SHOT_PREFIX) == yes) {
+        (agent.via == "wifi") {
+            @piece = shot.chunk_frame(agent.wifi.mac, agent.wifi.ip, agent.card.base, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(SHOT_PREFIX), str.bytes(packet.text))))
+            (piece) |piece| { inputs.transmit(agent, piece) }
+            out agent
+        }
+        shot.send_chunk(agent.card, agent.shot_bytes, packet, parse.parse_size(str.slice(packet.text, str.bytes(SHOT_PREFIX), str.bytes(packet.text))))
+        out agent
+    }
+    (mrpc.is_request(packet.payload) == no) {
+        @first = group.get(str.split(packet.text, " "), 0)
+        (commands.known(first) == no) { out trace.note(agent.trace, agent.card.base, "udp 5555: not mRPC, not a command - ignored") }
+    }
+    ((packet.text == "shot") == no) { wake(agent) }
+    @who = net.ip_text(packet.from_ip)
+    @command = packet.text
+    log(agent, "command from {who}: {command}")
+    @asked = journal.cut(journal.first_line(packet.payload), 80)
+    trace.note(agent.trace, agent.card.base, "cmd from {who}: {asked}")
+    feed.show_command(agent, who, packet.payload)
+    trace.ask(agent.trace, agent.card.base, packet.payload)
+    @reply_bytes = []
+    (mrpc.is_request(packet.payload) == yes) { reply_bytes = mrpc_reply(agent, packet) }
+    (mrpc.is_request(packet.payload) == no) {
+        @said = execute(agent, command, packet.payload) rescue |err| { "ошибка: {err}" }
+        reply_bytes = feed.text_bytes(said, REPLY_LIMIT)
+        (group.count(agent.output) > 0) { reply_bytes = group.concat(group.add(reply_bytes, 10), agent.output) }
+        agent.output = []
+        (group.count(reply_bytes) > REPLY_LIMIT) { reply_bytes = group.slice(reply_bytes, 0, REPLY_LIMIT) }
+    }
+    feed.show_reply(agent, reply_bytes)
+    trace.say(agent.trace, agent.card.base, reply_bytes)
+    @frame = net.udp_frame_bytes(inputs.our_mac(agent), inputs.my_ip(agent), packet.from_mac, packet.from_ip, PORT, packet.from_port, reply_bytes)
+    @sent = inputs.transmit(agent, frame) rescue |err| { "NOT sent ({err})" }
+    @size = group.count(reply_bytes)
+    log(agent, "  replied {sent} bytes")
+    trace.urgent(agent.trace, agent.card.base, "reply to {who}: {size} bytes payload, transmit {sent}")
+    agent.commands = agent.commands + 1
+    ((agent.opening == "") == no) {
+        agent.opening = ""
+        open_program(agent) rescue |err| { feed.show_reply(agent, feed.text_bytes("не открылась: {err}", 200)) }
+    }
+    (agent.restart == yes) {
+        countdown(agent, COUNTDOWN) rescue |err| { none }
+        uefi.restart(agent.card.base)
+    }
+    out agent
+}
+
+skill draw_progress(agent) {
+    (agent.console == yes) { out none }
+    (agent.lent == yes) { out none }
+    out feed.draw_progress(agent)
+}
+
+skill store_chunk(agent, bytes) {
+    @offset = net.word(bytes, 42) * 65536 + net.word(bytes, 44)
+    @size = net.word(bytes, 38) - 12
+    (size > group.count(bytes) - 46) { size = group.count(bytes) - 46 }
+    (agent.expected > 0) {
+        (offset == agent.received) {
+            (offset + size > agent.expected) { size = agent.expected - offset }
+            drum (size) {
+                @value = group.get(bytes, 46 + beat)
+                firmware.write8(agent.bay, agent.card.base, offset + beat, value)
+                agent.total = (agent.total + value) % 65536
+            }
+            agent.received = offset + size
+            (agent.received % REPORT_EVERY < size) {
+                @received = agent.received
+                @expected = agent.expected
+                log(agent, "upload: {received} of {expected} bytes")
+                draw_progress(agent)
+            }
+            (agent.received == agent.expected) { draw_progress(agent) }
+        }
+    }
+    @said = "ok {agent.received}"
+    @to_mac = net.slice_bytes(bytes, 6, 6)
+    @to_ip = net.slice_bytes(bytes, 26, 4)
+    inputs.transmit(agent, net.udp_frame(inputs.our_mac(agent), inputs.my_ip(agent), to_mac, to_ip, DATA_PORT, net.word(bytes, 34), said))
+    out agent
+}
+
+skill handle(agent, bytes) {
+    agent.frames = agent.frames + 1
+    trace.frame(agent.trace, agent.card.base, bytes, agent.via)
+    (agent.via == "wifi") {
+        traffic.answer_arp(agent.wifi, agent.wifi.point, bytes)
+        (net.is_udp_to(bytes, PORT) == yes) { out answer(agent, bytes) }
+        (net.is_udp_to(bytes, DATA_PORT) == yes) { out store_chunk(agent, bytes) }
+        out agent
+    }
+    (net.is_arp_request_for(bytes, MY_IP) == yes) {
+        @asker = net.ip_text(net.slice_bytes(bytes, 28, 4))
+        @told = inputs.transmit(agent, net.arp_reply(agent.card.mac, MY_IP, bytes)) rescue |err| {
+            out trace.urgent(agent.trace, agent.card.base, "arp: reply to {asker} NOT sent ({err})")
+        }
+        agent.arp = agent.arp + 1
+        log(agent, "arp: told {asker} that 10.0.0.2 is us")
+        trace.note(agent.trace, agent.card.base, "arp: reply to {asker} sent, {told} bytes")
+        out agent
+    }
+    (net.is_udp_to(bytes, PORT) == yes) { out answer(agent, bytes) }
+    (net.is_udp_to(bytes, DATA_PORT) == yes) { out store_chunk(agent, bytes) }
+    out agent
+}
+
+skill wifi_keep(agent) {
+    (agent.expected == 0) { out "сначала upload посылки (tools/wifi_pack.py)" }
+    ((agent.received == agent.expected) == no) { out str.concat("приём не закончен: ", upload_state(agent)) }
+    @written = programs.keep_file(agent.card.base, agent.bay, agent.expected, WIFI_FOLDER, WIFI_FILE)
+    out "сохранил прошивку Wi-Fi: {written} байт в \\SALTIC\\{WIFI_FOLDER}\\{WIFI_FILE}"
+}
+
+skill keep_file_command(agent, words) {
+    (group.count(words) < 3) { out "как: keep-file <папка> <имя>" }
+    (agent.expected == 0) { out "ничего не принято" }
+    ((agent.received == agent.expected) == no) { out str.concat("приём не закончен: ", upload_state(agent)) }
+    @folder = str.upper(group.get(words, 1))
+    @name = str.upper(group.get(words, 2))
+    @written = programs.keep_file(agent.card.base, agent.bay, agent.expected, folder, name)
+    system_panel.measure_disk(agent.card.base) rescue |err| { none }
+    out "сохранил {written} байт в \\SALTIC\\{folder}\\{name}"
+}
+
+skill poll_wifi(agent) {
+    (agent.wifi == none) { out none }
+    (agent.wifi.lost == yes) {
+        log(agent, "wifi: the access point dropped us, joining again")
+        trace.urgent(agent.trace, agent.card.base, "wifi: access point dropped us, joining again")
+        inputs.wifi_stage(agent, 0, "точка пропала, ищу заново")
+        inputs.wifi_up(agent, WIFI_NETWORK, VERSION) rescue |err| { none }
+        out none
+    }
+    drum (WIFI_FRAMES) {
+        @bytes = traffic.poll(agent.wifi)
+        (bytes == none) { leave }
+        agent.via = "wifi"
+        handle(agent, bytes) rescue |err| {
+            agent.via = "cable"
+            trace.urgent(agent.trace, agent.card.base, "wifi: frame handling failed ({err})")
+            out none
+        }
+        agent.via = "cable"
+    }
+    out none
+}
+
+skill has_link(card) {
+    out rtl8111.has_bit(rtl8111.status(card), rtl8111.PHY_LINK)
+}
+
+skill greet(card) {
+    rtl8111.send(card, net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, "агент Saltic {VERSION} слушает 10.0.0.2:5555, скажи help"))
+    out none
+}
+
+skill watch_link(agent) {
+    @now = has_link(agent.card)
+    (now == agent.linked) { out none }
+    agent.linked = now
+    (now == yes) {
+        log(agent, "link: cable is back, listening")
+        greet(agent.card)
+        out none
+    }
+    log(agent, "link: cable lost, waiting")
+    feed.banner(agent.card.base, "нет связи по кабелю — агент работает и ждёт")
+    out none
+}
+
+skill tick(agent) {
+    @seen = agent.frames
+    drum (rtl8111.RX_COUNT) {
+        (rtl8111.received(agent.card, beat) == yes) {
+            @bytes = rtl8111.read_frame(agent.card, beat)
+            rtl8111.release(agent.card, beat)
+            handle(agent, bytes)
+        }
+    }
+    (agent.saver == yes) { dream(agent, seen) }
+    agent.rounds = agent.rounds + 1
+    (agent.rounds % TRACE_EVERY == 0) { trace.second(agent.trace, agent.card, TRACE_EVERY) }
+    (agent.rounds % WIFI_EVERY == 0) { poll_wifi(agent) }
+    (agent.rounds % KEY_EVERY == 0) { press(agent, uefi.poll_key(agent.card.base, 0)) }
+    (agent.rounds == CLOCK_EVERY) {
+        agent.rounds = 0
+        watch_link(agent)
+        (agent.console == no) {
+            (agent.saver == no) {
+                (agent.lent == no) { feed.draw_clock(agent) }
+                doze(agent)
+            }
+            @tracer = agent.trace
+            sides.tick(agent.card.base, agent.card, agent.meter, tracer.skin) rescue |err| { none }
+        }
+    }
+    out none
+}
+
+skill last_cry(card, message) {
+    feed.banner(card.base, message)
+    (has_link(card) == no) { out none }
+    rtl8111.send(card, net.udp_frame(card.mac, MY_IP, net.BROADCAST_MAC, [255, 255, 255, 255], PORT, PORT, message))
+    out none
+}
+
+skill survive(agent) {
+    tick(agent) rescue |err| {
+        (agent.restart == yes) { uefi.restart(agent.card.base) }
+        agent.failures = agent.failures + 1
+        agent.last_error = "{err}"
+        trace.urgent(agent.trace, agent.card.base, "loop error: {err}")
+        feed.banner(agent.card.base, "сбой в цикле: {err} (агент продолжает работу)")
+        none
+    }
+    out none
+}
+
+skill serve(agent) {
+    always { survive(agent) }
+    out agent
+}
+
+skill run() {
+    @screen = uefi.wide_console(firmware.guest_base())
+    @columns = screen.columns
+    @rows = screen.rows
+    @tracer = trace.open(firmware.guest_base())
+    trace.urgent(tracer, firmware.guest_base(), "agent {VERSION} starting")
+    @card = rtl8111.open() rescue |err| {
+        trace.urgent(tracer, firmware.guest_base(), "card: open failed ({err})")
+        out err
+    }
+    @mmio = firmware.phys_text(card.mmio)
+    @mac = net.mac_text(card.mac)
+    trace.event(tracer, card.base, "card: mmio {mmio}, mac {mac}")
+    rtl8111.configure(card) rescue |err| {
+        trace.urgent(tracer, card.base, "card: configure failed ({err})")
+        out err
+    }
+    trace.wire(tracer, card)
+    trace.link(tracer, card)
+    tracer.skin = sides.load_fonts(card.base) rescue |err| {
+        trace.urgent(tracer, card.base, "fonts: TTF for side panels failed ({err}), Spleen")
+        themes.named("soft", gop.open_whole(card.base))
+    }
+    arena_map.check()
+    @bay = firmware.region(card.base, "bay")
+    @agent = Agent { card = card, columns = columns, rows = rows, bay = bay, limit = UPLOAD_LIMIT, trace = tracer }
+    agent.active_at = day_second(card.base)
+    system_panel.measure_disk(card.base) rescue |err| { none }
+    clear_screen(agent)
+    feed.show_reply(agent, feed.text_bytes("Wi-Fi выключен — поднять командой wifi", 200))
+    watch_link(agent)
+    netlog.say_text(card.base, "агент Saltic {VERSION} слушает 10.0.0.2:5555")
+    sides.log(card.base, tracer.skin) rescue |err| { none }
+    serve(agent) rescue |err| {
+        last_cry(card, "агент остановился: {err}")
+        out err
+    }
+    last_cry(card, "агент остановился: главный цикл закончился")
+    out none
+}
+
+program() {
+    io.show("Saltic agent: commands over the network")
+    @done = run() rescue |err| {
+        io.show("FAILED: {err}")
+        feed.banner(firmware.guest_base(), "агент не запустился: {err}") rescue |again| { none }
+        none
+    }
+    io.show("")
+    io.show("This program never exits. Turn the laptop off when done.")
+    drum (200000000) {
+        @key = io.key()
+    }
+}

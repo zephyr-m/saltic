@@ -78,9 +78,9 @@
   числа на родном x86-64;
 `os` — модули ОС, не язык; в `just global-check` (под x86_64):
 
-- `jtml`, `tasks` — `registry.libraries.uiengine.jtml` и `os.apps.tasks`;
-- `ttf` — шрифты TTF (`os/fonts/ttf`, `os/fonts/raster`) на Inter;
-- `events` — ядро событий и жесты (`os/input/events`, `os/input/gestures`);
+- `jtml`, `tasks` — `registry.libraries.uiengine.jtml` и `soft.work.todo`;
+- `ttf` — шрифты TTF (`fonts.ttf`, `fonts.raster` — библиотека реестра) на Inter;
+- `events` — ядро событий и жесты (`input.events`, `input.gestures` — библиотека реестра);
 - `panels`, `mrpc` — системная панель и mRPC агента (`mrpc` — всегда под
   x86_64: модули ОС UEFI — 61-битный мир).
 

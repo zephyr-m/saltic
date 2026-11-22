@@ -169,7 +169,7 @@ Wi-Fi-карты) — не наши, предсказуемость начина
 - Первая цель — старый ноутбук.
 - **Решение автора 13.11.2026.** Первая версия ОС работает на ESP32 автора
   (DevKit: классическая ESP32, два ядра Xtensa). Бэкенд Xtensa — в работе:
-  `soul/seed/compiler/gorn/backend/xtensa/lx6`, цель `os/target/esp32`.
+  `soul/seed/compiler/gorn/backend/xtensa/lx6`, цель `soul/toolchains/esp32`.
 - Всё железо автора — тела одной ОС (см. «Первое требование»): STM32,
   ESP32 (Xtensa), RP2350, дальше ARM64 — телефоны и Raspberry Pi.
 

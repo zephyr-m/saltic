@@ -1,0 +1,342 @@
+-- trace — журнал сети агента для отладки на железе: каждое событие — строка
+-- «ЧЧ:ММ:СС #номер текст» по-английски (у прошивки нет кириллицы) на панель
+-- netlog и дописью в файл \SALTIC\agent.log. Файл — на записываемом томе
+-- флешки (съёмный) с меткой из FLASH_LABELS по порядку (SALTICLOG, затем VTOYEFI —
+-- FAT-раздел Ventoy); внутренний диск — только если флешки нет; не вышло —
+-- только экран. Каждая строка — сразу в файл с Flush. В полях Trace — числа:
+-- строка или группа в долгом Box из вечного цикла — побег в кучу навсегда.
+-- В файл — всегда всё. На экран — по ручке screen (SCREEN_LEVEL по умолчанию):
+-- quiet — панель пустая; important — события (event/urgent: старт, карта,
+-- линк, команды и итог отправки, Wi-Fi, ошибки); all — ещё и подробности
+-- (note: каждый кадр, строки раз в секунду).
+--
+-- Каждая строка — ещё и к нам в файл по кабелю (stream), как только агент
+-- открыл карту и отдал её в trace.wire.
+--
+-- Trace { file, place, count, hour, minute, second, phy, rounds, screen (номер в
+--     LEVELS), dirty, card, wired, skin } — skin: палитра панелей со шрифтами
+--     (screen/sides, ставит агент при старте) / open(base) -> Trace — открыть файл, SetPosition в конец
+-- wire(trace, card) — с этой строки слать журнал и по кабелю
+-- note(trace, base, text) — подробность / event(…) — событие / urgent(…) —
+--     событие со свежим временем и сразу в файл
+-- ask / say(trace, base, bytes) — команда и ответ в netlog, если не quiet
+-- level(trace, base, words) -> текст — команда log: без слова — уровень,
+--     log quiet|important|all — поставить
+-- flush(trace, base) — перерисовать панель, если в ней новое
+-- frame(trace, base, bytes, via) — подробность о кадре: ARP, IPv4-UDP, прочее
+-- second(trace, card, rounds) -> yes в новую секунду: линк, счётчики, flush;
+--     rounds — кругов цикла с прошлого вызова
+-- link(trace, card) — событие, если байт PHY изменился / counters(trace, card) —
+--     строка кучи (core.mem.heap: занято, побеги) и строка карты
+-- Внутри: open_on(base, handle) -> File; write_file(base, file, bytes);
+--     label_of(base, handle) -> метка тома; attempt(trace, base, handle, where)
+--     -> yes, если файл открылся; phy_text(raw); ip(bytes, at);
+--     line(trace, base, text, shown) — строка в файл и, если shown, на экран;
+--     clock_text(trace) / set_clock(trace, moment) / level_text(trace)
+
+use core.str
+use core.group
+use core.mem
+use tarantul.firmware.firmware
+use tarantul.firmware.firmware.uefi
+use tarantul.firmware.firmware.clock
+use tarantul.files.files
+use tarantul.rtl8111.rtl8111
+use tarantul.net.net
+use soft.system.acer_bench.network.netlog
+use soft.system.acer_bench.network.stream
+use soft.system.acer_bench.network.netlog.journal
+use soft.system.acer_bench.screen.sides
+use tarantul.uiengine.draw.atoms
+
+SCREEN_LEVEL = "important"
+LEVELS = ["quiet", "important", "all"]
+FLASH_LABELS = ["SALTICLOG", "VTOYEFI"]
+FILE_SET_POSITION = 56
+UPLOAD_PORT = 5556
+FOLDER = "SALTIC"
+NAME = "agent.log"
+CHUNK = 4096
+CHUNK_AT = 16384
+LOW = 4294967295
+
+Trace = Box {
+    file = 0,
+    place = "screen only",
+    count = 0,
+    hour = 0,
+    minute = 0,
+    second = -1,
+    phy = -1,
+    rounds = 0,
+    screen = 1,
+    dirty = no,
+    card = rtl8111.Card {},
+    wired = no,
+    skin = atoms.Palette {}
+}
+
+skill open_on(base, handle) {
+    @root = files.open_root(base, handle)
+    @home = files.create(base, root, FOLDER, files.DIRECTORY)
+    @file = files.create(base, home, NAME, 0)
+    files.close_file(base, home)
+    files.close_file(base, root)
+    @moved = firmware.call_wide(base, firmware.pointer(file, base, FILE_SET_POSITION), [file, LOW], [0, LOW])
+    (moved.failed == yes) { out error.SeekFailed }
+    write_file(base, file, journal.bytes_of("\n"))
+    out file
+}
+
+skill write_file(base, file, bytes) {
+    @buffer = firmware.scratch(base, CHUNK_AT)
+    @size_at = firmware.scratch(base, files.SCRATCH_SIZE)
+    @done = 0
+    @total = group.count(bytes)
+    drum ((total + CHUNK - 1) / CHUNK) {
+        @size = total - done
+        (size > CHUNK) { size = CHUNK }
+        drum (size) { firmware.write8(buffer, base, beat, group.get(bytes, done + beat)) }
+        firmware.write64(size_at, base, 0, firmware.number(size))
+        @written = firmware.call(base, firmware.pointer(file, base, files.FILE_WRITE), [file, size_at, buffer])
+        (written.failed == yes) { out error.WriteFailed }
+        done = done + size
+    }
+    @flushed = firmware.call(base, firmware.pointer(file, base, files.FILE_FLUSH), [file])
+    (flushed.failed == yes) { out error.FlushFailed }
+    out done
+}
+
+skill label_of(base, handle) {
+    @root = files.open_root(base, handle) rescue |err| { out "?" }
+    @label = files.volume_label(base, root)
+    files.close_file(base, root)
+    out label
+}
+
+skill attempt(trace, base, handle, where) {
+    trace.file = open_on(base, handle) rescue |err| {
+        event(trace, base, "log file: {where} not writable ({err})")
+        out no
+    }
+    trace.place = where
+    out yes
+}
+
+skill open(base) {
+    @trace = Trace {}
+    drum (group.count(LEVELS)) {
+        (group.get(LEVELS, beat) == SCREEN_LEVEL) { trace.screen = beat }
+    }
+    set_clock(trace, uefi.now(base)) rescue |err| { none }
+    @handles = files.file_systems(base)
+    @seen = ""
+    drum (handles) {
+        @kind = "usb"
+        (files.fixed_volume(base, beat) == yes) { kind = "internal" }
+        @label = label_of(base, beat)
+        seen = "{seen} {kind}:'{label}'"
+    }
+    drum (FLASH_LABELS) {
+        @wanted = beat
+        drum (handles) {
+            (trace.file == 0) {
+                (files.fixed_volume(base, beat) == no) {
+                    (label_of(base, beat) == wanted) { attempt(trace, base, beat, "usb '{wanted}'") }
+                }
+            }
+        }
+    }
+    drum (handles) {
+        (trace.file == 0) {
+            (files.fixed_volume(base, beat) == yes) { attempt(trace, base, beat, "internal disk (no writable flash)") }
+        }
+    }
+    @place = trace.place
+    (trace.file == 0) { place = "nowhere, screen only" }
+    urgent(trace, base, "log file: \\SALTIC\\agent.log on {place}; volumes{seen}")
+    out trace
+}
+
+skill set_clock(trace, moment) {
+    @local = clock.local_time(moment)
+    trace.hour = local.hour
+    trace.minute = local.minute
+    trace.second = moment.second
+    out none
+}
+
+skill clock_text(trace) {
+    @hours = clock.two(trace.hour)
+    @minutes = clock.two(trace.minute)
+    @seconds = clock.two(trace.second)
+    out "{hours}:{minutes}:{seconds}"
+}
+
+skill level_text(trace) {
+    out group.get(LEVELS, trace.screen)
+}
+
+skill note(trace, base, text) {
+    out line(trace, base, text, trace.screen == 2)
+}
+
+skill event(trace, base, text) {
+    out line(trace, base, text, trace.screen > 0)
+}
+
+skill ask(trace, base, bytes) {
+    (trace.screen == 0) { out none }
+    netlog.ask(base, bytes)
+    out sides.log(base, trace.skin) rescue |err| { none }
+}
+
+skill say(trace, base, bytes) {
+    (trace.screen == 0) { out none }
+    netlog.say(base, bytes)
+    out sides.log(base, trace.skin) rescue |err| { none }
+}
+
+skill level(trace, base, words) {
+    (group.count(words) < 2) {
+        @now = level_text(trace)
+        out "журнал на экране: {now} (quiet, important, all; в файл — всё)"
+    }
+    @wanted = group.get(words, 1)
+    @known = -1
+    drum (group.count(LEVELS)) {
+        (group.get(LEVELS, beat) == wanted) { known = beat }
+    }
+    (known < 0) { out "не знаю уровень '{wanted}': quiet, important, all" }
+    trace.screen = known
+    (wanted == "quiet") {
+        netlog.clear(base) rescue |err| { none }
+        sides.log(base, trace.skin) rescue |err| { none }
+    }
+    urgent(trace, base, "log: screen level {wanted}")
+    out "журнал на экране: {wanted}"
+}
+
+skill wire(trace, card) {
+    trace.card = card
+    trace.wired = yes
+    out none
+}
+
+skill line(trace, base, text, shown) {
+    trace.count = trace.count + 1
+    @moment = clock_text(trace)
+    @count = trace.count
+    @bytes = journal.bytes_of("{moment} #{count} {text}")
+    (trace.wired == yes) { stream.send(trace.card, "агент: {moment} #{count} {text}") }
+    (shown == yes) {
+        netlog.note(base, bytes)
+        trace.dirty = yes
+    }
+    (trace.file > 0) {
+        write_file(base, trace.file, group.add(bytes, 10)) rescue |err| {
+            trace.file = 0
+            line(trace, base, "log file: write failed ({err}), file logging off", yes)
+            none
+        }
+    }
+    out none
+}
+
+skill urgent(trace, base, text) {
+    set_clock(trace, uefi.now(base)) rescue |err| { none }
+    event(trace, base, text)
+    out flush(trace, base)
+}
+
+skill flush(trace, base) {
+    (trace.dirty == yes) {
+        trace.dirty = no
+        sides.log(base, trace.skin) rescue |err| { none }
+    }
+    out none
+}
+
+skill ip(bytes, at) {
+    out net.ip_text(net.slice_bytes(bytes, at, 4))
+}
+
+skill frame(trace, base, bytes, via) {
+    @length = group.count(bytes)
+    (length < 14) { out note(trace, base, "rx {via}: runt frame, {length} bytes") }
+    @from = net.mac_text(net.slice_bytes(bytes, 6, 6))
+    @kind = net.word(bytes, 12)
+    (kind == net.TYPE_ARP) {
+        (length < 42) { out note(trace, base, "rx {via}: ARP short, {length} bytes from {from}") }
+        @op = net.word(bytes, 20)
+        @sender = ip(bytes, 28)
+        @wanted = ip(bytes, 38)
+        out note(trace, base, "rx {via}: ARP op {op} {sender} asks {wanted}, from {from}, {length} bytes")
+    }
+    (kind == net.TYPE_IPV4) {
+        (length < 38) { out note(trace, base, "rx {via}: IPv4 short, {length} bytes from {from}") }
+        @source = ip(bytes, 26)
+        @target = ip(bytes, 30)
+        @protocol = group.get(bytes, 23)
+        (protocol == net.PROTOCOL_UDP) {
+            @source_port = net.word(bytes, 34)
+            @port = net.word(bytes, 36)
+            (port == UPLOAD_PORT) { out none }
+            out note(trace, base, "rx {via}: IPv4-UDP {source}:{source_port} -> {target}:{port}, {length} bytes")
+        }
+        out note(trace, base, "rx {via}: IPv4 proto {protocol} {source} -> {target}, {length} bytes")
+    }
+    @code = firmware.hex(kind, 4)
+    out note(trace, base, "rx {via}: other type 0x{code} from {from}, {length} bytes")
+}
+
+skill phy_text(raw) {
+    @hex = firmware.hex(raw, 2)
+    @state = rtl8111.link_text(raw)
+    out "{state} (PHY status 0x{hex})"
+}
+
+skill link(trace, card) {
+    @raw = rtl8111.status(card)
+    (raw == trace.phy) { out none }
+    @before = "unknown"
+    (trace.phy >= 0) { before = phy_text(trace.phy) }
+    trace.phy = raw
+    @now = phy_text(raw)
+    out urgent(trace, card.base, "link: {before} -> {now}")
+}
+
+skill counters(trace, card) {
+    @isr = firmware.hex(rtl8111.interrupts(card), 4)
+    @rings = rtl8111.rings(card)
+    @sent = card.sent_bytes
+    @got = card.received_bytes
+    @rounds = trace.rounds
+    @heap_used = mem.heap(0)
+    @heap_escapes = mem.heap(1)
+    note(trace, card.base, "heap: used {heap_used} escapes {heap_escapes} bytes")
+    @head = "card: isr 0x{isr} {rings}, driver tx {sent} rx {got} bytes, {rounds} rounds/s"
+    @count = rtl8111.tally(card) rescue |err| { out note(trace, card.base, "{head}, tally failed ({err})") }
+    @tx = count.tx_ok
+    @rx = count.rx_ok
+    @tx_err = count.tx_errors
+    @rx_err = count.rx_errors
+    @missed = count.missed
+    @align = count.align
+    @broad = count.broadcast
+    @abort = count.tx_aborted
+    @under = count.tx_underrun
+    out note(trace, card.base, "{head}; tally tx {tx} rx {rx} txerr {tx_err} rxerr {rx_err} missed {missed} align {align} bcast {broad} abort {abort} underrun {under}")
+}
+
+skill second(trace, card, rounds) {
+    trace.rounds = trace.rounds + rounds
+    @moment = uefi.now(card.base)
+    (moment.second == trace.second) { out no }
+    set_clock(trace, moment)
+    link(trace, card) rescue |err| { event(trace, card.base, "link: read failed ({err})") }
+    counters(trace, card) rescue |err| { event(trace, card.base, "card: counters failed ({err})") }
+    trace.rounds = 0
+    flush(trace, card.base)
+    out yes
+}

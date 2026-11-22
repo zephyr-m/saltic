@@ -6,7 +6,7 @@
 - подсветку актуального синтаксиса через TextMate;
 - парные скобки и автоматические отступы;
 - переход к определению: Ctrl+щелчок или F12 по имени навыка, Box, enum, константы
-  (`extension.js` спрашивает `lens goto` — тот же `workbench/agent/lens/jump`, что у SalticIDE;
+  (`extension.js` спрашивает `lens goto` — тот же `workbench/agent/lens/jump.saltic`, что у SalticIDE;
   нужен собранный lens — `just lens-serve`), по пути в `use` — открыть файл модуля;
 - иконку языка и файловую тему Saltic Icons;
 - цветовую тему «Saltic Тема 1» в двух видах — светлую (`themes/saltic-theme-1-light.json`,

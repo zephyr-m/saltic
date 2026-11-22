@@ -1,0 +1,242 @@
+-- stage — съёмочная площадка «Пластилина»: экран, небо и задний буфер,
+-- камера, сцена. Сцена каждый раз новая: зерно — из часов (clay/scene).
+-- Небо — градиент цветов сезона и облака. Кадр: небо из своего буфера, земля рядами
+-- от дальних к ближним, вода, предметы от дальних к ближним; готовый кадр
+-- копируется на экран прошивкой построчно. Камера смотрит на LOOK с орбиты
+-- радиуса RADIUS. Берут программа clay и хранитель экрана агента (agent/saver).
+--
+-- Stage { front, sky, back, camera, cast, seed, season, faces, painter, baked,
+--     worst_*, stall_* } — сцена лежит слепком в своих страницах (clay/cast;
+--     костыль: долгий Box держал бы каждую старую полянку в куче); season —
+--     номер в season.SEASONS; painter — [intel_gpu/render.Painter], если буфер
+--     размечен для видеокарты, иначе грани рисует процессор; baked — секунд на
+--     постройку; worst_sky, _collect, _gpu, _screen — самые долгие части кадра в
+--     обновлениях экрана; stall_* — последний долгий кадр видеокарты и их число
+-- open_stage(base, front) -> Stage — буферы неба и кадра (страницы), сцена
+-- remake(stage, base) — новая полянка с новым зерном
+-- moment(base) -> секунда суток по часам прошивки
+-- ticks(stage) -> счётчик кадров экрана с видеокарты (60 в секунду, ровный,
+--     без вызова прошивки); -1 — видеокарты нет
+-- pages(stage) -> страниц одного буфера; close_stage(base, stage) — отдать буферы
+-- draw_sky(screen, world) — градиент неба и облака
+-- compose(stage, angle, lift, base) -> тик — кадр в задний буфер back: камера на
+--     угле angle, высоте lift; на экран не кладёт (поверх можно дорисовать)
+-- render(stage, angle, lift, base) — compose и весь кадр на экран одним копированием
+
+use core.group
+use tarantul.firmware.firmware.uefi
+use tarantul.graphics.graphics
+use tarantul.gop.gop
+use tarantul.lettering.geometry
+use soft.system.acer_bench.screen.clay.mesh
+use soft.system.acer_bench.screen.clay.cast
+use soft.system.acer_bench.screen.clay.scene
+use soft.system.acer_bench.screen.clay.dice
+use soft.system.acer_bench.screen.clay.season
+use tarantul.intel_gpu.intel_gpu
+use tarantul.intel_gpu.intel_gpu.render
+
+RADIUS = 760
+LOOK = [0, 40, 0]
+WHITE = [255, 255, 255]
+
+Stage = Box {
+    front = graphics.Screen {},
+    sky = graphics.Screen {},
+    back = graphics.Screen {},
+    camera = mesh.Camera {},
+    cast = cast.Cast {},
+    seed = 0,
+    season = 0,
+    faces = 0,
+    painter = [],
+    baked = 0,
+    worst_sky = 0,
+    worst_collect = 0,
+    worst_gpu = 0,
+    worst_screen = 0,
+    stall_long = 0,
+    stall_render = 0,
+    stall_blit = 0,
+    stalls = 0
+}
+
+skill paint(screen, color) {
+    out graphics.color(screen, group.get(color, 0), group.get(color, 1), group.get(color, 2))
+}
+
+skill circle(screen, cx, cy, r, bottom, color) {
+    drum (2 * r + 1) {
+        @dy = beat - r
+        @y = cy + dy
+        (y >= 0) {
+            (y < bottom) {
+                @half = geometry.root(r * r - dy * dy)
+                @left = cx - half
+                @right = cx + half
+                (left < 0) { left = 0 }
+                (right > screen.width - 1) { right = screen.width - 1 }
+                (right >= left) { gop.fill(screen, left, y, right - left + 1, 1, color) }
+            }
+        }
+    }
+    out none
+}
+
+skill cloud(screen, cx, cy, size, shade, bright) {
+    @bottom = cy + size / 3
+    (bottom > screen.height) { bottom = screen.height }
+    drum (5) {
+        @side = beat - 2
+        (side < 0) { side = -side }
+        circle(screen, cx + (beat - 2) * size / 2, cy, size * (4 - side) / 4, bottom, shade)
+    }
+    drum (5) {
+        @side = beat - 2
+        (side < 0) { side = -side }
+        circle(screen, cx + (beat - 2) * size / 2, cy - size / 8, size * (4 - side) / 6, bottom - size / 6, bright)
+    }
+    out none
+}
+
+skill draw_sky(screen, world) {
+    drum (screen.height) { gop.fill(screen, 0, beat, screen.width, 1, paint(screen, season.mix(world.top, world.low, beat * 100 / screen.height))) }
+    @luck = dice.Dice { state = world.seed + 3 }
+    @white = WHITE
+    (world.evening == yes) { white = season.mix(world.low, WHITE, 45) }
+    drum (dice.between(luck, 2, 6)) {
+        @cx = dice.roll(luck, screen.width)
+        @cy = screen.height * dice.between(luck, 8, 34) / 100
+        @size = screen.width * dice.between(luck, 4, 8) / 100
+        @behind = season.mix(world.top, world.low, cy * 100 / screen.height)
+        cloud(screen, cx, cy, size, paint(screen, season.mix(behind, white, 55)), paint(screen, season.mix(behind, white, 85)))
+    }
+    out none
+}
+
+skill ticks(stage) {
+    @back = stage.back
+    (group.count(back.accel) == 0) { out -1 }
+    out intel_gpu.frames(group.get(back.accel, 0))
+}
+
+skill moment(base) {
+    @clock = uefi.now(base)
+    out clock.hour * 3600 + clock.minute * 60 + clock.second
+}
+
+skill make(stage, base, seed) {
+    @began = moment(base)
+    @world = scene.build(stage.front, seed)
+    draw_sky(stage.sky, world)
+    cast.fill(stage.cast, world)
+    stage.seed = seed
+    stage.season = season_number(world.season)
+    stage.faces = scene.quads(world)
+    stage.baked = moment(base) - began
+    out none
+}
+
+skill open_stage(base, front) {
+    @sky = gop.buffer_like(base, front)
+    @back = gop.buffer_like(base, front)
+    @painter = []
+    (group.count(back.accel) > 0) {
+        @made = render.painter(group.get(back.accel, 0), base) rescue |err| { none }
+        (made) |made| { painter = [made] }
+    }
+    @stage = Stage { front = front, sky = sky, back = back, camera = mesh.Camera { width = front.width, height = front.height }, cast = cast.open(base), painter = painter }
+    make(stage, base, dice.seed(uefi.now(base)))
+    out stage
+}
+
+skill remake(stage, base) {
+    out make(stage, base, (stage.seed * 7 + dice.seed(uefi.now(base)) + 1) % 1000000007)
+}
+
+skill season_number(chosen) {
+    drum (group.count(season.SEASONS)) {
+        @one = group.get(season.SEASONS, beat)
+        (one.name == chosen.name) { out beat }
+    }
+    out 0
+}
+
+skill pages(stage) {
+    out gop.buffer_pages(stage.front)
+}
+
+skill close_stage(base, stage) {
+    @sky = stage.sky
+    @back = stage.back
+    uefi.free_pages(base, sky.frame, pages(stage))
+    cast.close(base, stage.cast)
+    out uefi.free_pages(base, back.frame, pages(stage))
+}
+
+skill mark(stage, part, from) {
+    @now = ticks(stage)
+    @spent = (now - from + 4294967296) % 4294967296
+    (part == 0) {
+        (spent > stage.worst_sky) { stage.worst_sky = spent }
+    }
+    (part == 1) {
+        (spent > stage.worst_collect) { stage.worst_collect = spent }
+    }
+    (part == 2) {
+        (spent > stage.worst_gpu) { stage.worst_gpu = spent }
+    }
+    (part == 3) {
+        (spent > stage.worst_screen) { stage.worst_screen = spent }
+    }
+    out now
+}
+
+skill compose(stage, angle, lift, base) {
+    @back = stage.back
+    @at = ticks(stage)
+    gop.copy_rect(base, back, stage.sky, 0, 0, back.width, back.height)
+    at = mark(stage, 0, at)
+    @camera = stage.camera
+    @from = [RADIUS * geometry.cosine(angle) / geometry.ONE, lift, RADIUS * geometry.sine(angle) / geometry.ONE]
+    mesh.look(camera, from, LOOK)
+    @set = stage.cast
+    @flats = cast.flats(set)
+    @bodies = cast.solids(set, camera)
+    @gpu_ok = no
+    (group.count(stage.painter) > 0) {
+        @candidate = group.get(stage.painter, 0)
+        gpu_ok = candidate.broken == no
+    }
+    (gpu_ok == yes) {
+        @painter = group.get(stage.painter, 0)
+        render.begin(painter)
+        cast.ground_collect(set, painter, camera, scene.CELLS)
+        drum (group.count(flats)) { cast.collect(set, painter, camera, group.get(flats, beat)) }
+        drum (group.count(bodies)) { cast.collect(set, painter, camera, group.get(bodies, beat)) }
+        at = mark(stage, 1, at)
+        @tails = intel_gpu.tails(group.get(back.accel, 0))
+        @drawn = render.triangles(painter, render.Surface { at = back.frame, pitch = back.stride * graphics.PIXEL_BYTES, width = back.width, height = back.height })
+        @before = at
+        at = mark(stage, 2, at)
+        @spent = (at - before + 4294967296) % 4294967296
+        (spent >= 10) {
+            stage.stall_long = spent
+            stage.stall_render = group.get(tails, 0)
+            stage.stall_blit = group.get(tails, 1)
+            stage.stalls = stage.stalls + 1
+        }
+        (drawn == yes) { out at }
+        gop.copy_rect(base, back, stage.sky, 0, 0, back.width, back.height)
+    }
+    cast.ground_draw(set, back, camera, scene.CELLS)
+    drum (group.count(flats)) { cast.draw(set, back, camera, group.get(flats, beat)) }
+    drum (group.count(bodies)) { cast.draw(set, back, camera, group.get(bodies, beat)) }
+    out at
+}
+
+skill render(stage, angle, lift, base) {
+    @at = compose(stage, angle, lift, base)
+    gop.push(base, stage.front, stage.back)
+    out mark(stage, 3, at)
+}

@@ -1,0 +1,118 @@
+-- sides — боковые панели экрана Acer (решение автора 17.11.2026): слева «Сеть»
+-- (строки журнала netlog), справа «Система» (system_panel.facts) — жителями
+-- UIEngine (screen/sides/panels, те же, что у пульта) в холсты сторон
+-- (netlog.canvas) и на экран. Журнал и система только хранят данные, рисует
+-- здесь. Шрифты TTF агент грузит один раз (load_fonts) и кладёт их адреса в
+-- таблицу конфигурации UEFI FONTS_GUID; программа берёт их оттуда (skin),
+-- если они в её окне памяти, иначе — тот же вид буквами Spleen. Палитру со
+-- шрифтами держит тот, кто рисует часто (агент, remote): у Typeface свой кэш
+-- букв, собирать её на каждый кадр — растеризовать буквы заново.
+--
+-- load_fonts(base) -> палитра со шрифтами и значками Lucide (значки — только
+--     агенту: середина, плитки программ); адреса шрифтов — в таблицу FONTS_GUID
+-- skin(base) -> палитра: со шрифтами из таблицы, иначе Spleen
+-- log(base, palette) — панель «Сеть»
+-- system(base, card, meter, forced, palette) — панель «Система»; forced = no
+--     — только если подписи изменились (system_panel.SIGNATURE); meter.hidden —
+--     только в холст, на экран не кладёт
+-- tick(base, card, meter, palette) — счётчики раз в секунду (system_panel.tick)
+--     и, если прошла секунда, панель «Система»
+-- Внутри: look(whole) -> panels.Look стороны; shown(base, canvas, text, palette)
+--     -> runtime нарисованного в холсте; face(base, at) -> Typeface по адресу
+
+use core.str
+use core.group
+use tarantul.fonts.ttf
+use tarantul.firmware.firmware
+use tarantul.firmware.firmware.uefi
+use tarantul.graphics.graphics
+use tarantul.gop.gop
+use soft.system.acer_bench.network.netlog
+use soft.system.acer_bench.screen.system_panel
+use soft.system.acer_bench.screen.sides.panels
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use tarantul.uiengine.jtml.calls
+use tarantul.uiengine.draw.atoms
+use tarantul.uiengine.draw.typeface
+use tarantul.uiengine.themes
+
+FONTS_GUID = [83, 65, 76, 84, 73, 67, 45, 70, 79, 78, 84, 83, 0, 0, 0, 1]
+MARGIN = 12
+HEAD = 70
+
+skill look(whole) {
+    @side = gop.side_width(whole.width)
+    out panels.Look { wide = side - 2 * MARGIN, high = whole.height - 2 * MARGIN - HEAD, grow = 1 }
+}
+
+skill load_fonts(base) {
+    @whole = gop.open_whole(base)
+    @typed = atoms.with_fonts(themes.named("soft", whole), base)
+    @place = uefi.pages_below_4g(base, 1)
+    firmware.write_phys32(place, base, 0, typed.regular.place)
+    firmware.write_phys32(place, base, 4, typed.bold.place)
+    firmware.write_phys32(place, base, 8, typed.mono.place)
+    uefi.add_table(base, FONTS_GUID, place)
+    @sheet = typeface.load_icons(base) rescue |err| { out typed }
+    out atoms.with_icons(typed, sheet.set)
+}
+
+skill face(base, at) {
+    firmware.guest(at, base)
+    out typeface.Typeface { font = ttf.open(ttf.from_memory(at - base)), place = at, pages = typeface.LIMIT / typeface.PAGE }
+}
+
+skill skin(base) {
+    @plain = themes.named("soft", gop.open_whole(base))
+    @place = uefi.find_table(base, FONTS_GUID)
+    (place == 0) { out plain }
+    @faces = []
+    drum (3) {
+        @at = firmware.read32(place, base, beat * 4)
+        @made = face(base, at) rescue |err| { out plain }
+        faces = group.add(faces, made)
+    }
+    out atoms.with_faces(plain, group.get(faces, 0), group.get(faces, 1), group.get(faces, 2))
+}
+
+skill shown(base, canvas, text, palette) {
+    @tree = atoms.fitted(read.page(text), no, palette)
+    @runtime = jtml.mount(canvas, tree)
+    atoms.draw(canvas, runtime, palette)
+    out runtime
+}
+
+skill log(base, palette) {
+    @whole = gop.open_whole(base)
+    @side = gop.side_width(whole.width)
+    @canvas = netlog.canvas(base, netlog.LEFT_CANVAS, side, whole)
+    @text = calls.call("side-deck", [["panel", panels.network(look(whole), netlog.entries(base))]])
+    shown(base, canvas, text, palette)
+    out gop.put(base, canvas, whole, 0)
+}
+
+skill system(base, card, meter, forced, palette) {
+    @told = system_panel.facts(base, card, meter)
+    @journal = netlog.find(base)
+    @latest = 0
+    (group.count(told.rates) > 0) { latest = group.get(told.rates, group.count(told.rates) - 1) }
+    @heard = group.count(told.heard)
+    @mark = system_panel.signature("{told.heap_used}/{told.escapes}/{told.memory_used}/{told.memory_total}/{told.disk_used}/{told.disk_total}/{told.cable}/{told.incoming}/{told.outgoing}/{told.received}/{told.sent}/{latest}/{heard}/{told.wifi_step}/{told.wifi_text}")
+    (forced == no) {
+        (mark == netlog.number_at(base, journal, system_panel.SIGNATURE)) { out none }
+    }
+    netlog.set_number(base, journal, system_panel.SIGNATURE, mark)
+    @whole = gop.open_whole(base)
+    @side = gop.side_width(whole.width)
+    @canvas = netlog.canvas(base, system_panel.RIGHT_CANVAS, side, whole)
+    @text = calls.call("side-deck", [["panel", panels.system(look(whole), told)]])
+    shown(base, canvas, text, palette)
+    (meter.hidden == yes) { out none }
+    out gop.put(base, canvas, whole, whole.width - side)
+}
+
+skill tick(base, card, meter, palette) {
+    (system_panel.tick(base, card, meter) == no) { out none }
+    out system(base, card, meter, no, palette)
+}

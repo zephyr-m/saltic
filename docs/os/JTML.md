@@ -98,7 +98,7 @@ UIEngine — библиотека реестра (`git@github.com:zephyr-m/salti
 
 ## Старый uiengine
 
-`os/uiengine` (canvas, fonts, icons, shapes) — остаток прежнего движка с
+`soft/system/acer_bench/uiengine` (canvas, fonts, icons, shapes) — остаток прежнего движка с
 рисуемыми компонентами, мусор по решению автора. Он уходит в `.archive/`,
 когда его последние пользователи (программы Acer: chat, web, jumper, clay, cube, land и другие) переедут на
 JTML.

@@ -73,8 +73,8 @@ x86-версия с 154:47:128 — родной бэкенд, а не перев
 | Файл | Строк |
 |---|---:|
 | `os/fonts/spleen.saltic` | 990 |
-| `os/target/uefi_x86_64/agent/main.saltic` | 773 |
-| `os/uiengine/components/desktop/drop.saltic` | 686 — исключение по решению автора |
+| `soft/development/acer_agent/main.saltic` | 773 |
+| `soft/system/acer_bench/uiengine/components/desktop/drop.saltic` | 686 — исключение по решению автора |
 | `soul/seed/compiler/gorn/backend/layout.saltic` | 610 |
 | `soft/science/colony/colony.saltic` | 582 |
 | `registry/libraries/uiengine/jtml.saltic` | 566 |
@@ -82,7 +82,7 @@ x86-версия с 154:47:128 — родной бэкенд, а не перев
 | `soul/seed/compiler/gorn/codegen/main.saltic` | 550 |
 | `soul/seed/compiler/checker/walk.saltic` | 527 |
 | `soul/seed/compiler/gorn/state.saltic` | 509 |
-| `os/target/uefi_x86_64/screen/glyphs.saltic` | 502 |
+| `soft/system/acer_bench/screen/glyphs.saltic` | 502 |
 
 Самый длинный в прошлый раз — `soul/seed/proof/machine/translation.saltic`
 (2 158) — теперь в нём 24 строки.

@@ -12,7 +12,7 @@
 Сборка из корня репозитория:
 
 ```
-bootstrap/saltic-284-77-272-compiler-x86_64-linux soul/toolchains/wasm/main.saltic /tmp/wasm-cc 1073741824 x86_64
+bootstrap/saltic soul/toolchains/wasm/main.saltic /tmp/wasm-cc 1073741824 x86_64
 /tmp/wasm-cc soul/toolchains/wasm/checks/smoke.saltic /tmp/saltic-smoke.wasm 65536
 ```
 

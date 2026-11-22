@@ -1,0 +1,134 @@
+-- feed — лента агента: команды и ответы, крупная строка, часы, приём
+-- программы — запоминаются строками (agent/front.Entry в agent.lines) и
+-- показываются серединой экрана жителями UIEngine (agent/front.draw); баннер
+-- тревоги — сам по себе, тёмной полосой внизу (его зовут и без агента: авария,
+-- старт). В консольном, отданном (lent) режиме и под хранителем (saver) лента
+-- молчит.
+--
+-- paper(screen) -> цвет фона (тёмный, как у панелей)
+-- draw_header(agent, version, details) — метка версии и адрес в шапку
+-- text_bytes(text, limit) -> [байты], не больше limit
+-- show_command(agent, who, payload) — строка: время, кто, байты команды
+-- split_lines(bytes) -> [[байты]] по переводам строки
+-- show_reply / show_code(agent, bytes) — ответ (или код моноширинно), не
+--     больше REPLY_LINES строк и «… и ещё N строк»
+-- print_big(agent, line_bytes) — крупная строка
+-- draw_clock(agent) -> agent; середина заново, если сменилась секунда
+-- draw_progress(agent) — середина заново, когда процент приёма перешагнул
+--     очередные STEP % (agent.bar — показанный процент): перерисовка середины
+--     гладким шрифтом дорогая, на каждый процент заливка шла в шесть раз дольше
+-- banner(base, message) — тёмно-красная полоса с текстом внизу середины
+-- Внутри: quiet(agent) -> yes, если лента молчит; told(agent, bytes, kind)
+
+use core.str
+use core.group
+use tarantul.firmware.firmware.uefi
+use tarantul.firmware.firmware.clock
+use tarantul.graphics.graphics
+use tarantul.gop.gop
+use tarantul.lettering.lettering
+use soft.development.acer_agent.front
+
+MARGIN = 40
+BAR_SPACE = 64
+SHELF_SPACE = 212
+TOP = 92
+REPLY_LINES = 24
+STEP = 10
+
+skill paper(screen) {
+    out graphics.color(screen, 7, 9, 13)
+}
+
+skill quiet(agent) {
+    (agent.console == yes) { out yes }
+    (agent.saver == yes) { out yes }
+    out agent.lent
+}
+
+skill draw_header(agent, version, details) {
+    agent.badge = "агент {version}"
+    agent.address = details
+    (quiet(agent) == yes) { out none }
+    out front.draw(agent)
+}
+
+skill text_bytes(text, limit) {
+    @bytes = []
+    @count = str.bytes(text)
+    (count > limit) { count = limit }
+    drum (count) { bytes = group.add(bytes, str.byte(text, beat)) }
+    out bytes
+}
+
+skill show_command(agent, who, payload) {
+    (quiet(agent) == yes) { out none }
+    @moment = clock.clock_text(clock.local_time(uefi.now(agent.card.base)))
+    front.remember(agent, front.Entry { kind = front.COMMAND, time = moment, who = who, bytes = payload })
+    out front.draw(agent)
+}
+
+skill split_lines(bytes) {
+    @lines = []
+    @line = []
+    drum (bytes) {
+        (beat == 10) {
+            lines = group.add(lines, line)
+            line = []
+        }
+        ((beat == 10) == no) { line = group.add(line, beat) }
+    }
+    out group.add(lines, line)
+}
+
+skill told(agent, bytes, kind) {
+    (quiet(agent) == yes) { out none }
+    @all = split_lines(bytes)
+    @shown = group.count(all)
+    (shown > REPLY_LINES) { shown = REPLY_LINES }
+    drum (shown) { front.remember(agent, front.Entry { kind = kind, bytes = group.get(all, beat) }) }
+    @hidden = group.count(all) - shown
+    (hidden > 0) { front.remember(agent, front.Entry { kind = front.REPLY, bytes = text_bytes("… и ещё {hidden} строк", 200) }) }
+    out front.draw(agent)
+}
+
+skill show_reply(agent, bytes) {
+    out told(agent, bytes, front.REPLY)
+}
+
+skill show_code(agent, bytes) {
+    out told(agent, bytes, front.CODE)
+}
+
+skill print_big(agent, line_bytes) {
+    (quiet(agent) == yes) { out none }
+    front.remember(agent, front.Entry { kind = front.BIG, bytes = line_bytes })
+    out front.draw(agent)
+}
+
+skill draw_clock(agent) {
+    @moment = clock.local_time(uefi.now(agent.card.base))
+    (moment.second == agent.shown_second) { out agent }
+    agent.shown_second = moment.second
+    front.draw(agent)
+    out agent
+}
+
+skill draw_progress(agent) {
+    (agent.expected < 1) { out none }
+    @percent = agent.received / 1024 * 100 / (agent.expected / 1024 + 1)
+    (agent.received == agent.expected) { percent = 100 }
+    percent = percent / STEP * STEP
+    (percent == agent.bar) { out none }
+    agent.bar = percent
+    (quiet(agent) == yes) { out none }
+    out front.draw(agent)
+}
+
+skill banner(base, message) {
+    @screen = gop.open(base)
+    @top = screen.height - BAR_SPACE - 44
+    gop.fill(screen, 16, top, screen.width - 32, 36, graphics.color(screen, 49, 30, 40))
+    gop.fill(screen, 16, top, 3, 36, graphics.color(screen, 255, 90, 110))
+    out lettering.paint_text(screen, lettering.FACE_SMALL, 30, top + 12, message, graphics.color(screen, 255, 170, 180))
+}

@@ -1,0 +1,129 @@
+-- netlog — сетевой журнал: запросы к Saltic и его ответы, один на агента и
+-- любую программу; рисует его панель «Сеть» screen/sides (сам журнал только
+-- хранит строки и числа соседей). Строки лежат в страницах
+-- прошивки, помеченных таблицей конфигурации UEFI (GUID ниже), поэтому
+-- программа, запущенная агентом, пишет в тот же журнал. Если страницы
+-- журнала ниже окна программы, она заводит новые и ставит их в таблицу
+-- вместо старых. gop.open отдаёт программам экран без боковых четвертей.
+--
+-- Страницы: HEADER байт (след. ячейка u16, заполнено u16; с NUMBERS — числа
+-- соседей, например system_panel), затем SLOTS ячеек по SLOT байт:
+-- [вид, длина, байты строки]. Новые строки — внизу, длинные переносятся.
+--
+-- ask(base, bytes) / say(base, bytes) / say_text(base, text) — записать запрос
+--     или ответ; ошибок не бросают; перерисовать — sides.log
+-- clear(base) — забыть строки
+-- find(base) -> адрес журнала; новый, если его нет или он вне окна
+-- add(base, kind, bytes) — записать строку со временем; put(base, kind, line)
+--     — готовую строку; note(base, bytes) — строка журнала агента
+--     (agent.trace), ошибок не бросает
+-- entries(base) -> [[вид, [байты]], …] — строки журнала, новые первыми
+-- number_at(base, log, offset) / set_number(base, log, offset, value) —
+--     число до 2^28 в заголовке, offset от NUMBERS до HEADER
+-- canvas(base, offset, width, whole) -> graphics.Screen — задний буфер панели;
+--     его адрес хранится в заголовке по offset, вне окна — заводится новый
+
+use core.group
+use tarantul.firmware.firmware
+use tarantul.firmware.firmware.uefi
+use tarantul.firmware.firmware.clock
+use tarantul.graphics.graphics
+use tarantul.gop.gop
+use soft.system.acer_bench.network.netlog.journal
+
+GUID = [83, 65, 76, 84, 73, 67, 45, 78, 69, 84, 76, 79, 71, 0, 0, 2]
+PAGES = 3
+HEADER = 64
+NUMBERS = 16
+LEFT_CANVAS = 52
+SLOTS = 32
+SLOT = 256
+
+skill create(base) {
+    @place = uefi.pages_below_4g(base, PAGES)
+    drum (HEADER) { firmware.write8(place, base, beat, 0) }
+    uefi.add_table(base, GUID, place)
+    out place
+}
+
+skill find(base) {
+    @place = uefi.find_table(base, GUID)
+    (place == 0) { out create(base) }
+    out place
+}
+
+skill add(base, kind, bytes) {
+    out put(base, kind, journal.entry(kind, clock.clock_text(clock.local_time(uefi.now(base))), bytes, SLOT - 2))
+}
+
+skill entries(base) {
+    @log = find(base)
+    @next = firmware.read16(log, base, 0)
+    @found = []
+    drum (firmware.read16(log, base, 2)) {
+        @slot = firmware.add(log, HEADER + (next - 1 - beat + SLOTS) % SLOTS * SLOT)
+        @bytes = []
+        drum (firmware.read8(slot, base, 1)) { bytes = group.add(bytes, firmware.read8(slot, base, 2 + beat)) }
+        found = group.add(found, [firmware.read8(slot, base, 0), bytes])
+    }
+    out found
+}
+
+skill note(base, bytes) {
+    out put(base, journal.NOTE, journal.cut(bytes, SLOT - 2)) rescue |err| { none }
+}
+
+skill put(base, kind, line) {
+    @log = find(base)
+    @next = firmware.read16(log, base, 0)
+    @filled = firmware.read16(log, base, 2)
+    @slot = firmware.add(log, HEADER + next * SLOT)
+    firmware.write8(slot, base, 0, kind)
+    firmware.write8(slot, base, 1, group.count(line))
+    drum (group.count(line)) { firmware.write8(slot, base, 2 + beat, group.get(line, beat)) }
+    firmware.write16(log, base, 0, (next + 1) % SLOTS)
+    (filled < SLOTS) { firmware.write16(log, base, 2, filled + 1) }
+    out none
+}
+
+skill clear(base) {
+    @log = find(base)
+    firmware.write16(log, base, 0, 0)
+    out firmware.write16(log, base, 2, 0)
+}
+
+skill ask(base, bytes) {
+    out add(base, journal.ASK, bytes) rescue |err| { none }
+}
+
+skill say(base, bytes) {
+    out add(base, journal.SAY, bytes) rescue |err| { none }
+}
+
+skill say_text(base, text) {
+    out say(base, journal.bytes_of(text))
+}
+
+skill number_at(base, log, offset) {
+    out firmware.read16(log, base, offset) + firmware.read16(log, base, offset + 2) * 65536
+}
+
+skill set_number(base, log, offset, value) {
+    firmware.write16(log, base, offset, value % 65536)
+    out firmware.write16(log, base, offset + 2, value / 65536)
+}
+
+skill canvas(base, offset, width, whole) {
+    @log = find(base)
+    @place = firmware.read32(log, base, offset)
+    (place > 0) {
+        @seen = firmware.guest(place, base) rescue |err| { [] }
+        (group.count(seen) == 0) { place = 0 }
+    }
+    (place == 0) {
+        place = uefi.pages_in_window(base, (width * whole.height * graphics.PIXEL_BYTES + 4095) / 4096)
+        firmware.write_phys32(log, base, offset, place)
+    }
+    out gop.canvas_at(base, place, width, whole.height, whole)
+}
+

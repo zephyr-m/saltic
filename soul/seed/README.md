@@ -46,7 +46,7 @@
   машинный код: `codegen` — сердце (выражения, инструкции, вызовы) с
   помощниками `codegen/{lookup,emitters,loops,failures}`, `functions` собирает
   функции и константы; всё это говорит на договоре машины `gorn/backend`
-  (роли регистров и операции) методами исполнителя `compiler.executor`;
+  (роли регистров и операции) методами исполнителя — Box договора машины (`compiler.gorn.backend`);
   исполнители: `gorn/backend/riscv/rv32i` (`Executor`), родной x86-64
   `gorn/backend/x86/x86_64` (`Executor` на `encoder`, `roles`, `ops`,
   `access`, `control`; `platform` — вход и syscall Linux, `image` — ELF64,
@@ -56,7 +56,7 @@
   `rt_platform_*` (write, exit, key, file_read, file_write, now, wait, firmware,
   call), которые цель даёт программе; чего не умеет — ошибка `NotSupported`.
   Платформа — Box с методом `append(compiler)`: `platform.linux.Linux`,
-  `platform.uefi.Uefi`, `soul/seed/compiler/gorn/platform/qemu_virt.Platform`;
+  `platform.uefi.Uefi`, `compiler.gorn.platform.qemu_virt.QemuVirt`;
 - `gorn/backend/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
   машинный runtime `rt_*` на договоре машины (роли и операции `gorn/backend`,
   общий для исполнителей): арифметика, Box и группы, строки,
@@ -84,4 +84,4 @@
 из исходников. Рядом с каждым лежит паспорт `.txt`: версия, хеш исходников,
 чем собран и сходится ли самосборка.
 
-Проверка ядра входит в общий прогон `just test` (`tests/run.sh`).
+Проверка ядра входит в общий прогон `just test` (`tests/run/main.saltic`).

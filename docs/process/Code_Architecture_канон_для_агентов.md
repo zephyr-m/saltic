@@ -272,7 +272,7 @@ SDK не является складом потенциально полезны
   лимит кода). Проверяет `workbench/check/limits/main.saltic`.
 
 Образцы: `soul/seed/compiler/gorn/codegen/main.saltic`,
-`os/target/uefi_x86_64/platform/firmware.saltic`.
+`firmware` (пакет реестра, `registry/adapters/uefi_x86_64/firmware`).
 
 Ресурсы принадлежат использующему их модулю. Общие ресурсы поднимаются к ближайшему
 общему владельцу по тем же правилам, что и код.
