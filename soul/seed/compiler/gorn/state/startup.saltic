@@ -1,0 +1,144 @@
+-- startup — начало и конец программы в горне.
+-- open_program(billet) — программа исполнителя с входом _start, heap_size.
+-- emit_entry(billet) — код _start: стек входа — в rt_environment_capture (envp),
+--     куча — кусок heap_bytes у платформы (rt_platform_heap, Q-050; не дали —
+--     rt_out_of_memory), его начало — в слово HEAP_START, STORE_BOTTOM — её конец,
+--     rt_store_init ставит карту страниц и низ хранилища;
+--     свой стек — rt_platform_stack(load_stack_bytes: 1 ГБ на 8-байтном слове, 64 МБ на
+--     4-байтном; 1 ГБ — сдвигом из долей по STACK_MARGIN_BYTES: обычное число
+--     компилятора на 4-байтном хозяине его не вмещает): дала платформа — STACK
+--     переключается на него перед saltic_program, STACK_LIMIT — его низ плюс
+--     STACK_MARGIN_BYTES (страж рекурсии); не дала — стек входа и STACK_LIMIT = 0
+--     (стража нет); верх стека — в слово rt_stack_base (разбор карантина
+--     сканирует стек до него); аргументы через rt_cstring, вызов saltic_program,
+--     rt_platform_exit
+-- finish_data(billet) — выравнивание секций, saltic_arena и слово HEAP_START в bss
+--
+-- Startup: header / start / finish_data(billet) -> billet;
+--     load_stack_bytes(billet, role, margins) / load_heap_bytes(billet, role) -> billet
+
+use core.group
+use compiler.contract.abi
+use compiler.nodes
+use compiler.gorn.memory.model
+use compiler.gorn.backend
+use compiler.gorn.machine.wide
+
+HEAP_START = "saltic_heap_start"
+STACK_BASE = "rt_stack_base"
+STACK_BYTES_NARROW = 67108864
+STACK_UNITS_WIDE = 4096
+STACK_UNIT_SHIFT = 18
+STACK_MARGIN_BYTES = 262144
+
+Startup = Box {
+    skill open_program(billet) {
+        @executor = billet.executor
+        @heap = billet.heap_bytes
+        (heap.is_zero() == yes) {
+            billet.heap_bytes = wide.from_number(billet.default_heap_bytes)
+        }
+        billet = executor.new_program(billet, "_start")
+        out executor.heap_size(billet, billet.heap_bytes)
+    }
+
+    skill emit_entry(billet) {
+        @abi_ops = abi.Abi {}
+        @node_ops = nodes.Nodes {}
+        @executor = billet.executor
+        @words = billet.words
+        @params = node_ops.part(billet.entry, 1)
+        @param_count = group.count(params)
+        billet = executor.label(billet, "_start")
+        billet = executor.move(billet, backend.VALUE, backend.STACK)
+        billet = executor.call(billet, "rt_environment_capture")
+        billet = executor.load_immediate(billet, backend.FRAME, 0)
+        billet = load_heap_bytes(billet, backend.VALUE)
+        billet = executor.call(billet, "rt_platform_heap")
+        billet = executor.branch_zero(billet, backend.ERROR, ".L_start_heap_ready")
+        billet = executor.call(billet, "rt_out_of_memory")
+        billet = executor.label(billet, ".L_start_heap_ready")
+        billet = executor.move(billet, backend.HEAP_TOP, backend.VALUE)
+        billet = executor.load_address(billet, backend.SCRATCH0, HEAP_START, 0)
+        billet = executor.store(billet, backend.HEAP_TOP, backend.SCRATCH0, 0)
+        billet = load_heap_bytes(billet, backend.STORE_BOTTOM)
+        billet = executor.add(billet, backend.STORE_BOTTOM, backend.HEAP_TOP, backend.STORE_BOTTOM)
+        billet = executor.call(billet, "rt_store_init")
+        billet = executor.move(billet, backend.REGION_MARK, backend.HEAP_TOP)
+        billet = executor.load_immediate(billet, backend.STACK_LIMIT, 0)
+        billet = executor.load_address(billet, backend.SCRATCH0, STACK_BASE, 0)
+        billet = executor.store(billet, backend.STACK, backend.SCRATCH0, 0)
+        billet = load_stack_bytes(billet, backend.VALUE, 0)
+        billet = executor.call(billet, "rt_platform_stack")
+        billet = executor.branch_nonzero(billet, backend.ERROR, ".L_start_stack_ready")
+        billet = executor.load_address(billet, backend.SCRATCH0, STACK_BASE, 0)
+        billet = executor.store(billet, backend.VALUE, backend.SCRATCH0, 0)
+        billet = load_stack_bytes(billet, backend.SCRATCH1, 1)
+        billet = executor.sub(billet, backend.STACK_LIMIT, backend.VALUE, backend.SCRATCH1)
+        billet = executor.label(billet, ".L_start_stack_ready")
+        (billet.signals == yes) {
+            billet = executor.call(billet, "rt_install_signals")
+        }
+        billet = executor.load(billet, backend.VALUE, backend.STACK, 0)
+        billet = executor.load_immediate(billet, backend.SCRATCH0, param_count + 1)
+        billet = executor.branch_greater_equal(billet, backend.VALUE, backend.SCRATCH0, ".L_start_args_ready")
+        billet = executor.load_immediate(billet, backend.VALUE, abi_ops.with_tag(param_count, abi.TAG_NUMBER))
+        billet = executor.call(billet, "rt_missing_args")
+        billet = executor.label(billet, ".L_start_args_ready")
+        drum (param_count) {
+            billet = executor.load(billet, backend.VALUE, backend.STACK, (2 * beat + 2) * words.bytes)
+            billet = executor.call(billet, "rt_cstring")
+            billet = executor.push(billet, backend.VALUE)
+        }
+        drum (param_count) {
+            billet = executor.load(billet, backend.argument(beat), backend.STACK, (param_count - beat - 1) * words.bytes)
+        }
+        (param_count > 0) {
+            billet = executor.add_immediate(billet, backend.STACK, backend.STACK, param_count * words.bytes)
+        }
+        billet = executor.load_address(billet, backend.SCRATCH0, STACK_BASE, 0)
+        billet = executor.load(billet, backend.STACK, backend.SCRATCH0, 0)
+        billet = executor.call(billet, "saltic_program")
+        billet = executor.branch_zero(billet, backend.ERROR, ".L_start_done")
+        billet = executor.move(billet, backend.VALUE, backend.ERROR)
+        billet = executor.call(billet, "rt_start_failure")
+        billet = executor.label(billet, ".L_start_done")
+        billet = executor.load_immediate(billet, backend.VALUE, 0)
+        out executor.call(billet, "rt_platform_exit")
+    }
+
+    skill load_stack_bytes(billet, role, margins) {
+        @executor = billet.executor
+        (billet.words.bytes == 8) {
+            billet = executor.load_immediate(billet, role, STACK_UNITS_WIDE - margins)
+            out executor.shift_left(billet, role, role, STACK_UNIT_SHIFT)
+        }
+        out executor.load_immediate(billet, role, STACK_BYTES_NARROW - margins * STACK_MARGIN_BYTES)
+    }
+
+    skill load_heap_bytes(billet, role) {
+        @executor = billet.executor
+        (billet.words.bytes == 8) {
+            out executor.load_wide(billet, role, billet.heap_bytes)
+        }
+        @heap = billet.heap_bytes
+        out executor.load_word(billet, role, heap.narrow())
+    }
+
+    skill finish_data(billet) {
+        @executor = billet.executor
+        @heap = billet.heap_bytes
+        (heap.is_zero() == yes) {
+            billet.heap_bytes = wide.from_number(billet.default_heap_bytes)
+        }
+        billet = executor.heap_size(billet, billet.heap_bytes)
+        billet = executor.align(billet, backend.DATA, abi.OBJECT_ALIGNMENT)
+        billet = executor.align(billet, backend.RODATA, abi.OBJECT_ALIGNMENT)
+        billet = executor.align(billet, backend.BSS, model.ARENA_ALIGNMENT)
+        billet = executor.data_label(billet, backend.BSS, "saltic_arena")
+        billet = executor.reserve(billet, wide.from_number(billet.arena_bytes))
+        billet = executor.align(billet, backend.BSS, abi.OBJECT_ALIGNMENT)
+        billet = executor.data_label(billet, backend.BSS, HEAP_START)
+        out executor.reserve(billet, wide.from_number(billet.words.bytes))
+    }
+}

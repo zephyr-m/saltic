@@ -35,8 +35,13 @@ use compiler.checker
 use compiler.gorn.backend.runtime.tails
 use compiler.gorn.codegen.statements
 use compiler.gorn.codegen.literals
+use compiler.gorn.state.function
+use compiler.gorn.state.labels
+use compiler.gorn.state.locals
+use compiler.gorn.state.symbols
 
 Functions = Box {
+    label_ops = labels.Labels {},
     abi_ops = abi.Abi {},
     node_ops = nodes.Nodes {},
     constant_ops = constants.Constants {},
@@ -47,20 +52,22 @@ Functions = Box {
     skill compile_function(billet, name, params, body, subject, module) {
         @operators = billet.operators
         @executor = billet.executor
-        @locals = state.collect_locals(params, body)
-        @local_count = group.count(locals.names.items)
+        @gathered = locals.Locals {}
+        gathered.gather_params(params, body)
+        @found = gathered.names
+        @local_count = group.count(found.items)
         @frame = constant_ops.frame_bytes(billet.words, local_count)
-        @slots = state.make_slots(billet.words, locals.names, constant_ops.local_offset(billet.words, 0))
+        @slots = gathered.slot_table(billet.words, constant_ops.local_offset(billet.words, 0))
         @end = billet.fresh_label("{name}_return")
         @failure = billet.fresh_label("{name}_failure")
-        billet.current_function = state.Function {
+        billet.current_function = function.Function {
             name = name,
             slots = slots,
             end = end,
             failure = failure,
             subject = subject,
             module = module,
-            types = state.Symbols {},
+            types = symbols.Symbols {},
             lined = yes
         }
         @current = billet.current_function
@@ -70,7 +77,7 @@ Functions = Box {
         (str.bytes(subject) > 0) {
             current.set_type("$self", "box:{subject}")
         }
-        @function_label = str.concat("saltic_", state.safe(name))
+        @function_label = str.concat("saltic_", label_ops.safe(name))
         billet = executor.label(billet, function_label)
         (billet.signals == yes) {
             billet.placed = group.add(billet.placed, [function_label, literal_ops.string_label(billet, failure_ops.place_text(billet))])
@@ -91,7 +98,7 @@ Functions = Box {
             @slot = billet.slot_of(group.get(params, beat))
             billet = executor.store(billet, backend.argument(beat), backend.FRAME, slot)
         }
-        billet = executor.store_zero(billet, backend.FRAME, billet.slot_of(state.FAIL_LINE))
+        billet = executor.store_zero(billet, backend.FRAME, billet.slot_of(locals.FAIL_LINE))
         billet = executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
         billet = operators.compile_block(billet, body, no)
         billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
@@ -101,7 +108,7 @@ Functions = Box {
         billet = executor.label(billet, failure)
         billet = executor.load_address(billet, backend.VALUE, literal_ops.string_label(billet, failure_ops.place_text(billet)), 0)
         billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
-        billet = executor.load(billet, backend.ARG2, backend.FRAME, billet.slot_of(state.FAIL_LINE))
+        billet = executor.load(billet, backend.ARG2, backend.FRAME, billet.slot_of(locals.FAIL_LINE))
         billet = executor.call(billet, "rt_trail_push")
         billet = executor.load_immediate(billet, backend.VALUE, 0)
         billet = executor.load_immediate(billet, backend.ARG2, constants.REGION_VALUE_SKIPPED)
@@ -114,7 +121,7 @@ Functions = Box {
         billet = executor.move(billet, backend.STACK, backend.FRAME)
         billet = executor.move(billet, backend.FRAME, backend.SCRATCH0)
         billet = executor.ret(billet)
-        billet.current_function = state.Function {}
+        billet.current_function = function.Function {}
         out billet
     }
 
@@ -126,7 +133,7 @@ Functions = Box {
         @failure = billet.fresh_label("constant_failure")
         @finish = billet.fresh_label("constant_finish")
         @before = billet.current_function
-        billet.current_function = state.Function {
+        billet.current_function = function.Function {
             name = constant.name,
             module = constant.text
         }
@@ -298,7 +305,7 @@ Functions = Box {
         @endings = tails.Tails {}
         @executor = billet.executor
         @words = billet.words
-        @label = state.dispatch_label(method)
+        @label = label_ops.dispatch_label(method)
         @missing = "{label}_missing"
         billet = executor.label(billet, label)
         billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.TAG_MASK)
@@ -316,7 +323,7 @@ Functions = Box {
                 @next = "{label}_{beat}"
                 billet = executor.load_immediate(billet, backend.SCRATCH1, abi_ops.with_tag(beat + 1, abi.TAG_NUMBER))
                 billet = executor.branch_not_equal(billet, backend.SCRATCH2, backend.SCRATCH1, next)
-                billet = executor.jump(billet, str.concat("saltic_", state.safe(str.concat("{box.name}.", method))))
+                billet = executor.jump(billet, str.concat("saltic_", label_ops.safe(str.concat("{box.name}.", method))))
                 billet = executor.label(billet, next)
             }
         }

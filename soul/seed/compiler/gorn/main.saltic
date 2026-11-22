@@ -6,15 +6,16 @@
 -- heap_bytes — wide, кратное model.ALIGNMENT и не меньше model.MINIMUM_HEAP_BYTES;
 -- на 4-байтном слове исполнителя — меньше 4 ГБ; иначе ValueOutsideRange.
 --
--- valid_heap_size(heap_bytes) -> yes/no
--- compile_state(ast, heap_bytes, executor, platform) -> State; ValueOutsideRange
--- compile_state_from(…, source, signals) — то же, source — путь главного
---     исходника (в пути ошибки вместо «главный файл»), signals — yes: программа
---     ставит обработчик сбоя памяти (сейчас только x86-64 Linux)
--- compile_machine(ast, heap_bytes, executor, platform) -> machine исполнителя
--- compile_machine_from(ast, heap_bytes, executor, platform, source, signals) — то же
--- compile_machine_with_heap(ast, heap_bytes) -> machine RV32I для Linux
---     (riscv.Executor + linux.Linux, ближние вызовы) — для тестов
+-- Gorn:
+--     valid_heap_size(heap_bytes) -> yes/no
+--     compile_state(ast, heap_bytes, executor, platform) -> State; ValueOutsideRange
+--     compile_state_from(…, source, signals) — то же, source — путь главного
+--         исходника (в пути ошибки вместо «главный файл»), signals — yes: программа
+--         ставит обработчик сбоя памяти (сейчас только x86-64 Linux)
+--     compile_machine(ast, heap_bytes, executor, platform) -> machine исполнителя
+--     compile_machine_from(ast, heap_bytes, executor, platform, source, signals) — то же
+--     compile_machine_with_heap(ast, heap_bytes) -> machine RV32I для Linux
+--         (riscv.Executor + linux.Linux, ближние вызовы) — для тестов
 --
 -- Дети: state, constants, functions, codegen, backend (договор машины;
 --     исполнитель и рантайм RV32I — в backend/riscv/rv32i), platform (договор платформы).
@@ -29,77 +30,82 @@ use compiler.gorn.memory.model
 use compiler.gorn.machine.wide
 use compiler.gorn.machine.word
 use compiler.gorn.functions
-
-skill valid_heap_size(heap_bytes) {
-    @low = heap_bytes.low
-    (low.b0 % model.ALIGNMENT > 0) {
-        out no
-    }
-    @upper = heap_bytes.high
-    (upper.is_zero() == no) {
-        out yes
-    }
-    ((low.b3 > 0) ○○ (low.b2 > 0) ○○ (low.b1 > 0)) {
-        out yes
-    }
-    (low.b0 < model.MINIMUM_HEAP_BYTES) {
-        out no
-    }
-    out yes
-}
-
-skill compile_state(ast, heap_bytes, executor, platform) {
-    out compile_state_from(ast, heap_bytes, executor, platform, "", no)
-}
-
-skill compile_state_from(ast, heap_bytes, executor, platform, source, signals) {
-    @constant_ops = constants.Constants {}
-    @function_ops = functions.Functions {}
-    @runtime_part = runtime.Runtime {}
-    (valid_heap_size(heap_bytes) == no) {
-        out error.ValueOutsideRange
-    }
-    @billet = state.State {
-        source = source,
-        signals = signals,
-        tree = ast,
-        heap_bytes = heap_bytes,
-        executor = executor,
-        arena_bytes = platform.arena_bytes,
-        default_heap_bytes = platform.default_heap_bytes
-    }
-    billet.collect_top_level()
-    billet = state.header(billet)
-    @heap_high = billet.heap_bytes.high
-    ((billet.words.bytes == 4) ○ (heap_high.is_zero() == no)) {
-        out error.ValueOutsideRange
-    }
-    billet = state.start(billet)
-    @seen = function_ops.reach(billet)
-    billet = function_ops.compile_functions(billet, seen)
-    billet = function_ops.compile_constants(billet, seen)
-    billet = runtime_part.append_runtime(billet)
-    billet = platform.append(billet)
-    billet = constant_ops.emit_storage(billet)
-    billet = state.finish_data(billet)
-    out billet
-}
-
-skill compile_machine(ast, heap_bytes, executor, platform) {
-    @billet = compile_state(ast, heap_bytes, executor, platform)
-    out billet.machine
-}
-
-skill compile_machine_from(ast, heap_bytes, executor, platform, source, signals) {
-    @billet = compile_state_from(ast, heap_bytes, executor, platform, source, signals)
-    out billet.machine
-}
-
-skill compile_machine_with_heap(ast, heap_bytes) {
-    out compile_machine(ast, heap_bytes, riscv.Executor {}, linux.Linux {})
-}
+use compiler.gorn.state.startup
 
 program() {
     io.show("библиотека компилятора")
     out none
+}
+
+Gorn = Box {
+    startup_ops = startup.Startup {}
+
+    skill valid_heap_size(heap_bytes) {
+        @low = heap_bytes.low
+        (low.b0 % model.ALIGNMENT > 0) {
+            out no
+        }
+        @upper = heap_bytes.high
+        (upper.is_zero() == no) {
+            out yes
+        }
+        ((low.b3 > 0) ○○ (low.b2 > 0) ○○ (low.b1 > 0)) {
+            out yes
+        }
+        (low.b0 < model.MINIMUM_HEAP_BYTES) {
+            out no
+        }
+        out yes
+    }
+
+    skill compile_state(ast, heap_bytes, executor, platform) {
+        out compile_state_from(ast, heap_bytes, executor, platform, "", no)
+    }
+
+    skill compile_state_from(ast, heap_bytes, executor, platform, source, signals) {
+        @constant_ops = constants.Constants {}
+        @function_ops = functions.Functions {}
+        @runtime_part = runtime.Runtime {}
+        (valid_heap_size(heap_bytes) == no) {
+            out error.ValueOutsideRange
+        }
+        @billet = state.State {
+            source = source,
+            signals = signals,
+            tree = ast,
+            heap_bytes = heap_bytes,
+            executor = executor,
+            arena_bytes = platform.arena_bytes,
+            default_heap_bytes = platform.default_heap_bytes
+        }
+        billet.collect_top_level()
+        billet = startup_ops.open_program(billet)
+        @heap_high = billet.heap_bytes.high
+        ((billet.words.bytes == 4) ○ (heap_high.is_zero() == no)) {
+            out error.ValueOutsideRange
+        }
+        billet = startup_ops.emit_entry(billet)
+        @seen = function_ops.reach(billet)
+        billet = function_ops.compile_functions(billet, seen)
+        billet = function_ops.compile_constants(billet, seen)
+        billet = runtime_part.append_runtime(billet)
+        billet = platform.append(billet)
+        billet = constant_ops.emit_storage(billet)
+        billet = startup_ops.finish_data(billet)
+        out billet
+    }
+
+    skill compile_machine(ast, heap_bytes, executor, platform) {
+        @billet = compile_state(ast, heap_bytes, executor, platform)
+        out billet.machine
+    }
+
+    skill compile_machine_from(ast, heap_bytes, executor, platform, source, signals) {
+        @billet = compile_state_from(ast, heap_bytes, executor, platform, source, signals)
+        out billet.machine
+    }
+
+    skill compile_machine_with_heap(ast, heap_bytes) {
+        out compile_machine(ast, heap_bytes, riscv.Executor {}, linux.Linux {})
+    }
 }

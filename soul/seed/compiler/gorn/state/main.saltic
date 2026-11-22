@@ -1,0 +1,182 @@
+-- state — состояние компилятора State: таблицы символов, текущий навык,
+-- метки, сбор Box, enum и верхнего уровня. Части — у детей: symbol, symbols
+-- (таблица — хозяин себя, поиск с конца), function (текущий навык), stub
+-- (заглушка перехода на ошибку), locals (сбор локальных имён и слоты),
+-- startup (вход _start и данные в конце), labels (имена меток). Команды —
+-- только через методы исполнителя договора (backend) в executor; machine —
+-- его программа.
+--
+-- State { …, executor, machine, words } — words — раскладка памяти под слово;
+--     arena_bytes, default_heap_bytes — память тела, их даёт платформа
+--     исполнителя (abi.shape, по умолчанию 4 байта); executor назначает горн
+--     при создании; machine — его программа
+--     fresh_label(prefix) -> уникальная метка; at_line(node) — строка node в
+--     current_function.line; slot_of(name) / field(name) -> смещение / id поля
+--     collect_box / collect_enum(item, module) / collect_top_level()
+--     box_number(name) -> номер Box (с 1)
+
+use core.str
+use core.group
+use core.num
+use compiler.contract.abi
+use compiler.contract.abi.shape
+use compiler.nodes
+use compiler.gorn.memory.model
+use compiler.gorn.backend
+use compiler.gorn.machine.word
+use compiler.gorn.machine.wide
+use compiler.gorn.codegen
+use compiler.gorn.codegen.calls
+use compiler.gorn.codegen.statements
+use compiler.gorn.state.symbol
+use compiler.gorn.state.symbols
+use compiler.gorn.state.function
+use compiler.gorn.state.labels
+
+State = Box {
+    label_ops = labels.Labels {},
+    abi_ops = abi.Abi {},
+    node_ops = nodes.Nodes {},
+    source = "",
+    signals = no,
+    placed = [],
+    tree = [],
+    executor = backend.unassigned(),
+    machine = backend.unassigned(),
+    words = shape.Words {},
+    heap_bytes = wide.Wide {},
+    arena_bytes = model.ARENA_BYTES,
+    default_heap_bytes = model.DEFAULT_HEAP_BYTES,
+    strings = symbols.Symbols {},
+    serial = 0,
+    constants = symbols.Symbols {},
+    boxes = symbols.Symbols {},
+    enums = symbols.Symbols {},
+    variants = symbols.Symbols {},
+    errors = symbols.Symbols {},
+    fields = symbols.Symbols {},
+    skills = symbols.Symbols {},
+    natives = symbols.Symbols {},
+    entry = [],
+    current_function = function.Function {},
+    next_enum_id = 1,
+    next_field_id = 1,
+    dispatches = [],
+    expressions = codegen.Codegen {},
+    call_ops = calls.Calls {},
+    operators = statements.Statements {}
+
+    skill fresh_label(prefix) {
+        @safe_prefix = label_ops.safe(prefix)
+        @label = ".L_{safe_prefix}_{serial}"
+        serial = serial + 1
+        out label
+    }
+
+    skill at_line(node) {
+        @place = node_ops.location(node)
+        (group.get(place, 0) > 0) {
+            current_function.line = group.get(place, 0)
+        }
+        out none
+    }
+
+    skill slot_of(name) {
+        @billet_current_function_slots = current_function.slots
+        @slot = billet_current_function_slots.find(name)
+        out slot.value
+    }
+
+    skill field(name) {
+        @billet_fields = fields
+        @known = billet_fields.find(name)
+        out known.value
+    }
+
+    skill collect_box(item, module) {
+        @name = node_ops.qualified(module, node_ops.part(item, 1))
+        @billet_boxes = boxes
+        billet_boxes.add_named(name, "box", item, module)
+        @slot = 0
+        drum (group.count(node_ops.plain(item)) - 2) {
+            @member = node_ops.part(item, beat + 2)
+            (node_ops.tag(member) == "field") {
+                @field_name = node_ops.part(member, 1)
+                @billet_fields = fields
+                (billet_fields.has(field_name) == no) {
+                    billet_fields.keep(symbol.Symbol {
+                        name = field_name,
+                        kind = "field",
+                        node = member,
+                        value = next_field_id,
+                        slot = slot
+                    })
+                    next_field_id = next_field_id + 1
+                }
+                slot = slot + 1
+            }
+        }
+        out none
+    }
+
+    skill collect_enum(item, module) {
+        @name = node_ops.qualified(module, node_ops.part(item, 1))
+        @billet_enums = enums
+        billet_enums.add_named(name, "enum", item, module)
+        drum (group.count(node_ops.plain(item)) - 2) {
+            @variant = node_ops.part(item, beat + 2)
+            @full_name = "{name}."
+            full_name = str.concat(full_name, variant)
+            @value = abi_ops.with_tag(next_enum_id, abi.TAG_ENUM)
+            @billet_variants = variants
+            billet_variants.add(full_name, "variant", item, value)
+            (billet_variants.has(variant) == no) {
+                billet_variants.add(variant, "variant", item, value)
+            }
+            next_enum_id = next_enum_id + 1
+        }
+        out none
+    }
+
+    skill collect_top_level() {
+        drum (group.count(tree) - 1) {
+            @item = group.get(tree, beat + 1)
+            @tag = node_ops.tag(item)
+            @module = node_ops.module_name(item)
+            (tag == "const") {
+                @billet_constants = constants
+                billet_constants.add_named(node_ops.qualified(module, node_ops.part(item, 1)), "const", node_ops.part(item, 2), module)
+            }
+            (tag == "box") {
+                collect_box(item, module)
+            }
+            (tag == "enum") {
+                collect_enum(item, module)
+            }
+            (tag == "skill") {
+                @billet_skills = skills
+                billet_skills.add_named(node_ops.qualified(module, node_ops.part(item, 1)), "skill", item, module)
+            }
+            (tag == "native") {
+                @billet_natives = natives
+                billet_natives.add_named(node_ops.qualified(module, node_ops.part(item, 1)), "native", item, module)
+            }
+            (tag == "entry") {
+                entry = item
+            }
+        }
+        out none
+    }
+
+    skill box_number(name) {
+        drum (group.count(boxes.items)) {
+            @box = group.get(boxes.items, beat)
+            (box.name == name) {
+                out beat + 1
+            }
+        }
+        out 0
+    }
+
+}
+

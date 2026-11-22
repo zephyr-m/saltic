@@ -1,0 +1,319 @@
+-- shared — разделяемая библиотека ELF64 (ET_DYN) AArch64 из той же раскладки,
+-- что у программы ARM64: код с адреса 65536, адрес в памяти = смещение в
+-- файле. Таблицы связи — заготовки с метками внутри программы: reserve кладёт
+-- при сборке dynstr и хеш готовыми, а dynsym, rela, .dynamic и слоты GOT —
+-- нулями; write после раскладки заполняет их адресами и пишет файл: PT_LOAD
+-- RX с нуля файла (заголовки, код, rodata, таблицы), PT_LOAD RW (data с GOT
+-- и .dynamic, bss), PT_DYNAMIC, PT_GNU_STACK; секции .dynstr, .text, .dynamic
+-- и .shstrtab — без них bionic библиотеку не грузит; .dynsym, .hash и
+-- .rela.dyn — для инструментов (readelf). Импорт связывается
+-- R_AARCH64_GLOB_DAT в свой слот GOT; экспорт — метка кода. Хеш SysV — одна
+-- корзина, цепочка через все символы.
+--
+-- Что библиотека говорит о себе — shared/library (Library); bundle — она.
+-- got_slot(name) -> метка слота GOT функции name
+-- reserve(billet, bundle) -> compiler — заготовки таблиц
+-- write_library(path, machine, bundle) — файл .so (правки семьи чинит layout.resolve); UnresolvedPatch, WriteFailed
+-- Внутри: strings / offset(bundle, name), u16 / u32 / u64(target, …),
+--     put_bytes(machine, label, at, bytes), header, program_header,
+--     section_header(…, links, entry) — links — [sh_link, sh_info]
+
+use core.str
+use core.group
+use compiler.gorn.backend
+use compiler.gorn.backend.layout
+use compiler.gorn.backend.buffer
+use compiler.gorn.backend.arm.arm64.platform
+use compiler.gorn.linker.elf64
+use compiler.gorn.machine.word
+use compiler.gorn.machine.wide
+use compiler.gorn.linker.shared.library
+
+DYNSTR = "so_dynstr"
+HASH = "so_hash"
+DYNSYM = "so_dynsym"
+RELA = "so_rela"
+DYNAMIC = "so_dynamic"
+SYMBOL = 24
+DYNAMIC_ENTRY = 16
+GLOBAL_FUNCTION = 18
+GLOB_DAT = 1025
+TEXT_SECTION = 2
+SHARED = 3
+LOAD = 1
+DYNAMIC_SEGMENT = 2
+GNU_STACK = 1685382481
+READ_EXECUTE = 5
+READ_WRITE = 6
+STRTAB_TYPE = 3
+PROGBITS = 1
+DYNAMIC_TYPE = 6
+DYNSYM_TYPE = 11
+HASH_TYPE = 5
+RELA_TYPE = 4
+DYNSYM_SECTION = 4
+SECTION_NAMES = [".dynstr", ".text", ".dynamic", ".dynsym", ".hash", ".rela.dyn", ".shstrtab"]
+DT_NULL = 0
+DT_NEEDED = 1
+DT_HASH = 4
+DT_STRTAB = 5
+DT_SYMTAB = 6
+DT_RELA = 7
+DT_RELASZ = 8
+DT_RELAENT = 9
+DT_STRSZ = 10
+DT_SYMENT = 11
+DT_SONAME = 14
+
+Shared = Box {
+    elf_writer = elf64.Elf64 {}
+
+    skill got_slot(name) {
+        out "so_got_{name}"
+    }
+
+    skill strings(bundle) {
+        out group.concat(group.concat(group.concat(bundle.needed, [bundle.name]), bundle.imports), bundle.exports)
+    }
+
+    skill offset(bundle, name) {
+        @at = 1
+        drum (strings(bundle)) {
+            (beat == name) {
+                out at
+            }
+            at = at + str.bytes(beat) + 1
+        }
+        out 0
+    }
+
+    skill string_bytes(bundle) {
+        @total = 1
+        drum (strings(bundle)) {
+            total = total + str.bytes(beat) + 1
+        }
+        out total
+    }
+
+    skill symbols(bundle) {
+        out 1 + group.count(bundle.imports) + group.count(bundle.exports)
+    }
+
+    skill dynamic_count(bundle) {
+        out group.count(bundle.needed) + 11
+    }
+
+    skill zeroes(billet, where, count) {
+        @executor = billet.executor
+        drum (count) {
+            billet = executor.data_byte(billet, where, 0)
+        }
+        out billet
+    }
+
+    skill reserve(billet, bundle) {
+        @executor = billet.executor
+        @count = symbols(bundle)
+        billet = executor.align(billet, backend.RODATA, 8)
+        billet = executor.data_label(billet, backend.RODATA, DYNSTR)
+        billet = executor.data_byte(billet, backend.RODATA, 0)
+        drum (strings(bundle)) {
+            billet = executor.data_text(billet, backend.RODATA, beat)
+        }
+        billet = executor.align(billet, backend.RODATA, 8)
+        billet = executor.data_label(billet, backend.RODATA, HASH)
+        billet = executor.data32(billet, backend.RODATA, word.from_number(1))
+        billet = executor.data32(billet, backend.RODATA, word.from_number(count))
+        billet = executor.data32(billet, backend.RODATA, word.from_number(count - 1))
+        billet = executor.data32(billet, backend.RODATA, word.from_number(0))
+        drum (count - 1) {
+            billet = executor.data32(billet, backend.RODATA, word.from_number(beat))
+        }
+        billet = executor.align(billet, backend.RODATA, 8)
+        billet = executor.data_label(billet, backend.RODATA, DYNSYM)
+        billet = zeroes(billet, backend.RODATA, count * SYMBOL)
+        billet = executor.data_label(billet, backend.RODATA, RELA)
+        billet = zeroes(billet, backend.RODATA, group.count(bundle.imports) * SYMBOL)
+        billet = executor.align(billet, backend.DATA, 8)
+        billet = executor.data_label(billet, backend.DATA, DYNAMIC)
+        billet = zeroes(billet, backend.DATA, dynamic_count(bundle) * DYNAMIC_ENTRY)
+        drum (bundle.imports) {
+            billet = executor.data_label(billet, backend.DATA, got_slot(beat))
+            billet = zeroes(billet, backend.DATA, 8)
+        }
+        out billet
+    }
+
+    skill u16(target, value) {
+        target.append_u16(value)
+        out target
+    }
+
+    skill u32(target, value) {
+        target.append_word(word.from_number(value))
+        out target
+    }
+
+    skill u64(target, value) {
+        out elf_writer.append_quad(target, wide.from_number(value))
+    }
+
+    skill put_bytes(machine, label, at, bytes) {
+        @found = machine.find_label(label)
+        @section = machine.section_buffer(found.section)
+        @start = found.offset + at
+        drum (bytes.length) {
+            section.set_byte(start + beat, bytes.byte_at(beat))
+        }
+        out machine
+    }
+
+    skill address(machine, current, label) {
+        @placed = machine.label_address(current, label, 0)
+        out placed.as_number()
+    }
+
+    skill symbol(name, section, value) {
+        @entry = u32(buffer.empty(), name)
+        entry.append_byte(GLOBAL_FUNCTION)
+        entry.append_byte(0)
+        entry = u16(entry, section)
+        entry = u64(entry, value)
+        out u64(entry, 0)
+    }
+
+    skill dynamic_pair(target, tag, value) {
+        target = u64(target, tag)
+        out u64(target, value)
+    }
+
+    skill fill_tables(machine, current, bundle) {
+        @index = 1
+        drum (bundle.imports) {
+            machine = put_bytes(machine, DYNSYM, index * SYMBOL, symbol(offset(bundle, beat), 0, 0))
+            @relocation = u64(buffer.empty(), address(machine, current, got_slot(beat)))
+            relocation = u32(relocation, GLOB_DAT)
+            relocation = u32(relocation, index)
+            machine = put_bytes(machine, RELA, (index - 1) * SYMBOL, u64(relocation, 0))
+            index = index + 1
+        }
+        drum (bundle.exports) {
+            machine = put_bytes(machine, DYNSYM, index * SYMBOL, symbol(offset(bundle, beat), TEXT_SECTION, address(machine, current, beat)))
+            index = index + 1
+        }
+        @table = buffer.empty()
+        drum (bundle.needed) {
+            table = dynamic_pair(table, DT_NEEDED, offset(bundle, beat))
+        }
+        table = dynamic_pair(table, DT_SONAME, offset(bundle, bundle.name))
+        table = dynamic_pair(table, DT_HASH, address(machine, current, HASH))
+        table = dynamic_pair(table, DT_STRTAB, address(machine, current, DYNSTR))
+        table = dynamic_pair(table, DT_SYMTAB, address(machine, current, DYNSYM))
+        table = dynamic_pair(table, DT_STRSZ, string_bytes(bundle))
+        table = dynamic_pair(table, DT_SYMENT, SYMBOL)
+        table = dynamic_pair(table, DT_RELA, address(machine, current, RELA))
+        table = dynamic_pair(table, DT_RELASZ, group.count(bundle.imports) * SYMBOL)
+        table = dynamic_pair(table, DT_RELAENT, SYMBOL)
+        table = dynamic_pair(table, DT_NULL, 0)
+        table = dynamic_pair(table, DT_NULL, 0)
+        out put_bytes(machine, DYNAMIC, 0, table)
+    }
+
+    skill header(target, sections_at) {
+        @identity = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        drum (identity) {
+            target.append_byte(beat)
+        }
+        target = u16(target, SHARED)
+        target = u16(target, elf64.AARCH64)
+        target = u32(target, 1)
+        target = u64(target, 0)
+        target = u64(target, elf64.HEADER_BYTES)
+        target = u64(target, sections_at)
+        target = u32(target, 0)
+        target = u16(target, elf64.HEADER_BYTES)
+        target = u16(target, elf64.PROGRAM_HEADER_BYTES)
+        target = u16(target, 4)
+        target = u16(target, 64)
+        target = u16(target, group.count(SECTION_NAMES) + 1)
+        out u16(target, group.count(SECTION_NAMES))
+    }
+
+    skill program_header(target, kind, flags, at, file_bytes, memory_bytes, align) {
+        target = u32(target, kind)
+        target = u32(target, flags)
+        target = u64(target, at)
+        target = u64(target, at)
+        target = u64(target, at)
+        target = u64(target, file_bytes)
+        target = elf_writer.append_quad(target, memory_bytes)
+        out u64(target, align)
+    }
+
+    skill section_header(target, name, kind, flags, at, size, links, entry) {
+        @loaded = at
+        (flags == 0) {
+            loaded = 0
+        }
+        target = u32(target, name)
+        target = u32(target, kind)
+        target = u64(target, flags)
+        target = u64(target, loaded)
+        target = u64(target, at)
+        target = u64(target, size)
+        target = u32(target, group.get(links, 0))
+        target = u32(target, group.get(links, 1))
+        target = u64(target, 8)
+        out u64(target, entry)
+    }
+
+    skill write_library(path, machine, bundle) {
+        @page = platform.PAGE
+        @runtime = platform.LinuxRuntime {}
+        machine = runtime.pages(machine)
+        machine = layout.resolve(machine) rescue |failure| {
+            out error.UnresolvedPatch
+        }
+        @current = machine.layout()
+        machine = fill_tables(machine, current, bundle)
+        @body = machine.payload(current)
+        @data_at = page + current.data_offset
+        @data_bytes = current.file_size - current.data_offset
+        @sections_at = page + body.length
+        sections_at = sections_at + (8 - sections_at % 8) % 8
+        @dynamic_at = address(machine, current, DYNAMIC)
+        @dynamic_bytes = dynamic_count(bundle) * DYNAMIC_ENTRY
+
+        @result = header(buffer.empty(), sections_at)
+        result = program_header(result, LOAD, READ_EXECUTE, 0, data_at, wide.from_number(data_at), page)
+        @bss_size = machine.bss_size
+        result = program_header(result, LOAD, READ_WRITE, data_at, data_bytes, bss_size.sum_number(data_bytes), page)
+        result = program_header(result, DYNAMIC_SEGMENT, READ_WRITE, dynamic_at, dynamic_bytes, wide.from_number(dynamic_bytes), 8)
+        result = program_header(result, GNU_STACK, READ_WRITE, 0, 0, wide.Wide {}, 16)
+        result.pad_to(page)
+        result.append_buffer(body)
+        result.pad_to(sections_at)
+
+        @names = buffer.empty()
+        names.append_byte(0)
+        @name_at = []
+        drum (SECTION_NAMES) {
+            name_at = group.add(name_at, names.length)
+            names.append_text(beat)
+            names.append_byte(0)
+        }
+        @names_at = sections_at + (group.count(SECTION_NAMES) + 1) * 64
+        @imports = group.count(bundle.imports)
+        result = section_header(result, 0, 0, 0, 0, 0, [0, 0], 0)
+        result = section_header(result, group.get(name_at, 0), STRTAB_TYPE, 2, address(machine, current, DYNSTR), string_bytes(bundle), [0, 0], 0)
+        @load_address = machine.load_address
+        result = section_header(result, group.get(name_at, 1), PROGBITS, 6, load_address.as_number(), machine.code.length, [0, 0], 0)
+        result = section_header(result, group.get(name_at, 2), DYNAMIC_TYPE, 3, dynamic_at, dynamic_bytes, [1, 0], DYNAMIC_ENTRY)
+        result = section_header(result, group.get(name_at, 3), DYNSYM_TYPE, 2, address(machine, current, DYNSYM), symbols(bundle) * SYMBOL, [1, 1], SYMBOL)
+        result = section_header(result, group.get(name_at, 4), HASH_TYPE, 2, address(machine, current, HASH), (symbols(bundle) + 3) * 4, [DYNSYM_SECTION, 0], 4)
+        result = section_header(result, group.get(name_at, 5), RELA_TYPE, 2, address(machine, current, RELA), imports * SYMBOL, [DYNSYM_SECTION, 0], SYMBOL)
+        result = section_header(result, group.get(name_at, 6), STRTAB_TYPE, 0, names_at, names.length, [0, 0], 0)
+        result.append_buffer(names)
+        out result.write_program(path)
+    }
+}

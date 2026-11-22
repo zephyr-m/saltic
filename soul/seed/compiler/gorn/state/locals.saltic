@@ -1,0 +1,143 @@
+-- locals — сбор локальных имён навыка: параметры, переменные и служебные
+-- ячейки drum, always и rescue по всему поддереву (обход — nodes.children),
+-- плюс FAIL_LINE — строка, где ошибка покинула оператор навыка. Слоты —
+-- смещения от FRAME вниз, по слову на имя.
+--
+-- Locals { names, next_drum, next_rescue, next_always, node_ops } — names —
+--     собранное (symbols.Symbols)
+--     add_local(name) — имя, если его ещё нет
+--     gather(node) — имена и служебные ячейки поддерева
+--     gather_params(params, body) — параметры, FAIL_LINE и тело
+--     gather_assigned(node) — имена, которым поддерево присваивает
+--     slot_table(words, first_slot) -> Symbols слотов: first_slot и вниз на слово
+--     outer_assigned(block) -> имена снаружи блока, которым блок присваивает
+--     uses_beat(node) -> yes/no: есть ли beat (во вложенный drum не заходит —
+--         там свой beat)
+
+use core.group
+use core.num
+use compiler.nodes
+use compiler.gorn.state.symbols
+
+FAIL_LINE = "$fail_line"
+
+Locals = Box {
+    names = symbols.Symbols {},
+    next_drum = 1,
+    next_rescue = 1,
+    next_always = 1,
+    node_ops = nodes.Nodes {}
+
+    skill add_local(name) {
+        (names.has(name) == no) {
+            names.add(name, "local", [], 0)
+        }
+        out none
+    }
+
+    skill gather(node) {
+        @plain = node_ops.plain(node)
+        @tag = group.get(plain, 0)
+        (tag == "rescue") {
+            @rescue_number = num.text(next_rescue)
+            add_local("$rescue:{rescue_number}")
+            next_rescue = next_rescue + 1
+            gather(group.get(plain, 1))
+            add_local(group.get(plain, 2))
+            gather(group.get(plain, 3))
+            out none
+        }
+        (tag == "present") {
+            gather(group.get(plain, 1))
+            add_local(group.get(plain, 2))
+            gather(group.get(plain, 3))
+            out none
+        }
+        (tag == "var") {
+            add_local(group.get(plain, 1))
+        }
+        (tag == "always") {
+            @always_number = num.text(next_always)
+            next_always = next_always + 1
+            add_local("$always_mark:{always_number}")
+        }
+        (tag == "drum") {
+            @drum_number = num.text(next_drum)
+            next_drum = next_drum + 1
+            add_local("$drum:{drum_number}")
+            add_local("$drum_source:{drum_number}")
+            add_local("$drum_index:{drum_number}")
+            add_local("$drum_saved:{drum_number}")
+            add_local("$drum_mark:{drum_number}")
+            add_local("$drum_limit:{drum_number}")
+            add_local(nodes.DRUM_BEAT)
+        }
+        drum (node_ops.children(node)) {
+            gather(beat)
+        }
+        out none
+    }
+
+    skill gather_params(params, body) {
+        drum (params) {
+            add_local(beat)
+        }
+        add_local(FAIL_LINE)
+        gather(body)
+        out none
+    }
+
+    skill gather_assigned(node) {
+        @plain = node_ops.plain(node)
+        (group.get(plain, 0) == "assign") {
+            add_local(group.get(plain, 1))
+        }
+        drum (node_ops.children(node)) {
+            gather_assigned(beat)
+        }
+        out none
+    }
+
+    skill slot_table(words, first_slot) {
+        @table = symbols.Symbols {}
+        @slot = first_slot
+        drum (names.items) {
+            table.add(beat.name, "slot", [], slot)
+            slot = slot - words.bytes
+        }
+        out table
+    }
+
+    skill outer_assigned(block) {
+        @declared = Locals {}
+        declared.gather(block)
+        @assigned = Locals {}
+        assigned.gather_assigned(block)
+        @declared_names = declared.names
+        @assigned_names = assigned.names
+        @outer = []
+        drum (assigned_names.items) {
+            (declared_names.has(beat.name) == no) {
+                outer = group.add(outer, beat.name)
+            }
+        }
+        out outer
+    }
+
+    skill uses_beat(node) {
+        @plain = node_ops.plain(node)
+        @tag = group.get(plain, 0)
+        (tag == "path") {
+            out (group.get(plain, 1) == nodes.DRUM_BEAT)
+        }
+        (tag == "drum") {
+            out uses_beat(group.get(plain, 1))
+        }
+        drum (node_ops.children(node)) {
+            (uses_beat(beat) == yes) {
+                out yes
+            }
+        }
+        out no
+    }
+}
