@@ -7,7 +7,7 @@
 use core.str
 use core.group
 use compiler.nodes
-use compiler.report.errors
+use compiler.report.meaning
 use compiler.contract.intrinsic.contract
 use compiler.checker.names
 use compiler.checker.names.paths
@@ -29,6 +29,8 @@ VALUE_MARKER = "$value_block"
 CASE_MARKER = "$case_block"
 
 Walk = Box {
+    meaning_errors = meaning.Meaning {},
+    node_ops = nodes.Nodes {},
     register = Names {},
     routes = Paths {},
     journal = Notes {},
@@ -40,7 +42,7 @@ Walk = Box {
     knots = Cycles {}
 
     skill check_expression(node, scope, globals, diagnostics) {
-        @plain = nodes.plain(node)
+        @plain = node_ops.plain(node)
         @tag = group.get(plain, 0)
         ((tag == "fraction-number") ○○ (tag == "wide-number") ○○ (tag == "template") ○○ (tag == "enum-value") ○○ (tag == "path") ○○ (tag == "negate")) {
             @part = valuing()
@@ -61,7 +63,7 @@ Walk = Box {
     }
 
     skill check_statement(node, scope, globals, diagnostics) {
-        @plain = nodes.plain(node)
+        @plain = node_ops.plain(node)
         @tag = group.get(plain, 0)
         ((tag == "var") ○○ (tag == "assign") ○○ (tag == "field-assign") ○○ (tag == "out") ○○ (tag == "expr")) {
             @part = binding()
@@ -75,22 +77,22 @@ Walk = Box {
             @part = looping()
             out part.walk_node(tag, node, plain, scope, globals, diagnostics)
         }
-        out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, errors.unknown_statement(tag))))
+        out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.unknown_statement(tag))))
     }
 
     skill check_block(block, scope, globals, diagnostics) {
-        @plain = nodes.plain(block)
+        @plain = node_ops.plain(block)
         @current = block
         drum (group.count(plain) - 1) {
             @statement_walked = check_statement(group.get(plain, beat + 1), scope, globals, check_effect(group.get(plain, beat + 1), (beat + 2 == group.count(plain)), scope, diagnostics))
             diagnostics = statement_walked.diagnostics
-            current = nodes.with_part(current, beat + 1, statement_walked.node)
+            current = node_ops.with_part(current, beat + 1, statement_walked.node)
         }
         out journal.walked(current, diagnostics)
     }
 
     skill named_block(node, type, scope, globals, diagnostics) {
-        @plain = nodes.plain(node)
+        @plain = node_ops.plain(node)
         @value_walked = check_expression(group.get(plain, 1), scope, globals, diagnostics)
         @child = Names.Scope {
             names = scope.names,
@@ -99,9 +101,9 @@ Walk = Box {
         }
         @named = routes.check_module_name(node, group.get(plain, 2), scope.module, globals, value_walked.diagnostics)
         child.names = register.bind_name(child.names, group.get(plain, 2), "variable", type)
-        (nodes.tag(node) == "rescue") { child.names = register.put_name(child.names, VALUE_MARKER, "variable", "unknown") }
+        (node_ops.tag(node) == "rescue") { child.names = register.put_name(child.names, VALUE_MARKER, "variable", "unknown") }
         @block_walked = check_block(group.get(plain, 3), child, globals, named)
-        out journal.walked(nodes.with_part(nodes.with_part(node, 1, value_walked.node), 3, block_walked.node), block_walked.diagnostics)
+        out journal.walked(node_ops.with_part(node_ops.with_part(node, 1, value_walked.node), 3, block_walked.node), block_walked.diagnostics)
     }
 
     skill check_params(owner, params, globals, subject, module, body, diagnostics) {
@@ -113,14 +115,14 @@ Walk = Box {
         @result = register.table_find(globals, register.result_key(full))
         (str.bytes(subject) > 0) {
             @model = register.table_find(globals, subject)
-            drum (group.count(nodes.plain(model.node)) - 2) {
-                @member = nodes.part(model.node, beat + 2)
-                (nodes.tag(member) == "field") { scope.names = register.put_name(scope.names, nodes.part(member, 1), "field", forms.stored(typing.field_type(nodes.part(member, 2), module, globals))) }
+            drum (group.count(node_ops.plain(model.node)) - 2) {
+                @member = node_ops.part(model.node, beat + 2)
+                (node_ops.tag(member) == "field") { scope.names = register.put_name(scope.names, node_ops.part(member, 1), "field", forms.stored(typing.field_type(node_ops.part(member, 2), module, globals))) }
             }
         }
         drum (params) {
             pick {
-                (register.has_name(scope.names, beat) == yes) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(owner, errors.duplicate_param(beat))) }
+                (register.has_name(scope.names, beat) == yes) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(owner, meaning_errors.duplicate_param(beat))) }
                 {
                     diagnostics = routes.check_module_name(owner, beat, module, globals, diagnostics)
                     scope.names = register.put_name(scope.names, beat, "parameter", signing.param_type(globals, full, params, beat))
@@ -132,11 +134,11 @@ Walk = Box {
     }
 
     skill check_effect(statement, last, scope, diagnostics) {
-        @plain = nodes.plain(statement)
+        @plain = node_ops.plain(statement)
         ((group.get(plain, 0) == "expr") == no) {
             out diagnostics
         }
-        @inner = nodes.tag(group.get(plain, 1))
+        @inner = node_ops.tag(group.get(plain, 1))
         (inner == "call") {
             out diagnostics
         }
@@ -151,7 +153,7 @@ Walk = Box {
                 out diagnostics
             }
         }
-        out journal.add_diagnostic(diagnostics, journal.placed(group.get(plain, 1), errors.expression_without_effect()))
+        out journal.add_diagnostic(diagnostics, journal.placed(group.get(plain, 1), meaning_errors.expression_without_effect()))
     }
 
     skill valuing() {

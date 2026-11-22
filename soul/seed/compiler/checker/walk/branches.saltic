@@ -4,7 +4,7 @@
 use core.str
 use core.group
 use compiler.nodes
-use compiler.report.errors
+use compiler.report.meaning
 use compiler.contract.intrinsic.contract
 use compiler.checker.names
 use compiler.checker.names.paths
@@ -18,6 +18,8 @@ use compiler.checker.types.signatures
 use compiler.checker.walk
 
 Branches = Box {
+    meaning_errors = meaning.Meaning {},
+    node_ops = nodes.Nodes {},
     register = Names {},
     routes = Paths {},
     journal = Notes {},
@@ -59,7 +61,7 @@ Branches = Box {
     skill case_variant(case_node, subject_type, variant, globals, diagnostics) {
         @short = register.table_find(globals, register.variant_key(variant))
         (str.bytes(short.name) == 0) {
-            out case_of(variant, journal.add_diagnostic(diagnostics, journal.placed(case_node, errors.unknown_enum_variant(variant))))
+            out case_of(variant, journal.add_diagnostic(diagnostics, journal.placed(case_node, meaning_errors.unknown_enum_variant(variant))))
         }
         (forms.is_enum_type(subject_type) == yes) {
             @owner = forms.enum_name(subject_type)
@@ -68,10 +70,10 @@ Branches = Box {
             }
             @other = forms.type_text(short.type)
             (short.type == names.AMBIGUOUS) { other = "другому enum" }
-            out case_of(variant, journal.add_diagnostic(diagnostics, journal.placed(case_node, errors.enum_type_mismatch(variant, other, forms.type_text(subject_type)))))
+            out case_of(variant, journal.add_diagnostic(diagnostics, journal.placed(case_node, meaning_errors.enum_type_mismatch(variant, other, forms.type_text(subject_type)))))
         }
         (short.type == names.AMBIGUOUS) {
-            out case_of(variant, journal.add_diagnostic(diagnostics, journal.placed(case_node, errors.ambiguous_enum_case(variant))))
+            out case_of(variant, journal.add_diagnostic(diagnostics, journal.placed(case_node, meaning_errors.ambiguous_enum_case(variant))))
         }
         @owner = forms.enum_name(short.type)
         out case_of("{owner}.{variant}", diagnostics)
@@ -86,11 +88,11 @@ Branches = Box {
     }
 
     skill check_case_body(case_node, block, diagnostics) {
-        @plain = nodes.plain(block)
+        @plain = node_ops.plain(block)
         drum (group.count(plain) - 1) {
-            @statement = nodes.plain(group.get(plain, beat + 1))
+            @statement = node_ops.plain(group.get(plain, beat + 1))
             (group.get(statement, 0) == "expr") {
-                ((nodes.tag(group.get(statement, 1)) == "call") == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(case_node, errors.case_bare_value())) }
+                ((node_ops.tag(group.get(statement, 1)) == "call") == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(case_node, meaning_errors.case_bare_value())) }
             }
         }
         out diagnostics
@@ -102,14 +104,14 @@ Branches = Box {
         }
         @model = register.table_find(globals, owner)
         @missing = []
-        drum (nodes.enum_variant_count(model.node)) {
-            @variant = nodes.enum_variant(model.node, beat)
+        drum (node_ops.enum_variant_count(model.node)) {
+            @variant = node_ops.enum_variant(model.node, beat)
             (register.has_name(seen, variant) == no) { missing = group.add(missing, variant) }
         }
         (group.count(missing) == 0) {
             out diagnostics
         }
-        out journal.add_diagnostic(diagnostics, journal.placed(node, errors.switch_incomplete(str.join(missing, ", "))))
+        out journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.switch_incomplete(str.join(missing, ", "))))
     }
 
     skill check_condition(node, scope, globals, diagnostics) {
@@ -120,7 +122,7 @@ Branches = Box {
         (type == "unknown") {
             out diagnostics
         }
-        out journal.add_diagnostic(diagnostics, journal.placed(node, errors.condition_type(forms.type_text(type))))
+        out journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.condition_type(forms.type_text(type))))
     }
 
     skill walk_pick(node, plain, scope, globals, diagnostics) {
@@ -129,7 +131,7 @@ Branches = Box {
         @current = node
         drum (count - 1) {
             @choice = group.get(plain, beat + 1)
-            @choice_plain = nodes.plain(choice)
+            @choice_plain = node_ops.plain(choice)
             @choice_tag = group.get(choice_plain, 0)
             @child = Names.Scope {
                 names = scope.names,
@@ -140,14 +142,14 @@ Branches = Box {
                 @condition_walked = walker.check_expression(group.get(choice_plain, 1), scope, globals, check_condition(group.get(choice_plain, 1), scope, globals, diagnostics))
                 @branch_walked = walker.check_block(group.get(choice_plain, 2), child, globals, condition_walked.diagnostics)
                 diagnostics = branch_walked.diagnostics
-                current = nodes.with_part(current, beat + 1, nodes.with_part(nodes.with_part(choice, 1, condition_walked.node), 2, branch_walked.node))
+                current = node_ops.with_part(current, beat + 1, node_ops.with_part(node_ops.with_part(choice, 1, condition_walked.node), 2, branch_walked.node))
             }
-            (choice_tag == "switch") { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(choice, errors.pick_branch_not_condition())) }
+            (choice_tag == "switch") { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(choice, meaning_errors.pick_branch_not_condition())) }
             (choice_tag == "otherwise") {
-                (beat + 2 < count) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(choice, errors.pick_default_not_last())) }
+                (beat + 2 < count) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(choice, meaning_errors.pick_default_not_last())) }
                 @otherwise_walked = walker.check_block(group.get(choice_plain, 1), child, globals, diagnostics)
                 diagnostics = otherwise_walked.diagnostics
-                current = nodes.with_part(current, beat + 1, nodes.with_part(choice, 1, otherwise_walked.node))
+                current = node_ops.with_part(current, beat + 1, node_ops.with_part(choice, 1, otherwise_walked.node))
             }
         }
         out journal.walked(current, diagnostics)
@@ -162,7 +164,7 @@ Branches = Box {
             module = scope.module
         }
         @branch_walked = walker.check_block(group.get(plain, 2), branch_scope, globals, condition_walked.diagnostics)
-        out journal.walked(nodes.with_part(nodes.with_part(node, 1, condition_walked.node), 2, branch_walked.node), branch_walked.diagnostics)
+        out journal.walked(node_ops.with_part(node_ops.with_part(node, 1, condition_walked.node), 2, branch_walked.node), branch_walked.diagnostics)
     }
 
     skill walk_present(node, plain, scope, globals, diagnostics) {
@@ -172,26 +174,26 @@ Branches = Box {
 
     skill walk_switch(node, plain, scope, globals, diagnostics) {
         @walker = walking()
-        @subject_node = nodes.switch_subject(node)
+        @subject_node = node_ops.switch_subject(node)
         @subject_walked = walker.check_expression(subject_node, scope, globals, diagnostics)
         diagnostics = subject_walked.diagnostics
-        @current = nodes.with_part(node, 1, subject_walked.node)
+        @current = node_ops.with_part(node, 1, subject_walked.node)
         @subject_type = typing.value_type(subject_node, scope, globals)
         @owner = ""
         (forms.is_enum_type(subject_type) == yes) { owner = forms.enum_name(subject_type) }
         @seen = []
-        drum (nodes.switch_case_count(node)) {
-            @case_node = nodes.switch_case(node, beat)
-            @variant_name = nodes.case_variant(case_node)
+        drum (node_ops.switch_case_count(node)) {
+            @case_node = node_ops.switch_case(node, beat)
+            @variant_name = node_ops.case_variant_of(case_node)
             pick {
                 (register.has_name(seen, variant_name) == yes) {
-                    diagnostics = journal.add_diagnostic(diagnostics, journal.placed(case_node, errors.duplicate_switch_case(variant_name)))
+                    diagnostics = journal.add_diagnostic(diagnostics, journal.placed(case_node, meaning_errors.duplicate_switch_case(variant_name)))
                 }
                 { seen = register.put_name(seen, variant_name, "case", "unknown") }
             }
             @resolved = case_variant(case_node, subject_type, variant_name, globals, diagnostics)
             (str.bytes(owner) == 0) { owner = case_owner(resolved.full) }
-            @body = nodes.case_body(case_node)
+            @body = node_ops.case_body(case_node)
             @case_scope = Names.Scope {
                 names = register.put_name(scope.names, walk.CASE_MARKER, "variable", "unknown"),
                 subject = scope.subject,
@@ -199,7 +201,7 @@ Branches = Box {
             }
             @body_walked = walker.check_block(body, case_scope, globals, check_case_body(case_node, body, resolved.diagnostics))
             diagnostics = body_walked.diagnostics
-            current = nodes.with_part(current, beat + 2, nodes.with_part(nodes.with_part(case_node, 1, resolved.full), 2, body_walked.node))
+            current = node_ops.with_part(current, beat + 2, node_ops.with_part(node_ops.with_part(case_node, 1, resolved.full), 2, body_walked.node))
         }
         out journal.walked(current, check_complete(node, owner, seen, globals, diagnostics))
     }

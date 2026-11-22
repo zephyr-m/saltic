@@ -6,7 +6,7 @@
 use core.str
 use core.group
 use compiler.nodes
-use compiler.report.errors
+use compiler.report.meaning
 use compiler.contract.intrinsic.contract
 use compiler.checker.names
 use compiler.checker.names.paths
@@ -20,6 +20,9 @@ use compiler.checker.types.signatures
 use compiler.checker.walk
 
 Values = Box {
+    contract_ops = contract.Contract {},
+    meaning_errors = meaning.Meaning {},
+    node_ops = nodes.Nodes {},
     register = Names {},
     routes = Paths {},
     journal = Notes {},
@@ -56,14 +59,14 @@ Values = Box {
         (register.table_has(globals, "core.fraction.text") == yes) {
             out diagnostics
         }
-        out journal.add_diagnostic(diagnostics, journal.placed(node, errors.fraction_text_module()))
+        out journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.fraction_text_module()))
     }
 
     skill walk_fraction_number(node, plain, scope, globals, diagnostics) {
         (register.table_has(globals, numbers.WIDE_MARK) == yes) {
             out journal.walked(node, diagnostics)
         }
-        out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, errors.fraction_not_supported())))
+        out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.fraction_not_supported())))
     }
 
     skill walk_wide_number(node, plain, scope, globals, diagnostics) {
@@ -72,7 +75,7 @@ Values = Box {
                 out journal.walked(node, diagnostics)
             }
         }
-        out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, errors.number_out_of_range())))
+        out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.number_out_of_range())))
     }
 
     skill walk_template(node, plain, scope, globals, diagnostics) {
@@ -83,8 +86,8 @@ Values = Box {
             @inner = walker.check_expression(placeholder, scope, globals, diagnostics)
             diagnostics = inner.diagnostics
             @type = typing.value_type(placeholder, scope, globals)
-            current = nodes.with_part(current, beat * 2 + 2, nodes.typed(type, inner.node))
-            @allowed = contract.is_fixed_type(type)
+            current = node_ops.with_part(current, beat * 2 + 2, node_ops.typed(type, inner.node))
+            @allowed = contract_ops.is_fixed_type(type)
             (type == "string") { allowed = yes }
             (type == "number") { allowed = yes }
             (type == "answer") { allowed = yes }
@@ -92,14 +95,14 @@ Values = Box {
             (type == "unknown") { allowed = yes }
             (type == "fraction") { allowed = yes diagnostics = check_fraction_text(placeholder, globals, diagnostics) }
             (allowed == no) {
-                diagnostics = journal.add_diagnostic(diagnostics, journal.placed(placeholder, errors.template_type(nodes.path_text(placeholder), forms.type_text(type))))
+                diagnostics = journal.add_diagnostic(diagnostics, journal.placed(placeholder, meaning_errors.template_type(node_ops.path_text(placeholder), forms.type_text(type))))
             }
         }
         out journal.walked(current, diagnostics)
     }
 
     skill walk_enum_value(node, plain, scope, globals, diagnostics) {
-        out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, errors.short_enum_outside_match(group.get(plain, 1)))))
+        out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.short_enum_outside_match(group.get(plain, 1)))))
     }
 
     skill walk_path(node, plain, scope, globals, diagnostics) {
@@ -111,50 +114,50 @@ Values = Box {
         @operand_walked = walker.check_expression(group.get(plain, 1), scope, globals, diagnostics)
         @operand_type = typing.value_type(group.get(plain, 1), scope, globals)
         (arithmetic.negatable(operand_type) == no) {
-            out journal.walked(node, journal.add_diagnostic(operand_walked.diagnostics, journal.placed(node, errors.negate_expects_number(forms.type_text(operand_type)))))
+            out journal.walked(node, journal.add_diagnostic(operand_walked.diagnostics, journal.placed(node, meaning_errors.negate_expects_number(forms.type_text(operand_type)))))
         }
-        out journal.walked(nodes.with_part(node, 1, nodes.typed(operand_type, operand_walked.node)), operand_walked.diagnostics)
+        out journal.walked(node_ops.with_part(node, 1, node_ops.typed(operand_type, operand_walked.node)), operand_walked.diagnostics)
     }
 
     skill check_path(node, scope, globals, diagnostics) {
-        @parts = nodes.plain(node)
+        @parts = node_ops.plain(node)
         @name = group.get(parts, 1)
         @count = group.count(parts)
         @long = routes.long_reference(node, scope, globals)
-        (errors.is_ok(long) == no) {
+        (long.is_ok() == no) {
             out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, long)))
         }
         @resolved = routes.resolve_path(node, scope, globals)
         (str.bytes(resolved) > 0) {
-            out journal.walked(nodes.rebuild(node, routes.path_from_text(resolved)), diagnostics)
+            out journal.walked(node_ops.rebuild(node, routes.path_from_text(resolved)), diagnostics)
         }
         (count == 2) {
             @known = register.has_name(scope.names, name)
             (known == no) { known = routes.visible(globals, scope.module, name) }
             (name == "error") { known = yes }
             (known == no) {
-                out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, errors.unknown_name(name))))
+                out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.unknown_name(name))))
             }
             out journal.walked(node, diagnostics)
         }
         (name == "error") {
             out journal.walked(node, diagnostics)
         }
-        @enum_name = routes.resolve_name(nodes.path_prefix(node), scope.module, globals)
+        @enum_name = routes.resolve_name(node_ops.path_prefix(node), scope.module, globals)
         @enum_model = register.table_find(globals, enum_name)
         (enum_model.kind == "enum") {
             @variant = group.get(parts, count - 1)
             (typing.enum_has(globals, enum_name, variant) == no) {
-                out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, errors.enum_lacks_variant(enum_name, variant))))
+                out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.enum_lacks_variant(enum_name, variant))))
             }
             @full_variant = routes.path_from_text(enum_name)
-            out journal.walked(nodes.rebuild(node, group.add(full_variant, variant)), diagnostics)
+            out journal.walked(node_ops.rebuild(node, group.add(full_variant, variant)), diagnostics)
         }
-        @import = register.table_find(globals, nodes.alias_key(scope.module, name))
+        @import = register.table_find(globals, node_ops.alias_key(scope.module, name))
         (import.kind == "import") {
             (register.has_name(scope.names, name) == no) {
-                @full = nodes.path_text(node)
-                out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, errors.unknown_name(full))))
+                @full = node_ops.path_text(node)
+                out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.unknown_name(full))))
             }
         }
         @global = routes.find_visible(globals, scope.module, name)
@@ -168,18 +171,18 @@ Values = Box {
             @field_name = group.get(parts, beat + 2)
             (type == "unknown") { leave }
             (type == "none") {
-                diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.maybe_none(str.join(group.slice(parts, 1, beat + 2), "."))))
+                diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.maybe_none(str.join(group.slice(parts, 1, beat + 2), "."))))
                 leave
             }
             (forms.is_box_type(type) == no) {
                 @type_name = forms.type_text(type)
-                diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.field_on_non_box(field_name, type_name)))
+                diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.field_on_non_box(field_name, type_name)))
                 leave
             }
             @box_name = forms.box_name(type)
             @field = typing.box_field(globals, box_name, field_name)
             (str.bytes(field.name) == 0) {
-                diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.unknown_field(box_name, field_name)))
+                diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.unknown_field(box_name, field_name)))
                 leave
             }
             type = field.type

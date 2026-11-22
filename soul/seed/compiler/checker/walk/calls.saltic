@@ -4,7 +4,7 @@
 use core.str
 use core.group
 use compiler.nodes
-use compiler.report.errors
+use compiler.report.meaning
 use compiler.contract.intrinsic.contract
 use compiler.checker.names
 use compiler.checker.names.paths
@@ -18,6 +18,9 @@ use compiler.checker.types.signatures
 use compiler.checker.walk
 
 Calls = Box {
+    contract_ops = contract.Contract {},
+    meaning_errors = meaning.Meaning {},
+    node_ops = nodes.Nodes {},
     register = Names {},
     routes = Paths {},
     journal = Notes {},
@@ -43,7 +46,7 @@ Calls = Box {
 
     skill walk_call(node, plain, scope, globals, diagnostics) {
         @walker = walking()
-        @callee = nodes.plain(nodes.call_callee(node))
+        @callee = node_ops.plain(node_ops.call_callee(node))
         (group.get(callee, 0) == "path") {
             @part_count = group.count(callee)
             (part_count > 3) {
@@ -53,36 +56,36 @@ Calls = Box {
             }
         }
         @full = routes.call_name(callee, scope, globals)
-        @made = contract.conversion(contract.find(full))
+        @made = contract_ops.conversion(contract_ops.find(full))
         @fixed_call = (str.bytes(made) > 0)
         @current = node
         (group.get(callee, 0) == "path") {
             @callee_count = group.count(callee)
             (callee_count == 2) {
                 (str.bytes(scope.subject) > 0) {
-                    (typing.box_has_skill(globals, scope.subject, group.get(callee, 1)) == yes) { current = nodes.with_part(node, 1, nodes.typed(forms.box_type(scope.subject), nodes.call_callee(node))) }
+                    (typing.box_has_skill(globals, scope.subject, group.get(callee, 1)) == yes) { current = node_ops.with_part(node, 1, node_ops.typed(forms.box_type(scope.subject), node_ops.call_callee(node))) }
                 }
             }
             (callee_count == 3) {
                 @receiver_path = ["path", group.get(callee, 1)]
                 @receiver_type = typing.path_type(receiver_path, scope, globals)
                 (forms.is_box_type(receiver_type) == yes) {
-                    (typing.box_has_skill(globals, forms.box_name(receiver_type), group.get(callee, 2)) == yes) { current = nodes.with_part(node, 1, nodes.typed(receiver_type, nodes.call_callee(node))) }
+                    (typing.box_has_skill(globals, forms.box_name(receiver_type), group.get(callee, 2)) == yes) { current = node_ops.with_part(node, 1, node_ops.typed(receiver_type, node_ops.call_callee(node))) }
                 }
             }
         }
-        (nodes.type_of(nodes.call_callee(current)) == "unknown") {
-            @callee_walked = walker.check_expression(nodes.call_callee(node), scope, globals, diagnostics)
+        (node_ops.type_of(node_ops.call_callee(current)) == "unknown") {
+            @callee_walked = walker.check_expression(node_ops.call_callee(node), scope, globals, diagnostics)
             diagnostics = callee_walked.diagnostics
-            current = nodes.with_part(current, 1, callee_walked.node)
+            current = node_ops.with_part(current, 1, callee_walked.node)
             (group.count(callee) == 2) {
                 @skill_name = routes.resolve_name(group.get(callee, 1), scope.module, globals)
-                (str.bytes(skill_name) > 0) { current = nodes.with_part(current, 1, nodes.rebuild(nodes.call_callee(node), routes.path_from_text(skill_name))) }
+                (str.bytes(skill_name) > 0) { current = node_ops.with_part(current, 1, node_ops.rebuild(node_ops.call_callee(node), routes.path_from_text(skill_name))) }
             }
         }
-        @argument_count = nodes.call_argument_count(node)
+        @argument_count = node_ops.call_argument_count(node)
         drum (argument_count) {
-            @argument = nodes.call_argument(node, beat)
+            @argument = node_ops.call_argument(node, beat)
             @skip_argument = no
             (fixed_call == yes) {
                 (beat == 0) {
@@ -95,8 +98,8 @@ Calls = Box {
                 diagnostics = argument_walked.diagnostics
                 @argument_node = argument_walked.node
                 @mark = signing.argument_mark(node, beat, full, fixed_call, scope, globals)
-                (str.bytes(mark) > 0) { argument_node = nodes.typed(mark, argument_node) }
-                current = nodes.with_part(current, beat + 2, argument_node)
+                (str.bytes(mark) > 0) { argument_node = node_ops.typed(mark, argument_node) }
+                current = node_ops.with_part(current, beat + 2, argument_node)
             }
         }
         (fixed_call == no) { diagnostics = signing.check_call(node, full, scope, globals, diagnostics) }
@@ -107,48 +110,48 @@ Calls = Box {
         }
         @signature = signing.resolve_signature(callee, scope, globals, receiver_type)
         @arity = law.arity_rule(signature, argument_count)
-        (errors.is_ok(arity) == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, arity)) }
+        (arity.is_ok() == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, arity)) }
         (fixed_call == yes) {
             (argument_count > 0) {
-                @fixed_argument = nodes.call_argument(node, 0)
+                @fixed_argument = node_ops.call_argument(node, 0)
                 @text = forms.integer_text(fixed_argument)
                 (str.bytes(text) > 0) {
-                    (contract.fixed_in_range(made, text, register.table_has(globals, numbers.WIDE_MARK)) == no) {
-                        @range = contract.fixed_range_text(made, register.table_has(globals, numbers.WIDE_MARK))
-                        diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.fixed_integer_out_of_range(text, made, range)))
+                    (contract_ops.fixed_in_range(made, text, register.table_has(globals, numbers.WIDE_MARK)) == no) {
+                        @range = contract_ops.fixed_range_text(made, register.table_has(globals, numbers.WIDE_MARK))
+                        diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.fixed_integer_out_of_range(text, made, range)))
                     }
                 }
                 @actual_type = typing.value_type(fixed_argument, scope, globals)
                 @fixed_problem = arithmetic.fixed_argument(fixed_argument, actual_type)
-                (errors.is_ok(fixed_problem) == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, fixed_problem)) }
+                (fixed_problem.is_ok() == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, fixed_problem)) }
             }
         }
-        @seed_kind = contract.find(full)
+        @seed_kind = contract_ops.find(full)
         drum (argument_count) {
-            @expected_argument = contract.argument_type(seed_kind, beat)
+            @expected_argument = contract_ops.argument_type(seed_kind, beat)
             ((expected_argument == "unknown") == no) {
-                @actual_argument = typing.value_type(nodes.call_argument(node, beat), scope, globals)
+                @actual_argument = typing.value_type(node_ops.call_argument(node, beat), scope, globals)
                 @argument_problem = law.argument_rule(full, beat, expected_argument, actual_argument)
-                (errors.is_ok(argument_problem) == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, argument_problem)) }
+                (argument_problem.is_ok() == no) { diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, argument_problem)) }
             }
         }
         @address_type = "unknown"
         (group.count(plain) > 2) { address_type = typing.value_type(group.get(plain, 2), scope, globals) }
-        @expected = contract.store_type(seed_kind, address_type)
+        @expected = contract_ops.store_type(seed_kind, address_type)
         (str.bytes(expected) > 0) {
             (address_type == "address") {
                 (group.count(plain) > 4) {
                 @actual = typing.value_type(group.get(plain, 4), scope, globals)
                 (actual == expected) { expected = "" }
                 (str.bytes(expected) > 0) {
-                    diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.store_type_mismatch(full, expected, actual)))
+                    diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.store_type_mismatch(full, expected, actual)))
                 }
                 }
             }
         }
-        @checked_argument = contract.checked_argument(seed_kind)
+        @checked_argument = contract_ops.checked_argument(seed_kind)
         (checked_argument >= 0) {
-            @expected_type = contract.checked_type(seed_kind)
+            @expected_type = contract_ops.checked_type(seed_kind)
             @argument_index = checked_argument + 2
             (argument_index < group.count(plain)) {
                 @actual = typing.value_type(group.get(plain, argument_index), scope, globals)
@@ -156,7 +159,7 @@ Calls = Box {
                 (str.bytes(expected_type) > 0) {
                     @expected_text = expected_type
                     (expected_type == "u8") { expected_text = "сдвиг {expected_type}" }
-                    diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.fixed_argument_type_mismatch(full, expected_text, actual)))
+                    diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.fixed_argument_type_mismatch(full, expected_text, actual)))
                 }
             }
         }
@@ -169,7 +172,7 @@ Calls = Box {
         drum (group.count(plain) - 1) {
             @item_walked = walker.check_expression(group.get(plain, beat + 1), scope, globals, diagnostics)
             diagnostics = item_walked.diagnostics
-            current = nodes.with_part(current, beat + 1, forms.fixed_marked(typing.value_type(group.get(plain, beat + 1), scope, globals), item_walked.node))
+            current = node_ops.with_part(current, beat + 1, forms.fixed_marked(typing.value_type(group.get(plain, beat + 1), scope, globals), item_walked.node))
         }
         out journal.walked(current, diagnostics)
     }
@@ -178,36 +181,36 @@ Calls = Box {
         @walker = walking()
         @name = group.get(plain, 1)
         @long_box = routes.long_reference(routes.path_from_text(name), scope, globals)
-        (errors.is_ok(long_box) == no) {
+        (long_box.is_ok() == no) {
             out journal.walked(node, journal.add_diagnostic(diagnostics, journal.placed(node, long_box)))
         }
         @resolved_box = routes.resolve_name(name, scope.module, globals)
         @model = register.table_find(globals, resolved_box)
         (model.kind == "box") {
-            @current = nodes.with_part(node, 1, resolved_box)
+            @current = node_ops.with_part(node, 1, resolved_box)
             @seen = []
             drum (group.count(plain) - 2) {
                 @override = group.get(plain, beat + 2)
-                @field_name = nodes.part(override, 1)
-                @value = nodes.part(override, 2)
+                @field_name = node_ops.part(override, 1)
+                @value = node_ops.part(override, 2)
                 @value_walked = walker.check_expression(value, scope, globals, diagnostics)
                 diagnostics = value_walked.diagnostics
-                current = nodes.with_part(current, beat + 2, nodes.with_part(override, 2, forms.fixed_marked(typing.value_type(value, scope, globals), value_walked.node)))
+                current = node_ops.with_part(current, beat + 2, node_ops.with_part(override, 2, forms.fixed_marked(typing.value_type(value, scope, globals), value_walked.node)))
                 (register.has_name(seen, field_name) == yes) {
-                    diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.duplicate_literal_field(field_name, name)))
+                    diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.duplicate_literal_field(field_name, name)))
                 }
                 seen = register.put_name(seen, field_name, "field", "unknown")
                 @field = typing.box_field(globals, resolved_box, field_name)
                 pick {
                     (str.bytes(field.name) == 0) {
-                        diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.unknown_field(name, field_name)))
+                        diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.unknown_field(name, field_name)))
                     }
                     {
                         @value_type = forms.stored(typing.value_type(value, scope, globals))
                         (forms.compatible(field.type, value_type) == no) {
                             @value_name = forms.type_text(value_type)
                             @field_type = forms.type_text(field.type)
-                            diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, errors.field_type_mismatch(value_name, field_name, name, field_type)))
+                            diagnostics = journal.add_diagnostic(diagnostics, journal.placed(node, meaning_errors.field_type_mismatch(value_name, field_name, name, field_type)))
                         }
                     }
                 }

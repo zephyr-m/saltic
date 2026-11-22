@@ -1,18 +1,18 @@
 -- word — 32-битное слово: хранится четырьмя байтами (b0 младший) — в поле Box и
 -- группе на RV32I u32 не влезает в обычное число (Q-049), а считается в u32
--- (raw / of_raw). Адреса, размеры, кодировки команд. to_number только до 2^28
+-- (raw / of_raw). Адреса, размеры, кодировки команд. as_number только до 2^28
 -- (ValueOutsideRange); переполнение — WordOutsideRange.
 --
--- Word { b0, b1, b2, b3 }
+-- Word = Box { b0, b1, b2, b3 }
+--     raw() -> u32; as_number() -> число; is_zero() -> yes/no
+--     sum(right) / sum_number(amount) -> Word; WordOutsideRange
+--     negated() / shifted(shift) -> Word
+--     aligned_to(boundary) -> Word, boundary — делитель 256; InvalidAlignment
+--     page_aligned() -> Word, вверх до 4096
+--     decimal() -> десятичный текст; bits_text() -> биты по байтам; byte_bits(value) -> биты байта
 -- from_bytes(b0, b1, b2, b3) / from_number(value) / from_signed(value) -> Word
 -- from_decimal(text) -> Word; InvalidWordText, WordOutsideRange
--- to_number(word) -> число; is_zero(word) -> yes/no
--- add(left, right) / add_number(word, amount) -> Word; WordOutsideRange
--- negate(word) / shift_left(word, shift) -> Word
--- align(word, boundary) -> Word, boundary — делитель 256; InvalidAlignment
--- align_page(word) -> Word, вверх до 4096
--- text(word) -> десятичный текст; binary_text / byte_binary_text -> биты
--- raw(word) -> u32; of_raw(value) -> Word из u32
+-- of_raw(value) -> Word из u32
 
 use core.str
 use core.num
@@ -27,11 +27,105 @@ Word = Box {
     b1 = 0,
     b2 = 0,
     b3 = 0
-}
 
-skill raw(value) {
-    @low = u32.from(value.b0) + u32.from(value.b1) * u32.from(BYTE)
-    out low + u32.from(value.b2) * u32.from(65536) + u32.from(value.b3) * u32.from(16777216)
+    skill raw() {
+        @low = u32.from(b0) + u32.from(b1) * u32.from(BYTE)
+        out low + u32.from(b2) * u32.from(65536) + u32.from(b3) * u32.from(16777216)
+    }
+
+    skill as_number() {
+        (b3 > 15) {
+            out error.ValueOutsideRange
+        }
+        out b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+    }
+
+    skill is_zero() {
+        (b0 > 0) {
+            out no
+        }
+        (b1 > 0) {
+            out no
+        }
+        (b2 > 0) {
+            out no
+        }
+        out b3 == 0
+    }
+
+    skill sum(right) {
+        @first = b0 + right.b0
+        @second = b1 + right.b1 + first / BYTE
+        @third = b2 + right.b2 + second / BYTE
+        @fourth = b3 + right.b3 + third / BYTE
+        (fourth >= BYTE) {
+            out error.WordOutsideRange
+        }
+        out from_bytes(first % BYTE, second % BYTE, third % BYTE, fourth)
+    }
+
+    skill sum_number(amount) {
+        out sum(from_number(amount))
+    }
+
+    skill aligned_to(boundary) {
+        ((boundary < 1) ○○ (boundary > 256) ○○ ((256 % boundary) > 0)) {
+            out error.InvalidAlignment
+        }
+        @remainder = b0 % boundary
+        (remainder == 0) {
+            out from_bytes(b0, b1, b2, b3)
+        }
+        out sum_number(boundary - remainder)
+    }
+
+    skill page_aligned() {
+        @offset = b0 + b1 % 16 * 256
+        (offset == 0) {
+            out from_bytes(b0, b1, b2, b3)
+        }
+        out sum_number(4096 - offset)
+    }
+
+    skill decimal() {
+        @whole = raw()
+        out "{whole}"
+    }
+
+    skill negated() {
+        (is_zero() == yes) {
+            out from_bytes(b0, b1, b2, b3)
+        }
+        out of_raw(u32.from(bits32.invert(bits32.from(raw()))) + u32.from(1))
+    }
+
+    skill shifted(shift) {
+        out of_raw(u32.from(bits32.shift_left(bits32.from(raw()), u8.from(shift))))
+    }
+
+    skill byte_bits(value) {
+        @text = ""
+        @weight = 128
+        drum (8) {
+            (value < weight) {
+                text = "{text}0"
+            }
+            (value >= weight) {
+                text = "{text}1"
+                value = value - weight
+            }
+            weight = weight / 2
+        }
+        out text
+    }
+
+    skill bits_text() {
+        @first = byte_bits(b0)
+        @second = byte_bits(b1)
+        @third = byte_bits(b2)
+        @fourth = byte_bits(b3)
+        out "{first} {second} {third} {fourth}"
+    }
 }
 
 skill of_raw(value) {
@@ -48,11 +142,18 @@ skill of_raw(value) {
 }
 
 skill from_bytes(b0, b1, b2, b3) {
-    out Word { b0 = b0, b1 = b1, b2 = b2, b3 = b3 }
+    out Word {
+        b0 = b0,
+        b1 = b1,
+        b2 = b2,
+        b3 = b3
+    }
 }
 
 skill from_number(value) {
-    (value < 0) { out error.ValueOutsideRange }
+    (value < 0) {
+        out error.ValueOutsideRange
+    }
     @b0 = value % 256
     value = value / 256
     @b1 = value % 256
@@ -60,111 +161,53 @@ skill from_number(value) {
     @b2 = value % 256
     value = value / 256
     @b3 = value % 256
-    (value / 256 > 0) { out error.WordOutsideRange }
+    ((value / 256) > 0) {
+        out error.WordOutsideRange
+    }
     out from_bytes(b0, b1, b2, b3)
 }
 
-skill to_number(value) {
-    (value.b3 > 15) { out error.ValueOutsideRange }
-    out value.b0 + value.b1 * 256 + value.b2 * 65536 + value.b3 * 16777216
-}
-
-skill is_zero(value) {
-    (value.b0 > 0) { out no }
-    (value.b1 > 0) { out no }
-    (value.b2 > 0) { out no }
-    out value.b3 == 0
-}
-
-skill add(left, right) {
-    @sum = raw(left) + raw(right) rescue |err| { out error.WordOutsideRange }
-    out of_raw(sum)
-}
-
-skill add_number(value, amount) {
-    out add(value, from_number(amount))
-}
-
-skill align(value, boundary) {
-    (boundary < 1) { out error.InvalidAlignment }
-    (boundary > 256) { out error.InvalidAlignment }
-    (256 % boundary > 0) { out error.InvalidAlignment }
-    @remainder = value.b0 % boundary
-    (remainder == 0) { out value }
-    out add_number(value, boundary - remainder)
-}
-
-skill align_page(value) {
-    @offset = value.b0 + value.b1 % 16 * 256
-    (offset == 0) { out value }
-    out add_number(value, 4096 - offset)
-}
-
-skill text(value) {
-    @whole = raw(value)
-    out "{whole}"
-}
-
-skill negate(value) {
-    (is_zero(value) == yes) { out value }
-    out of_raw(u32.from(bits32.invert(bits32.from(raw(value)))) + u32.from(1))
-}
-
 skill from_signed(value) {
-    (value < 0) { out negate(add_number(from_number(-(value + 1)), 1)) }
+    (value < 0) {
+        @magnitude = from_number(-(value + 1))
+        @whole = magnitude.sum_number(1)
+        out whole.negated()
+    }
     out from_number(value)
-}
-
-skill shift_left(value, shift) {
-    out of_raw(u32.from(bits32.shift_left(bits32.from(raw(value)), u8.from(shift))))
 }
 
 skill from_decimal(text) {
     @length = str.bytes(text)
-    (length == 0) { out error.InvalidWordText }
+    (length == 0) {
+        out error.InvalidWordText
+    }
     @negative = str.starts_with(text, "-")
     @first = 0
     (negative == yes) {
-        (length == 1) { out error.InvalidWordText }
+        (length == 1) {
+            out error.InvalidWordText
+        }
         first = 1
     }
     @total = u32.from(0)
     drum (length - first) {
         @ch = str.get(text, beat + first)
-        (str.is_digit(ch) == no) { out error.InvalidWordText }
-        total = total * u32.from(10) + u32.from(num.digit_value(ch)) rescue |err| { out error.WordOutsideRange }
+        (str.is_digit(ch) == no) {
+            out error.InvalidWordText
+        }
+        total = total * u32.from(10) + u32.from(num.digit_value(ch)) rescue |err| {
+            out error.WordOutsideRange
+        }
     }
     @result = of_raw(total)
     (negative == yes) {
-        (result.b3 > 128) { out error.WordOutsideRange }
-        (result.b3 == 128) {
-            ((result.b2 == 0) == no) { out error.WordOutsideRange }
-            ((result.b1 == 0) == no) { out error.WordOutsideRange }
-            ((result.b0 == 0) == no) { out error.WordOutsideRange }
+        (result.b3 > 128) {
+            out error.WordOutsideRange
         }
-        out negate(result)
+        ((result.b3 == 128) ○ (((result.b2 == 0) == no) ○○ ((result.b1 == 0) == no) ○○ ((result.b0 == 0) == no))) {
+            out error.WordOutsideRange
+        }
+        out result.negated()
     }
     out result
-}
-
-skill byte_binary_text(value) {
-    @text = ""
-    @weight = 128
-    drum (8) {
-        (value < weight) { text = "{text}0" }
-        (value >= weight) {
-            text = "{text}1"
-            value = value - weight
-        }
-        weight = weight / 2
-    }
-    out text
-}
-
-skill binary_text(value) {
-    @b0 = byte_binary_text(value.b0)
-    @b1 = byte_binary_text(value.b1)
-    @b2 = byte_binary_text(value.b2)
-    @b3 = byte_binary_text(value.b3)
-    out "{b0} {b1} {b2} {b3}"
 }

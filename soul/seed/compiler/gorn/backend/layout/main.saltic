@@ -35,7 +35,7 @@ use core.num
 use compiler.gorn.machine.word
 use compiler.gorn.machine.wide
 use compiler.gorn.backend.buffer
-use compiler.report.errors
+use compiler.report.building
 use compiler.gorn.backend.layout.patch
 
 LABEL_BUCKETS = 512
@@ -87,6 +87,7 @@ Layout = Box {
 }
 
 Program = Box {
+    build_errors = building.Building {},
     load_address = word.Word {},
     low_memory_size = 0,
     entry = "",
@@ -175,7 +176,7 @@ Program = Box {
     }
 
     skill reserve_bss(count) {
-        bss_size = wide.add(bss_size, count)
+        bss_size = bss_size.sum(count)
         resolved = no
         out none
     }
@@ -206,7 +207,7 @@ Program = Box {
 
     skill align_section(section, boundary) {
         (section == Layout.Section.BSS) {
-            bss_size = wide.align(bss_size, boundary)
+            bss_size = bss_size.aligned_to(boundary)
             resolved = no
             out none
         }
@@ -241,7 +242,7 @@ Program = Box {
     skill resolve_patch(current_layout, item) {
         @label_base = label_offset(current_layout, item.label) rescue |failure| {
             (str.bytes(item.label) > 0) {
-                @problem = errors.missing_label(item.label)
+                @problem = build_errors.missing_label(item.label)
                 io.show(problem.message)
             }
             out error.UnknownLabel
@@ -267,7 +268,7 @@ Program = Box {
 
     skill resolve_own() {
         (encoding_errors > 0) {
-            @problem = errors.encoding_failed(encoding_errors)
+            @problem = build_errors.encoding_failed(encoding_errors)
             io.show(problem.message)
             out error.InstructionEncoding
         }
@@ -300,7 +301,7 @@ Program = Box {
 
     skill section_length(section) {
         (section == Layout.Section.BSS) {
-            out wide.to_word(bss_size)
+            out bss_size.narrow()
         }
         @target = section_buffer(section)
         out target.length
@@ -348,7 +349,7 @@ Program = Box {
             data_offset = data_offset,
             bss_offset = bss_offset,
             file_size = bss_offset,
-            memory_size = wide.add_number(bss_size, bss_offset)
+            memory_size = bss_size.sum_number(bss_offset)
         }
     }
 
@@ -358,7 +359,9 @@ Program = Box {
             out error.UnknownLabel
         }
         (label.section == Layout.Section.BSS) {
-            out word.to_number(word.add_number(label.offset, current_layout.bss_offset))
+            @within = label.offset
+            @placed = within.sum_number(current_layout.bss_offset)
+            out placed.as_number()
         }
         out current_layout.offset_of(label.section) + label.offset
     }
@@ -369,8 +372,9 @@ Program = Box {
             out error.UnknownLabel
         }
         (label.section == Layout.Section.BSS) {
-            @offset = word.add_number(label.offset, current_layout.bss_offset + addend)
-            out word.add(load_address, offset)
+            @within = label.offset
+            @shifted = within.sum_number(current_layout.bss_offset + addend)
+            out load_address.sum(shifted)
         }
         @offset = label_offset(current_layout, name) + addend
         (offset < 0) {

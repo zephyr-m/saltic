@@ -8,7 +8,7 @@
 -- location(value) -> [строка, столбец] или [0, 0]
 -- rebuild(value, datum) -> datum в тех же обёртках, что value
 -- with_part(value, index, child) -> узел с заменённой частью
--- typed(type, value) / located(datum, line, col) / in_module(name, value) — обёртки
+-- typed(type, value) / with_location(datum, line, col) / in_module(name, value) — обёртки
 -- tag(value) -> тег; part(value, index) -> часть
 -- call_callee / call_argument_count / call_argument(value, index)
 -- enum_variant_count / enum_variant(value, index)
@@ -25,232 +25,294 @@ use core.group
 
 DRUM_BEAT = "beat"
 
-skill strip_location(value) {
-    (group.count(value) == 4) {
-        (group.get(value, 0) == "loc") { out group.get(value, 3) }
-    }
-    out value
-}
-
-skill plain(value) {
-    @datum = value
-    (group.count(datum) == 3) {
-        (group.get(datum, 0) == "module") { datum = group.get(datum, 2) }
-    }
-    (group.count(datum) == 3) {
-        (group.get(datum, 0) == "typed") { datum = group.get(datum, 2) }
-    }
-    out strip_location(datum)
-}
-
-skill module_name(value) {
-    (group.count(value) == 3) {
-        (group.get(value, 0) == "module") { out group.get(value, 1) }
-    }
-    out ""
-}
-
-skill location(value) {
-    @datum = value
-    (group.count(datum) == 3) {
-        (group.get(datum, 0) == "module") { datum = group.get(datum, 2) }
-    }
-    (group.count(datum) == 3) {
-        (group.get(datum, 0) == "typed") { datum = group.get(datum, 2) }
-    }
-    (group.count(datum) == 4) {
-        (group.get(datum, 0) == "loc") { out [group.get(datum, 1), group.get(datum, 2)] }
-    }
-    out [0, 0]
-}
-
-skill rebuild(value, datum) {
-    (group.count(value) == 3) {
-        (group.get(value, 0) == "module") { out ["module", group.get(value, 1), rebuild(group.get(value, 2), datum)] }
-        (group.get(value, 0) == "typed") { out ["typed", group.get(value, 1), rebuild(group.get(value, 2), datum)] }
-    }
-    (group.count(value) == 4) {
-        (group.get(value, 0) == "loc") { out ["loc", group.get(value, 1), group.get(value, 2), datum] }
-    }
-    out datum
-}
-
-skill with_part(value, index, child) {
-    @datum = plain(value)
-    @result = []
-    drum (group.count(datum)) {
-        pick {
-            (beat == index) { result = group.add(result, child) }
-            { result = group.add(result, group.get(datum, beat)) }
+Nodes = Box {
+    skill strip_location(value) {
+        (group.count(value) == 4) {
+            (group.get(value, 0) == "loc") {
+                out group.get(value, 3)
+            }
         }
+        out value
     }
-    out rebuild(value, result)
-}
 
-skill typed(type, value) {
-    (type == "unknown") { out value }
-    out ["typed", type, value]
-}
-
-skill type_of(value) {
-    (group.count(value) == 3) {
-        (group.get(value, 0) == "typed") { out group.get(value, 1) }
-    }
-    out "unknown"
-}
-
-skill located(datum, line, col) {
-    out ["loc", line, col, datum]
-}
-
-skill in_module(name, value) {
-    out ["module", name, value]
-}
-
-skill tag(value) {
-    out group.get(plain(value), 0)
-}
-
-skill part(value, index) {
-    out group.get(plain(value), index)
-}
-
-skill call_callee(value) {
-    out part(value, 1)
-}
-
-skill call_argument_count(value) {
-    out group.count(plain(value)) - 2
-}
-
-skill call_argument(value, index) {
-    out part(value, index + 2)
-}
-
-skill enum_variant_count(value) {
-    out group.count(plain(value)) - 2
-}
-
-skill enum_variant(value, index) {
-    out part(value, index + 2)
-}
-
-skill switch_subject(value) {
-    out part(value, 1)
-}
-
-skill parts_from(plain, first) {
-    @result = []
-    drum (group.count(plain) - first) { result = group.add(result, group.get(plain, beat + first)) }
-    out result
-}
-
-skill children(value) {
-    @node = plain(value)
-    @kind = group.get(node, 0)
-    (kind == "binary") { out [group.get(node, 2), group.get(node, 3)] }
-    (kind == "logic") {
-        out [group.get(node, 2), group.get(node, 3)]
-    }
-    (kind == "negate") { out [group.get(node, 1)] }
-    (kind == "call") { out parts_from(node, 1) }
-    (kind == "group") { out parts_from(node, 1) }
-    (kind == "block") { out parts_from(node, 1) }
-    (kind == "pick") { out parts_from(node, 1) }
-    (kind == "template") {
-        @result = []
-        drum ((group.count(node) - 2) / 2) { result = group.add(result, group.get(node, beat * 2 + 2)) }
-        out result
-    }
-    (kind == "box-new") {
-        @result = []
-        drum (group.count(node) - 2) { result = group.add(result, part(group.get(node, beat + 2), 2)) }
-        out result
-    }
-    (kind == "switch") {
-        @result = [group.get(node, 1)]
-        drum (group.count(node) - 2) { result = group.add(result, part(group.get(node, beat + 2), 2)) }
-        out result
-    }
-    (kind == "rescue") { out [group.get(node, 1), group.get(node, 3)] }
-    (kind == "present") { out [group.get(node, 1), group.get(node, 3)] }
-    (kind == "var") { out [group.get(node, 2)] }
-    (kind == "assign") { out [group.get(node, 2)] }
-    (kind == "field-assign") { out [group.get(node, 1), group.get(node, 2)] }
-    (kind == "out") { out [group.get(node, 1)] }
-    (kind == "expr") { out [group.get(node, 1)] }
-    (kind == "if") { out [group.get(node, 1), group.get(node, 2)] }
-    (kind == "otherwise") { out [group.get(node, 1)] }
-    (kind == "always") { out [group.get(node, 1)] }
-    (kind == "drum") { out [group.get(node, 1), group.get(node, 2)] }
-    out []
-}
-
-skill switch_case_count(value) {
-    out group.count(plain(value)) - 2
-}
-
-skill switch_case(value, index) {
-    out part(value, index + 2)
-}
-
-skill case_variant(value) {
-    out part(value, 1)
-}
-
-skill case_body(value) {
-    out part(value, 2)
-}
-
-skill path_text(path) {
-    @datum = plain(path)
-    out str.join(group.slice(datum, 1, group.count(datum)), ".")
-}
-
-skill path_prefix(path) {
-    @datum = plain(path)
-    @count = group.count(datum)
-    @text = group.get(datum, 1)
-    (count < 3) { out text }
-    drum (count - 3) {
-        text = "{text}."
-        text = str.concat(text, group.get(datum, beat + 2))
-    }
-    out text
-}
-
-skill qualified(module_name, name) {
-    (str.bytes(module_name) == 0) { out name }
-    out "{module_name}.{name}"
-}
-
-skill alias_key(module_name, alias) {
-    out "{module_name}|{alias}"
-}
-
-skill name_head(name) {
-    drum (str.bytes(name)) {
-        (str.get(name, beat) == ".") { out str.slice(name, 0, beat) }
-    }
-    out name
-}
-
-skill name_tail(name) {
-    @count = str.bytes(name)
-    drum (count) {
-        (str.get(name, beat) == ".") { out str.slice(name, beat, count) }
-    }
-    out ""
-}
-
-skill name_module(name) {
-    @count = str.bytes(name)
-    drum (count) {
-        @index = count - 1 - beat
-        (str.get(name, index) == ".") {
-            (index == 0) { out "" }
-            out str.slice(name, 0, index)
+    skill plain(value) {
+        @datum = value
+        (group.count(datum) == 3) {
+            (group.get(datum, 0) == "module") { datum = group.get(datum, 2) }
         }
+        (group.count(datum) == 3) {
+            (group.get(datum, 0) == "typed") { datum = group.get(datum, 2) }
+        }
+        out strip_location(datum)
     }
-    out ""
+
+    skill module_name(value) {
+        (group.count(value) == 3) {
+            (group.get(value, 0) == "module") {
+                out group.get(value, 1)
+            }
+        }
+        out ""
+    }
+
+    skill location(value) {
+        @datum = value
+        (group.count(datum) == 3) {
+            (group.get(datum, 0) == "module") { datum = group.get(datum, 2) }
+        }
+        (group.count(datum) == 3) {
+            (group.get(datum, 0) == "typed") { datum = group.get(datum, 2) }
+        }
+        (group.count(datum) == 4) {
+            (group.get(datum, 0) == "loc") {
+                out [group.get(datum, 1), group.get(datum, 2)]
+            }
+        }
+        out [0, 0]
+    }
+
+    skill rebuild(value, datum) {
+        (group.count(value) == 3) {
+            (group.get(value, 0) == "module") {
+                out ["module", group.get(value, 1), rebuild(group.get(value, 2), datum)]
+            }
+            (group.get(value, 0) == "typed") {
+                out ["typed", group.get(value, 1), rebuild(group.get(value, 2), datum)]
+            }
+        }
+        (group.count(value) == 4) {
+            (group.get(value, 0) == "loc") {
+                out ["loc", group.get(value, 1), group.get(value, 2), datum]
+            }
+        }
+        out datum
+    }
+
+    skill with_part(value, index, child) {
+        @datum = plain(value)
+        @result = []
+        drum (group.count(datum)) {
+            pick {
+                (beat == index) { result = group.add(result, child) }
+                { result = group.add(result, group.get(datum, beat)) }
+            }
+        }
+        out rebuild(value, result)
+    }
+
+    skill typed(type, value) {
+        (type == "unknown") {
+            out value
+        }
+        out ["typed", type, value]
+    }
+
+    skill type_of(value) {
+        (group.count(value) == 3) {
+            (group.get(value, 0) == "typed") {
+                out group.get(value, 1)
+            }
+        }
+        out "unknown"
+    }
+
+    skill with_location(datum, line, col) {
+        out ["loc", line, col, datum]
+    }
+
+    skill in_module(name, value) {
+        out ["module", name, value]
+    }
+
+    skill tag(value) {
+        out group.get(plain(value), 0)
+    }
+
+    skill part(value, index) {
+        out group.get(plain(value), index)
+    }
+
+    skill call_callee(value) {
+        out part(value, 1)
+    }
+
+    skill call_argument_count(value) {
+        out group.count(plain(value)) - 2
+    }
+
+    skill call_argument(value, index) {
+        out part(value, index + 2)
+    }
+
+    skill enum_variant_count(value) {
+        out group.count(plain(value)) - 2
+    }
+
+    skill enum_variant(value, index) {
+        out part(value, index + 2)
+    }
+
+    skill switch_subject(value) {
+        out part(value, 1)
+    }
+
+    skill parts_from(plain, first) {
+        @result = []
+        drum (group.count(plain) - first) { result = group.add(result, group.get(plain, beat + first)) }
+        out result
+    }
+
+    skill children(value) {
+        @node = plain(value)
+        @kind = group.get(node, 0)
+        (kind == "binary") {
+            out [group.get(node, 2), group.get(node, 3)]
+        }
+        (kind == "logic") {
+            out [group.get(node, 2), group.get(node, 3)]
+        }
+        (kind == "negate") {
+            out [group.get(node, 1)]
+        }
+        (kind == "call") {
+            out parts_from(node, 1)
+        }
+        (kind == "group") {
+            out parts_from(node, 1)
+        }
+        (kind == "block") {
+            out parts_from(node, 1)
+        }
+        (kind == "pick") {
+            out parts_from(node, 1)
+        }
+        (kind == "template") {
+            @result = []
+            drum ((group.count(node) - 2) / 2) { result = group.add(result, group.get(node, beat * 2 + 2)) }
+            out result
+        }
+        (kind == "box-new") {
+            @result = []
+            drum (group.count(node) - 2) { result = group.add(result, part(group.get(node, beat + 2), 2)) }
+            out result
+        }
+        (kind == "switch") {
+            @result = [group.get(node, 1)]
+            drum (group.count(node) - 2) { result = group.add(result, part(group.get(node, beat + 2), 2)) }
+            out result
+        }
+        (kind == "rescue") {
+            out [group.get(node, 1), group.get(node, 3)]
+        }
+        (kind == "present") {
+            out [group.get(node, 1), group.get(node, 3)]
+        }
+        (kind == "var") {
+            out [group.get(node, 2)]
+        }
+        (kind == "assign") {
+            out [group.get(node, 2)]
+        }
+        (kind == "field-assign") {
+            out [group.get(node, 1), group.get(node, 2)]
+        }
+        (kind == "out") {
+            out [group.get(node, 1)]
+        }
+        (kind == "expr") {
+            out [group.get(node, 1)]
+        }
+        (kind == "if") {
+            out [group.get(node, 1), group.get(node, 2)]
+        }
+        (kind == "otherwise") {
+            out [group.get(node, 1)]
+        }
+        (kind == "always") {
+            out [group.get(node, 1)]
+        }
+        (kind == "drum") {
+            out [group.get(node, 1), group.get(node, 2)]
+        }
+        out []
+    }
+
+    skill switch_case_count(value) {
+        out group.count(plain(value)) - 2
+    }
+
+    skill switch_case(value, index) {
+        out part(value, index + 2)
+    }
+
+    skill case_variant_of(value) {
+        out part(value, 1)
+    }
+
+    skill case_body(value) {
+        out part(value, 2)
+    }
+
+    skill path_text(path) {
+        @datum = plain(path)
+        out str.join(group.slice(datum, 1, group.count(datum)), ".")
+    }
+
+    skill path_prefix(path) {
+        @datum = plain(path)
+        @count = group.count(datum)
+        @text = group.get(datum, 1)
+        (count < 3) {
+            out text
+        }
+        drum (count - 3) {
+            text = "{text}."
+            text = str.concat(text, group.get(datum, beat + 2))
+        }
+        out text
+    }
+
+    skill qualified(module_name, name) {
+        (str.bytes(module_name) == 0) {
+            out name
+        }
+        out "{module_name}.{name}"
+    }
+
+    skill alias_key(module_name, alias) {
+        out "{module_name}|{alias}"
+    }
+
+    skill name_head(name) {
+        drum (str.bytes(name)) {
+            (str.get(name, beat) == ".") {
+                out str.slice(name, 0, beat)
+            }
+        }
+        out name
+    }
+
+    skill name_tail(name) {
+        @count = str.bytes(name)
+        drum (count) {
+            (str.get(name, beat) == ".") {
+                out str.slice(name, beat, count)
+            }
+        }
+        out ""
+    }
+
+    skill name_module(name) {
+        @count = str.bytes(name)
+        drum (count) {
+            @index = count - 1 - beat
+            (str.get(name, index) == ".") {
+                (index == 0) {
+                    out ""
+                }
+                out str.slice(name, 0, index)
+            }
+        }
+        out ""
+    }
 }

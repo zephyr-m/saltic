@@ -5,18 +5,19 @@
 -- (ELF64 RISC-V) и arm64 (ELF64 AArch64). Модули ищутся от текущей папки; не уложились ближние
 -- вызовы — собирает заново с дальними.
 -- Исходник грузится с местами (Architect { locations = yes }.gather): дерево с обёртками
--- ast.located идёт в чекер и кодоген как есть, кодоген читает узлы через
--- ast.plain. Ход печатается строками «toolchain: …», ошибки —
+-- nodes.located идёт в чекер и кодоген как есть, кодоген читает узлы через
+-- nodes.plain. Ход печатается строками «toolchain: …», ошибки —
 -- «код|строка|столбец|текст».
 --
--- build(source_path, output_path, heap_text, target) -> none;
---     ParseFailed, CheckFailed, ValueOutsideRange, UnknownTarget, WriteFailed
--- build_machine(ast, heap_size, far_calls, source) -> машина RV32I: исполнитель
---     riscv.Executor и платформа linux.Linux; source — путь исходника для пути ошибки
--- write_x86(ast, heap_size, output_path, firmware, source) / write_rv64 / write_arm64(ast,
---     heap_size, output_path, source) -> none — слово 8 байт, числа 61-битные: ELF64
---     Linux без окна или PE32+ UEFI в окне; ELF64 RISC-V (RVA23); ELF64 AArch64; WriteFailed
--- show(problem) / toolchain_show_diagnostics(diagnostics) — печать
+-- Toolchain:
+--     compile(source_path, output_path, heap_text, target) -> none;
+--         ParseFailed, CheckFailed, ValueOutsideRange, UnknownTarget, WriteFailed
+--     build_machine(ast, heap_size, far_calls, source) -> машина RV32I: исполнитель
+--         riscv.Executor и платформа linux.Linux; source — путь исходника для пути ошибки
+--     write_x86(ast, heap_size, output_path, firmware, source) / write_rv64 / write_arm64(ast,
+--         heap_size, output_path, source) -> none — слово 8 байт, числа 61-битные: ELF64
+--         Linux без окна или PE32+ UEFI в окне; ELF64 RISC-V (RVA23); ELF64 AArch64; WriteFailed
+--     tell(problem) / show_diagnostics(diagnostics) — печать
 
 use core.str
 use core.group
@@ -33,124 +34,143 @@ use compiler.gorn.backend.riscv.rv64
 use compiler.gorn.backend.arm.arm64
 use compiler.gorn.linker.elf64
 use compiler.gorn.machine.wide
-use compiler.report.errors
+use compiler.report.building
 
-skill show(problem) {
-    io.show(problem.message)
-    out none
-}
 
-skill toolchain_show_diagnostics(diagnostics) {
-    drum (diagnostics) { io.show("{beat.code}|{beat.line}|{beat.col}|{beat.message}") }
-    out none
-}
+Toolchain = Box {
+    build_errors = building.Building {}
 
-skill build_machine(ast, heap_size, far_calls, source) {
-    out gorn.compile_machine_from(ast, heap_size, riscv.Executor { far_calls = far_calls }, linux.Linux {}, source, no)
-}
+    skill tell(problem) {
+        io.show(problem.message)
+        out none
+    }
 
-skill write_x86(ast, heap_size, output_path, firmware, source) {
-    @executor = x86_64.Executor { firmware = firmware, wide = yes }
-    io.show("toolchain: пишу родной x86-64 {output_path}")
-    (firmware == yes) {
-        @firmware_machine = gorn.compile_machine_from(ast, heap_size, executor, uefi.Uefi {}, source, no)
-        executor.write_uefi(output_path, firmware_machine) rescue |failure| {
-            io.show("toolchain: образ UEFI не собрался: {failure}")
+    skill show_diagnostics(diagnostics) {
+        drum (diagnostics) {
+            io.show("{beat.code}|{beat.line}|{beat.col}|{beat.message}")
+        }
+        out none
+    }
+
+    skill build_machine(ast, heap_size, far_calls, source) {
+        out gorn.compile_machine_from(ast, heap_size, riscv.Executor { far_calls = far_calls }, linux.Linux {}, source, no)
+    }
+
+    skill write_x86(ast, heap_size, output_path, firmware, source) {
+        @executor = x86_64.Executor {
+            firmware = firmware,
+            wide = yes
+        }
+        io.show("toolchain: пишу родной x86-64 {output_path}")
+        (firmware == yes) {
+            @firmware_machine = gorn.compile_machine_from(ast, heap_size, executor, uefi.Uefi {}, source, no)
+            executor.write_uefi(output_path, firmware_machine) rescue |failure| {
+                io.show("toolchain: образ UEFI не собрался: {failure}")
+                out error.WriteFailed
+            }
+            out none
+        }
+        @machine = gorn.compile_machine_from(ast, heap_size, executor, linux.Linux {}, source, yes)
+        executor.write_wide(output_path, machine) rescue |failure| {
+            io.show("toolchain: образ x86-64 не собрался: {failure}")
             out error.WriteFailed
         }
         out none
     }
-    @machine = gorn.compile_machine_from(ast, heap_size, executor, linux.Linux {}, source, yes)
-    executor.write_wide(output_path, machine) rescue |failure| {
-        io.show("toolchain: образ x86-64 не собрался: {failure}")
-        out error.WriteFailed
-    }
-    out none
-}
 
-skill write_rv64(ast, heap_size, output_path, source) {
-    @machine = gorn.compile_machine_from(ast, heap_size, rv64.Executor {}, linux.Linux {}, source, no)
-    io.show("toolchain: пишу RV64 {output_path}")
-    elf64.write(output_path, machine, elf64.RISCV, elf64.PAGE_BYTES) rescue |failure| {
-        show(errors.near_calls_failed())
-        io.show("toolchain: причина: {failure}")
-        @far = gorn.compile_machine_from(ast, heap_size, rv64.Executor { far_calls = yes }, linux.Linux {}, source, no)
-        elf64.write(output_path, far, elf64.RISCV, elf64.PAGE_BYTES) rescue |again| {
-            show(errors.far_calls_failed())
-            io.show("toolchain: причина: {again}")
+    skill write_rv64(ast, heap_size, output_path, source) {
+        @machine = gorn.compile_machine_from(ast, heap_size, rv64.Executor {}, linux.Linux {}, source, no)
+        io.show("toolchain: пишу RV64 {output_path}")
+        elf64.write(output_path, machine, elf64.RISCV, elf64.PAGE_BYTES) rescue |failure| {
+            tell(build_errors.near_calls_failed())
+            io.show("toolchain: причина: {failure}")
+            @far = gorn.compile_machine_from(ast, heap_size, rv64.Executor { far_calls = yes }, linux.Linux {}, source, no)
+            elf64.write(output_path, far, elf64.RISCV, elf64.PAGE_BYTES) rescue |again| {
+                tell(build_errors.far_calls_failed())
+                io.show("toolchain: причина: {again}")
+                out error.WriteFailed
+            }
+            out none
+        }
+        out none
+    }
+
+    skill write_arm64(ast, heap_size, output_path, source) {
+        @executor = arm64.Executor {}
+        @machine = gorn.compile_machine_from(ast, heap_size, executor, linux.Linux {}, source, no)
+        io.show("toolchain: пишу ARM64 {output_path}")
+        executor.write_linux(output_path, machine) rescue |failure| {
+            io.show("toolchain: образ ARM64 не собрался: {failure}")
             out error.WriteFailed
         }
         out none
     }
-    out none
-}
 
-skill write_arm64(ast, heap_size, output_path, source) {
-    @executor = arm64.Executor {}
-    @machine = gorn.compile_machine_from(ast, heap_size, executor, linux.Linux {}, source, no)
-    io.show("toolchain: пишу ARM64 {output_path}")
-    executor.write_linux(output_path, machine) rescue |failure| {
-        io.show("toolchain: образ ARM64 не собрался: {failure}")
-        out error.WriteFailed
-    }
-    out none
-}
-
-skill build(source_path, output_path, heap_text, target) {
-    @plan = Architect {
-        locations = yes
-    }
-    io.show("toolchain: читаю {source_path}")
-    @loaded = plan.gather(source_path)
-    plan.told(loaded)
-    (group.count(loaded.diagnostics) > 0) {
-        toolchain_show_diagnostics(loaded.diagnostics)
-        out error.ParseFailed
-    }
-
-    io.show("toolchain: проверяю")
-    @wide_numbers = no
-    (target == "rv64") { wide_numbers = yes }
-    (target == "x86_64") { wide_numbers = yes }
-    (target == "x86_64-uefi") { wide_numbers = yes }
-    (target == "arm64") { wide_numbers = yes }
-    @inspector = Checker {}
-    @checked = inspector.check_for(loaded.ast, source_path, wide_numbers)
-    (group.count(checked.diagnostics) > 0) {
-        toolchain_show_diagnostics(checked.diagnostics)
-        out error.CheckFailed
-    }
-
-    (str.starts_with(heap_text, "-") == yes) { out error.ValueOutsideRange }
-    @heap_size = wide.from_decimal(heap_text)
-    io.show("toolchain: собираю")
-    (target == "x86_64") { out write_x86(checked.tree, heap_size, output_path, no, source_path) }
-    (target == "x86_64-uefi") { out write_x86(checked.tree, heap_size, output_path, yes, source_path) }
-    (target == "rv64") { out write_rv64(checked.tree, heap_size, output_path, source_path) }
-    (target == "arm64") { out write_arm64(checked.tree, heap_size, output_path, source_path) }
-    ((target == "rv32i") == no) { out error.UnknownTarget }
-    @machine = build_machine(checked.tree, heap_size, no, source_path)
-    io.show("toolchain: пишу {output_path}")
-    @machine_elf = Elf {
-        machine = machine
-    }
-    machine_elf.write(output_path) rescue |failure| {
-        show(errors.near_calls_failed())
-        io.show("toolchain: причина: {failure}")
-        @far = build_machine(checked.tree, heap_size, yes, source_path)
-        @far_elf = Elf {
-            machine = far
+    skill compile(source_path, output_path, heap_text, target) {
+        @plan = Architect {
+            locations = yes
         }
-        far_elf.write(output_path) rescue |again| {
-            show(errors.far_calls_failed())
-            io.show("toolchain: причина: {again}")
-            out error.WriteFailed
+        io.show("toolchain: читаю {source_path}")
+        @loaded = plan.gather(source_path)
+        plan.told(loaded)
+        (group.count(loaded.diagnostics) > 0) {
+            show_diagnostics(loaded.diagnostics)
+            out error.ParseFailed
+        }
+
+        io.show("toolchain: проверяю")
+        @wide_numbers = (target == "rv64") ○○ (target == "x86_64") ○○ (target == "x86_64-uefi") ○○ (target == "arm64")
+        @inspector = Checker {}
+        @checked = inspector.check_for(loaded.ast, source_path, wide_numbers)
+        (group.count(checked.diagnostics) > 0) {
+            show_diagnostics(checked.diagnostics)
+            out error.CheckFailed
+        }
+
+        (str.starts_with(heap_text, "-") == yes) {
+            out error.ValueOutsideRange
+        }
+        @heap_size = wide.from_decimal(heap_text)
+        io.show("toolchain: собираю")
+        (target == "x86_64") {
+            out write_x86(checked.tree, heap_size, output_path, no, source_path)
+        }
+        (target == "x86_64-uefi") {
+            out write_x86(checked.tree, heap_size, output_path, yes, source_path)
+        }
+        (target == "rv64") {
+            out write_rv64(checked.tree, heap_size, output_path, source_path)
+        }
+        (target == "arm64") {
+            out write_arm64(checked.tree, heap_size, output_path, source_path)
+        }
+        ((target == "rv32i") == no) {
+            out error.UnknownTarget
+        }
+        @machine = build_machine(checked.tree, heap_size, no, source_path)
+        io.show("toolchain: пишу {output_path}")
+        @machine_elf = Elf {
+            machine = machine
+        }
+        machine_elf.write(output_path) rescue |failure| {
+            tell(build_errors.near_calls_failed())
+            io.show("toolchain: причина: {failure}")
+            @far = build_machine(checked.tree, heap_size, yes, source_path)
+            @far_elf = Elf {
+                machine = far
+            }
+            far_elf.write(output_path) rescue |again| {
+                tell(build_errors.far_calls_failed())
+                io.show("toolchain: причина: {again}")
+                out error.WriteFailed
+            }
+            out none
         }
         out none
     }
-    out none
 }
 
 program(source_path, output_path, heap_text, target) {
-    out build(source_path, output_path, heap_text, target)
+    @toolchain = Toolchain {}
+    out toolchain.compile(source_path, output_path, heap_text, target)
 }

@@ -5,11 +5,14 @@
 use core.str
 use core.group
 use compiler.nodes
-use compiler.report.errors
+use compiler.report
+use compiler.report.naming
 use compiler.checker.names
 use compiler.checker.notes
 
 Paths = Box {
+    naming_errors = naming.Naming {},
+    node_ops = nodes.Nodes {},
     register = Names {},
     journal = Notes {}
 
@@ -30,7 +33,7 @@ Paths = Box {
     }
 
     skill module_alias(globals, module, name) {
-        @import = register.table_find(globals, nodes.alias_key(module, name))
+        @import = register.table_find(globals, node_ops.alias_key(module, name))
         (import.kind == "import") {
             out import.type
         }
@@ -45,7 +48,7 @@ Paths = Box {
     }
 
     skill lead_name(globals, module, head) {
-        @import = register.table_find(globals, nodes.alias_key(module, str.lower(head)))
+        @import = register.table_find(globals, node_ops.alias_key(module, str.lower(head)))
         ((import.kind == "import") == no) {
             out ""
         }
@@ -60,21 +63,21 @@ Paths = Box {
         (visible(globals, module, name) == yes) {
             out name
         }
-        @local = nodes.qualified(module, name)
+        @local = node_ops.qualified(module, name)
         (register.table_has(globals, local) == yes) {
             out local
         }
-        @head = nodes.name_head(name)
-        @import = register.table_find(globals, nodes.alias_key(module, head))
+        @head = node_ops.name_head(name)
+        @import = register.table_find(globals, node_ops.alias_key(module, head))
         (reaches(import) == yes) {
-            @candidate = str.concat(import.type, nodes.name_tail(name))
+            @candidate = str.concat(import.type, node_ops.name_tail(name))
             (register.table_has(globals, candidate) == yes) {
                 out candidate
             }
         }
         @lead = lead_name(globals, module, head)
         (str.bytes(lead) > 0) {
-            @led = str.concat(lead, nodes.name_tail(name))
+            @led = str.concat(lead, node_ops.name_tail(name))
             (register.table_has(globals, led) == yes) {
                 out led
             }
@@ -83,7 +86,7 @@ Paths = Box {
     }
 
     skill resolve_path(node, scope, globals) {
-        @plain = nodes.plain(node)
+        @plain = node_ops.plain(node)
         @count = group.count(plain)
         @head = group.get(plain, 1)
         (count == 2) {
@@ -91,17 +94,17 @@ Paths = Box {
                 out ""
             }
         }
-        @direct = nodes.path_text(plain)
+        @direct = node_ops.path_text(plain)
         (visible(globals, scope.module, direct) == yes) {
             out direct
         }
         (count == 2) {
-            @local = nodes.qualified(scope.module, head)
+            @local = node_ops.qualified(scope.module, head)
             (register.table_has(globals, local) == yes) {
                 out local
             }
         }
-        @import = register.table_find(globals, nodes.alias_key(scope.module, head))
+        @import = register.table_find(globals, node_ops.alias_key(scope.module, head))
         (reaches(import) == yes) {
             @candidate = import.type
             drum (count - 2) {
@@ -132,7 +135,7 @@ Paths = Box {
                 out resolved
             }
         }
-        out nodes.path_text(callee)
+        out node_ops.path_text(callee)
     }
 
     skill path_from_text(text) {
@@ -140,21 +143,21 @@ Paths = Box {
     }
 
     skill long_reference(node, scope, globals) {
-        @plain = nodes.plain(node)
+        @plain = node_ops.plain(node)
         @count = group.count(plain)
         (count < 4) {
-            out errors.ok()
+            out report.ok()
         }
         @head = group.get(plain, 1)
         (register.has_name(scope.names, head) == yes) {
-            out errors.ok()
+            out report.ok()
         }
-        (register.table_has(globals, nodes.qualified(scope.module, head)) == yes) {
-            out errors.ok()
+        (register.table_has(globals, node_ops.qualified(scope.module, head)) == yes) {
+            out report.ok()
         }
-        @text = nodes.path_text(plain)
+        @text = node_ops.path_text(plain)
         @full = text
-        @import = register.table_find(globals, nodes.alias_key(scope.module, head))
+        @import = register.table_find(globals, node_ops.alias_key(scope.module, head))
         (import.kind == "import") { full = str.concat(import.type, str.concat(".", str.join(group.slice(plain, 2, count - 1 + 1), "."))) }
         @segments = path_from_text(full)
         @size = group.count(segments)
@@ -164,16 +167,16 @@ Paths = Box {
                 @module = str.join(group.slice(segments, 1, length - 1 + 1), ".")
                 @short = str.join(group.slice(segments, length - 1, size - 1 + 1), ".")
                 (short == text) {
-                    out errors.ok()
+                    out report.ok()
                 }
-                out errors.long_reference(text, module, short)
+                out naming_errors.long_reference(text, module, short)
             }
         }
-        out errors.ok()
+        out report.ok()
     }
 
     skill ambiguous(name, module, globals) {
-        @part = register.table_find(globals, nodes.alias_key(module, name))
+        @part = register.table_find(globals, node_ops.alias_key(module, name))
         (part.kind == "nest") {
             out (part.type == names.AMBIGUOUS)
         }
@@ -182,26 +185,26 @@ Paths = Box {
 
     skill missing_box(name, module, globals) {
         (ambiguous(name, module, globals) == yes) {
-            out errors.ambiguous_part(name)
+            out naming_errors.ambiguous_part(name)
         }
-        out errors.unknown_box(name)
+        out naming_errors.unknown_box(name)
     }
 
     skill missing_part(name, module, globals) {
         (ambiguous(name, module, globals) == yes) {
-            out errors.ambiguous_part(name)
+            out naming_errors.ambiguous_part(name)
         }
-        out errors.unknown_namespace(name)
+        out naming_errors.unknown_namespace(name)
     }
 
     skill check_module_name(node, name, module, globals, diagnostics) {
         @target = module_alias(globals, module, name)
         (str.bytes(target) > 0) {
-            out journal.add_diagnostic(diagnostics, journal.placed(node, errors.name_taken_by_module(name, target)))
+            out journal.add_diagnostic(diagnostics, journal.placed(node, naming_errors.name_taken_by_module(name, target)))
         }
-        @root = register.table_find(globals, nodes.alias_key(names.ROOT_MARK, name))
+        @root = register.table_find(globals, node_ops.alias_key(names.ROOT_MARK, name))
         (root.kind == "root") {
-            out journal.add_diagnostic(diagnostics, journal.placed(node, errors.name_taken_by_root(name)))
+            out journal.add_diagnostic(diagnostics, journal.placed(node, naming_errors.name_taken_by_root(name)))
         }
         out diagnostics
     }

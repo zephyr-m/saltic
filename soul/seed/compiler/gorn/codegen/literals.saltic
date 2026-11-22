@@ -18,14 +18,16 @@ use compiler.contract.intrinsic.contract
 use compiler.gorn.codegen.lookup
 
 Literals = Box {
+    abi_ops = abi.Abi {},
+    node_ops = nodes.Nodes {},
     resolver = lookup.Lookup {},
     constant_ops = constants.Constants {}
 
     skill negative_literal(node) {
-        @plain = nodes.plain(node)
+        @plain = node_ops.plain(node)
         ((group.get(plain, 0) == "binary") ○ (group.get(plain, 1) == "-")) {
-            @left = nodes.plain(group.get(plain, 2))
-            @right = nodes.plain(group.get(plain, 3))
+            @left = node_ops.plain(group.get(plain, 2))
+            @right = node_ops.plain(group.get(plain, 3))
             ((group.get(left, 0) == "number") ○ (group.get(left, 1) == 0)) {
                 out (group.get(right, 0) == "number")
             }
@@ -34,7 +36,7 @@ Literals = Box {
     }
 
     skill constant_literal(node) {
-        @tag = nodes.tag(node)
+        @tag = node_ops.tag(node)
         (tag == "number") {
             out yes
         }
@@ -45,21 +47,21 @@ Literals = Box {
     }
 
     skill number_operand(billet, node) {
-        ((nodes.tag(node) == "number") ○○ (negative_literal(node) == yes) ○○ (resolver.infer_type(billet, node) == "number")) {
+        ((node_ops.tag(node) == "number") ○○ (negative_literal(node) == yes) ○○ (resolver.infer_type(billet, node) == "number")) {
             out yes
         }
-        @parts = nodes.plain(node)
+        @parts = node_ops.plain(node)
         (group.get(parts, 0) == "path") {
             @billet_current_function_slots = billet.current_function.slots
             (billet_current_function_slots.has(group.get(parts, 1)) == yes) {
                 out no
             }
             @billet_constants = billet.constants
-            @constant = billet_constants.find(resolver.resolve_symbol(billet, billet.constants, nodes.path_text(parts)))
+            @constant = billet_constants.find(resolver.resolve_symbol(billet, billet.constants, node_ops.path_text(parts)))
             (str.bytes(constant.name) == 0) {
                 out no
             }
-            (nodes.tag(constant.node) == "number") {
+            (node_ops.tag(constant.node) == "number") {
                 out yes
             }
             out negative_literal(constant.node)
@@ -68,19 +70,19 @@ Literals = Box {
     }
 
     skill immediate_operand(billet, node) {
-        @tag = nodes.tag(node)
+        @tag = node_ops.tag(node)
         ((constant_literal(node) == yes) ○○ (tag == "enum-value")) {
             out yes
         }
         (tag == "path") {
-            @parts = nodes.plain(node)
+            @parts = node_ops.plain(node)
             @count = group.count(parts)
-            ((count > 2) ○ (str.bytes(resolver.resolve_symbol(billet, billet.enums, nodes.path_prefix(parts))) > 0)) {
+            ((count > 2) ○ (str.bytes(resolver.resolve_symbol(billet, billet.enums, node_ops.path_prefix(parts))) > 0)) {
                 out yes
             }
             @billet_current_function_slots = billet.current_function.slots
             (billet_current_function_slots.has(group.get(parts, 1)) == no) {
-                @constant_name = resolver.resolve_symbol(billet, billet.constants, nodes.path_text(parts))
+                @constant_name = resolver.resolve_symbol(billet, billet.constants, node_ops.path_text(parts))
                 @billet_constants = billet.constants
                 @constant = billet_constants.find(constant_name)
                 (str.bytes(constant.name) > 0) {
@@ -133,7 +135,7 @@ Literals = Box {
     }
 
     skill literal_word(node) {
-        @plain = nodes.plain(node)
+        @plain = node_ops.plain(node)
         @tag = group.get(plain, 0)
         (tag == "answer") {
             (group.get(plain, 1) == "yes") {
@@ -146,9 +148,11 @@ Literals = Box {
         }
         @number = group.get(plain, 1)
         (tag == "binary") {
-            number = -group.get(nodes.plain(group.get(plain, 3)), 1)
+            number = -group.get(node_ops.plain(group.get(plain, 3)), 1)
         }
-        out word.add_number(word.shift_left(word.from_signed(number), abi.TAG_SHIFT), abi.TAG_NUMBER)
+        @payload = word.from_signed(number)
+        @shifted = payload.shifted(abi.TAG_SHIFT)
+        out shifted.sum_number(abi.TAG_NUMBER)
     }
 
     skill group_label(billet, items) {
@@ -181,7 +185,8 @@ Literals = Box {
     }
 
     skill load_wide_number(billet, text) {
-        @tagged = wide.shift_left(wide.from_decimal(text), abi.TAG_SHIFT)
+        @payload = wide.from_decimal(text)
+        @tagged = payload.shifted(abi.TAG_SHIFT)
         @executor = billet.executor
         out executor.load_wide(billet, backend.VALUE, tagged)
     }
@@ -193,14 +198,16 @@ Literals = Box {
     skill load_number_into(billet, role, number) {
         @executor = billet.executor
         ((number > -257) ○ (number < 256)) {
-            out executor.load_immediate(billet, role, abi.tagged(number, abi.TAG_NUMBER))
+            out executor.load_immediate(billet, role, abi_ops.with_tag(number, abi.TAG_NUMBER))
         }
-        @tagged = word.add_number(word.shift_left(word.from_signed(number), abi.TAG_SHIFT), abi.TAG_NUMBER)
+        @payload = word.from_signed(number)
+        @shifted = payload.shifted(abi.TAG_SHIFT)
+        @tagged = shifted.sum_number(abi.TAG_NUMBER)
         out executor.load_word(billet, role, tagged)
     }
 
     skill simple_operand(billet, node) {
-        @parts = nodes.plain(node)
+        @parts = node_ops.plain(node)
         (group.get(parts, 0) == "number") {
             out yes
         }
@@ -212,7 +219,7 @@ Literals = Box {
     }
 
     skill load_simple(billet, node, role) {
-        @parts = nodes.plain(node)
+        @parts = node_ops.plain(node)
         (group.get(parts, 0) == "number") {
             out load_number_into(billet, role, group.get(parts, 1))
         }
@@ -221,14 +228,14 @@ Literals = Box {
     }
 
     skill fixed_literal(value) {
-        @plain = nodes.plain(value)
+        @plain = node_ops.plain(value)
         @tag = group.get(plain, 0)
         ((tag == "number") ○○ (tag == "wide-number")) {
             out yes
         }
         ((tag == "binary") ○ (group.get(plain, 1) == "-")) {
-            @left = nodes.plain(group.get(plain, 2))
-            @right_tag = group.get(nodes.plain(group.get(plain, 3)), 0)
+            @left = node_ops.plain(group.get(plain, 2))
+            @right_tag = group.get(node_ops.plain(group.get(plain, 3)), 0)
             ((group.get(left, 0) == "number") ○ (group.get(left, 1) == 0)) {
                 ((right_tag == "number") ○○ (right_tag == "wide-number")) {
                     out yes
@@ -240,7 +247,7 @@ Literals = Box {
 
     skill load_fixed_literal(billet, value) {
         @executor = billet.executor
-        @plain = nodes.plain(value)
+        @plain = node_ops.plain(value)
         @tag = group.get(plain, 0)
         (tag == "wide-number") {
             @text = group.get(plain, 1)
@@ -252,7 +259,7 @@ Literals = Box {
         (tag == "number") {
             out executor.load_immediate(billet, backend.VALUE, group.get(plain, 1))
         }
-        @right = nodes.plain(group.get(plain, 3))
+        @right = node_ops.plain(group.get(plain, 3))
         (group.get(right, 0) == "number") {
             out executor.load_immediate(billet, backend.VALUE, -group.get(right, 1))
         }
