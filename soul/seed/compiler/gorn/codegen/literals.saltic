@@ -1,0 +1,262 @@
+-- literals — литералы в машинный код: числа (с тегом и отрицательные), строки
+-- (таблица strings, метка на каждый текст), статические группы, слова,
+-- фиксированные и широкие числа, простые операнды. Вынесено из emitters,
+-- когда он перерос 512 строк (22.11.2026). Хозяин — Literals (СОП).
+
+use core.str
+use core.group
+use core.num
+use compiler.abi
+use compiler.ast
+use compiler.gorn.state
+use compiler.gorn.constants
+use compiler.gorn.backend
+use compiler.machine.word
+use compiler.machine.wide
+use compiler.abi.fraction
+use compiler.intrinsic.contract
+use compiler.gorn.codegen.lookup
+
+Literals = Box {
+    resolver = lookup.Lookup {},
+    constant_ops = constants.Constants {}
+
+    skill negative_literal(node) {
+        @plain = ast.plain(node)
+        ((group.get(plain, 0) == "binary") ○ (group.get(plain, 1) == "-")) {
+            @left = ast.plain(group.get(plain, 2))
+            @right = ast.plain(group.get(plain, 3))
+            ((group.get(left, 0) == "number") ○ (group.get(left, 1) == 0)) {
+                out (group.get(right, 0) == "number")
+            }
+        }
+        out no
+    }
+
+    skill constant_literal(node) {
+        @tag = ast.tag(node)
+        (tag == "number") {
+            out yes
+        }
+        ((negative_literal(node) == yes) ○○ (tag == "answer") ○○ (tag == "none")) {
+            out yes
+        }
+        out no
+    }
+
+    skill number_operand(billet, node) {
+        ((ast.tag(node) == "number") ○○ (negative_literal(node) == yes) ○○ (resolver.infer_type(billet, node) == "number")) {
+            out yes
+        }
+        @parts = ast.plain(node)
+        (group.get(parts, 0) == "path") {
+            @billet_current_function_slots = billet.current_function.slots
+            (billet_current_function_slots.has(group.get(parts, 1)) == yes) {
+                out no
+            }
+            @billet_constants = billet.constants
+            @constant = billet_constants.find(resolver.resolve_symbol(billet, billet.constants, ast.path_text(parts)))
+            (str.bytes(constant.name) == 0) {
+                out no
+            }
+            (ast.tag(constant.node) == "number") {
+                out yes
+            }
+            out negative_literal(constant.node)
+        }
+        out no
+    }
+
+    skill immediate_operand(billet, node) {
+        @tag = ast.tag(node)
+        ((constant_literal(node) == yes) ○○ (tag == "enum-value")) {
+            out yes
+        }
+        (tag == "path") {
+            @parts = ast.plain(node)
+            @count = group.count(parts)
+            ((count > 2) ○ (str.bytes(resolver.resolve_symbol(billet, billet.enums, ast.path_prefix(parts))) > 0)) {
+                out yes
+            }
+            @billet_current_function_slots = billet.current_function.slots
+            (billet_current_function_slots.has(group.get(parts, 1)) == no) {
+                @constant_name = resolver.resolve_symbol(billet, billet.constants, ast.path_text(parts))
+                @billet_constants = billet.constants
+                @constant = billet_constants.find(constant_name)
+                (str.bytes(constant.name) > 0) {
+                    out constant_literal(constant.node)
+                }
+            }
+        }
+        out no
+    }
+
+    skill string_find(billet, text) {
+        @table = billet.strings
+        out table.find_text(text)
+    }
+
+    skill string_label(billet, text) {
+        @known = string_find(billet, text)
+        (str.bytes(known.name) > 0) {
+            out known.name
+        }
+        @label = billet.fresh_label("string")
+        @length = str.bytes(text)
+        @payload_bytes = constant_ops.string_storage_bytes(billet.words, length)
+        @executor = billet.executor
+        billet = executor.align(billet, backend.RODATA, constants.DATA_ALIGNMENT)
+        billet = executor.data_label(billet, backend.RODATA, label)
+        billet = constant_ops.emit_static_header(billet, backend.RODATA, abi.OBJECT_KIND_STRING, payload_bytes)
+        billet = executor.data_word(billet, backend.RODATA, word.from_number(length))
+        billet = executor.data_text(billet, backend.RODATA, text)
+        billet = executor.align(billet, backend.RODATA, constants.DATA_ALIGNMENT)
+        @table = billet.strings
+        table.keep(state.Symbol {
+            name = label,
+            kind = "string",
+            text = text
+        })
+        out label
+    }
+
+    skill static_group(items) {
+        (group.count(items) == 0) {
+            out no
+        }
+        drum (items) {
+            (constant_literal(beat) == no) {
+                out no
+            }
+        }
+        out yes
+    }
+
+    skill literal_word(node) {
+        @plain = ast.plain(node)
+        @tag = group.get(plain, 0)
+        (tag == "answer") {
+            (group.get(plain, 1) == "yes") {
+                out word.from_number(abi.YES)
+            }
+            out word.from_number(abi.NO)
+        }
+        (tag == "none") {
+            out word.from_number(abi.NONE)
+        }
+        @number = group.get(plain, 1)
+        (tag == "binary") {
+            number = -group.get(ast.plain(group.get(plain, 3)), 1)
+        }
+        out word.add_number(word.shift_left(word.from_signed(number), abi.TAG_SHIFT), abi.TAG_NUMBER)
+    }
+
+    skill group_label(billet, items) {
+        @label = billet.fresh_label("group")
+        @count = group.count(items)
+        @executor = billet.executor
+        @words = billet.words
+        billet = executor.align(billet, backend.RODATA, constants.DATA_ALIGNMENT)
+        billet = executor.data_label(billet, backend.RODATA, label)
+        billet = constant_ops.emit_static_header(billet, backend.RODATA, abi.OBJECT_KIND_GROUP, constant_ops.group_storage_bytes(words, count))
+        billet = executor.data_word(billet, backend.RODATA, word.from_number(count))
+        drum (items) {
+            billet = executor.data_word(billet, backend.RODATA, literal_word(beat))
+        }
+        out label
+    }
+
+    skill load_static_group(billet, items) {
+        @executor = billet.executor
+        billet = executor.load_address(billet, backend.VALUE, group_label(billet, items), 0)
+        out executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_GROUP)
+    }
+
+    skill emit_string_join(billet) {
+        @executor = billet.executor
+        billet = executor.move(billet, backend.ERROR, backend.VALUE)
+        billet = executor.pop(billet, backend.VALUE)
+        billet = executor.call(billet, "rt_string_add")
+        out executor.push(billet, backend.VALUE)
+    }
+
+    skill load_wide_number(billet, text) {
+        @tagged = wide.shift_left(wide.from_decimal(text), abi.TAG_SHIFT)
+        @executor = billet.executor
+        out executor.load_wide(billet, backend.VALUE, tagged)
+    }
+
+    skill load_number(billet, number) {
+        out load_number_into(billet, backend.VALUE, number)
+    }
+
+    skill load_number_into(billet, role, number) {
+        @executor = billet.executor
+        ((number > -257) ○ (number < 256)) {
+            out executor.load_immediate(billet, role, abi.tagged(number, abi.TAG_NUMBER))
+        }
+        @tagged = word.add_number(word.shift_left(word.from_signed(number), abi.TAG_SHIFT), abi.TAG_NUMBER)
+        out executor.load_word(billet, role, tagged)
+    }
+
+    skill simple_operand(billet, node) {
+        @parts = ast.plain(node)
+        (group.get(parts, 0) == "number") {
+            out yes
+        }
+        ((group.get(parts, 0) == "path") ○ (group.count(parts) == 2)) {
+            @billet_current_function_slots = billet.current_function.slots
+            out billet_current_function_slots.has(group.get(parts, 1))
+        }
+        out no
+    }
+
+    skill load_simple(billet, node, role) {
+        @parts = ast.plain(node)
+        (group.get(parts, 0) == "number") {
+            out load_number_into(billet, role, group.get(parts, 1))
+        }
+        @executor = billet.executor
+        out executor.load(billet, role, backend.FRAME, billet.slot_of(group.get(parts, 1)))
+    }
+
+    skill fixed_literal(value) {
+        @plain = ast.plain(value)
+        @tag = group.get(plain, 0)
+        ((tag == "number") ○○ (tag == "wide-number")) {
+            out yes
+        }
+        ((tag == "binary") ○ (group.get(plain, 1) == "-")) {
+            @left = ast.plain(group.get(plain, 2))
+            @right_tag = group.get(ast.plain(group.get(plain, 3)), 0)
+            ((group.get(left, 0) == "number") ○ (group.get(left, 1) == 0)) {
+                ((right_tag == "number") ○○ (right_tag == "wide-number")) {
+                    out yes
+                }
+            }
+        }
+        out no
+    }
+
+    skill load_fixed_literal(billet, value) {
+        @executor = billet.executor
+        @plain = ast.plain(value)
+        @tag = group.get(plain, 0)
+        (tag == "wide-number") {
+            @text = group.get(plain, 1)
+            ((billet.words.bytes == 8) ○ (str.starts_with(text, "-") == no)) {
+                out executor.load_wide(billet, backend.VALUE, wide.from_decimal(text))
+            }
+            out executor.load_word(billet, backend.VALUE, word.from_decimal(text))
+        }
+        (tag == "number") {
+            out executor.load_immediate(billet, backend.VALUE, group.get(plain, 1))
+        }
+        @right = ast.plain(group.get(plain, 3))
+        (group.get(right, 0) == "number") {
+            out executor.load_immediate(billet, backend.VALUE, -group.get(right, 1))
+        }
+        @negative_text = str.concat("-", group.get(right, 1))
+        out executor.load_word(billet, backend.VALUE, word.from_decimal(negative_text))
+    }
+}

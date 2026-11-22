@@ -21,6 +21,7 @@ use compiler.gorn.state
 use compiler.gorn.codegen.lookup
 use compiler.gorn.codegen.emitters
 use compiler.gorn.backend
+use compiler.gorn.codegen.literals
 
 Rescue = Box {
     done = "",
@@ -29,71 +30,86 @@ Rescue = Box {
     outer = ""
 }
 
-skill check(billet) {
-    out emitters.on_error(billet)
-}
+Failures = Box {
+    resolver = lookup.Lookup {},
+    emission = emitters.Emitters {},
+    literal_ops = literals.Literals {}
 
-skill load_value(billet, name) {
-    @executor = billet.executor
-    billet = lookup.remember_error(billet, name)
-    billet = executor.load_immediate(billet, backend.VALUE, abi.error_value(lookup.error_id(billet, name)))
-    out executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
-}
+    skill check(billet) {
+        out emission.on_error(billet)
+    }
 
-skill load_failure(billet, name) {
-    @executor = billet.executor
-    billet = lookup.remember_error(billet, name)
-    billet = executor.load_immediate(billet, backend.VALUE, 0)
-    out executor.load_immediate(billet, backend.ERROR, lookup.error_id(billet, name))
-}
+    skill load_value(billet, name) {
+        @executor = billet.executor
+        billet = resolver.remember_error(billet, name)
+        billet = executor.load_immediate(billet, backend.VALUE, abi.error_value(resolver.error_id(billet, name)))
+        out executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
+    }
 
-skill trail(billet) {
-    @executor = billet.executor
-    billet = executor.load_address(billet, backend.VALUE, emitters.string_label(billet, place_text(billet)), 0)
-    billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
-    billet = executor.load_immediate(billet, backend.ARG2, billet.current_function.line)
-    billet = executor.call(billet, "rt_trail_push")
-    out executor.load_immediate(billet, backend.VALUE, 0)
-}
+    skill load_failure(billet, name) {
+        @executor = billet.executor
+        billet = resolver.remember_error(billet, name)
+        billet = executor.load_immediate(billet, backend.VALUE, 0)
+        out executor.load_immediate(billet, backend.ERROR, resolver.error_id(billet, name))
+    }
 
-skill place_text(billet) {
-    @function = billet.current_function
-    @file = "главный файл"
-    (str.bytes(billet.source) > 0) { file = billet.source }
-    (str.bytes(function.module) > 0) { file = str.concat(str.join(str.split(function.module, "."), "/"), ".saltic") }
-    out "{function.name} · {file}"
-}
+    skill trail(billet) {
+        @executor = billet.executor
+        billet = executor.load_address(billet, backend.VALUE, literal_ops.string_label(billet, place_text(billet)), 0)
+        billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+        billet = executor.load_immediate(billet, backend.ARG2, billet.current_function.line)
+        billet = executor.call(billet, "rt_trail_push")
+        out executor.load_immediate(billet, backend.VALUE, 0)
+    }
 
-skill raise_value(billet) {
-    @executor = billet.executor
-    billet = executor.shift_right_unsigned(billet, backend.ERROR, backend.VALUE, abi.TAG_SHIFT)
-    out executor.load_immediate(billet, backend.VALUE, 0)
-}
+    skill place_text(billet) {
+        @function = billet.current_function
+        @file = "главный файл"
+        (str.bytes(billet.source) > 0) {
+            file = billet.source
+        }
+        (str.bytes(function.module) > 0) {
+            file = str.concat(str.join(str.split(function.module, "."), "/"), ".saltic")
+        }
+        out "{function.name} · {file}"
+    }
 
-skill rescue_frame(billet) {
-    @done = billet.fresh_label("rescue_done")
-    @caught = billet.fresh_label("rescue_caught")
-    @stack_slot = billet.slot_of("$rescue:{billet.current_function.next_rescue}")
-    out Rescue { done = done, caught = caught, stack_slot = stack_slot, outer = billet.current_function.failure }
-}
+    skill raise_value(billet) {
+        @executor = billet.executor
+        billet = executor.shift_right_unsigned(billet, backend.ERROR, backend.VALUE, abi.TAG_SHIFT)
+        out executor.load_immediate(billet, backend.VALUE, 0)
+    }
 
-skill enter(billet, frame) {
-    @executor = billet.executor
-    billet.current_function.next_rescue = billet.current_function.next_rescue + 1
-    billet = executor.store(billet, backend.STACK, backend.FRAME, frame.stack_slot)
-    billet.current_function.failure = frame.caught
-    out billet
-}
+    skill rescue_frame(billet) {
+        @done = billet.fresh_label("rescue_done")
+        @caught = billet.fresh_label("rescue_caught")
+        @stack_slot = billet.slot_of("$rescue:{billet.current_function.next_rescue}")
+        out Rescue {
+            done = done,
+            caught = caught,
+            stack_slot = stack_slot,
+            outer = billet.current_function.failure
+        }
+    }
 
-skill catch(billet, frame, name) {
-    @executor = billet.executor
-    billet.current_function.failure = frame.outer
-    billet = executor.jump_if_zero(billet, backend.ERROR, frame.done)
-    billet = executor.label(billet, frame.caught)
-    billet = executor.call(billet, "rt_trail_clear")
-    billet = executor.load(billet, backend.STACK, backend.FRAME, frame.stack_slot)
-    billet = executor.shift_left(billet, backend.VALUE, backend.ERROR, abi.TAG_SHIFT)
-    billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_ERROR)
-    billet = executor.store(billet, backend.VALUE, backend.FRAME, billet.slot_of(name))
-    out executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
+    skill enter(billet, frame) {
+        @executor = billet.executor
+        billet.current_function.next_rescue = billet.current_function.next_rescue + 1
+        billet = executor.store(billet, backend.STACK, backend.FRAME, frame.stack_slot)
+        billet.current_function.failure = frame.caught
+        out billet
+    }
+
+    skill catch(billet, frame, name) {
+        @executor = billet.executor
+        billet.current_function.failure = frame.outer
+        billet = executor.jump_if_zero(billet, backend.ERROR, frame.done)
+        billet = executor.label(billet, frame.caught)
+        billet = executor.call(billet, "rt_trail_clear")
+        billet = executor.load(billet, backend.STACK, backend.FRAME, frame.stack_slot)
+        billet = executor.shift_left(billet, backend.VALUE, backend.ERROR, abi.TAG_SHIFT)
+        billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_ERROR)
+        billet = executor.store(billet, backend.VALUE, backend.FRAME, billet.slot_of(name))
+        out executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
+    }
 }

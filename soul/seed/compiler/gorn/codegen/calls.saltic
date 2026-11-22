@@ -1,0 +1,206 @@
+-- calls — вызовы в машинный код: навык, метод Box (прямо или через
+-- диспетчер), встроенный навык, показ, хранение и упаковка фиксированных,
+-- аргументы. Вынесено из codegen/main, когда он упёрся в 512 строк (22.11.2026).
+--
+-- compile_call(billet, node) -> billet; compile_arguments / compile_stored /
+--     compile_show / compile_fixed_from / pack_fixed — его части
+
+use core.str
+use core.group
+use core.num
+use compiler.abi
+use compiler.abi.value
+use compiler.ast
+use compiler.intrinsic.contract
+use compiler.gorn.state
+use compiler.gorn.constants
+use compiler.gorn.backend
+use compiler.checker.types.shapes
+use compiler.errors
+use compiler.gorn.codegen.lookup
+use compiler.gorn.codegen.emitters
+use compiler.gorn.codegen.loops
+use compiler.gorn.codegen.endless
+use compiler.gorn.codegen.failures
+use compiler.gorn.codegen.statements
+use compiler.gorn.codegen
+use compiler.gorn.codegen.literals
+
+Calls = Box {
+    resolver = lookup.Lookup {},
+    constant_ops = constants.Constants {},
+    emission = emitters.Emitters {},
+    literal_ops = literals.Literals {},
+    failure_ops = failures.Failures {}
+
+    skill compile_call(billet, node) {
+        @expressions = billet.expressions
+        @executor = billet.executor
+        @plain = ast.plain(node)
+        @callee = ast.plain(group.get(plain, 1))
+        @args = resolver.call_arguments(node)
+        @name = resolver.call_target(billet, callee)
+        @seed_kind = contract.find(name)
+        (contract.is_show(seed_kind) == yes) {
+            out compile_show(billet, args)
+        }
+        @made = contract.conversion(seed_kind)
+        (str.bytes(made) > 0) {
+            out compile_fixed_from(billet, made, group.get(args, 0))
+        }
+        (name == "core.num.from") {
+            @argument = group.get(args, 0)
+            @source_type = resolver.infer_type(billet, argument)
+            billet = expressions.compile_expression(billet, argument)
+            (contract.is_fixed_type(source_type) == no) {
+                out billet
+            }
+            billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(source_type))
+            billet = executor.call(billet, "rt_fixed_to_number")
+            out failure_ops.check(billet)
+        }
+        @fixed_target = ""
+        (contract.is_fixed_call(seed_kind) == yes) {
+            fixed_target = contract.target(seed_kind, "unknown")
+        }
+        (str.bytes(fixed_target) > 0) {
+            billet = compile_arguments(billet, args)
+            @fixed_type = resolver.infer_type(billet, group.get(args, 0))
+            billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(fixed_type))
+            billet = executor.call(billet, fixed_target)
+            billet = failure_ops.check(billet)
+            out billet
+        }
+        @memory_target = ""
+        (group.count(args) > 0) {
+            @input_type = resolver.infer_type(billet, group.get(args, 0))
+            (contract.is_memory(seed_kind) == yes) {
+                memory_target = contract.target(seed_kind, input_type)
+            }
+        }
+        (str.bytes(memory_target) > 0) {
+            billet = compile_arguments(billet, args)
+            billet = executor.call(billet, memory_target)
+            billet = failure_ops.check(billet)
+            out billet
+        }
+        @resolved_box = resolver.resolve_symbol(billet, billet.boxes, name)
+        (str.bytes(resolved_box) > 0) {
+            out expressions.compile_box(billet, resolved_box, [])
+        }
+        @forms = Shapes {}
+        @box_name = forms.box_name(ast.type_of(group.get(plain, 1)))
+        (str.bytes(box_name) > 0) {
+            @receiver = ["path", "$self"]
+            @method = group.get(callee, 1)
+            (group.count(callee) == 3) {
+                receiver = ["path", group.get(callee, 1)]
+                method = group.get(callee, 2)
+            }
+            billet = compile_arguments(billet, group.concat([receiver], args))
+            @target = "{box_name}."
+            target = str.concat(target, method)
+            billet = executor.call(billet, str.concat("saltic_", state.safe(target)))
+            out failure_ops.check(billet)
+        }
+        @target = resolver.intrinsic(name)
+        (str.bytes(target) == 0) {
+            @resolved_skill = resolver.resolve_skill(billet, callee)
+            (str.bytes(resolved_skill) > 0) {
+                target = str.concat("saltic_", state.safe(resolved_skill))
+            }
+        }
+        (str.bytes(target) == 0) {
+            (group.count(callee) == 3) {
+                @billet_current_function_slots = billet.current_function.slots
+                (billet_current_function_slots.has(group.get(callee, 1)) == yes) {
+                    billet = compile_arguments(billet, group.concat([["path", group.get(callee, 1)]], args))
+                    (group.contains(billet.dispatches, group.get(callee, 2)) == no) {
+                        billet.dispatches = group.add(billet.dispatches, group.get(callee, 2))
+                    }
+                    billet = executor.call(billet, state.dispatch_label(group.get(callee, 2)))
+                    out failure_ops.check(billet)
+                }
+            }
+            @call_text = ast.path_text(callee)
+            @problem = errors.unresolved_call(call_text, billet.current_function.name)
+            io.show(problem.message)
+        }
+        (group.contains(["core.group.add", "core.group.replaced"], name) == yes) {
+            out failure_ops.check(executor.call(compile_stored(billet, args), target))
+        }
+        billet = compile_arguments(billet, args)
+        billet = executor.call(billet, target)
+        out failure_ops.check(billet)
+    }
+
+    skill compile_arguments(billet, args) {
+        @expressions = billet.expressions
+        @executor = billet.executor
+        @count = group.count(args)
+        drum (args) {
+            billet = expressions.compile_expression(billet, beat)
+            (str.starts_with(ast.type_of(beat), "pack:") == yes) {
+                billet = pack_fixed(billet, beat)
+            }
+            billet = executor.push(billet, backend.VALUE)
+        }
+        drum (count) {
+            billet = executor.load(billet, backend.argument(beat), backend.STACK, constant_ops.stack_source_offset(billet.words, count, beat))
+        }
+        (count > 0) {
+            billet = executor.add_immediate(billet, backend.STACK, backend.STACK, constant_ops.stack_bytes(billet.words, count))
+        }
+        out billet
+    }
+
+    skill compile_stored(billet, args) {
+        @expressions = billet.expressions
+        @executor = billet.executor
+        @last = group.count(args) - 1
+        drum (last) {
+            billet = executor.push(expressions.compile_expression(billet, group.get(args, beat)), backend.VALUE)
+        }
+        billet = pack_fixed(expressions.compile_expression(billet, group.get(args, last)), group.get(args, last))
+        billet = executor.move(billet, backend.argument(last), backend.VALUE)
+        drum (last) {
+            billet = executor.pop(billet, backend.argument(last - 1 - beat))
+        }
+        out billet
+    }
+
+    skill compile_show(billet, args) {
+        @expressions = billet.expressions
+        @executor = billet.executor
+        billet = expressions.compile_expression(billet, group.get(args, 0))
+        billet = executor.call(executor.call(billet, "rt_show"), "rt_newline")
+        out executor.load_immediate(billet, backend.VALUE, abi.NONE)
+    }
+
+    skill compile_fixed_from(billet, made, argument) {
+        @expressions = billet.expressions
+        @executor = billet.executor
+        (literal_ops.fixed_literal(argument) == yes) {
+            billet = literal_ops.load_fixed_literal(billet, argument)
+            billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(made))
+            out executor.call(billet, "rt_fixed_new")
+        }
+        @source_type = resolver.infer_type(billet, argument)
+        billet = expressions.compile_expression(billet, argument)
+        (contract.is_fixed_type(source_type) == yes) {
+            billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(source_type))
+            billet = executor.load_immediate(billet, backend.FIXED_TARGET_KIND, contract.fixed_kind(made))
+            out executor.call(billet, "rt_fixed_convert")
+        }
+        billet = executor.shift_right_signed(billet, backend.VALUE, backend.VALUE, abi.TAG_SHIFT)
+        billet = executor.load_immediate(billet, backend.FIXED_SOURCE_KIND, contract.fixed_kind(made))
+        out executor.call(billet, "rt_fixed_new")
+    }
+
+    skill pack_fixed(billet, stored) {
+        (contract.is_fixed_type(resolver.infer_type(billet, stored)) == yes) {
+            out failure_ops.check(emission.pack_call(billet, stored))
+        }
+        out billet
+    }
+}

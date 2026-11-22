@@ -39,75 +39,83 @@ Frame = Box {
     kept = []
 }
 
-skill head(billet, body) {
-    @executor = billet.executor
-    @number = num.text(billet.current_function.next_always)
-    billet.current_function.next_always = billet.current_function.next_always + 1
-    @frame = Frame {
-        mark = billet.slot_of("$always_mark:{number}"),
-        start = billet.fresh_label("always"),
-        end = billet.fresh_label("always_end"),
-        returning = billet.fresh_label("always_out"),
-        failing = billet.fresh_label("always_failure"),
-        keep = billet.fresh_label("always_keep"),
-        outer_end = billet.current_function.end,
-        outer_failure = billet.current_function.failure,
-        outer_exit = billet.current_function.drum_exit,
-        kept = state.outer_assigned(body)
+Endless = Box {
+    emission = emitters.Emitters {}
+
+    skill head(billet, body) {
+        @executor = billet.executor
+        @number = num.text(billet.current_function.next_always)
+        billet.current_function.next_always = billet.current_function.next_always + 1
+        @frame = Frame {
+            mark = billet.slot_of("$always_mark:{number}"),
+            start = billet.fresh_label("always"),
+            end = billet.fresh_label("always_end"),
+            returning = billet.fresh_label("always_out"),
+            failing = billet.fresh_label("always_failure"),
+            keep = billet.fresh_label("always_keep"),
+            outer_end = billet.current_function.end,
+            outer_failure = billet.current_function.failure,
+            outer_exit = billet.current_function.drum_exit,
+            kept = state.outer_assigned(body)
+        }
+        billet = executor.store(billet, backend.REGION_MARK, backend.FRAME, frame.mark)
+        billet = executor.label(billet, frame.start)
+        billet = executor.move(billet, backend.REGION_MARK, backend.HEAP_TOP)
+        billet.current_function.drum_exit = frame.end
+        billet.current_function.end = frame.returning
+        (str.bytes(frame.outer_failure) > 0) {
+            billet.current_function.failure = frame.failing
+        }
+        out frame
     }
-    billet = executor.store(billet, backend.REGION_MARK, backend.FRAME, frame.mark)
-    billet = executor.label(billet, frame.start)
-    billet = executor.move(billet, backend.REGION_MARK, backend.HEAP_TOP)
-    billet.current_function.drum_exit = frame.end
-    billet.current_function.end = frame.returning
-    (str.bytes(frame.outer_failure) > 0) { billet.current_function.failure = frame.failing }
-    out frame
-}
 
-skill restore(billet, frame) {
-    @executor = billet.executor
-    out executor.load(billet, backend.REGION_MARK, backend.FRAME, frame.mark)
-}
+    skill restore(billet, frame) {
+        @executor = billet.executor
+        out executor.load(billet, backend.REGION_MARK, backend.FRAME, frame.mark)
+    }
 
-skill guard(billet, frame, name) {
-    @executor = billet.executor
-    @plain = billet.fresh_label("always_plain")
-    @slot = billet.slot_of(name)
-    billet = executor.load(billet, backend.VALUE, backend.FRAME, slot)
-    billet = executor.and_immediate(billet, backend.SCRATCH1, backend.VALUE, abi.TAG_MASK)
-    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, -abi.TAG_STRING)
-    billet = executor.set_less_unsigned_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, POINTER_TAG_COUNT)
-    billet = executor.branch_zero(billet, backend.SCRATCH1, plain)
-    billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
-    billet = executor.branch_less_unsigned(billet, backend.SCRATCH0, backend.REGION_MARK, plain)
-    billet = executor.branch_greater_equal_unsigned(billet, backend.SCRATCH0, backend.HEAP_TOP, plain)
-    billet = executor.call(billet, "rt_store_keep")
-    billet = emitters.on_error(billet)
-    billet = executor.store(billet, backend.VALUE, backend.FRAME, slot)
-    out executor.label(billet, plain)
-}
+    skill guard(billet, frame, name) {
+        @executor = billet.executor
+        @plain = billet.fresh_label("always_plain")
+        @slot = billet.slot_of(name)
+        billet = executor.load(billet, backend.VALUE, backend.FRAME, slot)
+        billet = executor.and_immediate(billet, backend.SCRATCH1, backend.VALUE, abi.TAG_MASK)
+        billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, -abi.TAG_STRING)
+        billet = executor.set_less_unsigned_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, POINTER_TAG_COUNT)
+        billet = executor.branch_zero(billet, backend.SCRATCH1, plain)
+        billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+        billet = executor.branch_less_unsigned(billet, backend.SCRATCH0, backend.REGION_MARK, plain)
+        billet = executor.branch_greater_equal_unsigned(billet, backend.SCRATCH0, backend.HEAP_TOP, plain)
+        billet = executor.call(billet, "rt_store_keep")
+        billet = emission.on_error(billet)
+        billet = executor.store(billet, backend.VALUE, backend.FRAME, slot)
+        out executor.label(billet, plain)
+    }
 
-skill tail(billet, frame) {
-    @executor = billet.executor
-    billet.current_function.drum_exit = frame.outer_exit
-    billet.current_function.end = frame.outer_end
-    drum (frame.kept) { billet = guard(billet, frame, beat) }
-    billet.current_function.failure = frame.outer_failure
-    billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
-    billet = executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
-    billet = executor.load_immediate(billet, backend.ARG2, constants.REGION_VALUE_SKIPPED)
-    billet = executor.move(billet, backend.ARG3, backend.STACK)
-    billet = executor.call(billet, "rt_region_exit")
-    billet = executor.label(billet, frame.keep)
-    billet = executor.jump(billet, frame.start)
-    billet = executor.label(billet, frame.returning)
-    billet = restore(billet, frame)
-    billet = executor.jump(billet, frame.outer_end)
-    (str.bytes(frame.outer_failure) > 0) {
-        billet = executor.label(billet, frame.failing)
+    skill tail(billet, frame) {
+        @executor = billet.executor
+        billet.current_function.drum_exit = frame.outer_exit
+        billet.current_function.end = frame.outer_end
+        drum (frame.kept) {
+            billet = guard(billet, frame, beat)
+        }
+        billet.current_function.failure = frame.outer_failure
+        billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
+        billet = executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
+        billet = executor.load_immediate(billet, backend.ARG2, constants.REGION_VALUE_SKIPPED)
+        billet = executor.move(billet, backend.ARG3, backend.STACK)
+        billet = executor.call(billet, "rt_region_exit")
+        billet = executor.label(billet, frame.keep)
+        billet = executor.jump(billet, frame.start)
+        billet = executor.label(billet, frame.returning)
         billet = restore(billet, frame)
-        billet = executor.jump(billet, frame.outer_failure)
+        billet = executor.jump(billet, frame.outer_end)
+        (str.bytes(frame.outer_failure) > 0) {
+            billet = executor.label(billet, frame.failing)
+            billet = restore(billet, frame)
+            billet = executor.jump(billet, frame.outer_failure)
+        }
+        billet = executor.label(billet, frame.end)
+        out restore(billet, frame)
     }
-    billet = executor.label(billet, frame.end)
-    out restore(billet, frame)
 }
