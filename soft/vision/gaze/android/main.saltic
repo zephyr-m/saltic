@@ -1,0 +1,135 @@
+-- gaze — своя сеть взгляда на телефоне (APK, just android gaze): кадр с
+-- фронтальной камеры (camera, мост clib) уменьшается так же, как у сборщика
+-- (camera.shrink, collect.WIDE × HIGH), сеть gazenet с весами FILES/WEIGHTS
+-- отвечает точкой экрана в −1…1 — там кружок. Экран — жители закрытой
+-- библиотеки (section-title «Взгляд», label — кадров и мс на угадывание, или
+-- причина: нет весов, камеры), светлая палитра, шрифты TTF из FILES; в углу —
+-- превью того, что видит сеть. Веса — adb push .cache/gaze/weights.bin в
+-- FILES/WEIGHTS (учит soft/vision/gaze/linux/main). Право CAMERA — adb shell
+-- pm grant dev.saltic.gaze android.permission.CAMERA. Кадр — на каждый
+-- cpu.wait().
+--
+-- program() -> none
+-- Внутри: canvas() -> graphics.Screen окна; dressed / face — палитра со
+--     шрифтами; mounted(screen, palette, status) -> runtime экрана;
+--     preview(screen, buffer) — что видит сеть, в углу; spot(screen, answer) —
+--     кружок там, куда сеть думает, что смотрят
+
+use io
+use io.file
+use core.cpu
+use core.mem
+use core.u32
+use core.time
+use core.bytes
+use core.group
+use core.usize
+use core.address
+use core.num
+use core.fraction
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use tarantul.uiengine.jtml.calls
+use os.screen.graphics
+use tarantul.uiengine.draw.shapes
+use tarantul.uiengine.draw.atoms
+use tarantul.uiengine.draw.typeface
+use os.target.android.clib
+use tarantul.camera_android.camera
+use soft.vision.gaze.gazenet
+use tarantul.uiengine.themes
+
+FILES = "/sdcard/Android/data/dev.saltic.gaze/files/"
+WEIGHTS = "WEIGHTS.BIN"
+STEP = 5
+SPOT = 22
+EVERY = 10
+
+skill canvas() {
+    out graphics.Screen { width = cpu.firmware(1), height = cpu.firmware(2), stride = cpu.firmware(3), format = graphics.FORMAT_RGB, memory = cpu.firmware(0), vsync = no }
+}
+
+skill face(name) {
+    out typeface.from_bytes(file.read_bytes("{FILES}{name}"))
+}
+
+skill dressed(screen) {
+    @plain = themes.named("light", screen)
+    @typed = atoms.with_faces(themes.named("light", screen), face("INTER.TTF"), face("INTERB.TTF"), face("MONO.TTF")) rescue |err| {
+        io.show("gaze: шрифтов нет в {FILES} ({err}), рисую Spleen")
+        out plain
+    }
+    out typed
+}
+
+skill mounted(screen, palette, status) {
+    @title = calls.call("section-title", [["text", calls.quoted("Взгляд")]])
+    @line = calls.call("label", [["text", calls.quoted(status)]])
+    @page = "\{\"box\": \{\"fill\": \"ground\", \"padding\": [56, 16, 16, 16], \"gap\": 10, \"children\": [{title}, {line}]\}\}"
+    out jtml.mount(screen, atoms.fitted(read.page(page), no, palette))
+}
+
+skill preview(screen, buffer) {
+    @left = screen.width - gazenet.WIDE - 12
+    drum (gazenet.HIGH) {
+        @oy = beat
+        @row = ((140 + oy) * screen.stride + left) * graphics.PIXEL_BYTES
+        drum (gazenet.WIDE) {
+            @light = bytes.get(buffer, oy * gazenet.WIDE + beat)
+            mem.store32(address.from(screen.memory), usize.from(row + beat * graphics.PIXEL_BYTES), u32.from(graphics.color(screen, light, light, light)))
+        }
+    }
+    out none
+}
+
+skill spot(screen, answer) {
+    @x = num.round_school((1.0 + group.get(answer, 0)) / 2.0 * fraction.from(screen.width))
+    @y = num.round_school((1.0 + group.get(answer, 1)) / 2.0 * fraction.from(screen.height))
+    @size = SPOT * 2
+    shapes.shape(screen, x - SPOT, y - SPOT, size, size, SPOT, graphics.color(screen, 40, 200, 110))
+    out shapes.shape(screen, x - 5, y - 5, 10, 10, 5, graphics.color(screen, 250, 250, 250))
+}
+
+program() {
+    @screen = canvas()
+    @palette = dressed(screen)
+    @net = gazenet.load("{FILES}{WEIGHTS}") rescue |err| {
+        @runtime = mounted(screen, palette, "весов нет в {FILES}{WEIGHTS} ({err})")
+        always {
+            atoms.draw(canvas(), runtime, palette)
+            cpu.wait()
+        }
+        out none
+    }
+    @bridge = clib.open() rescue |err| { out io.show("gaze: нет памяти под мост ({err})") }
+    @eye = camera.Camera { bridge = bridge }
+    @opened = yes
+    camera.open(eye) rescue |err| { opened = no }
+    @status = "сеть загружена · смотри куда-нибудь"
+    (opened == no) { status = "камера не открылась: {eye.problem}" }
+    @runtime = mounted(screen, palette, status)
+    @buffer = bytes.new(gazenet.WIDE * gazenet.HIGH)
+    @answer = [0.0, 0.0]
+    @frames = 0
+    always {
+        @shown = canvas()
+        atoms.draw(shown, runtime, palette)
+        (opened == yes) {
+            @frame = camera.frame(eye)
+            (frame.ready == yes) {
+                camera.shrink(frame, buffer, 0, gazenet.WIDE, gazenet.HIGH, STEP)
+                camera.done(eye, frame)
+                @started = time.now()
+                @pass = gazenet.forward(net, gazenet.input_of(buffer, 0))
+                @spent = time.now() - started
+                answer = pass.answer
+                frames = frames + 1
+                (frames % EVERY == 0) { runtime = mounted(shown, palette, "кадров {frames} · сеть {spent} мс") }
+            }
+        }
+        preview(shown, buffer)
+        spot(shown, answer)
+        cpu.wait()
+    }
+    out none
+}

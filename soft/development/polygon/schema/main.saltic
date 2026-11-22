@@ -1,0 +1,94 @@
+-- schema — экран «Устройства» Полигона, субъект Schema: четыре устройства
+-- (devices.Device — каждое опрашивает себя само), схема из них — ноутбук в
+-- центре, Acer слева (кабель LAN), телефон справа (USB, adb), ESP32 снизу
+-- (USB, последовательный порт); карточки и провода стоят свободно (at) на
+-- сцене STAGE_HIGH точек. Провод голубой, если устройство ответило, иначе —
+-- линия. Опрос — при первом входе и по щелчку на карточку.
+--
+-- Schema { laptop, acer, phone, board, took, asked, pending, wide } —
+--     устройства, сколько мс занял последний опрос, был ли он, просили ли
+--     опросить заново, ширина содержимого
+--     survey() — опросить все и замерить; choose(id) -> yes, если id —
+--     карточка (опрос будет при следующем кадре окна: due() — пора ли);
+--     jtml() -> список JTML экрана
+--     wire(x, y, width, height, tone), label(x, y, text) — провод и подпись
+
+use core.str
+use core.group
+use io.clock
+use tarantul.uiengine.jtml.calls
+use soft.development.polygon.schema.devices
+
+CARD_WIDE = 280
+CARD_HIGH = 126
+STAGE_HIGH = 470
+ROW = 40
+WIRE = 2
+
+
+
+
+Schema = Box {
+    laptop = devices.Device { role = "laptop", icon = "laptop", name = "Ноутбук" },
+    acer = devices.Device { role = "acer", icon = "server", name = "Acer E5-575G" },
+    phone = devices.Device { role = "phone", icon = "smartphone", name = "POCO X6 Pro" },
+    board = devices.Device { role = "board", icon = "cpu", name = "ESP32 DevKit" },
+    took = 0,
+    asked = no,
+    pending = no,
+    wide = 1159
+
+    skill wire(x, y, width, height, tone) {
+        out calls.call("wire", [["x", "{x}"], ["y", "{y}"], ["width", "{width}"], ["height", "{height}"], ["tone", calls.quoted(tone)]])
+    }
+
+    skill label(x, y, text) {
+        out calls.call("wire-label", [["x", "{x}"], ["y", "{y}"], ["text", calls.quoted(text)]])
+    }
+
+    skill survey() {
+        @started = clock.local()
+        laptop.ask()
+        acer.ask()
+        phone.ask()
+        board.ask()
+        took = clock.local() - started
+        asked = yes
+        pending = no
+        out none
+    }
+
+    skill choose(id) {
+        (str.starts_with(id, devices.NODE) == no) { out no }
+        pending = yes
+        out yes
+    }
+
+    skill due() {
+        (pending == yes) { out yes }
+        out asked == no
+    }
+
+    skill jtml() {
+        @middle = (wide - CARD_WIDE) / 2
+        @right = wide - CARD_WIDE
+        @lane = ROW + CARD_HIGH / 2
+        @drop = ROW + CARD_HIGH + 160
+        @parts = [wire(CARD_WIDE, lane, middle - CARD_WIDE, WIRE, acer.wire_tone()), wire(middle + CARD_WIDE, lane, right - middle - CARD_WIDE, WIRE, phone.wire_tone()), wire(middle + CARD_WIDE / 2, ROW + CARD_HIGH, WIRE, drop - ROW - CARD_HIGH, board.wire_tone())]
+        parts = group.add(parts, label(CARD_WIDE + 16, lane - 22, "кабель LAN · mRPC"))
+        parts = group.add(parts, label(middle + CARD_WIDE + 16, lane - 22, "USB · adb"))
+        parts = group.add(parts, label(middle + CARD_WIDE / 2 + 14, ROW + CARD_HIGH + 60, "USB · /dev/ttyUSB0"))
+        parts = group.add(parts, acer.card(1, 0, ROW))
+        parts = group.add(parts, laptop.card(0, middle, ROW))
+        parts = group.add(parts, phone.card(2, right, ROW))
+        parts = group.add(parts, board.card(3, middle, drop))
+        @inside = calls.join(parts)
+        @stage = "\{\"box\": \{\"height\": {STAGE_HIGH}, \"gap\": 0, \"children\": [{inside}]\}\}"
+        @alive = 0
+        drum ([laptop, acer, phone, board]) {
+            (beat.alive == yes) { alive = alive + 1 }
+        }
+        @head = calls.call("page-head", [["title", calls.quoted("Устройства")], ["note", calls.quoted("живой опрос — щёлкни по карточке, чтобы спросить заново")], ["badge", calls.quoted("на связи {alive} из 4 · {took} мс")], ["tone", calls.quoted("up")]])
+        out calls.listed([head, stage])
+    }
+}

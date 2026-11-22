@@ -1,0 +1,127 @@
+-- exchange — криптобиржа на весь экран Acer. Программа держит два Box: рынок
+-- (exchange/market.Market — цена и такт) и страницу (exchange/page.Page — блоки,
+-- каждый Box в своём файле, вид — жители закрытой библиотеки registry/libraries/uiengine/library).
+-- Раз в секунду рынок делает такт, страница подхватывает его и показывает
+-- себя; клавиши принимает форма заявки. Рисует screen/atoms шрифтами TTF.
+-- Клавиши: Tab — следующее поле или ползунок, ← → — ползунок, цифры и точка —
+-- в поле, Backspace — стереть, Esc — выход. По сети — state, quit, key, shot.
+--
+-- Desk { base, whole, back, link, palette, quotes, view, second, dirty } —
+--     экран, сеть, палитра, рынок, страница и «пора перерисовать»
+-- steer(desk, key) -> yes — выход; остальное — форме заявки
+-- show(desk) — страница → атомы → экран
+-- dressed(whole, base, link) -> палитра со шрифтами TTF (их страницы — агенту
+--     через remote.own); не вышло — Spleen, а причина — в журнал по кабелю
+-- program() — вход
+
+use core.str
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.screen.graphics
+use tarantul.uiengine.draw.atoms
+use os.network.reply
+use os.network.remote
+use os.network.stream
+use soft.finance.exchange.page
+use soft.finance.exchange.market
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use tarantul.uiengine.themes
+
+PAUSE = 10000
+SCAN_ESCAPE = 23
+TAB = 9
+
+Desk = Box {
+    base = 0,
+    whole = graphics.Screen {},
+    back = graphics.Screen {},
+    link = none,
+    palette = atoms.Palette {},
+    quotes = market.Market {},
+    view = page.Page {},
+    second = -1,
+    dirty = yes
+}
+
+skill moment(base) {
+    @clock = uefi.now(base)
+    out clock.hour * 3600 + clock.minute * 60 + clock.second
+}
+
+skill steer(desk, key) {
+    (key.ready == no) { out no }
+    (key.scan == SCAN_ESCAPE) { out yes }
+    desk.dirty = yes
+    @order = desk.view.order
+    (key.char == TAB) {
+        order.next()
+        out no
+    }
+    order.press(key.scan, key.char)
+    out no
+}
+
+skill dressed(whole, base, link) {
+    @plain = themes.named("soft", whole)
+    @typed = atoms.with_fonts(themes.named("soft", whole), base) rescue |err| {
+        (link) |link| { stream.send(link.card, "биржа: шрифты TTF не загрузились ({err}), рисую Spleen") }
+        out plain
+    }
+    (link) |link| {
+        remote.own(link, typed.regular.place, typed.regular.pages)
+        remote.own(link, typed.bold.place, typed.bold.pages)
+        remote.own(link, typed.mono.place, typed.mono.pages)
+        stream.send(link.card, "биржа: шрифты TTF загружены")
+    }
+    out typed
+}
+
+skill show(desk) {
+    desk.dirty = no
+    @view = desk.view
+    view.follow(desk.quotes)
+    @tree = atoms.fitted(read.page(view.jtml()), no, desk.palette)
+    @order = view.order
+    @runtime = jtml.focus(jtml.mount(desk.back, tree), order.focused()) rescue |err| { jtml.mount(desk.back, tree) }
+    atoms.draw(desk.back, runtime, desk.palette)
+    graphics.push(desk.base, desk.whole, desk.back)
+    @quotes = desk.quotes
+    @price = market.money(quotes.price)
+    @link = desk.link
+    (link) |link| { remote.tell(link, "биржа: BTC/USDT {price}, такт {quotes.tick}") }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    uefi.forget_keys(base)
+    @whole = graphics.open_whole(base)
+    @back = graphics.buffer_like(base, whole)
+    @link = remote.open_remote() rescue |err| { none }
+    (link) |link| {
+        remote.own(link, back.frame, graphics.buffer_pages(whole))
+        remote.hide_panels(link)
+    }
+    @palette = dressed(whole, base, link)
+    @desk = Desk { base = base, whole = whole, back = back, link = link, palette = palette }
+    always {
+        (link) |link| {
+            drum (remote.serve(link)) { }
+        }
+        (steer(desk, uefi.poll_key(base, PAUSE)) == yes) {
+            uefi.free_pages(base, back.frame, graphics.buffer_pages(whole))
+            reply.home("биржа: вышла")
+            out none
+        }
+        @now = moment(base)
+        ((now == desk.second) == no) {
+            desk.second = now
+            @quotes = desk.quotes
+            quotes.step()
+            desk.dirty = yes
+        }
+        (desk.dirty == yes) { show(desk) }
+    }
+    out none
+}

@@ -1,0 +1,152 @@
+-- console — пульт Saltic на весь экран Acer (вид — docs/site/private/CONSOLE-LOOK.html):
+-- слева журнал сети агента, справа система — живые, с того же Acer; центр пока
+-- пуст. Журнал и счётчики ведёт remote как всегда, но на экран их не кладёт
+-- (remote.own_panels) — панели рисует пульт жителями UIEngine (console/page),
+-- шрифтами TTF и значками Lucide с диска Acer. Перерисовка — раз в секунду
+-- (в виде «Тихо» — раз в минуту), при новой строке журнала и по клавише.
+-- Клавиши: 1–4 или ← → — вид (Броня, Читать, Мягкая, Тихо; сначала Мягкая),
+-- Esc — выход. По сети — state, quit, key, shot.
+--
+-- Desk { base, whole, back, link, fonted, chosen, mark, heard } — экран, сеть,
+--     палитра со шрифтами, номер вида, отметка времени и журнала прошлого кадра
+-- program() — вход
+-- Внутри: dressed(whole, base, link) -> тёмная палитра со шрифтами и значками;
+--     skinned(desk, look) -> палитра вида; clock_text(desk, look) -> часы;
+--     heard(base) -> отпечаток журнала; steer(desk, key) -> yes — выход;
+--     show(desk) — экран
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.target.uefi_x86_64.platform.clock
+use os.screen.graphics
+use os.target.uefi_x86_64.screen.system_panel
+use tarantul.uiengine.draw.atoms
+use tarantul.uiengine.draw.typeface
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use os.network.reply
+use os.network.remote
+use os.network.stream
+use os.network.netlog
+use soft.development.console.page
+use tarantul.uiengine.themes
+
+PAUSE = 10000
+SCAN_ESCAPE = 23
+SCAN_RIGHT = 3
+SCAN_LEFT = 4
+FIRST_DIGIT = 49
+SOFT = 2
+
+Desk = Box {
+    base = 0,
+    whole = graphics.Screen {},
+    back = graphics.Screen {},
+    link = none,
+    fonted = atoms.Palette {},
+    chosen = 2,
+    mark = "",
+    heard = -1
+}
+
+skill dressed(whole, base, link) {
+    @plain = themes.named("soft", whole)
+    @typed = atoms.with_fonts(themes.named("soft", whole), base) rescue |err| {
+        (link) |link| { stream.send(link.card, "пульт: шрифты TTF не загрузились ({err}), рисую Spleen") }
+        out plain
+    }
+    (link) |link| {
+        remote.own(link, typed.regular.place, typed.regular.pages)
+        remote.own(link, typed.bold.place, typed.bold.pages)
+        remote.own(link, typed.mono.place, typed.mono.pages)
+    }
+    @sheet = typeface.load_icons(base) rescue |err| {
+        (link) |link| { stream.send(link.card, "пульт: значки не загрузились ({err}), рисую без них") }
+        out typed
+    }
+    (link) |link| { remote.own(link, sheet.place, sheet.pages) }
+    out atoms.with_icons(typed, sheet.set)
+}
+
+skill skinned(desk, look) {
+    @skin = themes.named("soft", desk.whole)
+    (look.armor == yes) { skin = themes.named("armor", desk.whole) }
+    @fonted = desk.fonted
+    (fonted.typed == yes) { skin = atoms.with_faces(skin, fonted.regular, fonted.bold, fonted.mono) }
+    (fonted.iconed == yes) { skin = atoms.with_icons(skin, fonted.icons) }
+    out skin
+}
+
+skill clock_text(desk, look) {
+    @shown = clock.clock_text(clock.local_time(uefi.now(desk.base)))
+    (look.still == yes) { out str.slice(shown, 0, 5) }
+    out shown
+}
+
+skill heard(base) {
+    @log = netlog.find(base)
+    out firmware.read16(log, base, 0) + firmware.read16(log, base, 2) * 100
+}
+
+skill steer(desk, key) {
+    (key.ready == no) { out no }
+    (key.scan == SCAN_ESCAPE) { out yes }
+    @count = group.count(page.LOOKS)
+    @asked = key.char - FIRST_DIGIT
+    (asked >= 0) {
+        (asked < count) { desk.chosen = asked }
+    }
+    (key.scan == SCAN_RIGHT) { desk.chosen = (desk.chosen + 1) % count }
+    (key.scan == SCAN_LEFT) { desk.chosen = (desk.chosen + count - 1) % count }
+    desk.mark = ""
+    out no
+}
+
+skill show(desk) {
+    @look = group.get(page.LOOKS, desk.chosen)
+    @palette = skinned(desk, look)
+    @told = none
+    @link = desk.link
+    (link) |link| { told = system_panel.facts(desk.base, link.card, link.meter) }
+    @source = page.deck(look, desk.chosen, clock_text(desk, look), netlog.entries(desk.base), told)
+    @tree = atoms.fitted(read.page(source), no, palette)
+    atoms.draw(desk.back, jtml.mount(desk.back, tree), palette)
+    graphics.push(desk.base, desk.whole, desk.back)
+    (link) |link| { remote.tell(link, "пульт: вид «{look.name}»") }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    uefi.forget_keys(base)
+    @whole = graphics.open_whole(base)
+    @back = graphics.buffer_like(base, whole)
+    @link = remote.open_remote() rescue |err| { none }
+    (link) |link| {
+        remote.own(link, back.frame, graphics.buffer_pages(whole))
+        remote.own_panels(link)
+    }
+    @desk = Desk { base = base, whole = whole, back = back, link = link, fonted = dressed(whole, base, link), chosen = SOFT }
+    always {
+        (link) |link| {
+            drum (remote.serve(link)) { }
+        }
+        (steer(desk, uefi.poll_key(base, PAUSE)) == yes) {
+            uefi.free_pages(base, back.frame, graphics.buffer_pages(whole))
+            reply.home("пульт: вышел")
+            out none
+        }
+        @mark = clock_text(desk, group.get(page.LOOKS, desk.chosen))
+        @log = heard(base)
+        @changed = (mark == desk.mark) == no
+        ((log == desk.heard) == no) { changed = yes }
+        (changed == yes) {
+            desk.mark = mark
+            desk.heard = log
+            show(desk)
+        }
+    }
+    out none
+}

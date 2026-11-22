@@ -1,0 +1,136 @@
+-- exchange — биржа Acer в окне Wayland на этом компьютере: те же рынок и
+-- страница (programs/exchange: Box Market и Page из блоков и жителей библиотеки), те же атомы и шрифты
+-- TTF, только файлы шрифтов читаются с диска хоста. Рынок делает такт раз в
+-- TICK кругов по PAUSE мс; окно закрыли — выход. Справа сверху — кнопка темы
+-- с выпадающим списком (themes.NAMES): щелчок по ней открывает список, по
+-- имени — биржа сразу перекрашивается в эту тему.
+--
+-- Themes { open, chosen, left } — список открыт, выбранная тема, x кнопки;
+--     around(screenful) -> JTML страницы со слоем кнопки и списка; choose(id) ->
+--     yes, если щелчок по кнопке или по теме что-то поменял
+-- program() — вход
+-- Внутри: face(path) -> Typeface из файла
+
+use io.file
+use core.str
+use core.bytes
+use core.group
+use core.socket
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use os.target.linux.screen
+use tarantul.uiengine.draw.atoms
+use tarantul.uiengine.draw.typeface
+use soft.finance.exchange.page
+use soft.finance.exchange.market
+use tarantul.uiengine.themes
+use tarantul.uiengine.jtml.calls
+use os.input.gestures
+
+REGULAR = "os/fonts/inter/Inter-Regular.ttf"
+BOLD = "os/fonts/inter/Inter-Bold.ttf"
+MONO = "os/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
+PAUSE = 50
+TICK = 20
+
+BUTTON = "theme"
+ITEM = "theme:"
+WIDE = 230
+
+Themes = Box {
+    open = no,
+    chosen = "soft",
+    left = 0
+
+    skill around(screenful) {
+        @label = "тема: {chosen}"
+        @button = calls.call("chip", [["text", calls.quoted(label)], ["fill", calls.quoted("panel")], ["tone", calls.quoted("ink")]])
+        @parts = ["\{\"box\": \{\"id\": \"{BUTTON}\", \"at\": [{left}, 18], \"gap\": 0, \"children\": [{button}]\}\}"]
+        (open == yes) {
+            @rows = []
+            drum (themes.NAMES) {
+                @kind = "menu-row"
+                (beat == chosen) { kind = "menu-row-current" }
+                rows = group.add(rows, calls.call(kind, [["id", calls.quoted("{ITEM}{beat}")], ["icon", calls.quoted("palette")], ["text", calls.quoted(beat)], ["count", calls.quoted("")]]))
+            }
+            @list = calls.call("console-panel", [["title", calls.quoted("темы")], ["note", calls.quoted("одним словом")], ["width", "{WIDE}"], ["radius", "14"], ["grow", "0"], ["children", calls.listed(rows)]])
+            parts = group.add(parts, "\{\"box\": \{\"at\": [{left}, 56], \"gap\": 0, \"children\": [{list}]\}\}")
+        }
+        @inside = calls.join(parts)
+        out "\{\"box\": \{\"grow\": 1, \"layers\": [\{\"layer\": \{\"name\": \"биржа\", \"children\": [{screenful}]\}\}, \{\"layer\": \{\"name\": \"тема\", \"children\": [{inside}]\}\}]\}\}"
+    }
+
+    skill choose(id) {
+        (id == BUTTON) {
+            open = open == no
+            out yes
+        }
+        (str.starts_with(id, ITEM) == yes) {
+            chosen = str.slice(id, str.bytes(ITEM), str.bytes(id))
+            open = no
+            out yes
+        }
+        (open == yes) {
+            open = no
+            out yes
+        }
+        out no
+    }
+}
+
+skill face(path) {
+    out typeface.from_bytes(file.read_bytes(path))
+}
+
+program() {
+    @host = screen.open()
+    (group.count(host) == 0) { out none }
+    @canvas = group.get(host, 0)
+    @link = group.get(host, 1)
+    @regular = face(REGULAR)
+    @bold = face(BOLD)
+    @mono = face(MONO)
+    @palette = atoms.with_faces(themes.named("soft", canvas), regular, bold, mono)
+    @picker = Themes { left = canvas.width - WIDE - 150 }
+    @reader = gestures.Reader {}
+    @runtime = jtml.Runtime {}
+    @dirty = yes
+    @quotes = market.Market {}
+    @view = page.Page {}
+    @packet = bytes.new(8192)
+    @hold = bytes.new(4096)
+    @joined = bytes.new(12288)
+    @rounds = 0
+    always {
+        (rounds % TICK == 0) {
+            quotes.step()
+            view.follow(quotes)
+            dirty = yes
+        }
+        (dirty == yes) {
+            @tree = atoms.fitted(read.page(picker.around(view.jtml())), no, palette)
+            runtime = jtml.mount(canvas, tree)
+            atoms.draw(canvas, runtime, palette)
+            screen.present(link)
+            dirty = no
+        }
+        (link.way_closed == yes) { leave }
+        (link.way_failed == yes) { leave }
+        screen.pump(link, packet, hold, joined)
+        @drained = reader.drain(link.way_events)
+        link.way_events = drained.core
+        drum (drained.gestures) {
+            (beat.kind == gestures.Kind.CLICK) {
+                @was = picker.chosen
+                @hit = jtml.hit(runtime, beat.x, beat.y)
+                (picker.choose(hit.id) == yes) {
+                    ((picker.chosen == was) == no) { palette = atoms.with_faces(themes.named(picker.chosen, canvas), regular, bold, mono) }
+                    dirty = yes
+                }
+            }
+        }
+        socket.sleep(PAUSE)
+        rounds = rounds + 1
+    }
+    out none
+}

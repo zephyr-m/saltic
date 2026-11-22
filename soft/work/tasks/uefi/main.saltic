@@ -1,0 +1,512 @@
+-- tasks — доска задач Saltic на Acer: «Надо → Делаю → Готово»; вид — жители
+-- закрытой библиотеки (view, task_view), рисуют атомы шрифтами TTF с диска.
+-- Клавиши: стрелки — выбор, Enter — взять и положить, Пробел — открыть задачу
+-- (её пункты: стрелки — пункт, Enter — галочка, Esc — назад на доску), Esc на
+-- доске — на главный экран.
+-- По сети (порт 5555, пока программа открыта): `tools/say.py tasks …` —
+-- list, add <текст>, move <номер> <колонка>, todo add <номер> <текст>, todo
+-- done <номер> <пункт>; колонка — 0..2, надо/делаю/готово. Те же команды — по
+-- mRPC (remote.offer, видны в help): tasks-list, tasks-add, tasks-move,
+-- tasks-todo-add, tasks-todo-done, а ещё tasks-show <номер> и tasks-message
+-- <номер> <автор> <текст> — лента вопросов и ответов в задаче; запрос mRPC
+-- становится той же строкой (mrpc.line, «-» в имени — пробел). Ответ mRPC —
+-- объектом data (MRPC-UDP: запрос и ответ — JSON): номер новой задачи, пункта,
+-- колонка, галочка, время; tasks-list — задачи страницами (from, total, next,
+-- как help), tasks-show — задача с пунктами и событиями. Текстом — только
+-- ошибки (fail_mrpc); по простому тексту (say.py) — как раньше.
+-- Время событий — часы прошивки в местном поясе (platform/clock), «ДД.ММ.ГГГГ
+-- ЧЧ:ММ»: создание задачи, переезд в колонку (по сети и клавишами), пункт
+-- добавлен, галочка поставлена или снята — в журнал задачи (board.note_event).
+-- Ответ на команду — что сделано и вся доска текстом; state — то же без
+-- действия, quit — выход (общие команды remote). Открыть — `open tasks`.
+-- Чтение по сети видно на экране: tasks-list листает доску к странице
+-- (выбрана её первая задача), tasks-show / items / events / messages
+-- открывают задачу, правки (todo, message) — тоже; в строке состояния — «Claude
+-- смотрит …». Пока на Acer жмут клавиши (тише CALM тактов), экран не прыгает
+-- — меняется только строка состояния.
+-- Доска хранится в \SALTIC\TASKS.TXT и переживает перезагрузку. Рисует в задний
+-- буфер, на экран уходит только дельта (graphics.present); её размер — в state.
+--
+-- COMMANDS — реестр mRPC; program() — доска; без кабеля — только клавиатура
+-- Said { text, fields, pages, kind, from } — итог: текст, поля data, страницы (kind — их поле)
+-- Внутри: dressed — шрифты TTF в палитру; told(text) -> Said; summary / full — задача data;
+--     listing / showing / itemizing / happening / talking — list, show, items,
+--     events, messages (pages_of — страницы с from; asked_number — номер задачи); paged / answered(link, packet, said) —
+--     ответ mRPC; stamp() -> время; moved(desk, number, column) — событие
+--     переезда; seen_board / seen_task — экран за чтением по сети (idle —
+--     тактов без клавиш); todo / message — пункты и сообщения; inside — клавиши задачи;
+--     spoken(link, packet) -> строка команды из mRPC («-» — пробел только в
+--     имени) или none (нет параметра или команды — ответ ошибкой)
+
+use core.str
+use core.group
+use os.target.uefi_x86_64.platform.firmware
+use os.target.uefi_x86_64.platform.uefi
+use os.screen.graphics
+use os.text.parse
+use os.target.uefi_x86_64.platform.clock
+use os.network.reply
+use os.network.remote
+use os.network.mrpc
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use tarantul.uiengine.draw.atoms
+use soft.work.tasks.board
+use soft.work.tasks.view
+use soft.work.tasks.uefi.store
+use soft.work.tasks.task_view
+use tarantul.uiengine.themes
+
+SCAN_ESCAPE = 23
+ENTER = 13
+SPACE = 32
+PAUSE = 2000
+CALM = 2500
+PREFIX = "tasks"
+COMMANDS = [
+    mrpc.Command { name = "tasks-list", kind = "query", options = ["from"], about = "задачи страницами: number, column, name, done, items (сделано / всего пунктов); total, next — с какой следующая страница (from)" },
+    mrpc.Command { name = "tasks-show", kind = "query", params = ["number"], about = "одна задача: name, column, done, и сколько в ней items, events, messages (сами — tasks-items, tasks-events, tasks-messages)" },
+    mrpc.Command { name = "tasks-items", kind = "query", params = ["number"], options = ["from"], about = "пункты задачи страницами: items (item, done, text, time), total, next" },
+    mrpc.Command { name = "tasks-events", kind = "query", params = ["number"], options = ["from"], about = "события задачи страницами: events (time, text), total, next" },
+    mrpc.Command { name = "tasks-messages", kind = "query", params = ["number"], options = ["from"], about = "лента задачи страницами: messages (message, time, author, text), total, next — с какого следующая страница (from)" },
+    mrpc.Command { name = "tasks-message", kind = "exec", params = ["number", "author", "text"], about = "сообщение в ленту задачи number: author — кто пишет одним словом (Claude, Зэф, имя агента); ответ — номер сообщения и время" },
+    mrpc.Command { name = "tasks-add", kind = "exec", params = ["text"], about = "новая задача в «Надо»; ответ — её номер" },
+    mrpc.Command { name = "tasks-move", kind = "exec", params = ["number", "column"], about = "задачу number в колонку: 0..2 или надо, делаю, готово" },
+    mrpc.Command { name = "tasks-todo-add", kind = "exec", params = ["number", "text"], about = "пункт в список задачи number; ответ — номер пункта" },
+    mrpc.Command { name = "tasks-todo-done", kind = "exec", params = ["number", "item"], about = "поставить или снять галочку у пункта item задачи number" }
+]
+
+Said = Box {
+    text = "",
+    fields = [],
+    pages = [],
+    kind = "tasks",
+    from = 0
+}
+
+Session = Box {
+    quit = no,
+    idle = 2500,
+    note = "доска открыта",
+    frames = graphics.Frames {},
+    palette = atoms.Palette {},
+    painted = "кадра ещё не было"
+}
+
+skill dressed(base, link, session) {
+    @screen = session.frames.back
+    @plain = themes.named("light", screen)
+    session.palette = plain
+    @typed = atoms.with_fonts(themes.named("light", screen), base) rescue |err| {
+        session.note = "шрифты TTF не загрузились ({err}), Spleen"
+        out none
+    }
+    (link) |link| {
+        remote.own(link, typed.regular.place, typed.regular.pages)
+        remote.own(link, typed.bold.place, typed.bold.pages)
+        remote.own(link, typed.mono.place, typed.mono.pages)
+    }
+    session.palette = typed
+    out none
+}
+
+skill state_text(desk, session) {
+    @note = session.note
+    @chosen = desk.selected
+    @hand = ""
+    (desk.holding == yes) { hand = ", в руке" }
+    @listed = board.board_text(desk)
+    @painted = session.painted
+    out "доска задач: {note}; выбрана №{chosen}{hand}; последний кадр: {painted}\n{listed}"
+}
+
+skill stamp() {
+    @moment = clock.local_time(uefi.now(firmware.guest_base()))
+    @day = clock.date_text(moment)
+    @time = str.slice(clock.clock_text(moment), 0, 5)
+    out "{day} {time}"
+}
+
+skill moved(desk, number, column) {
+    @where = group.get(board.COLUMN_NAMES, column)
+    out board.note_event(desk, number, stamp(), "в «{where}»")
+}
+
+skill redraw(link, desk, session) {
+    @shown = view.board_jtml(desk, session.note)
+    (desk.opened > 0) { shown = task_view.task_jtml(desk, session.note) }
+    @screen = session.frames.back
+    @tree = atoms.fitted(read.page(shown), no, session.palette)
+    atoms.draw(screen, jtml.mount(screen, tree), session.palette)
+    session.painted = graphics.present(session.frames)
+    (link) |link| { remote.tell(link, state_text(desk, session)) }
+    out none
+}
+
+skill told(text) {
+    out Said { text = text }
+}
+
+skill number_field(name, number) {
+    out mrpc.field(name, mrpc.number_value(number))
+}
+
+skill text_field(name, text) {
+    out mrpc.field(name, mrpc.text_value(text))
+}
+
+skill summary(desk, number) {
+    @list = board.items_of(desk, number)
+    @column = group.get(board.COLUMN_NAMES, group.get(desk.columns, number - 1))
+    out mrpc.object_value([number_field("number", number), text_field("column", column), text_field("name", group.get(desk.names, number - 1)), number_field("done", board.done_count(list)), number_field("items", group.count(list))])
+}
+
+skill full(desk, number) {
+    @list = board.items_of(desk, number)
+    @column = group.get(board.COLUMN_NAMES, group.get(desk.columns, number - 1))
+    out [number_field("number", number), text_field("column", column), text_field("name", group.get(desk.names, number - 1)), number_field("done", board.done_count(list)), number_field("items", group.count(list)), number_field("events", group.count(board.events_of(desk, number))), number_field("messages", group.count(board.messages_of(desk, number)))]
+}
+
+skill pages_of(number, pages, kind, parts, text) {
+    @from = 0
+    (group.count(parts) > 3) { from = parse.parse_size(group.get(parts, 3)) }
+    out Said { text = text, fields = [number_field("number", number)], pages = pages, kind = kind, from = from }
+}
+
+skill asked_number(desk, parts) {
+    (group.count(parts) < 3) { out error.NoSuchTask }
+    @number = parse.parse_size(group.get(parts, 2))
+    board.items_of(desk, number)
+    out number
+}
+
+skill itemizing(desk, session, parts) {
+    @number = asked_number(desk, parts) rescue |err| { out told("как: tasks items <номер> [с]; нет такой задачи") }
+    seen_task(desk, session, number, "пункты")
+    @list = board.items_of(desk, number)
+    @pages = []
+    @text = "№{number}, пункты:"
+    drum (group.count(list)) {
+        @item = group.get(list, beat)
+        pages = group.add(pages, mrpc.object_value([number_field("item", beat + 1), mrpc.field("done", mrpc.flag_value(group.get(item, 0))), text_field("text", group.get(item, 1)), text_field("time", group.get(item, 2))]))
+        @what = group.get(item, 1)
+        text = "{text}\n{what}"
+    }
+    out pages_of(number, pages, "items", parts, text)
+}
+
+skill happening(desk, session, parts) {
+    @number = asked_number(desk, parts) rescue |err| { out told("как: tasks events <номер> [с]; нет такой задачи") }
+    seen_task(desk, session, number, "события")
+    @pages = []
+    @text = "№{number}, события:"
+    drum (board.events_of(desk, number)) {
+        pages = group.add(pages, mrpc.object_value([text_field("time", group.get(beat, 0)), text_field("text", group.get(beat, 1))]))
+        @when = group.get(beat, 0)
+        @what = group.get(beat, 1)
+        text = "{text}\n{when} {what}"
+    }
+    out pages_of(number, pages, "events", parts, text)
+}
+
+skill talking(desk, session, parts) {
+    @number = asked_number(desk, parts) rescue |err| { out told("как: tasks messages <номер> [с]; нет такой задачи") }
+    seen_task(desk, session, number, "сообщения")
+    @said = board.messages_of(desk, number)
+    @pages = []
+    @text = "№{number}, сообщения:"
+    drum (group.count(said)) {
+        @line = group.get(said, beat)
+        pages = group.add(pages, mrpc.object_value([number_field("message", beat + 1), text_field("time", group.get(line, 0)), text_field("author", group.get(line, 1)), text_field("text", group.get(line, 2))]))
+        @when = group.get(line, 0)
+        @who = group.get(line, 1)
+        @what = group.get(line, 2)
+        text = "{text}\n{when} {who}: {what}"
+    }
+    out pages_of(number, pages, "messages", parts, text)
+}
+
+skill seen_board(desk, session, from) {
+    @first = from + 1
+    session.note = "Claude смотрит доску с №{first}"
+    (session.idle < CALM) { out none }
+    desk.opened = 0
+    (first <= group.count(desk.names)) { desk.selected = first }
+    out none
+}
+
+skill seen_task(desk, session, number, what) {
+    session.note = "Claude смотрит №{number}: {what}"
+    (session.idle < CALM) { out none }
+    (number < 1) { out none }
+    (number > group.count(desk.names)) { out none }
+    desk.selected = number
+    (desk.opened == number) { out none }
+    desk.opened = number
+    desk.cursor = 0
+    out none
+}
+
+skill listing(desk, session, parts) {
+    @pages = []
+    drum (group.count(desk.names)) { pages = group.add(pages, summary(desk, beat + 1)) }
+    @from = 0
+    (group.count(parts) > 2) { from = parse.parse_size(group.get(parts, 2)) }
+    seen_board(desk, session, from)
+    out Said { text = board.board_text(desk), pages = pages, from = from }
+}
+
+skill showing(desk, session, parts) {
+    (group.count(parts) < 3) { out told("как: tasks show <номер>") }
+    @number = parse.parse_size(group.get(parts, 2))
+    (number < 1) { out told("нет задачи №{number}") }
+    (number > group.count(desk.names)) { out told("нет задачи №{number}") }
+    seen_task(desk, session, number, "задача")
+    @name = group.get(desk.names, number - 1)
+    out Said { text = "№{number}. {name}", fields = full(desk, number) }
+}
+
+skill command(desk, session, words) {
+    @parts = str.split(words, " ")
+    (group.count(parts) < 2) { out listing(desk, session, parts) }
+    @verb = group.get(parts, 1)
+    (verb == "list") { out listing(desk, session, parts) }
+    (verb == "show") { out showing(desk, session, parts) }
+    (verb == "messages") { out talking(desk, session, parts) }
+    (verb == "items") { out itemizing(desk, session, parts) }
+    (verb == "events") { out happening(desk, session, parts) }
+    (verb == "add") {
+        @name = str.slice(words, str.bytes("tasks add "), str.bytes(words))
+        (str.bytes(name) == 0) { out told("как: tasks add <текст>") }
+        @number = board.put_task(desk, 0, name)
+        board.note_event(desk, number, stamp(), "создана в «Надо»")
+        session.note = "Claude добавила №{number}"
+        out Said { text = "добавлена №{number}: {name}", fields = [number_field("number", number)] }
+    }
+    (verb == "move") {
+        (group.count(parts) < 4) { out told("как: tasks move <номер> <надо|делаю|готово>") }
+        @number = parse.parse_size(group.get(parts, 2))
+        @column = board.column_word(group.get(parts, 3))
+        (board.shift_task(desk, number, column) == no) { out told("нет такой задачи или колонки") }
+        @where = group.get(board.COLUMN_NAMES, column)
+        moved(desk, number, column)
+        desk.selected = number
+        session.note = "Claude: №{number} в «{where}»"
+        out Said { text = "№{number} теперь в «{where}»", fields = [number_field("number", number), text_field("column", where)] }
+    }
+    (verb == "todo") { out todo(desk, session, parts, words) }
+    (verb == "message") { out message(desk, session, parts, words) }
+    out told("команды: tasks list [с] | tasks show <номер> | tasks add <текст> | tasks move <номер> <колонка> | tasks todo add <номер> <текст> | tasks todo done <номер> <пункт>")
+}
+
+skill message(desk, session, parts, words) {
+    (group.count(parts) < 5) { out told("как: tasks message <номер> <автор> <текст>") }
+    @number = parse.parse_size(group.get(parts, 2))
+    @author = group.get(parts, 3)
+    @skip = str.bytes("tasks message ") + str.bytes(group.get(parts, 2)) + str.bytes(author) + 2
+    @text = str.slice(words, skip, str.bytes(words))
+    @now = stamp()
+    @place = board.post(desk, number, now, author, text) rescue |err| { out told("нет задачи №{number}") }
+    seen_task(desk, session, number, "сообщения")
+    session.note = "{author}: сообщение в №{number}"
+    out Said { text = "в №{number} сообщение {place} от {author}", fields = [number_field("number", number), number_field("message", place), text_field("time", now)] }
+}
+
+skill todo(desk, session, parts, words) {
+    (group.count(parts) < 5) { out told("как: tasks todo add <номер> <текст> | tasks todo done <номер> <пункт>") }
+    @action = group.get(parts, 2)
+    @number = parse.parse_size(group.get(parts, 3))
+    (action == "add") {
+        @skip = str.bytes("tasks todo add ") + str.bytes(group.get(parts, 3)) + 1
+        @text = str.slice(words, skip, str.bytes(words))
+        @now = stamp()
+        @place = board.add_item(desk, number, text, now) rescue |err| { out told("нет задачи №{number}") }
+        board.note_event(desk, number, now, "пункт {place} добавлен")
+        seen_task(desk, session, number, "пункты")
+        session.note = "Claude: пункт {place} у №{number}"
+        out Said { text = "у №{number} пункт {place}: {text}", fields = [number_field("number", number), number_field("item", place), text_field("time", now)] }
+    }
+    (action == "done") {
+        @item = parse.parse_size(group.get(parts, 4))
+        @now = stamp()
+        @done = board.tick_item(desk, number, item, now) rescue |err| { out told("нет задачи №{number} или пункта {item}") }
+        @said = "снята галочка"
+        (done == yes) { said = "сделан" }
+        board.note_event(desk, number, now, "пункт {item}: {said}")
+        seen_task(desk, session, number, "пункты")
+        session.note = "Claude: №{number}, пункт {item} {said}"
+        out Said { text = "№{number}, пункт {item}: {said}", fields = [number_field("number", number), number_field("item", item), mrpc.field("done", mrpc.flag_value(done)), text_field("time", now)] }
+    }
+    out told("как: tasks todo add <номер> <текст> | tasks todo done <номер> <пункт>")
+}
+
+skill paged(link, packet, said) {
+    @call = mrpc.decode(packet.text)
+    @total = group.count(said.pages)
+    @used = mrpc.size(call, group.concat(said.fields, [mrpc.field(said.kind, mrpc.list_value([])), number_field("total", total), number_field("next", total)]))
+    @chosen = []
+    @next = total
+    drum (total) {
+        (beat >= said.from) {
+            (next == total) {
+                @piece = group.get(said.pages, beat)
+                @grown = used + group.count(piece)
+                (group.count(chosen) > 0) { grown = grown + 1 }
+                pick {
+                    (grown <= remote.REPLY_LIMIT) {
+                        chosen = group.add(chosen, piece)
+                        used = grown
+                    }
+                    { next = beat }
+                }
+            }
+        }
+    }
+    (group.count(chosen) == 0) {
+        (next < total) {
+            @place = next + 1
+            out remote.fail_mrpc(link, packet, "запись {place} в {said.kind} одна больше датаграммы ({remote.REPLY_LIMIT} байт) — её не отдать даже отдельно")
+        }
+    }
+    @fields = group.concat(said.fields, [mrpc.field(said.kind, mrpc.list_value(chosen)), number_field("total", total)])
+    (next < total) { fields = group.add(fields, number_field("next", next)) }
+    out remote.reply_data(link, packet, fields)
+}
+
+skill answered(link, packet, said) {
+    (group.count(said.pages) > 0) { out paged(link, packet, said) }
+    (group.count(said.fields) > 0) { out remote.reply_data(link, packet, said.fields) }
+    out remote.fail_mrpc(link, packet, said.text)
+}
+
+skill spoken(link, packet) {
+    @call = mrpc.decode(packet.text)
+    @found = mrpc.find(COMMANDS, call.cmd)
+    (found) |command| {
+        @asked = mrpc.line(call, command)
+        (asked.ok == no) {
+            remote.fail_mrpc(link, packet, "нужен параметр {asked.param}")
+            out none
+        }
+        @rest = str.slice(asked.text, str.bytes(command.name), str.bytes(asked.text))
+        @name = str.join(str.split(command.name, "-"), " ")
+        out str.concat(name, rest)
+    }
+    remote.fail_mrpc(link, packet, "нет такой команды: {call.cmd}")
+    out none
+}
+
+skill listen(link, desk, session) {
+    @heard = []
+    drum (remote.serve(link)) {
+        @packet = beat
+        @asked = mrpc.is_request(packet.payload)
+        (asked == yes) {
+            @words = spoken(link, packet)
+            (words) |words| { heard = group.add(heard, [packet, command(desk, session, words), yes]) }
+        }
+        (asked == no) {
+            (str.starts_with(packet.text, PREFIX) == yes) { heard = group.add(heard, [packet, command(desk, session, packet.text), no]) }
+        }
+    }
+    out heard
+}
+
+skill press(base, desk, session) {
+    @key = uefi.poll_key(base, PAUSE)
+    (session.idle < CALM) { session.idle = session.idle + 1 }
+    (key.ready == yes) { session.idle = 0 }
+    (desk.opened > 0) { out inside(desk, session, key) }
+    (key.char == SPACE) {
+        (desk.holding == no) {
+            board.open_task(desk)
+            session.note = "открыта №{desk.opened}"
+            out yes
+        }
+    }
+    (key.scan == SCAN_ESCAPE) {
+        session.quit = yes
+        out no
+    }
+    (key.char == ENTER) {
+        board.grab(desk)
+        @held = desk.selected
+        session.note = "в руке №{held}"
+        (desk.holding == no) { session.note = "положила" }
+        out yes
+    }
+    (key.scan == 0) { out no }
+    out board.choose(desk, key.scan)
+}
+
+skill inside(desk, session, key) {
+    (key.scan == SCAN_ESCAPE) {
+        desk.opened = 0
+        session.note = "доска"
+        out yes
+    }
+    (key.char == ENTER) {
+        @item = desk.cursor + 1
+        @now = stamp()
+        @done = board.tick_item(desk, desk.opened, item, now) rescue |err| { out no }
+        @said = "снята галочка"
+        (done == yes) { said = "сделан" }
+        board.note_event(desk, desk.opened, now, "пункт {item}: {said}")
+        session.note = "пункт {item}"
+        out yes
+    }
+    (key.scan == 0) { out no }
+    out board.walk_items(desk, key.scan)
+}
+
+skill tick(base, link, desk, session) {
+    @chosen = desk.selected
+    @was = -1
+    (chosen > 0) { was = group.get(desk.columns, chosen - 1) }
+    @changed = press(base, desk, session)
+    (chosen > 0) {
+        @now = group.get(desk.columns, chosen - 1)
+        ((now == was) == no) { moved(desk, chosen, now) }
+    }
+    @heard = []
+    (link) |link| { heard = listen(link, desk, session) }
+    (group.count(heard) > 0) { changed = yes }
+    (changed == yes) {
+        redraw(link, desk, session)
+        store.save_desk(base, desk) rescue |err| { session.note = "не сохранила: {err}" }
+    }
+    @after = state_text(desk, session)
+    drum (heard) {
+        @said = group.get(beat, 1)
+        (group.get(beat, 2) == yes) { answered(link, group.get(beat, 0), said) }
+        (group.get(beat, 2) == no) { remote.reply_text(link, group.get(beat, 0), "{said.text}\n\n{after}") }
+    }
+    out none
+}
+
+program() {
+    @base = firmware.guest_base()
+    uefi.forget_keys(base)
+    @desk = store.load_desk(base) rescue |err| { board.starting_board() }
+    @session = Session { frames = graphics.open_frames(base) }
+    session.palette = themes.named("light", session.frames.back)
+    @link = remote.open_remote() rescue |err| { none }
+    dressed(base, link, session)
+    (link == none) { session.note = "без сети" }
+    redraw(link, desk, session)
+    (link) |link| {
+        remote.offer(link, COMMANDS)
+        remote.own(link, session.frames.back.frame, session.frames.pages)
+        remote.own(link, session.frames.last.frame, session.frames.pages)
+    }
+    always {
+        tick(base, link, desk, session)
+        (session.quit == yes) {
+            @total = group.count(desk.names)
+            graphics.close_frames(session.frames)
+            reply.home("Задачи: {total} на доске")
+            out none
+        }
+    }
+    out none
+}

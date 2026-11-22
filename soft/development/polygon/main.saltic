@@ -1,0 +1,163 @@
+-- polygon — «Полигон Saltic» в окне Wayland: экран платформы из
+-- docs/site/private/PLATFORM-DEMO.html на жителях UIEngine (решение автора
+-- 18.11.2026 — та же страница, но на JTML). Окно — субъект Window: держит
+-- холст, шрифты, значки, палитру темы и экран (polygon/page — Polygon, его
+-- разделы — свои субъекты), step() — один оборот: ввод, щелчки, фонарик,
+-- опрос «Устройств», перерисовка. Щелчок по пункту меню — раздел, по теме —
+-- экран в этой теме (themes.named), по карточке устройства — опрос заново,
+-- набор с клавиатуры — в поиск «Пакетов».
+-- Свет сетки — фонарик за мышью: на движение экран не пересобирается, только
+-- перерисовывается готовый runtime; наведение на день в «Сборках» —
+-- подсказка поверх маленьким деревом. «×» окна — выход.
+--
+-- Window { canvas, link, regular, bold, mono, set, palette, runtime, view,
+--     reader, packet, hold, joined } — open() — окно, шрифты, история,
+--     первый кадр; NoWindow; step() -> no, когда окно закрыто
+-- program() — вход; face(path) — навык окна: Typeface из файла шрифта
+-- Внутри: dress() — палитра выбранной темы (фонарик сохраняется); build() —
+--     пересобрать экран; follow() -> yes, если свет сдвинулся; hover() —
+--     подсказка над наведённым
+use core.bytes
+use core.group
+use core.socket
+use io.file
+use os.icons
+use os.fonts.ttf
+use os.input.gestures
+use os.target.linux.screen
+use soft.development.polygon.page
+use os.screen.graphics
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use tarantul.uiengine.draw.atoms
+use tarantul.uiengine.draw.typeface
+use tarantul.uiengine.themes
+
+REGULAR = "os/fonts/inter/Inter-Regular.ttf"
+BOLD = "os/fonts/inter/Inter-Bold.ttf"
+MONO = "os/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
+ICONS = "os/icons/lucide/icons.txt"
+TITLE = "Полигон Saltic"
+WIDE = 1440
+HIGH = 900
+TIP_WIDE = 230
+
+
+Window = Box {
+    canvas = graphics.Screen {},
+    link = screen.Link {},
+    regular = typeface.Typeface {},
+    bold = typeface.Typeface {},
+    mono = typeface.Typeface {},
+    set = icons.Icons {},
+    palette = atoms.Palette {},
+    runtime = jtml.Runtime {},
+    view = page.Polygon {},
+    reader = gestures.Reader {},
+    packet = bytes.new(8192),
+    hold = bytes.new(4096),
+    joined = bytes.new(12288)
+
+    skill face(path) {
+        out typeface.from_bytes(file.read_bytes(path))
+    }
+
+    skill open() {
+        @host = screen.sized(TITLE, WIDE, HIGH)
+        (group.count(host) == 0) { out error.NoWindow }
+        canvas = group.get(host, 0)
+        link = group.get(host, 1)
+        regular = face(REGULAR)
+        bold = face(BOLD)
+        mono = face(MONO)
+        @sheet = file.read_bytes(ICONS)
+        set = icons.open(ttf.from_bytes(sheet), bytes.count(sheet))
+        view.refresh()
+        dress()
+        build()
+        out screen.present(link)
+    }
+
+    skill dress() {
+        view.worn = view.theme
+        @glow_x = palette.glow_x
+        @glow_y = palette.glow_y
+        palette = atoms.with_icons(atoms.with_faces(themes.named(view.worn, canvas), regular, bold, mono), set)
+        palette.glow_x = glow_x
+        palette.glow_y = glow_y
+        out none
+    }
+
+    skill build() {
+        @tree = atoms.fitted(read.page(view.jtml()), no, palette)
+        runtime = jtml.mount(canvas, tree)
+        out atoms.draw(canvas, runtime, palette)
+    }
+
+    skill hover() {
+        @under = jtml.hit(runtime, palette.glow_x, palette.glow_y)
+        @left = under.x - 24
+        (left + TIP_WIDE > WIDE) { left = WIDE - TIP_WIDE }
+        @bubble = view.tip(under.id, left, under.y - 62)
+        (bubble == "") { out none }
+        @tree = atoms.fitted(read.page(bubble), no, palette)
+        out atoms.paint(canvas, jtml.mount(canvas, tree), palette)
+    }
+
+    skill follow() {
+        @glow_x = -1
+        @glow_y = -1
+        (link.way_inside == yes) {
+            glow_x = link.way_pointer_x
+            glow_y = link.way_pointer_y
+        }
+        @moved = no
+        ((glow_x == palette.glow_x) == no) { moved = yes }
+        ((glow_y == palette.glow_y) == no) { moved = yes }
+        palette.glow_x = glow_x
+        palette.glow_y = glow_y
+        out moved
+    }
+
+    skill step() {
+        (link.way_closed == yes) { out no }
+        (link.way_failed == yes) { out no }
+        screen.pump(link, packet, hold, joined)
+        @drained = reader.drain(link.way_events)
+        link.way_events = drained.core
+        @changed = no
+        drum (drained.gestures) {
+            (beat.kind == gestures.Kind.CLICK) {
+                @hit = jtml.hit(runtime, beat.x, beat.y)
+                (view.choose(hit.id) == yes) { changed = yes }
+            }
+            (beat.kind == gestures.Kind.TYPE) {
+                (view.type(beat.text) == yes) { changed = yes }
+            }
+        }
+        @moved = follow()
+        (view.poll() == yes) { changed = yes }
+        ((view.theme == view.worn) == no) { dress() }
+        (changed == yes) { build() }
+        (changed == no) {
+            (moved == yes) { atoms.draw(canvas, runtime, palette) }
+        }
+        (moved == yes) {
+            (palette.glow_x >= 0) { hover() }
+        }
+        @shown = changed
+        (moved == yes) { shown = yes }
+        (shown == yes) { screen.present(link) }
+        socket.sleep(16)
+        out yes
+    }
+}
+
+program() {
+    @window = Window {}
+    window.open() rescue |err| { out none }
+    always {
+        (window.step() == no) { leave }
+    }
+    out none
+}

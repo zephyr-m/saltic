@@ -1,0 +1,178 @@
+-- gaze_train — обучение своей сети взгляда (soft/vision/gaze/gazenet) на
+-- ноутбуке по сессиям сборщика (collect), забранным с телефона в DATA. Снимок
+-- — вход сети и цель: точка экрана, приведённая к −1…1 (SCREEN_W × SCREEN_H —
+-- буфер телефона). Проверка честная: точки, чей номер в списке всех точек
+-- кратен HOLD, откладываются целиком со всеми кадрами — сеть их не видит при
+-- обучении. EPOCHS проходов мини-пачками по BATCH, порядок мешается каждый
+-- проход; каждые REPORT проходов — средняя ошибка в точках экрана на
+-- обучении и проверке рядом с планкой «всегда середина» (сеть не лучше
+-- планки — ничего не выучила). Веса — в WEIGHTS. Печатает ход по шагам.
+--
+-- program() -> none
+-- Внутри: Sample { input, target, point }; sessions() -> снимки; pixels — ошибка снимка; error_of(net,
+--     samples) -> средняя ошибка в точках экрана; center_of / center_error — планка;
+--     shuffled(count, seed) -> порядок; distance(dx, dy) -> длина
+
+use io
+use io.file
+use core.str
+use core.time
+use core.group
+use core.bytes
+use core.fraction
+use soft.vision.gaze.gazenet
+
+DATA = ".cache/gaze/data"
+WEIGHTS = ".cache/gaze/weights.bin"
+SCREEN_W = 406
+SCREEN_H = 904
+HEAD = 8
+EPOCHS = 200
+BATCH = 16
+RATE = 0.02
+REPORT = 20
+HOLD = 6
+
+Sample = Box {
+    input = [],
+    target = [],
+    point = 0
+}
+
+skill sessions() {
+    @found = []
+    @points = []
+    drum (file.list(DATA)) {
+        @name = beat
+        (str.ends_with(name, ".GAZE") == yes) {
+            @buffer = file.read_bytes("{DATA}/{name}")
+            @record = 4 + gazenet.WIDE * gazenet.HIGH
+            @count = (bytes.count(buffer) - HEAD) / record
+            io.show("сессия {name}: снимков {count}")
+            drum (count) {
+                @at = HEAD + beat * record
+                @x = bytes.get(buffer, at) + bytes.get(buffer, at + 1) * 256
+                @y = bytes.get(buffer, at + 2) + bytes.get(buffer, at + 3) * 256
+                @key = y * 1000 + x
+                (group.contains(points, key) == no) { points = group.add(points, key) }
+                @target = [fraction.from(x * 2) / fraction.from(SCREEN_W) - 1.0, fraction.from(y * 2) / fraction.from(SCREEN_H) - 1.0]
+                found = group.add(found, Sample { input = gazenet.input_of(buffer, at + 4), target = target, point = key })
+            }
+        }
+    }
+    @sorted = points
+    @marked = []
+    drum (found) {
+        @place = 0
+        @key = beat.point
+        drum (group.count(sorted)) { (group.get(sorted, beat) == key) { place = beat } }
+        marked = group.add(marked, Sample { input = beat.input, target = beat.target, point = place })
+    }
+    out marked
+}
+
+skill distance(dx, dy) {
+    out fraction.sqrt(dx * dx + dy * dy)
+}
+
+skill pixels(answer, target) {
+    @dx = (0.0 + group.get(answer, 0) - group.get(target, 0)) * fraction.from(SCREEN_W) / 2.0
+    @dy = (0.0 + group.get(answer, 1) - group.get(target, 1)) * fraction.from(SCREEN_H) / 2.0
+    out distance(dx, dy)
+}
+
+skill error_of(net, samples) {
+    (group.count(samples) == 0) { out 0.0 }
+    @sum = 0.0
+    drum (samples) {
+        @pass = gazenet.forward(net, beat.input)
+        sum = sum + pixels(pass.answer, beat.target)
+    }
+    out sum / fraction.from(group.count(samples))
+}
+
+skill center_of(samples) {
+    @x = 0.0
+    @y = 0.0
+    drum (samples) {
+        x = x + group.get(beat.target, 0)
+        y = y + group.get(beat.target, 1)
+    }
+    @count = fraction.from(group.count(samples))
+    out [x / count, y / count]
+}
+
+skill center_error(samples, center) {
+    (group.count(samples) == 0) { out 0.0 }
+    @sum = 0.0
+    drum (samples) { sum = sum + pixels(center, beat.target) }
+    out sum / fraction.from(group.count(samples))
+}
+
+skill shuffled(count, seed) {
+    @order = []
+    @state = seed
+    drum (count) {
+        state = (state * 75 + 74) % 65537
+        @at = state % (group.count(order) + 1)
+        order = group.concat(group.concat(group.slice(order, 0, at), [beat]), group.slice(order, at, group.count(order)))
+    }
+    out order
+}
+
+program() {
+    io.show("обучение взгляда: читаю {DATA}")
+    @all = sessions()
+    @train = []
+    @check = []
+    drum (all) {
+        pick {
+            (beat.point % HOLD == 0) { check = group.add(check, beat) }
+            { train = group.add(train, beat) }
+        }
+    }
+    @trained = group.count(train)
+    @held = group.count(check)
+    io.show("обучение: {trained} снимков, проверка: {held} (точки, которых сеть не видит)")
+    @center = center_of(train)
+    @plank_train = center_error(train, center)
+    @plank_check = center_error(check, center)
+    io.show("планка «всегда середина»: обучение {plank_train} точек, проверка {plank_check} точек")
+    @net = gazenet.fresh(12345)
+    @started = time.now()
+    @seed = 1
+    drum (EPOCHS) {
+        @epoch = beat + 1
+        seed = (seed * 75 + 74) % 65537
+        @order = shuffled(trained, seed)
+        @at = 0
+        drum ((trained + BATCH - 1) / BATCH) {
+            @sum = gazenet.Net {}
+            @first = yes
+            @size = 0
+            drum (BATCH) {
+                (at < trained) {
+                    @sample = group.get(train, group.get(order, at))
+                    @grad = gazenet.grads(net, gazenet.forward(net, sample.input), sample.target)
+                    pick {
+                        (first == yes) { sum = grad }
+                        { sum = gazenet.add(sum, grad) }
+                    }
+                    first = no
+                    size = size + 1
+                    at = at + 1
+                }
+            }
+            (size > 0) { net = gazenet.step(net, sum, RATE / fraction.from(size)) }
+        }
+        (epoch % REPORT == 0) {
+            @on_train = error_of(net, train)
+            @on_check = error_of(net, check)
+            @spent = (time.now() - started) / 1000
+            io.show("проход {epoch}/{EPOCHS}: обучение {on_train} точек, проверка {on_check} точек · {spent} с")
+        }
+    }
+    gazenet.save(net, WEIGHTS)
+    io.show("веса записаны: {WEIGHTS}")
+    out none
+}

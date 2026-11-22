@@ -145,6 +145,6 @@ ESP32, ESP32-S3, Teensy 4.1, STM32H7 и RP2350 в `os/target` есть, но э�
 
 - Экран Acer и экран Wayland на этом ноуте принимают один и тот же рисунок
   страницы. Адаптер — `os/target/linux/screen.saltic`. Проверка — SalticIDE:
-  `os/target/linux/salticide.saltic`.
+  `soft/development/salticide/linux/main.saltic`.
 - Свистка, принтера на нём и нескольких мест сразу ещё нет. Это картина, не
   готовый кабинет.

@@ -1,0 +1,92 @@
+-- entries — все входы проекта через lens (чекер без сборки): каждый файл с
+-- program в SOURCES, кроме намеренно сломанных примеров ошибок (SKIP).
+-- Проверки идут по WORKERS разом; долгий шаг подаёт голос (kit.watched).
+-- Печатает только упавшие — с причиной от lens; итог — сколько входов,
+-- зелёных и красных. Есть красные — ошибка EntriesFailed. Lens собирается с
+-- полки в LENS. Вызывается `just entries`.
+--
+-- Entries { zone } — zone — пояс для строк со временем
+--     found() -> пути входов по порядку; skipped(path) -> yes, если пример ошибки
+--     checked(paths) -> строки «путь: ответ lens»
+--     verdict(lines) -> сколько красных; печатает их
+-- program() — найти, проверить, напечатать итог
+
+use io
+use io.file
+use io.clock
+use core.str
+use core.group
+use workbench.kit
+
+WORK = ".cache/build/workbench/entries"
+LENS = ".cache/build/workbench/lens"
+WORKERS = "6"
+SOURCES = ["soft/*.saltic", "soul/*.saltic", "tests/*.saltic", "workbench/*.saltic", "os/*.saltic", "bootstrap/*.saltic"]
+SKIP = ["soul/canonical/checks/errors/", "tests/fixtures/"]
+
+Entries = Box {
+    zone = 0
+
+    skill found() {
+        @listed = "{WORK}/programs.txt"
+        @patterns = str.join(SOURCES, "' '")
+        kit.shell("git grep -lE '^program' -- '{patterns}' > \"$0\"", [listed], "")
+        @paths = []
+        drum (str.lines(file.read(listed))) {
+            @path = beat
+            ((str.bytes(path) > 0) ○ (skipped(path) == no)) {
+                paths = group.add(paths, path)
+            }
+        }
+        out paths
+    }
+
+    skill skipped(path) {
+        drum (SKIP) {
+            (str.starts_with(path, beat) == yes) {
+                out yes
+            }
+        }
+        out no
+    }
+
+    skill checked(paths) {
+        @list = "{WORK}/list.txt"
+        @answers = "{WORK}/answers.txt"
+        file.write(list, str.join(paths, "\n"))
+        @count = group.count(paths)
+        @one = "r=$(\"$1\" check \"$0\" 2>&1 | tail -1); echo \"$0: $r\""
+        kit.watched("xargs -P \"$0\" -I\{\} sh -c '{one}' \{\} \"$1\" < \"$2\" > \"$3\"", [WORKERS, LENS, list, answers], "", "lens по {count} входам")
+        out str.lines(file.read(answers))
+    }
+
+    skill verdict(lines) {
+        @red = 0
+        drum (lines) {
+            ((str.bytes(beat) > 0) ○ (str.ends_with(beat, ": ok") == no)) {
+                io.show("✗ {beat}")
+                red = red + 1
+            }
+        }
+        out red
+    }
+}
+
+program() {
+    @run = Entries {
+        zone = clock.zone()
+    }
+    kit.shell("mkdir -p \"$0\"", [WORK], "")
+    @paths = run.found()
+    @count = group.count(paths)
+    kit.line(run.zone, "entries: входов {count}, проверяю по {WORKERS} разом")
+    @lines = run.checked(paths)
+    @red = run.verdict(lines)
+    @total = group.count(lines)
+    @green = total - red
+    kit.line(run.zone, "entries: входов {total}, зелёных {green}, красных {red}")
+    (red > 0) {
+        out error.EntriesFailed
+    }
+    out none
+}

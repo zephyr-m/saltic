@@ -1,0 +1,71 @@
+-- taskdesk — клиент доски задач Acer в окне Wayland (тот же, что на телефоне,
+-- soft/work/tasks/android/main): связь mRPC по UDP с HOST:PORT (кабель до
+-- Acer), экраны taskdesk/page, рисунок atoms.draw шрифтами TTF из os/fonts в
+-- адаптер os.target.linux.screen. Щелчок мыши — касание (page.act). Доска на
+-- Acer должна быть открыта: иначе на экране — «Acer молчит». Закрыть окно —
+-- выход.
+--
+-- program() — вход; face(path) -> Typeface из файла; drawn(canvas, desk, view,
+--     palette) -> runtime JTML нарисованного экрана
+
+use core.bytes
+use core.group
+use core.socket
+use io.file
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use tarantul.uiengine.draw.typeface
+use tarantul.uiengine.draw.atoms
+use os.target.linux.screen
+use soft.work.tasks.desk.wire
+use soft.work.tasks.desk.mirror
+use soft.work.tasks.desk.page
+use tarantul.uiengine.themes
+
+HOST = "10.0.0.2"
+PORT = 5555
+REGULAR = "os/fonts/inter/Inter-Regular.ttf"
+BOLD = "os/fonts/inter/Inter-Bold.ttf"
+MONO = "os/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
+
+skill face(path) {
+    out typeface.from_bytes(file.read_bytes(path))
+}
+
+skill drawn(canvas, desk, view, palette) {
+    @tree = atoms.fitted(read.page(page.source(desk, view)), no, palette)
+    @runtime = jtml.mount(canvas, tree)
+    atoms.draw(canvas, runtime, palette)
+    out runtime
+}
+
+program() {
+    @host = screen.open()
+    (group.count(host) == 0) { out none }
+    @canvas = group.get(host, 0)
+    @link = group.get(host, 1)
+    @palette = atoms.with_faces(themes.named("light", canvas), face(REGULAR), face(BOLD), face(MONO))
+    @desk = mirror.Desk { link = wire.open(HOST, PORT) }
+    @view = page.View {}
+    mirror.refresh(desk)
+    @runtime = drawn(canvas, desk, view, palette)
+    screen.present(link)
+    @packet = bytes.new(8192)
+    @hold = bytes.new(4096)
+    @joined = bytes.new(12288)
+    always {
+        (link.way_closed == yes) { leave }
+        (link.way_failed == yes) { leave }
+        (link.way_clicked == yes) {
+            link.way_clicked = no
+            @hit = jtml.hit(runtime, link.way_click_x, link.way_click_y)
+            (page.act(desk, view, hit.id) == yes) {
+                runtime = drawn(canvas, desk, view, palette)
+                screen.present(link)
+            }
+        }
+        screen.pump(link, packet, hold, joined)
+        socket.sleep(50)
+    }
+    out none
+}

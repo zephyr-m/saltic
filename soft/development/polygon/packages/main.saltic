@@ -1,0 +1,154 @@
+-- packages — экран «Пакеты» Полигона, субъект Packages: дерево реестра
+-- tarantul (catalog — настоящие каталоги и паспорта): группы «адаптеры» и
+-- «библиотеки» сворачиваются (GROUP и роль), пакет раскрывается в карточку
+-- паспорта (PACKAGE и имя). Сверху — поиск, который правда фильтрует: знаки с
+-- клавиатуры (раскладка US) — в строку, ⌫ — стереть последний; ищется в
+-- имени, заголовке и пути без учёта регистра.
+--
+-- Packages { catalog, query, opened, folded } — реестр, строка поиска,
+--     раскрытые пакеты, свёрнутые группы
+--     refresh() — перечитать реестр; type(text) -> yes, если строка
+--     поменялась; choose(id) -> yes, если щелчок что-то раскрыл или свернул;
+--     jtml() -> список JTML экрана
+--     fold(role) / unfold(name) — свернуть или развернуть группу, раскрыть
+--     или закрыть паспорт пакета; column(items) — столбик без зазора
+-- Внутри: rows() — строки дерева; found() — сколько подходит
+
+use core.str
+use core.group
+use tarantul.uiengine.jtml.calls
+use soft.development.polygon.packages.catalog
+
+GROUP = "group-"
+PACKAGE = "package-"
+ERASE = "⌫"
+ROLES = [["adapter", "адаптеры", "plug", "accent"], ["library", "библиотеки", "book-open", "info"]]
+
+
+
+
+Packages = Box {
+    catalog = catalog.Catalog {},
+    query = "",
+    opened = [],
+    folded = []
+
+    skill refresh() {
+        out catalog.refresh()
+    }
+
+    skill column(items) {
+        @inside = calls.join(items)
+        out "\{\"box\": \{\"gap\": 0, \"children\": [{inside}]\}\}"
+    }
+
+    skill fold(role) {
+        (group.contains(folded, role) == no) {
+            folded = group.add(folded, role)
+            out none
+        }
+        @left = []
+        drum (folded) {
+            ((beat == role) == no) { left = group.add(left, beat) }
+        }
+        folded = left
+        out none
+    }
+
+    skill unfold(name) {
+        (group.contains(opened, name) == no) {
+            opened = group.add(opened, name)
+            out none
+        }
+        @left = []
+        drum (opened) {
+            ((beat == name) == no) { left = group.add(left, beat) }
+        }
+        opened = left
+        out none
+    }
+
+    skill type(text) {
+        (text == ERASE) {
+            (str.bytes(query) == 0) { out no }
+            query = str.slice(query, 0, str.bytes(query) - 1)
+            out yes
+        }
+        (text == "\t") { out no }
+        query = "{query}{text}"
+        out yes
+    }
+
+    skill choose(id) {
+        (str.starts_with(id, GROUP) == yes) {
+            fold(str.slice(id, str.bytes(GROUP), str.bytes(id)))
+            out yes
+        }
+        (str.starts_with(id, PACKAGE) == yes) {
+            unfold(str.slice(id, str.bytes(PACKAGE), str.bytes(id)))
+            out yes
+        }
+        out no
+    }
+
+    skill found() {
+        @many = 0
+        @asked = str.lower(query)
+        drum (catalog.packages) {
+            (beat.matches(asked) == yes) { many = many + 1 }
+        }
+        out many
+    }
+
+    skill rows() {
+        @asked = str.lower(query)
+        @made = []
+        drum (ROLES) {
+            @role = group.get(beat, 0)
+            @icon = group.get(beat, 2)
+            @tone = group.get(beat, 3)
+            @shut = group.contains(folded, role)
+            @chevron = "chevron-down"
+            (shut == yes) { chevron = "chevron-right" }
+            @total = 0
+            drum (catalog.packages) {
+                (beat.role == role) {
+                    (beat.matches(asked) == yes) { total = total + 1 }
+                }
+            }
+            made = group.add(made, calls.call("tree-group", [["id", calls.quoted("{GROUP}{role}")], ["chevron", calls.quoted(chevron)], ["text", calls.quoted(group.get(beat, 1))], ["count", calls.quoted("{total}")]]))
+            (shut == no) {
+                drum (catalog.packages) {
+                    @package = beat
+                    (package.role == role) {
+                        (package.matches(asked) == yes) {
+                            @open = group.contains(opened, package.name)
+                            @arrow = "chevron-right"
+                            (open == yes) { arrow = "chevron-down" }
+                            made = group.add(made, package.row(arrow, icon, tone, "{PACKAGE}{package.name}"))
+                            (open == yes) { made = group.add(made, package.details()) }
+                        }
+                    }
+                }
+            }
+        }
+        out made
+    }
+
+    skill jtml() {
+        @total = group.count(catalog.packages)
+        @many = found()
+        @head = calls.call("page-head", [["title", calls.quoted("Пакеты")], ["note", calls.quoted("реестр tarantul — адаптеры и библиотеки, паспорта настоящие")], ["badge", calls.quoted("найдено {many} из {total}")], ["tone", calls.quoted("accent")]])
+        @shown = "{query}|"
+        @hint = "набери имя, заголовок или путь · Backspace — стереть"
+        @rim = "line"
+        ((query == "") == no) {
+            hint = "{many} подходит"
+            rim = "accent_rim"
+        }
+        @search = calls.call("search-box", [["text", calls.quoted(shown)], ["hint", calls.quoted(hint)], ["tone", calls.quoted(rim)]])
+        @tree = calls.call("console-panel", [["title", calls.quoted("реестр")], ["note", calls.quoted("щёлкни по пакету — его паспорт")], ["radius", "16"], ["children", calls.listed([column(rows())])]])
+        ((catalog.trouble == "") == no) { tree = calls.call("page-head", [["title", calls.quoted("Реестр не прочитался")], ["note", calls.quoted(catalog.trouble)], ["badge", calls.quoted("ошибка")], ["tone", calls.quoted("down")]]) }
+        out calls.listed([head, search, tree])
+    }
+}

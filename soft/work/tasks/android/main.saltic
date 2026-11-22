@@ -1,0 +1,115 @@
+-- taskdesk — клиент доски задач Acer на телефоне (APK, just android
+-- taskdesk): mRPC по UDP к Acer (os/target/linux/taskdesk), экраны
+-- taskdesk/page — вид доски на Acer её же модулями (view, task_view, жители
+-- закрытой библиотеки), рисуют атомы светлой палитрой шрифтами TTF из FILES.
+-- Окно даёт платформа через cpu.firmware: 0 — адрес пикселей, 1 / 2 — ширина
+-- и высота, 3 — шаг строки, 4 / 5 — где палец коснулся, 7 / 8 — где отпустил,
+-- 9 — счёт отпусканий (точки экрана; буфер в SHRINK раз меньше, как в
+-- soul/seed/compiler/gorn/platform/android). Отпустил дальше SWIPE вбок — свайп (колонки
+-- доски; вправо в задаче — назад), иначе — касание там, где коснулся
+-- (jtml.hit по id, page.act). Рисует в часть окна под строкой часов (ABOVE)
+-- и над кнопками Android (BELOW). Адрес Acer — первое слово FILES/ACER.TXT
+-- (кладёт adb push), нет файла — HOST; Acer молчит — так и написано на
+-- экране. Кадр рисуется на каждый cpu.wait().
+--
+-- program() -> none
+-- Внутри: inner() / whole() -> graphics.Screen части окна / всего окна;
+--     dressed(screen) -> палитра со шрифтами; face(name) -> Typeface из
+--     FILES; acer() -> адрес Acer; mounted — runtime экрана; gesture(desk,
+--     look, runtime) -> yes, если экран надо пересобрать
+
+use io
+use io.file
+use core.str
+use core.cpu
+use core.group
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use os.screen.graphics
+use tarantul.uiengine.draw.typeface
+use tarantul.uiengine.draw.atoms
+use soft.work.tasks.desk.wire
+use soft.work.tasks.desk.mirror
+use soft.work.tasks.desk.page
+use tarantul.uiengine.themes
+
+FILES = "/sdcard/Android/data/dev.saltic.taskdesk/files/"
+HOST = "10.0.0.2"
+PORT = 5555
+SHRINK = 3
+SWIPE = 50
+ABOVE = 40
+BELOW = 48
+PIXEL_BYTES = 4
+
+skill inner() {
+    @stride = cpu.firmware(3)
+    @height = cpu.firmware(2) - ABOVE - BELOW
+    out graphics.Screen { width = cpu.firmware(1), height = height, stride = stride, format = graphics.FORMAT_RGB, memory = cpu.firmware(0) + ABOVE * stride * PIXEL_BYTES, vsync = no }
+}
+
+skill whole() {
+    out graphics.Screen { width = cpu.firmware(1), height = cpu.firmware(2), stride = cpu.firmware(3), format = graphics.FORMAT_RGB, memory = cpu.firmware(0), vsync = no }
+}
+
+skill face(name) {
+    out typeface.from_bytes(file.read_bytes("{FILES}{name}"))
+}
+
+skill dressed(screen) {
+    @plain = themes.named("light", screen)
+    @typed = atoms.with_faces(themes.named("light", screen), face("INTER.TTF"), face("INTERB.TTF"), face("MONO.TTF")) rescue |err| {
+        io.show("taskdesk: шрифтов нет в {FILES} ({err}), рисую Spleen")
+        out plain
+    }
+    out typed
+}
+
+skill acer() {
+    @text = file.read("{FILES}ACER.TXT") rescue |err| { out HOST }
+    @lines = str.lines(text)
+    (group.count(lines) == 0) { out HOST }
+    drum (str.split(group.get(lines, 0), " ")) { (str.bytes(beat) > 0) { out beat } }
+    out HOST
+}
+
+skill mounted(desk, look, palette) {
+    out jtml.mount(inner(), atoms.fitted(read.page(page.source(desk, look)), no, palette))
+}
+
+skill gesture(desk, look, runtime) {
+    @from_x = cpu.firmware(4) / SHRINK
+    @from_y = cpu.firmware(5) / SHRINK
+    @moved = cpu.firmware(7) / SHRINK - from_x
+    (moved > SWIPE) { out page.swipe(desk, look, -1) }
+    (moved < 0 - SWIPE) { out page.swipe(desk, look, 1) }
+    @hit = jtml.hit(runtime, from_x, from_y - ABOVE)
+    out page.act(desk, look, hit.id)
+}
+
+program() {
+    @palette = dressed(inner())
+    @host = acer()
+    @desk = mirror.Desk { link = wire.open(host, PORT) }
+    @look = page.View {}
+    mirror.refresh(desk)
+    @runtime = mounted(desk, look, palette)
+    @seen = cpu.firmware(9)
+    @memory = cpu.firmware(0)
+    @wide = cpu.firmware(1)
+    @high = cpu.firmware(2)
+    @stride = cpu.firmware(3)
+    io.show("taskdesk: Acer {host}; окно {wide}×{high}, шаг {stride}, буфер {memory}")
+    always {
+        @screen = whole()
+        graphics.fill(screen, 0, 0, screen.width, screen.height, palette.ground)
+        atoms.draw(inner(), runtime, palette)
+        cpu.wait()
+        @released = cpu.firmware(9)
+        ((released == seen) == no) {
+            seen = released
+            (gesture(desk, look, runtime) == yes) { runtime = mounted(desk, look, palette) }
+        }
+    }
+    out none
+}

@@ -1,0 +1,147 @@
+-- calendar — календарь коммитов экрана «Сборки», субъект Calendar: WEEKS
+-- недель (builds/week) по семь дней (builds/day), последняя — с сегодняшним
+-- днём; дни после сегодня — будущие. Заполняет его история коммитов
+-- (builds/history): grid(today) — сетка, mark(text) — ещё один коммит в день.
+-- Календарь знает о себе итоги и рисует себя: месяцы сверху, «пн, ср, пт»
+-- сбоку, недели, легенда; наведение на день — подсказка этого дня.
+--
+-- Calendar { weeks, first } — недели и номер первого дня сетки
+--     span() -> сколько недель охватывает; grid(today) — сетка недель до дня
+--     today (day.Day); mark(text) — день
+--     "ГГГГ-ММ-ДД" получил коммит (вне сетки — ничего); day(number) ->
+--     day.Day сетки или пустой; days() -> все дни подряд; total() / active()
+--     — коммитов и дней с коммитами; streak() — самая длинная серия дней
+--     подряд; best() -> лучший день; jtml() -> панель; tip(id, x, y) ->
+--     подсказка дня под указателем или ""; shelf(flow, gap, items) — ряд
+-- Внутри: months() — подписи месяцев; legend() — от «меньше» до «больше»
+
+use core.str
+use core.group
+use tarantul.uiengine.jtml.calls
+use soft.development.polygon.builds.day
+use soft.development.polygon.builds.week
+
+WEEKS = 53
+MARKS = ["пн", "", "ср", "", "пт", "", ""]
+STEP = 20
+
+Calendar = Box {
+    weeks = [],
+    first = 0
+
+    skill grid(today) {
+        first = today.number - (WEEKS - 1) * 7 - today.weekday()
+        @made = []
+        drum (WEEKS) {
+            @order = beat
+            @days = []
+            drum (7) {
+                @number = first + order * 7 + beat
+                days = group.add(days, day.Day { number = number, future = number > today.number })
+            }
+            made = group.add(made, week.Week { days = days })
+        }
+        weeks = made
+        out none
+    }
+
+    skill span() {
+        out WEEKS
+    }
+
+    skill day(number) {
+        @spot = number - first
+        (spot < 0) { out day.Day {} }
+        (spot >= WEEKS * 7) { out day.Day {} }
+        @holder = group.get(weeks, spot / 7)
+        out holder.at(spot % 7)
+    }
+
+    skill mark(text) {
+        @seen = day.Day {}
+        seen.read(text)
+        @found = day(seen.number)
+        found.commits = found.commits + 1
+        out none
+    }
+
+    skill days() {
+        @all = []
+        drum (weeks) { all = group.concat(all, beat.days) }
+        out all
+    }
+
+    skill total() {
+        @sum = 0
+        drum (days()) { sum = sum + beat.commits }
+        out sum
+    }
+
+    skill active() {
+        @many = 0
+        drum (days()) {
+            (beat.commits > 0) { many = many + 1 }
+        }
+        out many
+    }
+
+    skill streak() {
+        @longest = 0
+        @run = 0
+        drum (days()) {
+            (beat.future == no) {
+                run = run + 1
+                (beat.commits == 0) { run = 0 }
+                (run > longest) { longest = run }
+            }
+        }
+        out longest
+    }
+
+    skill best() {
+        @top = day.Day {}
+        drum (days()) {
+            (beat.commits > top.commits) { top = beat }
+        }
+        out top
+    }
+
+    skill shelf(flow, gap, items) {
+        @inside = calls.join(items)
+        out "\{\"box\": \{\"flow\": \"{flow}\", \"gap\": {gap}, \"children\": [{inside}]\}\}"
+    }
+
+    skill months() {
+        @made = [calls.call("tick-label", [["text", calls.quoted("")], ["width", "28"]])]
+        drum (weeks) { made = group.add(made, calls.call("tick-label", [["text", calls.quoted(beat.month())], ["width", "{STEP}"]])) }
+        out shelf("row", 0, made)
+    }
+
+    skill legend() {
+        @made = [calls.call("tick-label", [["text", calls.quoted("меньше")], ["width", "52"]])]
+        drum ([0, 1, 10, 25]) {
+            @sample = day.Day { commits = beat }
+            made = group.add(made, calls.call("heat-cell", [["id", calls.quoted("")], ["tone", calls.quoted(sample.tone())]]))
+        }
+        made = group.add(made, calls.call("tick-label", [["text", calls.quoted("больше")], ["width", "52"]]))
+        out shelf("row", 4, made)
+    }
+
+    skill tip(id, x, y) {
+        (str.starts_with(id, day.CELL) == no) { out "" }
+        @number = 0
+        @digits = str.slice(id, str.bytes(day.CELL), str.bytes(id))
+        drum (str.bytes(digits)) { number = number * 10 + str.byte(digits, beat) - 48 }
+        @found = day(number)
+        out found.bubble(x, y)
+    }
+
+    skill jtml() {
+        @labels = []
+        drum (MARKS) { labels = group.add(labels, calls.call("tick-label", [["text", calls.quoted(beat)], ["width", "28"], ["height", "16"]])) }
+        @columns = [shelf("column", 4, labels)]
+        drum (weeks) { columns = group.add(columns, beat.cells()) }
+        @grid = shelf("column", 6, [months(), shelf("row", 4, columns)])
+        out calls.call("console-panel", [["title", calls.quoted("календарь коммитов")], ["note", calls.quoted("53 недели · наведи на день")], ["radius", "16"], ["children", calls.listed([grid, legend()])]])
+    }
+}

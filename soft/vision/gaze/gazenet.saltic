@@ -1,0 +1,304 @@
+-- gazenet — своя маленькая свёрточная сеть взгляда (решение автора
+-- 16.11.2026): общая для обучения на ноутбуке (soft/vision/gaze/linux/main) и
+-- угадывания на телефоне. Вход — серый кадр сборщика (collect) WIDE × HIGH,
+-- усреднённый квадратами POOL до IN_W × IN_H, яркость −0.5…0.5. Слои:
+-- свёртка 1 — C1 фильтров 3 × 3 шагом 2 (A_W × A_H), ReLU; свёртка 2 — C2
+-- фильтров 3 × 3 × C1 шагом 2 (B_W × B_H), ReLU; полносвязный → 2 числа: x и y
+-- точки экрана, приведённые к −1…1. Ошибка — половина квадрата разницы.
+-- Веса — группы дробных (быстрее матрицы: group.get без кодирования ячейки);
+-- градиенты собираются «сборкой» — каждый вес считается целиком по порядку,
+-- без правки групп на месте.
+--
+-- Net { w1, b1, w2, b2, w3, b3 } — веса; fresh(seed) -> Net со случайными
+--     весами (He: ±sqrt(6 / входов))
+-- input_of(buffer, at) -> группа IN_W·IN_H дробных из записи сборщика
+-- Pass { input, z1, a1, z2, a2, answer } — проход вперёд (answer — [x, y]); forward(net, input) -> Pass
+-- grads(net, pass, target) -> Net градиентов одного снимка; target — [x, y] в −1…1
+-- add(a, b) / step(net, grad, rate) -> Net — сумма градиентов / шаг спуска
+-- save(net, path) / load(path) -> Net — веса: ячейки core.matrix (по 8 байт со
+--     знаком) столбцом в порядке w1, b1, w2, b2, w3, b3
+-- Произведения и разности значений из групп начинаются с 1.0 * / 0.0 +: чекер
+-- считает «неизвестное × неизвестное» целым и даёт целую операцию — на дробных
+-- рантайм падает TypeMismatch.
+-- Внутри: item(list, index) — чтение градиента; relu, uniform(seed) -> [число в −1…1, новое семя], scaled, total
+
+use io.file
+use core.group
+use core.bytes
+use core.fraction
+use core.matrix
+
+WIDE = 96
+HIGH = 128
+POOL = 4
+IN_W = 24
+IN_H = 32
+C1 = 8
+A_W = 11
+A_H = 15
+C2 = 16
+B_W = 5
+B_H = 7
+OUT = 2
+DENSE = 560
+SEED_STEP = 65537
+
+Net = Box {
+    w1 = [],
+    b1 = [],
+    w2 = [],
+    b2 = [],
+    w3 = [],
+    b3 = []
+}
+
+Pass = Box {
+    input = [],
+    z1 = [],
+    a1 = [],
+    z2 = [],
+    a2 = [],
+    answer = []
+}
+
+skill uniform(seed) {
+    @next = (seed * 75 + 74) % SEED_STEP
+    out [fraction.from(next) / fraction.from(SEED_STEP) * 2.0 - 1.0, next]
+}
+
+skill random_group(count, limit, seed) {
+    @made = []
+    @state = seed
+    drum (count) {
+        @drawn = uniform(state)
+        made = group.add(made, 1.0 * group.get(drawn, 0) * limit)
+        state = group.get(drawn, 1)
+    }
+    out [made, state]
+}
+
+skill zeros(count) {
+    @made = []
+    drum (count) { made = group.add(made, 0.0) }
+    out made
+}
+
+skill fresh(seed) {
+    @first = random_group(C1 * 9, fraction.sqrt(6.0 / 9.0), seed)
+    @second = random_group(C2 * C1 * 9, fraction.sqrt(6.0 / fraction.from(C1 * 9)), group.get(first, 1))
+    @third = random_group(OUT * DENSE, fraction.sqrt(6.0 / fraction.from(DENSE)), group.get(second, 1))
+    out Net { w1 = group.get(first, 0), b1 = zeros(C1), w2 = group.get(second, 0), b2 = zeros(C2), w3 = group.get(third, 0), b3 = zeros(OUT) }
+}
+
+skill input_of(buffer, at) {
+    @made = []
+    @area = fraction.from(POOL * POOL * 255)
+    drum (IN_H) {
+        @y = beat
+        drum (IN_W) {
+            @x = beat
+            @sum = 0
+            drum (POOL) {
+                @row = at + (y * POOL + beat) * WIDE + x * POOL
+                drum (POOL) { sum = sum + bytes.get(buffer, row + beat) }
+            }
+            made = group.add(made, fraction.from(sum) / area - 0.5)
+        }
+    }
+    out made
+}
+
+skill item(list, index) {
+    out group.get(list, index)
+}
+
+skill relu(value) {
+    (value > 0.0) { out 0.0 + value }
+    out 0.0
+}
+
+skill forward(net, input) {
+    @z1 = []
+    @a1 = []
+    drum (C1) {
+        @f = beat
+        drum (A_H) {
+            @oy = beat
+            drum (A_W) {
+                @ox = beat
+                @sum = group.get(net.b1, f)
+                drum (3) {
+                    @ky = beat
+                    @row = (oy * 2 + ky) * IN_W + ox * 2
+                    drum (3) { sum = sum + 1.0 * group.get(net.w1, f * 9 + ky * 3 + beat) * group.get(input, row + beat) }
+                }
+                z1 = group.add(z1, sum)
+                a1 = group.add(a1, relu(sum))
+            }
+        }
+    }
+    @z2 = []
+    @a2 = []
+    drum (C2) {
+        @g = beat
+        drum (B_H) {
+            @oy = beat
+            drum (B_W) {
+                @ox = beat
+                @sum = group.get(net.b2, g)
+                drum (C1) {
+                    @f = beat
+                    drum (3) {
+                        @ky = beat
+                        @row = (f * A_H + oy * 2 + ky) * A_W + ox * 2
+                        @base = (g * C1 + f) * 9 + ky * 3
+                        drum (3) { sum = sum + 1.0 * group.get(net.w2, base + beat) * group.get(a1, row + beat) }
+                    }
+                }
+                z2 = group.add(z2, sum)
+                a2 = group.add(a2, relu(sum))
+            }
+        }
+    }
+    @answer = []
+    drum (OUT) {
+        @j = beat
+        @sum = group.get(net.b3, j)
+        drum (DENSE) { sum = sum + 1.0 * group.get(net.w3, j * DENSE + beat) * group.get(a2, beat) }
+        answer = group.add(answer, sum)
+    }
+    out Pass { input = input, z1 = z1, a1 = a1, z2 = z2, a2 = a2, answer = answer }
+}
+
+skill grads(net, pass, target) {
+    @d_out = zeros(0)
+    drum (OUT) { d_out = group.add(d_out, 0.0 + group.get(pass.answer, beat) - group.get(target, beat)) }
+    @g_w3 = []
+    drum (OUT) {
+        @d = item(d_out, beat)
+        drum (DENSE) { g_w3 = group.add(g_w3, 1.0 * d * group.get(pass.a2, beat)) }
+    }
+    @d_z2 = zeros(0)
+    drum (DENSE) {
+        @i = beat
+        @sum = 0.0
+        drum (OUT) { sum = sum + 1.0 * group.get(net.w3, beat * DENSE + i) * item(d_out, beat) }
+        ((group.get(pass.z2, i) > 0.0) == no) { sum = 0.0 }
+        d_z2 = group.add(d_z2, sum)
+    }
+    @g_b2 = []
+    @g_w2 = []
+    drum (C2) {
+        @g = beat
+        @bias = 0.0
+        drum (B_H * B_W) { bias = bias + item(d_z2, g * B_H * B_W + beat) }
+        g_b2 = group.add(g_b2, bias)
+        drum (C1) {
+            @f = beat
+            drum (9) {
+                @ky = beat / 3
+                @kx = beat % 3
+                @sum = 0.0
+                drum (B_H) {
+                    @oy = beat
+                    drum (B_W) { sum = sum + 1.0 * item(d_z2, (g * B_H + oy) * B_W + beat) * group.get(pass.a1, (f * A_H + oy * 2 + ky) * A_W + beat * 2 + kx) }
+                }
+                g_w2 = group.add(g_w2, sum)
+            }
+        }
+    }
+    @d_z1 = zeros(0)
+    drum (C1) {
+        @f = beat
+        drum (A_H) {
+            @y = beat
+            drum (A_W) {
+                @x = beat
+                @sum = 0.0
+                drum (9) {
+                    @ky = beat / 3
+                    @kx = beat % 3
+                    @dy = y - ky
+                    @dx = x - kx
+                    @fits = dy >= 0
+                    (dx < 0) { fits = no }
+                    (dy % 2 == 1) { fits = no }
+                    (dx % 2 == 1) { fits = no }
+                    (dy / 2 >= B_H) { fits = no }
+                    (dx / 2 >= B_W) { fits = no }
+                    (fits == yes) { drum (C2) { sum = sum + 1.0 * group.get(net.w2, (beat * C1 + f) * 9 + ky * 3 + kx) * item(d_z2, (beat * B_H + dy / 2) * B_W + dx / 2) } }
+                }
+                ((group.get(pass.z1, (f * A_H + y) * A_W + x) > 0.0) == no) { sum = 0.0 }
+                d_z1 = group.add(d_z1, sum)
+            }
+        }
+    }
+    @g_b1 = []
+    @g_w1 = []
+    drum (C1) {
+        @f = beat
+        @bias = 0.0
+        drum (A_H * A_W) { bias = bias + item(d_z1, f * A_H * A_W + beat) }
+        g_b1 = group.add(g_b1, bias)
+        drum (9) {
+            @ky = beat / 3
+            @kx = beat % 3
+            @sum = 0.0
+            drum (A_H) {
+                @oy = beat
+                drum (A_W) { sum = sum + 1.0 * item(d_z1, (f * A_H + oy) * A_W + beat) * group.get(pass.input, (oy * 2 + ky) * IN_W + beat * 2 + kx) }
+            }
+            g_w1 = group.add(g_w1, sum)
+        }
+    }
+    out Net { w1 = g_w1, b1 = g_b1, w2 = g_w2, b2 = g_b2, w3 = g_w3, b3 = d_out }
+}
+
+skill joined(a, b, rate) {
+    @made = []
+    drum (group.count(a)) { made = group.add(made, 0.0 + group.get(a, beat) + 1.0 * group.get(b, beat) * rate) }
+    out made
+}
+
+skill add(a, b) {
+    out Net { w1 = joined(a.w1, b.w1, 1.0), b1 = joined(a.b1, b.b1, 1.0), w2 = joined(a.w2, b.w2, 1.0), b2 = joined(a.b2, b.b2, 1.0), w3 = joined(a.w3, b.w3, 1.0), b3 = joined(a.b3, b.b3, 1.0) }
+}
+
+skill step(net, grad, rate) {
+    @back = 0.0 - rate
+    out Net { w1 = joined(net.w1, grad.w1, back), b1 = joined(net.b1, grad.b1, back), w2 = joined(net.w2, grad.w2, back), b2 = joined(net.b2, grad.b2, back), w3 = joined(net.w3, grad.w3, back), b3 = joined(net.b3, grad.b3, back) }
+}
+
+skill parts(net) {
+    out [net.w1, net.b1, net.w2, net.b2, net.w3, net.b3]
+}
+
+skill save(net, path) {
+    @total = 0
+    drum (parts(net)) { total = total + group.count(beat) }
+    @kept = matrix.new(total, 1)
+    @at = 0
+    drum (parts(net)) {
+        drum (beat) {
+            matrix.set(kept, at, 0, beat)
+            at = at + 1
+        }
+    }
+    out file.write_bytes(path, kept.cells)
+}
+
+skill load(path) {
+    @kept = matrix.Matrix { rows = bytes.count(file.read_bytes(path)) / 8, columns = 1, cells = file.read_bytes(path) }
+    @sizes = [C1 * 9, C1, C2 * C1 * 9, C2, OUT * DENSE, OUT]
+    @found = []
+    @at = 0
+    drum (sizes) {
+        @made = []
+        drum (beat) {
+            made = group.add(made, matrix.get(kept, at, 0))
+            at = at + 1
+        }
+        found = group.add(found, made)
+    }
+    out Net { w1 = group.get(found, 0), b1 = group.get(found, 1), w2 = group.get(found, 2), b2 = group.get(found, 3), w3 = group.get(found, 4), b3 = group.get(found, 5) }
+}

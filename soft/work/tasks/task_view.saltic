@@ -1,0 +1,92 @@
+-- task_view — экран открытой задачи текстом JTML на жителях закрытой
+-- библиотеки (доска — view): шапка board-head «№N» со строкой состояния,
+-- подсказка, название (режет атом по ширине), карточка card с пунктами
+-- item-row — номер (у выбранного тёмный), «[x] текст» или «[ ] текст» и
+-- время последнего изменения справа; «сделано N из M»; карточка событий
+-- event-row — последние EVENTS (новые снизу); карточка сообщений message-row
+-- — последние MESSAGES. Время коротко «ДД.ММ ЧЧ:ММ», неизвестное — «время
+-- неизвестно». Пунктов нет — подсказка, как добавить по сети. id пунктов —
+-- item-<номер> (касание на телефоне), названия — back.
+--
+-- task_jtml(desk, note) -> текст JTML открытой задачи desk.opened
+-- Внутри: when(stamp) -> короткое время; rows(list, kind) -> строки событий
+--     или сообщений; card(rows) -> карточка; item_rows(desk, list) -> пункты
+
+use core.str
+use core.group
+use tarantul.uiengine.jtml.calls
+use soft.work.tasks.board
+use soft.work.tasks.view
+
+EVENTS = 4
+MESSAGES = 4
+UNKNOWN = "время неизвестно"
+
+skill when(stamp) {
+    (str.bytes(stamp) < 16) { out UNKNOWN }
+    @day = str.slice(stamp, 0, 5)
+    @clock = str.slice(stamp, 11, 16)
+    out "{day} {clock}"
+}
+
+skill card(rows) {
+    out calls.call("card", [["gap", "8"], ["padding", "12"], ["children", calls.listed(rows)]])
+}
+
+skill hint(text) {
+    out calls.call("label", [["text", calls.quoted(text)]])
+}
+
+skill item_rows(desk, list) {
+    @found = []
+    drum (group.count(list)) {
+        @item = group.get(list, beat)
+        @fill = "well"
+        @tone = "quiet"
+        (beat == desk.cursor) {
+            fill = "ink"
+            tone = "ground"
+        }
+        @mark = "[ ]"
+        (group.get(item, 0) == yes) { mark = "[x]" }
+        @number = beat + 1
+        found = group.add(found, calls.call("item-row", [["id", calls.quoted("item-{number}")], ["number", calls.quoted("{number}")], ["mark", calls.quoted(mark)], ["text", calls.quoted(view.safe(group.get(item, 1)))], ["time", calls.quoted(when(group.get(item, 2)))], ["fill", calls.quoted(fill)], ["tone", calls.quoted(tone)]]))
+    }
+    out found
+}
+
+skill rows(list, kind) {
+    @limit = EVENTS
+    (kind == "message-row") { limit = MESSAGES }
+    @count = group.count(list)
+    @first = 0
+    (count > limit) { first = count - limit }
+    @found = []
+    (first > 0) { found = [hint("... и ещё {first} раньше")] }
+    drum (count - first) {
+        @one = group.get(list, first + beat)
+        pick {
+            (kind == "message-row") { found = group.add(found, calls.call(kind, [["time", calls.quoted(when(group.get(one, 0)))], ["author", calls.quoted(view.safe(group.get(one, 1)))], ["text", calls.quoted(view.safe(group.get(one, 2)))]])) }
+            { found = group.add(found, calls.call(kind, [["time", calls.quoted(when(group.get(one, 0)))], ["text", calls.quoted(view.safe(group.get(one, 1)))]])) }
+        }
+    }
+    out found
+}
+
+skill task_jtml(desk, note) {
+    @number = desk.opened
+    @list = board.items_of(desk, number)
+    @items = item_rows(desk, list)
+    (group.count(items) == 0) { items = [hint("пунктов нет · по сети: tasks todo add {number} <текст>")] }
+    @done = board.done_count(list)
+    @total = group.count(list)
+    @happened = rows(board.events_of(desk, number), "event-row")
+    (group.count(happened) == 0) { happened = [hint("событий пока нет")] }
+    @talk = rows(board.messages_of(desk, number), "message-row")
+    (group.count(talk) == 0) { talk = [hint("сообщений нет · по сети: tasks-message")] }
+    @head = calls.call("board-head", [["title", calls.quoted("№{number}")], ["note", calls.quoted(view.safe(note))]])
+    @name = calls.quoted(view.safe(group.get(desk.names, number - 1)))
+    @parts = [head, hint("стрелки — пункт · Enter — галочка · Esc — на доску"), "\{\"text\": \{\"id\": \"back\", \"value\": {name}, \"size\": 14, \"cut\": \"yes\"\}\}", card(items), hint("сделано {done} из {total}"), calls.call("caption", [["text", calls.quoted("События")]]), card(happened), calls.call("caption", [["text", calls.quoted("Сообщения")]]), card(talk)]
+    @inside = calls.join(parts)
+    out "\{\"box\": \{\"fill\": \"ground\", \"padding\": 16, \"gap\": 12, \"children\": [{inside}]\}\}"
+}

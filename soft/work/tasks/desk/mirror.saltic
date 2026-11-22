@@ -1,0 +1,182 @@
+-- mirror — что клиент знает о доске задач Acer (программа tasks): список задач
+-- и одна открытая — всё по mRPC (wire), страницами from/next до конца; ничего
+-- не хранит у себя, доска на Acer — единственная правда. Ошибка связи или
+-- команды — текстом в problem, его показывает экран.
+--
+-- Task { number, column, name, done, items } — строка списка (tasks-list)
+-- Item { item, done, text, time } / Event { time, text } / Message { message,
+--     time, author, text } — части открытой задачи
+-- Opened { number, column, name, items, events, messages } — tasks-show и
+--     tasks-items / tasks-events / tasks-messages
+-- Desk { link, tasks, opened, problem } — состояние клиента
+-- refresh(desk) — список заново; open_task(desk, number) — открыть задачу;
+-- tick(desk, item) / move(desk, column) — галочка пункта / задачу в колонку
+--     (0..2) у открытой, потом открытая — заново
+-- board_of(desk) -> board.Board доски Acer (programs/tasks/board) — чтобы её
+--     рисовали те же view и task_view, что на Acer: задачи, колонки; пункты,
+--     события и сообщения — у открытой; выбора нет (selected 0, cursor -1)
+-- Внутри: pages(desk, cmd, params, field) -> все записи страниц или none
+--     (причина — в problem); text_of / number_of / flag_of(item, name)
+
+use core.str
+use core.group
+use craft.protocols.data.json
+use craft.protocols.data.json.value
+use os.text.parse
+use os.network.mrpc
+use soft.work.tasks.desk.wire
+use soft.work.tasks.board
+
+Task = Box {
+    number = 0,
+    column = "",
+    name = "",
+    done = 0,
+    items = 0
+}
+
+Item = Box {
+    item = 0,
+    done = no,
+    text = "",
+    time = ""
+}
+
+Event = Box {
+    time = "",
+    text = ""
+}
+
+Message = Box {
+    message = 0,
+    time = "",
+    author = "",
+    text = ""
+}
+
+Opened = Box {
+    number = 0,
+    column = "",
+    name = "",
+    items = [],
+    events = [],
+    messages = []
+}
+
+Desk = Box {
+    link = wire.Link {},
+    tasks = [],
+    opened = Opened {},
+    problem = ""
+}
+
+skill text_of(item, name) {
+    @found = value.get(item, name)
+    (found.found == no) { out "" }
+    out mrpc.plain(found.value)
+}
+
+skill number_of(item, name) {
+    out parse.parse_size(text_of(item, name))
+}
+
+skill flag_of(item, name) {
+    out text_of(item, name) == "yes"
+}
+
+skill pages(desk, cmd, params, field) {
+    @found = []
+    @from = 0
+    @more = yes
+    drum (64) {
+        (more == yes) {
+            @asked = "\"from\":{from}"
+            (str.bytes(params) > 0) { asked = "{params},\"from\":{from}" }
+            @answer = wire.ask(desk.link, cmd, asked)
+            (answer.ok == no) {
+                desk.problem = answer.message
+                out none
+            }
+            @list = value.get(answer.data, field)
+            drum (list.value.items) { found = group.add(found, beat) }
+            @next = value.get(answer.data, "next")
+            more = next.found
+            (more == yes) { from = parse.parse_size(mrpc.plain(next.value)) }
+        }
+    }
+    out found
+}
+
+skill refresh(desk) {
+    desk.problem = ""
+    @rows = pages(desk, "tasks-list", "", "tasks")
+    (rows) |rows| {
+        @made = []
+        drum (rows) { made = group.add(made, Task { number = number_of(beat, "number"), column = text_of(beat, "column"), name = text_of(beat, "name"), done = number_of(beat, "done"), items = number_of(beat, "items") }) }
+        desk.tasks = made
+    }
+    out none
+}
+
+skill open_task(desk, number) {
+    desk.problem = ""
+    @shown = wire.ask(desk.link, "tasks-show", "\"number\":{number}")
+    (shown.ok == no) {
+        desk.problem = shown.message
+        out none
+    }
+    @opened = Opened { number = number, column = text_of(shown.data, "column"), name = text_of(shown.data, "name") }
+    @asked = "\"number\":{number}"
+    @items = pages(desk, "tasks-items", asked, "items")
+    (items) |items| { drum (items) { opened.items = group.add(opened.items, Item { item = number_of(beat, "item"), done = flag_of(beat, "done"), text = text_of(beat, "text"), time = text_of(beat, "time") }) } }
+    @events = pages(desk, "tasks-events", asked, "events")
+    (events) |events| { drum (events) { opened.events = group.add(opened.events, Event { time = text_of(beat, "time"), text = text_of(beat, "text") }) } }
+    @messages = pages(desk, "tasks-messages", asked, "messages")
+    (messages) |messages| { drum (messages) { opened.messages = group.add(opened.messages, Message { message = number_of(beat, "message"), time = text_of(beat, "time"), author = text_of(beat, "author"), text = text_of(beat, "text") }) } }
+    desk.opened = opened
+    out none
+}
+
+skill tick(desk, item) {
+    @number = desk.opened.number
+    @answer = wire.ask(desk.link, "tasks-todo-done", "\"number\":{number},\"item\":{item}")
+    (answer.ok == no) {
+        desk.problem = answer.message
+        out none
+    }
+    out open_task(desk, number)
+}
+
+skill move(desk, column) {
+    @number = desk.opened.number
+    @answer = wire.ask(desk.link, "tasks-move", "\"number\":{number},\"column\":{column}")
+    (answer.ok == no) {
+        desk.problem = answer.message
+        out none
+    }
+    out open_task(desk, number)
+}
+
+skill board_of(desk) {
+    @made = board.Board { selected = 0, cursor = -1 }
+    drum (desk.tasks) {
+        @one = beat
+        @column = 0
+        drum (3) { (group.get(board.COLUMN_NAMES, beat) == one.column) { column = beat } }
+        board.put_task(made, column, one.name)
+    }
+    @number = desk.opened.number
+    (number < 1) { out made }
+    (number > group.count(made.names)) { out made }
+    made.opened = number
+    @items = []
+    drum (desk.opened.items) { items = group.add(items, [beat.done, beat.text, beat.time]) }
+    made.items = group.replaced(made.items, number - 1, items)
+    @events = []
+    drum (desk.opened.events) { events = group.add(events, [beat.time, beat.text]) }
+    made.events = group.replaced(made.events, number - 1, events)
+    @messages = []
+    drum (desk.opened.messages) { messages = group.add(messages, [beat.time, beat.author, beat.text]) }
+    made.messages = group.replaced(made.messages, number - 1, messages)
+    out made
+}

@@ -21,7 +21,7 @@ native file="soul/canonical/main.saltic" output="/tmp/saltic-native" *args: (tar
     bootstrap/saltic "$1" "$2" 536870912 x86_64
     "$2" "${@:3}"
 
-qemu file="os/target/qemu_virt/smoke.saltic": (tarantul "get")
+qemu file="soul/toolchains/qemu_virt/checks/smoke.saltic": (tarantul "get")
     mkdir -p .cache/build/qemu_virt
     bootstrap/saltic "$1" .cache/build/qemu_virt/program.elf 536870912 rv32i
 
@@ -134,23 +134,31 @@ esp32: _dirs (tarantul "get")
     bootstrap/saltic workbench/check/esp32.saltic .cache/build/workbench/esp32 536870912 x86_64
     .cache/build/workbench/esp32
 
-# Залить программу из os/target/esp32 на плату: `just esp32-flash` — куб,
-# `just esp32-flash oled` — любая другая по имени файла
+# Залить программу на плату: `just esp32-flash` — куб (soft/graphics/cube/esp32),
+# `just esp32-flash oled` — любая другая по имени: soft/<категория>/<имя>/esp32/main.saltic
 esp32-flash name="cube": _dirs (tarantul "get")
     bootstrap/saltic soul/toolchains/esp32/main.saltic .cache/build/workbench/esp32-toolchain 536870912 x86_64
-    .cache/build/workbench/esp32-toolchain os/target/esp32/{{name}}.saltic .cache/build/workbench/esp32-{{name}}.bin 65536
+    .cache/build/workbench/esp32-toolchain soft/*/{{name}}/esp32/main.saltic .cache/build/workbench/esp32-{{name}}.bin 65536
     nix-shell -p esptool --run "esptool --chip esp32 --port /dev/ttyUSB0 --no-stub write-flash 0x1000 .cache/build/workbench/esp32-{{name}}.bin"
 
-# APK для телефона: `just android` — os/target/android/hello.saltic, `just android
+# APK для телефона: `just android` — soft/hardware/hello/android/main.saltic, `just android
 # имя` — другая программа оттуда. Ключ подписи — один раз в .cache/build/android
 # (openssl, EC P-256), подпись и проверка — apksigner. Готовый APK —
 # .cache/build/android/<имя>.apk: скинуть на телефон и поставить.
 android name="hello": _dirs (tarantul "get")
     mkdir -p .cache/build/android
     bootstrap/saltic soul/toolchains/android/main.saltic .cache/build/workbench/android-toolchain 1073741824 x86_64
-    .cache/build/workbench/android-toolchain os/target/android/{{name}}.saltic .cache/build/android/{{name}}-unsigned.apk 67108864
+    .cache/build/workbench/android-toolchain soft/*/{{name}}/android/main.saltic .cache/build/android/{{name}}-unsigned.apk 67108864
     test -f .cache/build/android/key.pk8 || (openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out .cache/build/android/key.pem && openssl pkcs8 -topk8 -nocrypt -outform DER -in .cache/build/android/key.pem -out .cache/build/android/key.pk8 && openssl req -new -x509 -key .cache/build/android/key.pem -days 10000 -subj "/CN=Saltic" -out .cache/build/android/cert.pem)
     nix-shell -p apksigner --run "apksigner sign --key .cache/build/android/key.pk8 --cert .cache/build/android/cert.pem --min-sdk-version 24 --out .cache/build/android/{{name}}.apk .cache/build/android/{{name}}-unsigned.apk && apksigner verify --verbose .cache/build/android/{{name}}.apk"
+
+# Все входы проекта через lens (чекер без сборки), по 6 разом: печатает только
+# упавшие с причиной. Lens — с полки, через .part (работающий сервер MCP держит
+# свой файл).
+entries: _dirs (tarantul "get")
+    bootstrap/saltic workbench/agent/lens/main.saltic .cache/build/workbench/lens.part 1073741824 x86_64 && mv .cache/build/workbench/lens.part .cache/build/workbench/lens
+    bootstrap/saltic workbench/check/entries.saltic .cache/build/workbench/entries-check 268435456 x86_64
+    .cache/build/workbench/entries-check
 
 arm64-golden mode="": _dirs
     bootstrap/saltic workbench/check/arm64-encoder-golden.saltic .cache/build/workbench/arm64-encoder-golden 536870912 x86_64
