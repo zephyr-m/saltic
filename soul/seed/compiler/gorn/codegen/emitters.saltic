@@ -81,8 +81,10 @@ skill number_operand(billet, node) {
     (lookup.infer_type(billet, node) == "number") { out yes }
     @parts = ast.plain(node)
     (group.get(parts, 0) == "path") {
-        (state.symbol_has(billet.current_function.slots, group.get(parts, 1)) == yes) { out no }
-        @constant = state.symbol_find(billet.constants, lookup.resolve_symbol(billet, billet.constants, ast.path_text(parts)))
+        @billet_current_function_slots = billet.current_function.slots
+        (billet_current_function_slots.has(group.get(parts, 1)) == yes) { out no }
+        @billet_constants = billet.constants
+        @constant = billet_constants.find(lookup.resolve_symbol(billet, billet.constants, ast.path_text(parts)))
         (str.bytes(constant.name) == 0) { out no }
         (ast.tag(constant.node) == "number") { out yes }
         out negative_literal(constant.node)
@@ -95,7 +97,7 @@ skill number_tags(billet, left_number, right_number) {
         (right_number == yes) { out billet }
     }
     @executor = billet.executor
-    @ok = state.label(billet, "number_tags")
+    @ok = billet.fresh_label("number_tags")
     pick {
         (left_number == yes) { billet = executor.and_immediate(billet, backend.SCRATCH0, backend.ERROR, abi.TAG_MASK) }
         (right_number == yes) { billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.TAG_MASK) }
@@ -117,7 +119,7 @@ skill stub(billet) {
             (beat.target == billet.current_function.failure) { out beat.label }
         }
     }
-    @made = state.label(billet, "fail_line")
+    @made = billet.fresh_label("fail_line")
     billet.current_function.stubs = group.add(billet.current_function.stubs, state.Stub { label = made, line = billet.current_function.line, target = billet.current_function.failure })
     out made
 }
@@ -139,7 +141,7 @@ skill fail_jump(billet) {
 skill emit_stubs(billet) {
     @executor = billet.executor
     (billet.current_function.lined == no) { out billet }
-    @slot = state.slot(billet, state.FAIL_LINE)
+    @slot = billet.slot_of(state.FAIL_LINE)
     drum (billet.current_function.stubs) {
         billet = executor.label(billet, beat.label)
         billet = executor.load_immediate(billet, backend.SCRATCH0, beat.line)
@@ -151,7 +153,8 @@ skill emit_stubs(billet) {
 
 skill emit_field_get(billet, name) {
     @executor = billet.executor
-    @field = state.symbol_find(billet.fields, name)
+    @billet_fields = billet.fields
+    @field = billet_fields.find(name)
     billet = executor.load_immediate(billet, backend.ERROR, field.value)
     billet = executor.load_immediate(billet, backend.ARG2, field.slot)
     billet = executor.call(billet, "rt_box_get")
@@ -159,7 +162,8 @@ skill emit_field_get(billet, name) {
 }
 
 skill subject_field(billet, name) {
-    (state.symbol_has(billet.current_function.slots, name) == yes) { out no }
+    @billet_current_function_slots = billet.current_function.slots
+    (billet_current_function_slots.has(name) == yes) { out no }
     @field = lookup.box_field_symbol(billet, billet.current_function.subject, name)
     out str.bytes(field.name) > 0
 }
@@ -168,20 +172,21 @@ skill load_subject_field(billet, name) {
     @field = lookup.box_field_symbol(billet, billet.current_function.subject, name)
     (str.bytes(field.name) == 0) { out billet }
     @executor = billet.executor
-    billet = executor.load(billet, backend.VALUE, backend.FRAME, state.slot(billet, "$self"))
+    billet = executor.load(billet, backend.VALUE, backend.FRAME, billet.slot_of("$self"))
     out emit_field_get(billet, name)
 }
 
 skill store_subject_field(billet, name) {
     @executor = billet.executor
     billet = executor.move(billet, backend.ARG2, backend.VALUE)
-    billet = executor.load(billet, backend.VALUE, backend.FRAME, state.slot(billet, "$self"))
+    billet = executor.load(billet, backend.VALUE, backend.FRAME, billet.slot_of("$self"))
     out emit_field_set(billet, name)
 }
 
 skill emit_field_set(billet, name) {
     @executor = billet.executor
-    @field = state.symbol_find(billet.fields, name)
+    @billet_fields = billet.fields
+    @field = billet_fields.find(name)
     billet = executor.load_immediate(billet, backend.ERROR, field.value)
     billet = executor.load_immediate(billet, backend.ARG3, field.slot)
     billet = executor.call(billet, "rt_box_set")
@@ -277,8 +282,8 @@ skill emit_word_equal(billet) {
 
 skill emit_equal_fast_path(billet) {
     @executor = billet.executor
-    @slow = state.label(billet, "equal_slow")
-    @done = state.label(billet, "equal_done")
+    @slow = billet.fresh_label("equal_slow")
+    @done = billet.fresh_label("equal_done")
     billet = executor.branch_not_equal(billet, backend.VALUE, backend.ERROR, slow)
     billet = executor.load_immediate(billet, backend.VALUE, abi.YES)
     billet = emit_word_result(billet)
@@ -317,9 +322,11 @@ skill immediate_operand(billet, node) {
         (count > 2) {
             (str.bytes(lookup.resolve_symbol(billet, billet.enums, ast.path_prefix(parts))) > 0) { out yes }
         }
-        (state.symbol_has(billet.current_function.slots, group.get(parts, 1)) == no) {
+        @billet_current_function_slots = billet.current_function.slots
+        (billet_current_function_slots.has(group.get(parts, 1)) == no) {
             @constant_name = lookup.resolve_symbol(billet, billet.constants, ast.path_text(parts))
-            @constant = state.symbol_find(billet.constants, constant_name)
+            @billet_constants = billet.constants
+            @constant = billet_constants.find(constant_name)
             (str.bytes(constant.name) > 0) { out constant_literal(constant.node) }
         }
     }
@@ -327,18 +334,14 @@ skill immediate_operand(billet, node) {
 }
 
 skill string_find(billet, text) {
-    @count = group.count(billet.strings)
-    drum (count) {
-        @item = group.get(billet.strings, count - 1 - beat)
-        (item.text == text) { out item }
-    }
-    out state.Symbol {}
+    @table = billet.strings
+    out table.find_text(text)
 }
 
 skill string_label(billet, text) {
     @known = string_find(billet, text)
     (str.bytes(known.name) > 0) { out known.name }
-    @label = state.label(billet, "string")
+    @label = billet.fresh_label("string")
     @length = str.bytes(text)
     @payload_bytes = constants.string_storage_bytes(billet.words, length)
     @executor = billet.executor
@@ -348,7 +351,12 @@ skill string_label(billet, text) {
     billet = executor.data_word(billet, backend.RODATA, word.from_number(length))
     billet = executor.data_text(billet, backend.RODATA, text)
     billet = executor.align(billet, backend.RODATA, constants.DATA_ALIGNMENT)
-    billet.strings = group.add(billet.strings, state.Symbol { name = label, kind = "string", text = text })
+    @table = billet.strings
+    table.keep(state.Symbol {
+        name = label,
+        kind = "string",
+        text = text
+    })
     out label
 }
 
@@ -374,7 +382,7 @@ skill literal_word(node) {
 }
 
 skill group_label(billet, items) {
-    @label = state.label(billet, "group")
+    @label = billet.fresh_label("group")
     @count = group.count(items)
     @executor = billet.executor
     @words = billet.words
@@ -423,7 +431,10 @@ skill simple_operand(billet, node) {
     @parts = ast.plain(node)
     (group.get(parts, 0) == "number") { out yes }
     (group.get(parts, 0) == "path") {
-        (group.count(parts) == 2) { out state.symbol_has(billet.current_function.slots, group.get(parts, 1)) }
+        (group.count(parts) == 2) {
+            @billet_current_function_slots = billet.current_function.slots
+            out billet_current_function_slots.has(group.get(parts, 1))
+        }
     }
     out no
 }
@@ -432,20 +443,23 @@ skill load_simple(billet, node, role) {
     @parts = ast.plain(node)
     (group.get(parts, 0) == "number") { out load_number_into(billet, role, group.get(parts, 1)) }
     @executor = billet.executor
-    out executor.load(billet, role, backend.FRAME, state.slot(billet, group.get(parts, 1)))
+    out executor.load(billet, role, backend.FRAME, billet.slot_of(group.get(parts, 1)))
 }
 
 skill store_local(billet, name, value) {
     @executor = billet.executor
-    @slot = state.slot(billet, name)
+    @slot = billet.slot_of(name)
     billet = executor.store(billet, backend.VALUE, backend.FRAME, slot)
     @type = lookup.infer_type(billet, value)
-    @known = state.type_find(billet.current_function.types, name)
-    (type == "unknown") {
-        (str.bytes(known.name) == 0) { billet.current_function.types = state.type_set(billet.current_function.types, name, type) }
+    @current = billet.current_function
+    @known = current.type_of(name)
+    ((type == "unknown") ○ (str.bytes(known.name) == 0)) {
+        current.set_type(name, type)
     }
-    (type == "unknown") { out billet }
-    billet.current_function.types = state.type_set(billet.current_function.types, name, type)
+    (type == "unknown") {
+        out billet
+    }
+    current.set_type(name, type)
     out billet
 }
 

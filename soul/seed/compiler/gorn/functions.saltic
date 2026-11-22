@@ -33,23 +33,37 @@ use compiler.gorn.codegen.emitters
 use compiler.gorn.codegen.failures
 use compiler.checker
 use compiler.gorn.backend.runtime.tails
+use compiler.gorn.codegen.statements
 
 skill compile_function(billet, name, params, body, subject, module) {
     @executor = billet.executor
     @locals = state.collect_locals(params, body)
-    @local_count = group.count(locals.names)
+    @local_count = group.count(locals.names.items)
     @frame = constants.frame_bytes(billet.words, local_count)
     @slots = state.make_slots(billet.words, locals.names, constants.local_offset(billet.words, 0))
-    @end = state.label(billet, "{name}_return")
-    @failure = state.label(billet, "{name}_failure")
-    @types = []
-    drum (params) { types = state.type_set(types, beat, "unknown") }
-    (str.bytes(subject) > 0) { types = state.type_set(types, "$self", "box:{subject}") }
-    billet.current_function = state.Function { name = name, slots = slots, end = end, failure = failure, subject = subject, module = module, types = types, lined = yes }
+    @end = billet.fresh_label("{name}_return")
+    @failure = billet.fresh_label("{name}_failure")
+    billet.current_function = state.Function {
+        name = name,
+        slots = slots,
+        end = end,
+        failure = failure,
+        subject = subject,
+        module = module,
+        types = state.Symbols {},
+        lined = yes
+    }
+    @current = billet.current_function
+    drum (params) {
+        current.set_type(beat, "unknown")
+    }
+    (str.bytes(subject) > 0) {
+        current.set_type("$self", "box:{subject}")
+    }
     @function_label = str.concat("saltic_", state.safe(name))
     billet = executor.label(billet, function_label)
     (billet.signals == yes) { billet.placed = group.add(billet.placed, [function_label, emitters.string_label(billet, failures.place_text(billet))]) }
-    @stack_ready = state.label(billet, "stack_ready")
+    @stack_ready = billet.fresh_label("stack_ready")
     billet = executor.branch_greater_equal_unsigned(billet, backend.STACK, backend.STACK_LIMIT, stack_ready)
     billet = executor.load_immediate(billet, backend.VALUE, 0)
     billet = executor.load_immediate(billet, backend.ERROR, abi.ERROR_STACK_EXHAUSTED)
@@ -62,12 +76,12 @@ skill compile_function(billet, name, params, body, subject, module) {
     billet = executor.add_immediate(billet, backend.FRAME, backend.STACK, frame)
     billet = executor.move(billet, backend.REGION_MARK, backend.HEAP_TOP)
     drum (group.count(params)) {
-        @slot = state.slot(billet, group.get(params, beat))
+        @slot = billet.slot_of(group.get(params, beat))
         billet = executor.store(billet, backend.argument(beat), backend.FRAME, slot)
     }
-    billet = executor.store_zero(billet, backend.FRAME, state.slot(billet, state.FAIL_LINE))
+    billet = executor.store_zero(billet, backend.FRAME, billet.slot_of(state.FAIL_LINE))
     billet = executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
-    billet = codegen.compile_block(billet, body, no)
+    billet = statements.compile_block(billet, body, no)
     billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
     billet = executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
     billet = executor.jump(billet, end)
@@ -75,7 +89,7 @@ skill compile_function(billet, name, params, body, subject, module) {
     billet = executor.label(billet, failure)
     billet = executor.load_address(billet, backend.VALUE, emitters.string_label(billet, failures.place_text(billet)), 0)
     billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
-    billet = executor.load(billet, backend.ARG2, backend.FRAME, state.slot(billet, state.FAIL_LINE))
+    billet = executor.load(billet, backend.ARG2, backend.FRAME, billet.slot_of(state.FAIL_LINE))
     billet = executor.call(billet, "rt_trail_push")
     billet = executor.load_immediate(billet, backend.VALUE, 0)
     billet = executor.load_immediate(billet, backend.ARG2, constants.REGION_VALUE_SKIPPED)
@@ -94,10 +108,10 @@ skill compile_function(billet, name, params, body, subject, module) {
 
 skill compile_constant(billet, constant) {
     @executor = billet.executor
-    @ready = state.label(billet, "constant_ready")
-    @cycle = state.label(billet, "constant_cycle")
-    @failure = state.label(billet, "constant_failure")
-    @finish = state.label(billet, "constant_finish")
+    @ready = billet.fresh_label("constant_ready")
+    @cycle = billet.fresh_label("constant_cycle")
+    @failure = billet.fresh_label("constant_failure")
+    @finish = billet.fresh_label("constant_finish")
     @before = billet.current_function
     billet.current_function = state.Function { name = constant.name, module = constant.text }
 
@@ -187,9 +201,9 @@ skill walk(seen, index, node) {
 
 skill reach(billet) {
     @index = dict.new()
-    drum (billet.skills) { index_add(index, beat.name, ast.part(beat.node, 3)) }
-    drum (billet.constants) { index_add(index, beat.name, beat.node) }
-    drum (billet.boxes) {
+    drum (billet.skills.items) { index_add(index, beat.name, ast.part(beat.node, 3)) }
+    drum (billet.constants.items) { index_add(index, beat.name, beat.node) }
+    drum (billet.boxes.items) {
         @box = beat
         drum (group.count(ast.plain(box.node)) - 2) {
             @member = ast.part(box.node, beat + 2)
@@ -205,19 +219,19 @@ skill reach(billet) {
 }
 
 skill compile_constants(billet, seen) {
-    drum (billet.constants) {
+    drum (billet.constants.items) {
         (dict.has(seen, short_name(beat.name)) == yes) { billet = compile_constant(billet, beat) }
     }
     out billet
 }
 
 skill compile_functions(billet, seen) {
-    drum (billet.skills) {
+    drum (billet.skills.items) {
         (dict.has(seen, short_name(beat.name)) == yes) {
             billet = compile_function(billet, beat.name, ast.part(beat.node, 2), ast.part(beat.node, 3), "", beat.text)
         }
     }
-    drum (billet.boxes) {
+    drum (billet.boxes.items) {
         @box = beat
         drum (group.count(ast.plain(box.node)) - 2) {
             @member = ast.part(box.node, beat + 2)
@@ -251,8 +265,8 @@ skill compile_dispatch(billet, method) {
     billet = executor.shift_left(billet, backend.SCRATCH1, backend.SCRATCH1, words.shift + 1)
     billet = executor.add(billet, backend.SCRATCH0, backend.SCRATCH0, backend.SCRATCH1)
     billet = executor.load(billet, backend.SCRATCH2, backend.SCRATCH0, words.payload + words.box_fields + words.box_field_value - words.box_field)
-    drum (group.count(billet.boxes)) {
-        @box = group.get(billet.boxes, beat)
+    drum (group.count(billet.boxes.items)) {
+        @box = group.get(billet.boxes.items, beat)
         @inspector = Checker {}
         (inspector.box_has_skill(billet.boxes, box.name, method) == yes) {
             @next = "{label}_{beat}"

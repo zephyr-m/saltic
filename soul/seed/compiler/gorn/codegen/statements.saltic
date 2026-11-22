@@ -1,0 +1,186 @@
+-- statements — операторы навыка в машинный код: присваивание, out, условия,
+-- pick, drum, always, leave, rescue как оператор; блок — по оператору со строкой
+-- (at_line). Выражения — у codegen (compile_expression и соседи); вынесено из
+-- codegen/main, когда он перерос 512 строк (22.11.2026).
+--
+-- compile_block(billet, block, last) -> billet; compile_statement(billet, node, last) -> billet
+
+use core.str
+use core.group
+use core.num
+use compiler.abi
+use compiler.abi.value
+use compiler.ast
+use compiler.intrinsic.contract
+use compiler.gorn.state
+use compiler.gorn.constants
+use compiler.gorn.backend
+use compiler.checker.types.shapes
+use compiler.errors
+use compiler.gorn.codegen.lookup
+use compiler.gorn.codegen.emitters
+use compiler.gorn.codegen.loops
+use compiler.gorn.codegen.endless
+use compiler.gorn.codegen.failures
+use compiler.gorn.codegen
+
+skill compile_block(billet, block, keep) {
+    @plain = ast.plain(block)
+    @count = group.count(plain)
+    @outer = billet.current_function.line
+    drum (count - 1) {
+        @last = no
+        (keep == yes) {
+            (beat + 2 == count) {
+                last = yes
+            }
+        }
+        billet.at_line(group.get(plain, beat + 1))
+        billet = compile_statement(billet, group.get(plain, beat + 1), last)
+    }
+    billet.current_function.line = outer
+    (keep == yes) {
+        (count == 1) {
+            @executor = billet.executor
+            billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
+        }
+    }
+    out billet
+}
+
+skill compile_statement(billet, node, keep) {
+    @executor = billet.executor
+    @plain = ast.plain(node)
+    @tag = group.get(plain, 0)
+    (tag == "var") {
+        billet = codegen.compile_expression(billet, group.get(plain, 2))
+        out emitters.store_local(billet, group.get(plain, 1), group.get(plain, 2))
+    }
+    (tag == "assign") {
+        @name = group.get(plain, 1)
+        (emitters.subject_field(billet, name) == yes) {
+            out emitters.store_subject_field(codegen.pack_fixed(codegen.compile_expression(billet, group.get(plain, 2)), group.get(plain, 2)), name)
+        }
+        billet = codegen.compile_expression(billet, group.get(plain, 2))
+        out emitters.store_local(billet, name, group.get(plain, 2))
+    }
+    (tag == "field-assign") {
+        @target = ast.plain(group.get(plain, 1))
+        @part_count = group.count(target)
+        @base = group.slice(target, 0, part_count - 1)
+        billet = codegen.compile_expression(billet, base)
+        billet = executor.push(billet, backend.VALUE)
+        billet = codegen.pack_fixed(codegen.compile_expression(billet, group.get(plain, 2)), group.get(plain, 2))
+        billet = executor.move(billet, backend.ARG2, backend.VALUE)
+        billet = executor.pop(billet, backend.VALUE)
+        out emitters.emit_field_set(billet, group.get(target, part_count - 1))
+    }
+    (tag == "out") {
+        @failure = lookup.failure_name(group.get(plain, 1))
+        pick {
+            (str.bytes(failure) > 0) {
+                billet = failures.trail(failures.load_failure(billet, failure))
+            }
+            (lookup.infer_type(billet, group.get(plain, 1)) == "error") {
+                billet = failures.trail(failures.raise_value(codegen.compile_expression(billet, group.get(plain, 1))))
+            }
+            {
+                billet = codegen.compile_expression(billet, group.get(plain, 1))
+            }
+        }
+        @value_root = constants.REGION_VALUE_ROOT
+        (value.is_raw(lookup.infer_type(billet, group.get(plain, 1))) == yes) {
+            value_root = constants.REGION_VALUE_SKIPPED
+        }
+        billet = executor.load_immediate(billet, backend.ARG2, value_root)
+        out executor.jump(billet, billet.current_function.end)
+    }
+    (tag == "expr") {
+        out codegen.compile_expression(billet, group.get(plain, 1))
+    }
+    (tag == "pick") {
+        @end = billet.fresh_label("pick_end")
+        drum (group.count(plain) - 1) {
+            @choice = ast.plain(group.get(plain, beat + 1))
+            (group.get(choice, 0) == "if") {
+                @next = billet.fresh_label("pick_next")
+                billet = codegen.compile_expression(billet, group.get(choice, 1))
+                billet = emitters.jump_unless_yes(billet, next)
+                billet = compile_block(billet, group.get(choice, 2), keep)
+                billet = executor.jump(billet, end)
+                billet = executor.label(billet, next)
+            }
+            (group.get(choice, 0) == "otherwise") {
+                billet = compile_block(billet, group.get(choice, 1), keep)
+            }
+        }
+        out executor.label(billet, end)
+    }
+    (tag == "leave") {
+        out executor.jump(billet, billet.current_function.drum_exit)
+    }
+    (tag == "if") {
+        @end = billet.fresh_label("if_end")
+        billet = codegen.compile_expression(billet, group.get(plain, 1))
+        billet = emitters.jump_unless_yes(billet, end)
+        billet = compile_block(billet, group.get(plain, 2), keep)
+        out executor.label(billet, end)
+    }
+    (tag == "present") {
+        @end = billet.fresh_label("present_end")
+        billet = codegen.compile_expression(billet, group.get(plain, 1))
+        billet = emitters.store_local(billet, group.get(plain, 2), group.get(plain, 1))
+        billet = executor.load_immediate(billet, backend.SCRATCH0, abi.NONE)
+        billet = executor.jump_if_equal(billet, backend.VALUE, backend.SCRATCH0, end)
+        billet = compile_block(billet, group.get(plain, 3), keep)
+        out executor.label(billet, end)
+    }
+    (tag == "switch") {
+        @end = billet.fresh_label("switch_end")
+        billet = codegen.compile_expression(billet, group.get(plain, 1))
+        billet = executor.move(billet, backend.SCRATCH2, backend.VALUE)
+        drum (group.count(plain) - 2) {
+            @case_node = ast.plain(group.get(plain, beat + 2))
+            @next = billet.fresh_label("case_next")
+            @billet_variants = billet.variants
+            @variant = billet_variants.find(group.get(case_node, 1))
+            billet = executor.load_immediate(billet, backend.SCRATCH0, variant.value)
+            billet = executor.jump_if_not_equal(billet, backend.SCRATCH2, backend.SCRATCH0, next)
+            billet = compile_block(billet, group.get(case_node, 2), no)
+            billet = executor.jump(billet, end)
+            billet = executor.label(billet, next)
+        }
+        out executor.label(billet, end)
+    }
+    (tag == "always") {
+        @turn = endless.head(billet, group.get(plain, 1))
+        billet = compile_block(billet, group.get(plain, 1), no)
+        out endless.tail(billet, turn)
+    }
+    (tag == "drum") {
+        @frame = loops.frame(billet)
+        @body = group.get(plain, 2)
+        @uses_beat = state.block_uses_beat(body)
+        billet = codegen.compile_expression(billet, group.get(plain, 1))
+        @region = loops.region_open(billet, frame, body)
+        (uses_beat == no) {
+            billet = loops.light_head(billet, frame)
+        }
+        (uses_beat == yes) {
+            billet = loops.head(billet, frame)
+        }
+        @outer_exit = billet.current_function.drum_exit
+        billet.current_function.drum_exit = frame.end
+        billet = compile_block(billet, body, no)
+        billet.current_function.drum_exit = outer_exit
+        billet = loops.region_close(billet, frame, region)
+        (uses_beat == no) {
+            billet = loops.light_tail(billet, frame)
+        }
+        (uses_beat == yes) {
+            billet = loops.tail(billet, frame)
+        }
+        out loops.region_restore(billet, region)
+    }
+    out billet
+}
