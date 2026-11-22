@@ -30,6 +30,12 @@ global-check: _dirs (tarantul "get")
     bootstrap/saltic workbench/check/global-check.saltic .cache/build/workbench/global-check 536870912 x86_64
     .cache/build/workbench/global-check
 
+# Чужие хосты под QEMU — тесты rv32i, rv64, arm64, платформы, самосборка RV64 и
+# ARM64 — та же проверка, только эти ветки; гонять перед релизом.
+hosts: _dirs (tarantul "get")
+    bootstrap/saltic workbench/check/global-check.saltic .cache/build/workbench/global-check 536870912 x86_64
+    SALTIC_FOREIGN=1 .cache/build/workbench/global-check
+
 # Сервер MCP saltic_* для агента (.mcp.json): собирает lens и mcp с полки, потом
 # говорит по stdio. Вывод сборки — в stderr: stdout принадлежит протоколу. Сборка —
 # в .part и переименование: работающий сервер свой файл перезаписать не даст.
@@ -62,13 +68,13 @@ limits: _dirs
     .cache/build/workbench/limits
 
 # Быстрая проверка на родном x86-64 (global-check — редко): лимиты канона, случаи
-# языка без машинных эталонов и чужих процессоров (machine, rva23, rv64, arm64 —
-# в global-check) и весь набор ОС. Тестовые программы — x86-64 на этом ноутбуке.
+# языка без машинных эталонов и чужих процессоров (links, rva23, rv64, arm64,
+# machine — в just hosts) и весь набор ОС. Тестовые программы — x86-64 на этом ноутбуке.
 quick: _dirs (tarantul "get")
     bootstrap/saltic workbench/check/limits/main.saltic .cache/build/workbench/limits 536870912 x86_64
     .cache/build/workbench/limits
     bootstrap/saltic tests/run/main.saltic .cache/build/workbench/tests 536870912 x86_64
-    SALTIC_TEST_HOST=x86_64 nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/tests "checker machine fixed-types fraction wide modules json-rpc diagnostics groups bytes edges always x86-encoder arm64-encoder xtensa-encoder dict crypto apk seed-contract abi memory platform process native jtml ttf events mrpc"
+    SALTIC_TEST_HOST=x86_64 nix --extra-experimental-features "nix-command flakes" develop --command .cache/build/workbench/tests "checker fixed-types fraction wide modules json-rpc diagnostics groups bytes edges always x86-encoder arm64-encoder xtensa-encoder dict crypto apk seed-contract abi memory platform process native jtml ttf events mrpc"
 
 rv64: _dirs
     bootstrap/saltic bootstrap/refresh-qemu.saltic .cache/build/workbench/refresh-qemu 536870912 x86_64

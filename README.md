@@ -135,10 +135,12 @@ UEFI, окно Wayland) — в реестре; `just tarantul` привозит 
 nix --extra-experimental-features "nix-command flakes" develop
 ```
 
-- `just global-check` — проверка всего: самосборка с паспортами (неподвижная
-  точка rv64 и arm64, полка x86-64), тесты на rv32i, x86-64, RV64 и
-  ARM64, тесты библиотек, платформы (qemu-virt, UEFI), кодировщики x86-64,
-  ARM64 и ESP32, wasm — карточками со случаями каждой ветки;
+- `just global-check` — проверка на родном хосте: лимиты, самосборка полки
+  x86-64, тесты x86-64 и библиотек, кодировщики x86-64, ARM64 и ESP32, wasm —
+  карточками со случаями каждой ветки;
+- `just hosts` — чужие хосты под QEMU, перед релизом: тесты на rv32i, RV64 и
+  ARM64, платформы (qemu-virt, UEFI), программы под чужие процессоры (звенья,
+  RVA23, канон RV64 и ARM64, машинный слой RV32I), самосборка RV64 и ARM64;
 - `just test` — тесты (группы — [docs/process/TESTING.md](docs/process/TESTING.md));
 - `just entries` — все входы проекта через чекер, без сборки.
 
@@ -181,8 +183,9 @@ qemu-riscv64 -B 0x100000000 ./hello
 1. `just release-draft` предложит счёт и черновик по префиксам коммитов;
    проверить по [docs/process/FOOTBALL.md](docs/process/FOOTBALL.md) — фичи, баги и уборку —
    и записать счёт в `VERSION`, `README.md` и `CHANGELOG.md`.
-2. `just global-check` — компиляторы на полке получат имя новой версии и
-   паспорта, заодно пройдут все хосты и платформы.
+2. `just bootstrap-refresh` — компиляторы на полке получат имя новой версии и
+   паспорта; потом `just global-check` (родной хост) и `just hosts` (чужие
+   хосты и платформы).
 3. Закоммитить `release: Saltic F:B:C`, вместе с обоими компиляторами
    (эталон RV64 и родной x86-64).
 4. Аннотированный тег: `git tag -a vF.B.C -m "Saltic F:B:C — название"`.
