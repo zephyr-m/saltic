@@ -1,87 +1,85 @@
 # Seed — ядро языка Saltic
 
-`seed` — самохостящееся ядро: парсер, чекер, компилятор и машинный слой
-написаны на самом Saltic. Эталон языка — `soul/canonical/`.
+`seed` — семя: всё, что нужно языку, чтобы собрать самого себя. Парсер,
+чекер, компилятор и машинный слой написаны на самом Saltic. Эталон языка —
+`soul/canonical/`; сборщики целей (что под что собирать) — вне семени, в
+`soul/toolchains/`; инструменты языка — `soul/craft/`.
 
 ## Слои
 
-Ядро делится на три слоя, каждый подключается по своему корню:
+Каждый слой подключается по своему корню:
 
 - `core/` — то, что нужно любой программе: `core.str`, `core.group`,
-  `core.num`, `core.mem`, фиксированные значения `core.u8` … `core.usize`,
-  `core.bits32`, `core.address`, а также `core.cpu`, `core.time`,
-  `core.process`, `core.system`, `core.bytes`, `core.dict`, `core.arena`, на
-  64-битных целях — `core.fraction` и `core.matrix`. Сравнение секретов —
-  `craft.protocols.security.crypto` (Q-023).
-- `io/` — вывод (`use io`, вход `main.saltic`), файлы (`use io.file`).
-- `compiler/` — сам язык: `compiler.architect`, `compiler.parser`, `compiler.checker`,
-  `compiler.gorn` и всё, на чём они стоят.
+  `core.num`, `core.mem`, фиксированные `core.u8` … `core.usize`, `core.i32`,
+  `core.bits32`, `core.address`, `core.cpu`, `core.time`, `core.process`,
+  `core.system`, `core.socket`, `core.bytes`, `core.dict`, `core.arena`; на
+  64-битных целях — `core.fraction` и `core.matrix`.
+- `io/` — вывод (`use io`), файлы (`use io.file`), часы (`io.clock`).
+- `proof/` — проверки ядра: машина, контракт, дробные, фиксированные типы.
+- `compiler/` — сам язык; своего входа у него нет, это библиотека. Вход
+  компилятора с полки — `soul/toolchains/saltic`.
 
 Модуль архитектор ищет по углам: `soul/seed/`, потом `soul/`, потом корень
-проекта (`compiler/architect/main.saltic`).
+проекта.
 
 ## Язык
 
-- ключевые слова: `use`, `skill`, `program`, `out`, `Box`, `enum`, `drum`,
-  `always`, `pick`, `leave`, `rescue`, `native`;
-- значения `yes`, `no`, `none` — тоже ключевые слова, всего их 15
-  (`parser/lexer.saltic`, `KEYWORDS`); отрицания нет, только `== no`;
-- одно имя вводится через `@`, дальнейшая запись идёт без `@`;
-- ошибка — значение (`error.Имя`), не отдельный режим; `rescue` подставляет
-  запасной результат.
+- 15 ключевых слов: `use`, `skill`, `program`, `out`, `Box`, `enum`, `drum`,
+  `always`, `pick`, `leave`, `rescue`, `native` и значения `yes`, `no`, `none`
+  (`parser/lexer`, `KEYWORDS`); отрицания нет, только `== no`;
+- новое имя вводится через `@`, дальнейшая запись идёт без `@`;
+- навык всегда чей-то: метод своего Box; свободными остаются только
+  конструкторы (своего `self` в языке пока нет);
+- ошибка — значение (`error.Имя`), не отдельный режим; `rescue` ловит её на
+  месте.
 
-Память программы — одна квота. Каждый вызов skill открывает регион: на выходе
-результат `out` копируется вызывающему, остальная память региона
-освобождается целиком. Нехватка памяти — ошибка `MemoryExhausted`, её ловит
-`rescue`. Сборщика мусора нет. Подробно — `docs/language/MEMORY-MODEL.md`.
+Память программы — одна квота. Каждый вызов навыка открывает регион: на
+выходе результат `out` копируется вызывающему, остальное освобождается
+целиком. Циклы ссылок запрещены. Нехватка памяти — ошибка `MemoryExhausted`.
+Сборщика мусора нет. Подробно — `docs/language/MEMORY-MODEL.md`.
 
 ## Устройство `compiler`
 
-- `architect/` — первая ступень: из каких файлов программа и как они связаны (`use` → файл, связи, порядок);
-- `parser/` (`main`, `lexer/`, `syntax/`, `token`, `nest`) — текст файла в дерево;
-- `checker` + `checker/{names,signatures,rules,types,lookup,walk,top_level}` — проверка: верх программы, обход выражений и инструкций, справки об именах;
-- `errors` — каталог ошибок языка: у каждой свой навык с кодом и текстом
-  (`errors.unknown_name(name)`); `diagnostic` ставит её на место в файле;
-- `gorn` + `gorn/{codegen,functions,state,constants}` — перевод в
-  машинный код: `codegen` — сердце (выражения, инструкции, вызовы) с
-  помощниками `codegen/{lookup,emitters,loops,failures}`, `functions` собирает
-  функции и константы; всё это говорит на договоре машины `gorn/backend`
-  (роли регистров и операции) методами исполнителя — Box договора машины (`compiler.gorn.backend`);
-  исполнители: `gorn/backend/riscv/rv32i` (`Executor`), родной x86-64
-  `gorn/backend/x86/x86_64` (`Executor` на `encoder`, `roles`, `ops`,
-  `access`, `control`; `platform` — вход и syscall Linux, `image` — ELF64,
-  `uefi` и `pe` — UEFI) и RV64 `gorn/backend/riscv/rv64`; перевод RV32I →
-  x86-64 — на пенсии (`.archive/x86_64_translation/`);
-- `gorn/platform` + `platform/{linux,uefi}` — договор платформы: метки
-  `rt_platform_*` (write, exit, key, file_read, file_write, now, wait, firmware,
-  call), которые цель даёт программе; чего не умеет — ошибка `NotSupported`.
-  Платформа — Box с методом `append(compiler)`: `platform.linux.Linux`,
-  `platform.uefi.Uefi`, `compiler.gorn.platform.qemu_virt.QemuVirt`;
-- `gorn/backend/runtime` + `runtime/{numbers,collections,strings,fixed,raw_memory,host,memory,terminal}` —
-  машинный runtime `rt_*` на договоре машины (роли и операции `gorn/backend`,
-  общий для исполнителей): арифметика, Box и группы, строки,
-  фиксированные типы, прямой доступ к памяти, ввод-вывод, регионы памяти и печать;
-- `gorn/backend/{buffer,layout}` — байтовый буфер и программа в сборке, общие
-  для всех; `gorn/backend/riscv/{main,instruction,registers,codec,emit,fixer}`
-  — общее семьи RISC-V: таблица команд (`Instruction`, `Catalog`), кодирование,
-  команды и переходы, правки; `riscv/rv32i/{profile,elf}` — паспорт машины и ELF32;
-- `machine/word` — 32-битное слово из четырёх байтов, общее для всех
-  бэкендов, образов и ОС; `machine/wide` — 64-битное из двух `word` (константы
-  RV64, поля ELF64). Компилятор считает ими, потому что работает и на RV32I,
-  где обычное число 29-битное; на RV64 и x86-64 оно 61-битное;
-- `abi` — одно машинное слово, теги значений, номер ошибки в отдельном
-  регистре, 12-байтовый заголовок объекта;
-- `toolchain.saltic` — точка входа компилятора.
+```
+compiler/
+├─ architect/   из каких файлов программа: use → файл, углы поиска, советы-законы
+├─ parser/      текст → дерево: lexer/, syntax/, token, nest
+├─ checker/     проверка: names/, passes/, rules/, types/, walk/, notes
+├─ nodes/       Nodes — чтение узлов дерева без знания обёрток
+├─ report/      Diagnostic и тексты ошибок по этапам: writing, declarations,
+│               naming, meaning, laws, building
+├─ contract/    договор о значениях языка: abi/ (теги, объекты, вызов, ошибки),
+│               intrinsic/ (встроенные навыки)
+└─ gorn/        горн — дерево в машинный код
+   ├─ main          Gorn — compile_machine…
+   ├─ state/        State и его части: symbols, function, stub, locals,
+   │                startup (_start и данные), labels
+   ├─ functions, constants, codegen/   навыки, константы, выражения, вызовы, циклы
+   ├─ backend/      договор машины (роли регистров и операции) и исполнители:
+   │                riscv/{rv32i,rv64}, x86/x86_64, arm/arm64, xtensa/lx6,
+   │                wasm/wasm32; общее — buffer, layout, runtime (rt_*)
+   ├─ platform/     договор платформы Platform (rt_platform_*) и платформы:
+   │                linux, uefi, qemu_virt, android, esp32, wasm
+   ├─ linker/       файлы: elf64 (Elf64, Segment), shared (.so для Android)
+   ├─ machine/      Word (32 бита четырьмя байтами), Wide (64 бита)
+   └─ memory/       модель кучи: Allocation, Budget
+```
+
+Горн ничего не выбирает сам: исполнителя и платформу ему дают Box'ами
+(`forge.compile_machine(tree, heap, executor, platform)`), выбор делает
+сборщик цели.
 
 ## Цели и сборка
 
-Исходник собирается прямо в образ: ELF для `rv32i` (Linux и `qemu_virt`), ELF
-для `x86_64` Linux и PE32+ для `x86_64-uefi`. Текст ассемблера, GNU `as`/`gcc`
-и JavaScript в эту цепочку не входят.
+Исходник собирается прямо в образ, без ассемблера, GNU `as`/`gcc` и
+JavaScript: ELF для Linux на rv32i, rv64, x86-64 и arm64, PE32+ для
+x86-64-uefi, голый ELF для qemu-virt, образ ESP32, `.so` в APK для Android,
+модуль wasm. Какой сборщик что собирает — `soul/toolchains/<цель>/`.
 
 Восстановление компилятора — готовые файлы
 `bootstrap/saltic-<версия>-compiler-<проц>-<платформа>` из Git, не сборка
-из исходников. Рядом с каждым лежит паспорт `.txt`: версия, хеш исходников,
+из исходников. Рядом с каждым — паспорт `.txt`: версия, хеш исходников,
 чем собран и сходится ли самосборка.
 
-Проверка ядра входит в общий прогон `just test` (`tests/run/main.saltic`).
+Проверки ядра входят в `just test` (`tests/run/main.saltic`); все входы
+проекта без сборки — `just entries`.

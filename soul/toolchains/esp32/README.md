@@ -1,17 +1,17 @@
 # ESP32
 
-Платформа и сборщик есть: `platform.saltic`, `toolchain.saltic`, `smoke.saltic`.
+Платформа — `compiler.gorn.platform.esp32`, сборщик — `main.saltic`, дымовые проверки — `checks/` (`smoke`, `probe`).
 Сборка: `toolchain <исходник> <образ.bin> <куча байт>` — куча не больше 64 КБ.
 Прошивка: `esptool --chip esp32 --port /dev/ttyUSB0 --no-stub write-flash 0x1000 образ.bin`.
 Память тела: свободной DRAM около 180 КБ; арена 16 КБ и куча 64 КБ по
-умолчанию — в `platform.saltic`.
+умолчанию — в платформе (`compiler.gorn.platform.esp32`).
 Ядро: платформа переводит его с кварца 40 МГц на PLL 160 МГц, шина APB —
 80 МГц; `time.now` — такты ядра.
-Экран SSD1306 128×64 (13.11.2026): `registry/adapters/esp32/i2c/i2c.saltic` — железный I2C0 на 800 кГц,
+Экран SSD1306 128×64 (13.11.2026): пакеты реестра `i2c_esp32` — железный I2C0 на 800 кГц,
 SDA — D23, SCL — D22, VCC — 3V3, с восстановлением залипшей шины;
-`registry/adapters/esp32/ssd1306/ssd1306.saltic` — текст Spleen 5×8 с кириллицей, кадр из арены целиком или
-прямоугольником. Программы: `oled` — текст, `cube` — вращающийся куб (около
-37 кадров в секунду), `blink` — светодиод на GPIO 2, `i2c_scan` — кто на шине.
+`ssd1306` — текст Spleen 5×8 с кириллицей, кадр из арены целиком или
+прямоугольником. Программы (`soft/`): `hardware/oled` — текст, `graphics/cube` — вращающийся куб (около
+37 кадров в секунду), `hardware/blink` — светодиод на GPIO 2, `hardware/i2c_scan` — кто на шине.
 GPIO, IO_MUX, I2C и RTC — только по адресам AHB (`0x6000_xxxx`): по `0x3FF4_xxxx`
 блок GPIO молчит.
 Залить программу: `just esp32-flash` (куб) или `just esp32-flash oled`.
@@ -21,6 +21,5 @@ GPIO, IO_MUX, I2C и RTC — только по адресам AHB (`0x6000_xxxx`
 - **Платы:** ESP32-CAM, ESP32-WROVER (4–8 МБ PSRAM).
 - **Бэкенд:** Xtensa LX6 — `soul/seed/compiler/gorn/backend/`.
 - **Зачем:** Wi-Fi и камера за $5–10; ESP32 автора может оказаться WROVER.
-- **Когда:** эпоха 3 — ядро ОС и параллельно проверка на железе.
 - **Документация:** ESP32 Technical Reference Manual (Espressif).
 - **Подробно:** `.archive/docs/PLAN-1.md, раздел «Железо и бэкенды»`; одна ОС на всё железо — `docs/os/OS-core.md`.

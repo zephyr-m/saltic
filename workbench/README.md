@@ -8,6 +8,11 @@ workbench/
 ├── check/          проверки: их зовут just, global-check и CI
 │   └── view/       вид global-check: карточки, чек картинкой, PNG
 ├── agent/          инструменты агента: lens и сервер MCP saltic_*
+├── acer/           инструменты стенда Acer на этом ноуте: мост MCP acer_*, say, listen, shot, snippet, upload; snippets/
+├── uefi/           build (образ флешки) и run (образ в QEMU с OVMF)
+├── qemu/           build-graphics — стол qemu-virt голым ELF
+├── esp32/          tools/uart.py — чтение UART платы
+├── tarantul/       пакетный менеджер: get, update, list, check
 ├── bench.saltic    таблица лидеров по скорости
 ├── registry.saltic сверка реестра адаптеров
 ├── install.saltic  поставить программу на ноут
@@ -23,6 +28,7 @@ workbench/
 |---|---|
 | `global-check.saltic` | Одна проверка всего, `just global-check`: по очереди — сборка проверок, лимиты канона, самосборка полки с паспортами и время/память против прошлого прогона; затем разом — тесты на rv32i, x86-64 и rv64, тесты ОС, платформы (qemu-virt, UEFI, closure), самосборка на RV64, кодировщик x86. Вид — карточки «подготовка», «проверки разом», «итог»; в CI — без цвета, раз в 10 с «идут». Журналы — `.cache/build/workbench/check-*.log`. Вызывается и в CI релиза |
 | `limits/main.saltic` | Лимиты канона, `just limits` и первый шаг `global-check`: до 512 строк кода и до 32 строк шапки. Замер и сверка — `limits/canon.saltic` (его же берёт `lens check`), известные нарушения — `limits-known.txt` (правит автор): им нельзя расти |
+| `entries.saltic` | `just entries`: все входы проекта (файлы с `program`) через lens без сборки, по 6 разом; печатает только упавшие с причиной; намеренно сломанные примеры ошибок — в пропусках |
 | `same.saltic` | `just same [исходники…]`: рефакторинг компилятора — исходники, собранные компилятором с полки и новым stage-1 под rv64, x86_64 и rv32i, совпадают побайтово; плюс набор ошибок канона |
 | `same-source.saltic` | `just same-source`: правка исходников без изменения смысла — все программы собираются компилятором из HEAD и из рабочего дерева и сравниваются побайтово |
 | `x86-encoder-golden.saltic` | `just x86-golden [--print]`: эталоны кодировщика x86-64 — каждую команду из `tests/x86-encoder.saltic` собирает GNU `as` и сверяет байты |

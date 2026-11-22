@@ -7,10 +7,11 @@
 **Текущая версия: 310:82:286**
 
 Saltic — системный язык, который собирает сам себя: парсер, чекер и
-компилятор написаны на самом Saltic, выдают машинный код RISC-V и x86-64 без
-LLVM и без C. На нём же написана ОС, которая живёт на настоящем ноутбуке через
-UEFI — с драйвером сети, своим сетевым стеком, библиотекой интерфейса и
-программами.
+компилятор написаны на самом Saltic и выдают машинный код без LLVM и без C —
+для RISC-V (RV32I, RV64), x86-64, ARM64, Xtensa (ESP32) и WebAssembly. На нём
+же написаны драйверы и программы: стенд на ноутбуке Acer через UEFI (свой
+сетевой стек, Wi-Fi, видеокарта), APK для Android, программы на плате ESP32 и
+окна на Linux. Своей ОС пока нет — её замысел автор собирает заново.
 
 Имя — от **Salticidae**, пауков-скакунов: маленьких, с лучшим зрением среди
 пауков, точных в прыжке. Латинское *saltare* — «прыгать» и «танцевать»,
@@ -23,57 +24,59 @@ Saltic делается одним автором для себя и своих 
 
 ## В цифрах
 
-- Самосборка — **5,7 с и 89 МБ**, компилятор — 2,6 МБ (эталон rv32i, паспорт
-  полки 172:53:165; вечером 02.11.2026 было 16,9 с и 1,19 ГБ). Неподвижная
-  точка: второе и третье поколения компилятора совпадают байт в байт.
+- Самосборка родным x86-64 — **34 с и 168 МБ**, компилятор — 2,7 МБ
+  (global-check 22.11.2026). Неподвижная точка: второе и третье поколения
+  компилятора совпадают байт в байт (rv64, arm64; полка x86-64).
 - **15 ключевых слов** (у Lua — 22, у Go — 25, у C — 32).
-- fib(40) — 0,88 с на родном x86-64: быстрее Ruby с YJIT, PHP с JIT, Lua и
-  Python; впереди C, LuaJIT и Node. Таблицы и методика —
+- fib(40) на родном x86-64 — 1,30 с (22.11.2026; 06.11.2026 было 0,88 с).
+  Таблицы среди других языков и методика —
   [docs/numbers/BENCHMARKS.md](docs/numbers/BENCHMARKS.md).
-- Запуск программы — 0,2 мс.
 
 ## Как выглядит
 
 ```saltic
 use io
-use core.group
-
-State = enum {
-    READY,
-    ACTIVE,
-    TIRED
-}
 
 Actor = Box {
     name = "pip",
     state = State.READY,
     energy = 100
-}
 
-skill spend(actor, cost) {
-    (cost > actor.energy) { out error.NotEnoughEnergy }
-    out Actor { name = actor.name, state = State.ACTIVE, energy = actor.energy - cost }
-}
-
-skill try_spend(actor, cost) {
-    @next = spend(actor, cost) rescue |err| {
-        io.show("{err}: нужно {cost}")
-        out Actor { name = actor.name, state = State.TIRED, energy = actor.energy }
+    State = enum {
+        READY,
+        ACTIVE,
+        TIRED
     }
-    out next
+
+    skill spend(cost) {
+        (cost > energy) {
+            out error.NotEnoughEnergy
+        }
+        energy = energy - cost
+        state = State.ACTIVE
+        out none
+    }
+
+    skill try_spend(cost) {
+        spend(cost) rescue |err| {
+            io.show("{err}: нужно {cost}")
+            state = State.TIRED
+        }
+        out none
+    }
 }
 
 program() {
-    @actor = Actor { energy = 30 }
-    @costs = [5, 7, 40]
-    drum (group.count(costs)) {
-        @cost = group.get(costs, beat)
-        actor = try_spend(actor, cost)
+    @actor = Actor {
+        energy = 30
     }
-    @name = actor.name
-    @energy = actor.energy
-    io.show("{name}: осталось {energy}")
-    (actor.state == State.TIRED) { io.show("{name} устал") }
+    drum ([5, 7, 40]) {
+        actor.try_spend(beat)
+    }
+    io.show("{actor.name}: осталось {actor.energy}")
+    (actor.state == Actor.State.TIRED) {
+        io.show("{actor.name} устал")
+    }
     out none
 }
 ```
@@ -84,22 +87,45 @@ pip: осталось 18
 pip устал
 ```
 
-`@` — новая переменная, `out` — результат навыка, ошибки — значения с именем
-(`error.NotEnoughEnergy`), `rescue` ловит их на месте. Эталон всех
-возможностей языка — канон [soul/canonical/](soul/canonical/).
+Навык всегда чей-то — метод своего Box; поля Box метод видит по имени. `@` —
+новая переменная, `out` — результат навыка, ошибки — значения с именем
+(`error.NotEnoughEnergy`), `rescue` ловит их на месте, цикл — барабан `drum`,
+шаг — `beat`. Эталон всех возможностей языка — канон
+[soul/canonical/](soul/canonical/).
 
 ## Что уже работает
 
-- **Компилятор** — родной код RV32I, RV64 и x86-64; программы для Linux
-  (rv32i, rv64, x86-64), голого RISC-V (qemu-virt) и UEFI.
-- **ОС на qemu-virt** — лаунчер, змейка, пианино со звуком, колония
-  (`just qemu-graphics`).
-- **Acer Aspire E5-575G через UEFI** — агент на диске, управление по кабелю,
-  драйвер Ethernet RTL8111 и свой стек (ARP, IPv4, UDP), драйвер Wi-Fi QCA9377
-  до `SERVICE_READY`, UIEngine (около 60 компонентов в духе shadcn, JTML),
-  программы WIRE, TASKS, CareOS, трассировщик лучей, фрактал.
+- **Компилятор** — родной код RV32I, RV64, x86-64, ARM64, Xtensa и wasm32;
+  цели: Linux (rv32i, rv64, x86-64, arm64), UEFI, голый qemu-virt, Android
+  (APK без NDK), ESP32, wasm под Node и в браузере.
+- **Стенд Acer Aspire E5-575G через UEFI** — агент на диске, управление по
+  кабелю и mRPC, драйвер Ethernet RTL8111 и свой стек (ARP, IPv4, UDP), Wi-Fi
+  QCA9377 до `SERVICE_READY`, блиттер видеокарты Intel.
+- **Программы** (`soft/`) — «Сцена», «Бастион», SalticIDE, Полигон, почта,
+  алхимия языка, доска задач, биржа, взгляд на телефоне, куб на ESP32, игры
+  стола qemu-virt.
+- **Интерфейс** — JTML (пять атомов) и закрытая библиотека жителей UIEngine по
+  этажам, темы, шрифты TTF.
+- **Пакеты** — реестр `saltic-registry` (адаптеры и библиотеки с паспортами и
+  версиями) и пакетный менеджер tarantul.
 - **Язык** — группы-деревья, буфер байтов `core.bytes`, фиксированные типы
-  `u8…usize`, `bits32`, `address`, регионы памяти, ошибки по имени.
+  `u8…usize`, `bits32`, `address`, регионы памяти без сборщика мусора, запрет
+  циклов ссылок, ошибки по имени, законы архитектора.
+
+## Где что лежит
+
+```
+soul/seed/        семя: core, io, proof и compiler (библиотека без входа)
+soul/toolchains/  сборщики целей: saltic (полка), qemu_virt, android, esp32, wasm
+soul/canonical/   эталон языка        soul/craft/   инструменты языка
+soft/             программы: <категория>/<программа>/, платформы — подпапками
+workbench/        инструменты разработки: проверки, lens, установка, Acer
+tests/  bootstrap/  formats/  docs/
+```
+
+Библиотеки и адаптеры (графика, шрифты, ввод, UIEngine, драйверы, прошивка
+UEFI, окно Wayland) — в реестре; `just tarantul` привозит их в `tarantul/`,
+программы пишут `use tarantul.<пакет>.…`.
 
 ## Быстрый старт
 
@@ -110,51 +136,47 @@ nix --extra-experimental-features "nix-command flakes" develop
 ```
 
 - `just global-check` — проверка всего: самосборка с паспортами (неподвижная
-  точка rv64, x86-64 и rv32i родными компиляторами), затем разом тесты `all`
-  на rv32i, x86-64 и RV64, тесты ОС `os`, платформы (qemu-virt, UEFI, closure),
-  самосборка на RV64 и кодировщик x86 — карточками со случаями каждой ветки;
-- `just rv64` — доказательство: эталон RV64 собирает себя под `qemu-riscv64`
-  (около минуты; перед релизом);
-  (группы тестов — [docs/process/TESTING.md](docs/process/TESTING.md));
-- `just qemu-graphics` — ОС с программами в окне QEMU.
+  точка rv64 и arm64, полка x86-64), тесты на rv32i, x86-64, RV64 и
+  ARM64, тесты ОС-программ, платформы (qemu-virt, UEFI), кодировщики x86-64,
+  ARM64 и ESP32, wasm — карточками со случаями каждой ветки;
+- `just test` — тесты (группы — [docs/process/TESTING.md](docs/process/TESTING.md));
+- `just entries` — все входы проекта через чекер, без сборки;
+- `just qemu-graphics` — стол qemu-virt с программами в окне QEMU;
+- `just install <имя>` — поставить программу на этот ноут (меню и рабочий стол).
 
 Собрать свою программу компилятором с полки:
 
 ```bash
-bootstrap/saltic-*-compiler-x86_64-linux hello.saltic hello 134217728 x86_64
+bootstrap/saltic hello.saltic hello 134217728 x86_64
 ```
 
 Под RISC-V 64 (канон RVA23) — та же команда с целью `rv64`, запуск под QEMU:
 
 ```bash
-bootstrap/saltic-*-compiler-x86_64-linux hello.saltic hello 134217728 rv64
+bootstrap/saltic hello.saltic hello 134217728 rv64
 qemu-riscv64 -B 0x100000000 ./hello
 ```
 
 ## Документы
 
-- [docs/plan/PLAN.md](docs/plan/PLAN.md) — чек-лист задач сверху вниз (План 2, только
-  открытое; сделанное — [docs/plan/DONE.md](docs/plan/DONE.md));
-  [docs/plan/PLAN-3.md](docs/plan/PLAN-3.md) — ОС, инструменты, скорость, железо: ждёт, пока
-  План 2 не завершён;
-  [docs/plan/QUESTIONS.md](docs/plan/QUESTIONS.md) и [docs/plan/ANSWERS.md](docs/plan/ANSWERS.md) —
-  вопросы к автору и его ответы; прежний план с дорогой по эпохам и двумя
-  свистками — [.archive/docs/PLAN-1.md](.archive/docs/PLAN-1.md);
-- [CHANGELOG.md](CHANGELOG.md) — история релизов, [VERSION](VERSION) — номер;
-- [docs/process/FOOTBALL.md](docs/process/FOOTBALL.md) — версия как счёт матча «фичи : баги :
-  уборка»;
-- [docs/numbers/BENCHMARKS.md](docs/numbers/BENCHMARKS.md) — скорость среди других языков и
-  наши компиляторы;
-- [docs/laws/MISSION.md](docs/laws/MISSION.md), [docs/laws/ORIGIN.md](docs/laws/ORIGIN.md),
-  [docs/laws/PHILOSOPHY.md](docs/laws/PHILOSOPHY.md) — зачем и откуда;
-- [docs/os/OS-core.md](docs/os/OS-core.md) — понимание ОС;
-- [docs/os/SEATS.md](docs/os/SEATS.md) — один компьютер на кабинет, свисток в мониторе;
+- [docs/plan/PLAN.md](docs/plan/PLAN.md) — чек-лист открытого (План 2),
+  сделанное — [docs/plan/DONE.md](docs/plan/DONE.md);
+  [docs/plan/PLAN-3.md](docs/plan/PLAN-3.md) — ОС, инструменты, скорость, железо;
+  [docs/plan/GREAT-REFACTOR.md](docs/plan/GREAT-REFACTOR.md) — дорога языка до
+  скорости; вопросы и ответы автора —
+  [QUESTIONS](docs/plan/QUESTIONS.md), [ANSWERS](docs/plan/ANSWERS.md);
+- [docs/laws/](docs/laws/) — законы: [принципы](docs/laws/PRINCIPLES.md),
+  [миссия](docs/laws/MISSION.md), [откуда](docs/laws/ORIGIN.md),
+  [философия](docs/laws/PHILOSOPHY.md), [архитектура](docs/laws/ARCHITECTURE.md);
+- [docs/language/](docs/language/) — модель памяти, метроном, конечный автомат,
+  типы данных;
+- [docs/os/OS-core.md](docs/os/OS-core.md) — замысел ОС;
+  [docs/hardware/boards/](docs/hardware/boards/) — платы;
 - [docs/process/Code_Architecture_канон_для_агентов.md](docs/process/Code_Architecture_канон_для_агентов.md)
   и [AGENTS.md](AGENTS.md) — правила для агентов;
-- [.archive/docs/history/](.archive/docs/history/) — летопись по дням,
-  [.archive/docs/fable/](.archive/docs/fable/) — отчёты агента Fable (разобраны,
-  несделанное — в чек-листе); разведка — [docs/plan/RECON.md](docs/plan/RECON.md),
-  открытые вопросы — [docs/plan/QUESTIONS.md](docs/plan/QUESTIONS.md).
+  [docs/process/FOOTBALL.md](docs/process/FOOTBALL.md) — версия как счёт матча;
+- [CHANGELOG.md](CHANGELOG.md) — история релизов, [VERSION](VERSION) — номер;
+- [.archive/docs/](.archive/docs/) — прежние документы и летопись по дням.
 
 ## Релиз
 
@@ -175,12 +197,12 @@ GitHub Actions сверит тег с `VERSION`, возьмёт описание
 
 На полке [bootstrap/](bootstrap/) — компилятор
 `saltic-<версия>-compiler-rv64-linux` (эталон, канон RV64, собирает сам себя)
-и его родная версия `saltic-<версия>-compiler-x86_64-linux`; у каждого паспорт
-`.txt`: кто собрал, из каких исходников, размер, время и пик памяти.
-Компилятор для RV32I (`…-compiler-rv32i-linux.elf`, вторая сверка неподвижной
-точки) и для голого RISC-V (`…-for-qemu_virt.elf`) выводятся из них локально
-и в git не лежат. `SALTIC_NATIVE=0` возвращает запуск эталона под
-`qemu-riscv64`.
+и его родная версия `saltic-<версия>-compiler-x86_64-linux`; оба собраны из
+сборщика `soul/toolchains/saltic`. У каждого паспорт `.txt`: кто собрал, из
+каких исходников, размер, время и пик памяти. Компилятор для RV32I и для
+голого RISC-V (qemu-virt) выводятся из них локально и в git не лежат.
+`bootstrap/saltic` — запуск родного с полки; `SALTIC_NATIVE=0` возвращает
+запуск эталона под `qemu-riscv64`.
 
 ## Лицензия
 
