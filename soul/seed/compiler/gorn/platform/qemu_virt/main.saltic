@@ -1,0 +1,281 @@
+-- platform — машинный код платформы qemu-virt для RV32I: вход, ловушка,
+-- вывод в UART 16550 (0x10000000), выход через SiFive test (0x100000).
+-- Всё дописывается в цель компилятора (riscv.emit); точка входа становится
+-- platform_start, адрес загрузки 0x80000000. Программа видит argv ["saltic"].
+-- Системные вызовы через ecall: 64 — write, 93/94 — exit; прочие ловушки
+-- печатают причину и адрес в UART и выходят с ошибкой.
+--
+-- QemuVirt { name } — платформа договора (compiler/gorn/platform): append(billet) —
+--     wait через wfi, куча — свой bss (platform.append_heap_reserve), остальное
+--     (key, файлы, now, firmware, call) — NotSupported
+-- append_whole(target) -> target — вся платформа целиком (вход, ловушка, UART); вход из toolchain
+-- append_boot(target, boot_trampoline) / append_trap / append_uart_bits /
+--     append_direct_write / append_direct_exit / append_trap_write /
+--     append_exit / append_data(target) -> target — части по отдельности
+-- show_banner() — печатает приветствие (для smoke)
+
+use io
+use compiler.gorn.memory.model
+use compiler.contract.abi
+use compiler.gorn.backend.riscv.instruction
+use compiler.gorn.backend.riscv.codec
+use compiler.gorn.backend.layout
+use compiler.gorn.backend.riscv.registers
+use compiler.gorn.machine.word
+use compiler.gorn.backend
+use compiler.gorn.platform
+use compiler.gorn.backend.riscv.fixer
+use compiler.gorn.backend.riscv.emit
+
+UART_BASE_UPPER = 65536
+UART_LSR = 5
+UART_TX_READY = 32
+QEMU_TEST_UPPER = 256
+QEMU_EXIT_OK = 21845
+QEMU_EXIT_ERROR = 13107
+STACK_TOP_UPPER = 557056
+
+UNSUPPORTED = ["key", "file_read", "file_write", "now", "firmware", "call"]
+
+QemuVirt = Box {
+    platform_ops = platform.Platform {},
+    name = "qemu_virt",
+    arena_bytes = model.ARENA_BYTES,
+    default_heap_bytes = model.DEFAULT_HEAP_BYTES
+
+    skill append(billet) {
+        @executor = billet.executor
+        billet = executor.label(billet, platform.WAIT)
+        billet = executor.wait(billet)
+        billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
+        billet = executor.load_immediate(billet, backend.ERROR, abi.CALL_NO_ERROR)
+        billet = executor.ret(billet)
+        billet = platform_ops.append_heap_reserve(billet)
+        out platform_ops.append_unsupported(billet, UNSUPPORTED)
+    }
+
+    skill append_boot(target, boot_trampoline) {
+        @writer = emit.Emit {}
+        target.define_label(Layout.Section.CODE, "platform_start")
+        writer.op(target, Instruction.Kind.LUI, registers.SP, registers.ZERO, registers.ZERO, STACK_TOP_UPPER)
+        writer.relative_address(target, registers.T0, "platform_trap", 0)
+        writer.op(target, Instruction.Kind.CSRRW, registers.ZERO, registers.T0, registers.ZERO, 773)
+        writer.relative_address(target, registers.A1, "platform_argv", 0)
+        writer.op(target, Instruction.Kind.ADDI, registers.A0, registers.ZERO, registers.ZERO, 1)
+        writer.op(target, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, -16)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.SP, registers.A0, 0)
+        writer.relative_address(target, registers.T0, "platform_name", 0)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.SP, registers.T0, 4)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.SP, registers.ZERO, 8)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.SP, registers.ZERO, 12)
+        (boot_trampoline == yes) {
+            writer.relative_address(target, registers.T0, "_start", 8)
+            writer.op(target, Instruction.Kind.JALR, registers.ZERO, registers.T0, registers.ZERO, 0)
+            out target
+        }
+        writer.jal(target, registers.ZERO, "_start")
+        out target
+    }
+
+    skill append_trap(target) {
+        @writer = emit.Emit {}
+        target.define_label(Layout.Section.CODE, "platform_trap")
+        writer.op(target, Instruction.Kind.CSRRS, registers.T0, registers.ZERO, registers.ZERO, 834)
+        writer.op(target, Instruction.Kind.ADDI, registers.T1, registers.ZERO, registers.ZERO, 11)
+        writer.branch(target, Instruction.Kind.BNE, registers.T0, registers.T1, "platform_report_trap")
+        writer.op(target, Instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, 64)
+        writer.branch(target, Instruction.Kind.BEQ, registers.A7, registers.T0, "platform_write")
+        writer.op(target, Instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, 93)
+        writer.branch(target, Instruction.Kind.BEQ, registers.A7, registers.T0, "platform_exit")
+        writer.op(target, Instruction.Kind.ADDI, registers.T0, registers.ZERO, registers.ZERO, 94)
+        writer.branch(target, Instruction.Kind.BEQ, registers.A7, registers.T0, "platform_exit")
+
+        target.define_label(Layout.Section.CODE, "platform_report_trap")
+        writer.op(target, Instruction.Kind.CSRRS, registers.T1, registers.ZERO, registers.ZERO, 833)
+        writer.op(target, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, -16)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.SP, registers.T0, 0)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.SP, registers.T1, 4)
+        writer.relative_address(target, registers.A1, "platform_trap_cause", 0)
+        writer.relative_address(target, registers.A2, "platform_trap_cause_end", 0)
+        writer.op(target, Instruction.Kind.SUB, registers.A2, registers.A2, registers.A1, 0)
+        writer.call(target, "rt_platform_write")
+        writer.op(target, Instruction.Kind.LW, registers.A0, registers.SP, registers.ZERO, 0)
+        writer.call(target, "platform_uart_bits")
+        writer.relative_address(target, registers.A1, "platform_trap_address", 0)
+        writer.relative_address(target, registers.A2, "platform_trap_address_end", 0)
+        writer.op(target, Instruction.Kind.SUB, registers.A2, registers.A2, registers.A1, 0)
+        writer.call(target, "rt_platform_write")
+        writer.op(target, Instruction.Kind.LW, registers.A0, registers.SP, registers.ZERO, 4)
+        writer.call(target, "platform_uart_bits")
+        writer.op(target, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 16)
+        writer.jal(target, registers.ZERO, "platform_exit_error")
+        out target
+    }
+
+    skill append_uart_bits(target) {
+        @writer = emit.Emit {}
+        target.define_label(Layout.Section.CODE, "platform_uart_bits")
+        writer.op(target, Instruction.Kind.ADDI, registers.T5, registers.ZERO, registers.ZERO, 32)
+        writer.op(target, Instruction.Kind.LUI, registers.T4, registers.ZERO, registers.ZERO, UART_BASE_UPPER)
+        target.define_label(Layout.Section.CODE, ".L_platform_bits_loop")
+        writer.op(target, Instruction.Kind.SRLI, registers.T2, registers.A0, registers.ZERO, 31)
+        writer.op(target, Instruction.Kind.ADDI, registers.T2, registers.T2, registers.ZERO, 48)
+        target.define_label(Layout.Section.CODE, ".L_platform_bits_wait")
+        writer.op(target, Instruction.Kind.LBU, registers.T3, registers.T4, registers.ZERO, UART_LSR)
+        writer.op(target, Instruction.Kind.ANDI, registers.T3, registers.T3, registers.ZERO, UART_TX_READY)
+        writer.branch(target, Instruction.Kind.BEQ, registers.T3, registers.ZERO, ".L_platform_bits_wait")
+        writer.op(target, Instruction.Kind.SB, registers.ZERO, registers.T4, registers.T2, 0)
+        writer.op(target, Instruction.Kind.SLLI, registers.A0, registers.A0, registers.ZERO, 1)
+        writer.op(target, Instruction.Kind.ADDI, registers.T5, registers.T5, registers.ZERO, -1)
+        writer.branch(target, Instruction.Kind.BNE, registers.T5, registers.ZERO, ".L_platform_bits_loop")
+        target.define_label(Layout.Section.CODE, ".L_platform_bits_newline_wait")
+        writer.op(target, Instruction.Kind.LBU, registers.T3, registers.T4, registers.ZERO, UART_LSR)
+        writer.op(target, Instruction.Kind.ANDI, registers.T3, registers.T3, registers.ZERO, UART_TX_READY)
+        writer.branch(target, Instruction.Kind.BEQ, registers.T3, registers.ZERO, ".L_platform_bits_newline_wait")
+        writer.op(target, Instruction.Kind.ADDI, registers.T2, registers.ZERO, registers.ZERO, 10)
+        writer.op(target, Instruction.Kind.SB, registers.ZERO, registers.T4, registers.T2, 0)
+        writer.op(target, Instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+        out target
+    }
+
+    skill append_direct_write(target) {
+        @writer = emit.Emit {}
+        target.define_label(Layout.Section.CODE, "rt_platform_write")
+        writer.op(target, Instruction.Kind.ADDI, registers.T0, registers.A1, registers.ZERO, 0)
+        writer.op(target, Instruction.Kind.ADDI, registers.T1, registers.A2, registers.ZERO, 0)
+        writer.op(target, Instruction.Kind.LUI, registers.T4, registers.ZERO, registers.ZERO, UART_BASE_UPPER)
+        target.define_label(Layout.Section.CODE, ".L_platform_direct_write_loop")
+        writer.branch(target, Instruction.Kind.BEQ, registers.T1, registers.ZERO, ".L_platform_direct_write_done")
+        target.define_label(Layout.Section.CODE, ".L_platform_direct_uart_wait")
+        writer.op(target, Instruction.Kind.LBU, registers.T2, registers.T4, registers.ZERO, UART_LSR)
+        writer.op(target, Instruction.Kind.ANDI, registers.T2, registers.T2, registers.ZERO, UART_TX_READY)
+        writer.branch(target, Instruction.Kind.BEQ, registers.T2, registers.ZERO, ".L_platform_direct_uart_wait")
+        writer.op(target, Instruction.Kind.LBU, registers.T2, registers.T0, registers.ZERO, 0)
+        writer.op(target, Instruction.Kind.SB, registers.ZERO, registers.T4, registers.T2, 0)
+        writer.op(target, Instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, 1)
+        writer.op(target, Instruction.Kind.ADDI, registers.T1, registers.T1, registers.ZERO, -1)
+        writer.jal(target, registers.ZERO, ".L_platform_direct_write_loop")
+        target.define_label(Layout.Section.CODE, ".L_platform_direct_write_done")
+        writer.op(target, Instruction.Kind.ADDI, registers.A0, registers.A2, registers.ZERO, 0)
+        writer.op(target, Instruction.Kind.ADDI, registers.A1, registers.ZERO, registers.ZERO, abi.CALL_NO_ERROR)
+        writer.op(target, Instruction.Kind.JALR, registers.ZERO, registers.RA, registers.ZERO, 0)
+        out target
+    }
+
+    skill append_direct_exit(target) {
+        @writer = emit.Emit {}
+        target.define_label(Layout.Section.CODE, "rt_platform_exit")
+        writer.branch(target, Instruction.Kind.BEQ, registers.A0, registers.ZERO, "platform_exit_ok")
+        writer.op(target, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, -16)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.SP, registers.RA, 12)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.SP, registers.A0, 8)
+        writer.relative_address(target, registers.A1, "platform_exit_failure", 0)
+        writer.relative_address(target, registers.A2, "platform_exit_failure_end", 0)
+        writer.op(target, Instruction.Kind.SUB, registers.A2, registers.A2, registers.A1, 0)
+        writer.call(target, "rt_platform_write")
+        writer.op(target, Instruction.Kind.LW, registers.A0, registers.SP, registers.ZERO, 8)
+        writer.call(target, "platform_uart_bits")
+        writer.op(target, Instruction.Kind.LW, registers.RA, registers.SP, registers.ZERO, 12)
+        writer.op(target, Instruction.Kind.ADDI, registers.SP, registers.SP, registers.ZERO, 16)
+        writer.jal(target, registers.ZERO, "platform_exit_error")
+        out target
+    }
+
+    skill append_trap_write(target) {
+        @writer = emit.Emit {}
+        target.define_label(Layout.Section.CODE, "platform_write")
+        writer.op(target, Instruction.Kind.ADDI, registers.T0, registers.A1, registers.ZERO, 0)
+        writer.op(target, Instruction.Kind.ADDI, registers.T1, registers.A2, registers.ZERO, 0)
+        writer.op(target, Instruction.Kind.ADDI, registers.T3, registers.A2, registers.ZERO, 0)
+        writer.op(target, Instruction.Kind.LUI, registers.T4, registers.ZERO, registers.ZERO, UART_BASE_UPPER)
+        target.define_label(Layout.Section.CODE, ".L_platform_write_loop")
+        writer.branch(target, Instruction.Kind.BEQ, registers.T1, registers.ZERO, ".L_platform_write_done")
+        target.define_label(Layout.Section.CODE, ".L_platform_uart_wait")
+        writer.op(target, Instruction.Kind.LBU, registers.T2, registers.T4, registers.ZERO, UART_LSR)
+        writer.op(target, Instruction.Kind.ANDI, registers.T2, registers.T2, registers.ZERO, UART_TX_READY)
+        writer.branch(target, Instruction.Kind.BEQ, registers.T2, registers.ZERO, ".L_platform_uart_wait")
+        writer.op(target, Instruction.Kind.LBU, registers.T2, registers.T0, registers.ZERO, 0)
+        writer.op(target, Instruction.Kind.SB, registers.ZERO, registers.T4, registers.T2, 0)
+        writer.op(target, Instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, 1)
+        writer.op(target, Instruction.Kind.ADDI, registers.T1, registers.T1, registers.ZERO, -1)
+        writer.jal(target, registers.ZERO, ".L_platform_write_loop")
+        target.define_label(Layout.Section.CODE, ".L_platform_write_done")
+        writer.op(target, Instruction.Kind.ADDI, registers.A0, registers.T3, registers.ZERO, 0)
+        writer.op(target, Instruction.Kind.CSRRS, registers.T0, registers.ZERO, registers.ZERO, 833)
+        writer.op(target, Instruction.Kind.ADDI, registers.T0, registers.T0, registers.ZERO, 4)
+        writer.op(target, Instruction.Kind.CSRRW, registers.ZERO, registers.T0, registers.ZERO, 833)
+        writer.op(target, Instruction.Kind.MRET, registers.ZERO, registers.ZERO, registers.ZERO, 0)
+        out target
+    }
+
+    skill append_exit(target) {
+        @writer = emit.Emit {}
+        target.define_label(Layout.Section.CODE, "platform_exit")
+        writer.branch(target, Instruction.Kind.BEQ, registers.A0, registers.ZERO, "platform_exit_ok")
+        target.define_label(Layout.Section.CODE, "platform_exit_error")
+        writer.op(target, Instruction.Kind.LUI, registers.T0, registers.ZERO, registers.ZERO, QEMU_TEST_UPPER)
+        writer.load_immediate(target, registers.T1, QEMU_EXIT_ERROR)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
+        writer.jal(target, registers.ZERO, "platform_halt")
+        target.define_label(Layout.Section.CODE, "platform_exit_ok")
+        writer.op(target, Instruction.Kind.LUI, registers.T0, registers.ZERO, registers.ZERO, QEMU_TEST_UPPER)
+        writer.load_immediate(target, registers.T1, QEMU_EXIT_OK)
+        writer.op(target, Instruction.Kind.SW, registers.ZERO, registers.T0, registers.T1, 0)
+        target.define_label(Layout.Section.CODE, "platform_halt")
+        writer.op(target, Instruction.Kind.WFI, registers.ZERO, registers.ZERO, registers.ZERO, 0)
+        writer.jal(target, registers.ZERO, "platform_halt")
+        out target
+    }
+
+    skill append_data(target) {
+        target.align_section(Layout.Section.RODATA, 4)
+        target.define_label(Layout.Section.RODATA, "platform_name")
+        target.append_section_text(Layout.Section.RODATA, "saltic", yes)
+        target.define_label(Layout.Section.RODATA, "platform_trap_cause")
+        target.append_section_text(Layout.Section.RODATA, "ловушка процессора, причина: ", no)
+        target.define_label(Layout.Section.RODATA, "platform_trap_cause_end")
+        target.define_label(Layout.Section.RODATA, "platform_trap_address")
+        target.append_section_text(Layout.Section.RODATA, "адрес остановки: ", no)
+        target.define_label(Layout.Section.RODATA, "platform_trap_address_end")
+        target.define_label(Layout.Section.RODATA, "platform_exit_failure")
+        target.append_section_text(Layout.Section.RODATA, "системный выход с ошибкой: ", no)
+        target.define_label(Layout.Section.RODATA, "platform_exit_failure_end")
+        target.align_section(Layout.Section.DATA, 4)
+        target.define_label(Layout.Section.DATA, "platform_argv")
+        target.append_label_address(Layout.Section.DATA, "platform_name", 0)
+        target.append_section_word(Layout.Section.DATA, word.from_bytes(0, 0, 0, 0))
+        out target
+    }
+
+    skill append_whole(target) {
+        @coder = codec.Codec {}
+        @program_code_size = target.code.length
+        @boot_trampoline = program_code_size > 0
+        target.load_address = layout.word_address(0, 0, 0, 128)
+        target.low_memory_size = 0
+        target.entry = "platform_start"
+        target.resolved = no
+        target = append_boot(target, boot_trampoline)
+        target = append_trap(target)
+        target = append_uart_bits(target)
+        target = append_direct_write(target)
+        target = append_direct_exit(target)
+        target = append_trap_write(target)
+        target = append_exit(target)
+        target = append_data(target)
+        (boot_trampoline == yes) {
+            @upper = coder.signed_value(fixer.relative_high(program_code_size), 20)
+            @high = coder.encode_kind(Instruction.Kind.AUIPC, registers.T0, registers.ZERO, registers.ZERO, upper)
+            @low = coder.encode_kind(Instruction.Kind.JALR, registers.ZERO, registers.T0, registers.ZERO, fixer.relative_low(program_code_size))
+            target.set_section_word(Layout.Section.CODE, 0, high)
+            target.set_section_word(Layout.Section.CODE, 4, low)
+        }
+        out target
+    }
+
+    skill show_banner() {
+        io.show("Saltic работает прямо на RV32I")
+        out none
+    }
+}
+

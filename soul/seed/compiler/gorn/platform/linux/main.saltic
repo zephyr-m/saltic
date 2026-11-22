@@ -98,6 +98,11 @@ KEY_NAMES = ["escape", "enter", "backspace", "tab", "up", "down", "right", "left
 UNSUPPORTED = ["wait", "firmware", "call"]
 
 Linux = Box {
+    socket_calls = socket.Socket {},
+    input_calls = input.Input {},
+    clock_calls = clock.Clock {},
+    process_calls = process.Process {},
+    platform_ops = platform.Platform {},
     name = "linux",
     arena_bytes = model.ARENA_BYTES,
     default_heap_bytes = model.DEFAULT_HEAP_BYTES
@@ -114,411 +119,413 @@ Linux = Box {
         billet = emit_file_error(billet)
         billet = emit_key(billet)
         billet = append_key_data(billet)
-        billet = process.append(billet)
-        billet = clock.emit_now(billet)
-        billet = input.emit_read_line(billet)
-        billet = socket.append(billet)
-        out platform.append_unsupported(billet, UNSUPPORTED)
+        billet = process_calls.append(billet)
+        billet = clock_calls.emit_now(billet)
+        billet = input_calls.emit_read_line(billet)
+        billet = socket_calls.append(billet)
+        out platform_ops.append_unsupported(billet, UNSUPPORTED)
     }
-}
 
-skill emit_write(billet) {
-    @endings = tails.Tails {}
-    @executor = billet.executor
-    billet = executor.label(billet, platform.WRITE)
-    billet = executor.syscall(billet, system.SYSCALL_WRITE)
-    out endings.succeeded(billet)
-}
-
-skill emit_log_open(billet) {
-    @endings = tails.Tails {}
-    @executor = billet.executor
-    billet = executor.label(billet, platform.LOG_OPEN)
-    billet = executor.load_immediate(billet, backend.VALUE, -100)
-    billet = executor.load_address(billet, backend.ERROR, LOG_PATH_LABEL, 0)
-    billet = executor.load_immediate(billet, backend.ARG2, LOG_FLAGS)
-    billet = executor.load_immediate(billet, backend.ARG3, 420)
-    billet = executor.syscall(billet, system.SYSCALL_OPENAT)
-    billet = executor.branch_negative(billet, backend.VALUE, ".L_log_open_failed")
-    billet = endings.succeeded(billet)
-    billet = endings.error_stub(billet, ".L_log_open_failed", abi.ERROR_FILE)
-    billet = executor.data_label(billet, backend.RODATA, LOG_PATH_LABEL)
-    out executor.data_text(billet, backend.RODATA, LOG_PATH)
-}
-
-skill emit_heap(billet) {
-    @endings = tails.Tails {}
-    @executor = billet.executor
-    billet = executor.label(billet, platform.HEAP)
-    billet = executor.move(billet, backend.ERROR, backend.VALUE)
-    billet = executor.load_address(billet, backend.VALUE, state.HEAP_START, 0)
-    billet = executor.load_immediate(billet, backend.SCRATCH0, PAGE_ROUND)
-    billet = executor.add(billet, backend.VALUE, backend.VALUE, backend.SCRATCH0)
-    billet = executor.load_immediate(billet, backend.SCRATCH0, PAGE_MASK)
-    billet = executor.and(billet, backend.VALUE, backend.VALUE, backend.SCRATCH0)
-    billet = executor.load_immediate(billet, backend.ARG2, MAP_PROTECTION)
-    billet = executor.load_immediate(billet, backend.ARG3, MAP_FLAGS)
-    billet = executor.load_immediate(billet, backend.ARG4, -1)
-    billet = executor.load_immediate(billet, backend.ARG5, 0)
-    billet = executor.syscall(billet, system.SYSCALL_MMAP)
-    billet = executor.load_immediate(billet, backend.SCRATCH0, MAP_FAILED_FROM)
-    billet = executor.branch_greater_equal_unsigned(billet, backend.VALUE, backend.SCRATCH0, ".L_heap_refused")
-    (billet.words.bytes == 8) {
-        billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.VALUE, LOW_BITS)
-        billet = executor.load_immediate(billet, backend.SCRATCH1, 0)
-        billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH1, ".L_heap_refused")
+    skill emit_write(billet) {
+        @endings = tails.Tails {}
+        @executor = billet.executor
+        billet = executor.label(billet, platform.WRITE)
+        billet = executor.syscall(billet, system.SYSCALL_WRITE)
+        out endings.succeeded(billet)
     }
-    billet = endings.succeeded(billet)
-    out endings.error_stub(billet, ".L_heap_refused", abi.ERROR_MEMORY_EXHAUSTED)
-}
 
-skill emit_stack(billet) {
-    @endings = tails.Tails {}
-    @executor = billet.executor
-    billet = executor.label(billet, platform.STACK)
-    billet = executor.move(billet, backend.ERROR, backend.VALUE)
-    billet = executor.load_immediate(billet, backend.VALUE, 0)
-    billet = executor.load_immediate(billet, backend.ARG2, MAP_PROTECTION)
-    billet = executor.load_immediate(billet, backend.ARG3, MAP_FLAGS)
-    billet = executor.load_immediate(billet, backend.ARG4, -1)
-    billet = executor.load_immediate(billet, backend.ARG5, 0)
-    billet = executor.syscall(billet, system.SYSCALL_MMAP)
-    billet = executor.load_immediate(billet, backend.SCRATCH0, MAP_FAILED_FROM)
-    billet = executor.branch_greater_equal_unsigned(billet, backend.VALUE, backend.SCRATCH0, ".L_stack_refused")
-    billet = executor.add(billet, backend.VALUE, backend.VALUE, backend.ERROR)
-    billet = endings.succeeded(billet)
-    out endings.error_stub(billet, ".L_stack_refused", abi.ERROR_NOT_SUPPORTED)
-}
-
-skill emit_exit(billet) {
-    @executor = billet.executor
-    billet = executor.label(billet, platform.EXIT)
-    out executor.syscall(billet, system.SYSCALL_EXIT)
-}
-
-skill emit_file_read(billet) {
-    @endings = tails.Tails {}
-    @executor = billet.executor
-    @words = billet.words
-    billet = executor.label(billet, platform.FILE_READ)
-    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 8)
-    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 7)
-    billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
-    billet = executor.add_immediate(billet, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
-    billet = executor.load_immediate(billet, backend.VALUE, -100)
-    billet = executor.load_immediate(billet, backend.ARG2, 0)
-    billet = executor.load_immediate(billet, backend.ARG3, 0)
-    billet = executor.syscall(billet, system.SYSCALL_OPENAT)
-    billet = executor.branch_negative(billet, backend.VALUE, FILE_ERROR)
-    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_FD)
-    billet = emit_seek(billet, SEEK_END, READ_UNKNOWN)
-    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
-    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_KNOWN)
-    billet = emit_seek(billet, SEEK_SET, FILE_ERROR)
-    billet = executor.jump(billet, READ_MEASURED)
-    billet = executor.label(billet, READ_UNKNOWN)
-    billet = executor.store_zero(billet, backend.STACK, words.bytes * READ_SIZE)
-    billet = executor.store_zero(billet, backend.STACK, words.bytes * READ_KNOWN)
-    billet = executor.label(billet, READ_MEASURED)
-    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
-    billet = executor.branch_nonzero(billet, backend.VALUE, READ_SIZED)
-    billet = executor.load_immediate(billet, backend.VALUE, READ_CHUNK)
-    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
-    billet = executor.label(billet, READ_SIZED)
-    billet = executor.add_immediate(billet, backend.VALUE, backend.VALUE, words.string_data + 1)
-    billet = executor.call(billet, "rt_alloc")
-    billet = executor.load_immediate(billet, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
-    billet = executor.store32(billet, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
-    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_OBJECT)
-    billet = executor.load_immediate(billet, backend.SCRATCH0, 0)
-    billet = executor.store(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
-    billet = executor.label(billet, READ_LOOP)
-    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
-    billet = executor.load(billet, backend.SCRATCH1, backend.STACK, words.bytes * READ_SIZE)
-    billet = executor.branch_greater_equal(billet, backend.SCRATCH0, backend.SCRATCH1, READ_FULL)
-    billet = executor.load(billet, backend.ERROR, backend.STACK, words.bytes * READ_OBJECT)
-    billet = executor.add_immediate(billet, backend.ERROR, backend.ERROR, words.payload + words.string_data)
-    billet = executor.add(billet, backend.ERROR, backend.ERROR, backend.SCRATCH0)
-    billet = executor.sub(billet, backend.ARG2, backend.SCRATCH1, backend.SCRATCH0)
-    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_FD)
-    billet = executor.syscall(billet, system.SYSCALL_READ)
-    billet = executor.branch_negative(billet, backend.VALUE, FILE_ERROR)
-    billet = executor.branch_zero(billet, backend.VALUE, READ_DONE)
-    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
-    billet = executor.add(billet, backend.SCRATCH0, backend.SCRATCH0, backend.VALUE)
-    billet = executor.store(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
-    billet = executor.jump(billet, READ_LOOP)
-    billet = emit_read_grow(billet)
-    billet = executor.label(billet, READ_DONE)
-    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_OBJECT)
-    billet = executor.load(billet, backend.SCRATCH2, backend.STACK, words.bytes * READ_TOTAL)
-    billet = executor.store(billet, backend.SCRATCH2, backend.SCRATCH0, words.payload)
-    billet = executor.add(billet, backend.SCRATCH1, backend.SCRATCH0, backend.SCRATCH2)
-    billet = executor.store_byte_zero(billet, backend.SCRATCH1, words.payload + words.string_data)
-    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_FD)
-    billet = executor.syscall(billet, system.SYSCALL_CLOSE)
-    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_OBJECT)
-    billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
-    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 7)
-    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 8)
-    out endings.succeeded(billet)
-}
-
-skill emit_read_grow(billet) {
-    @executor = billet.executor
-    @words = billet.words
-    billet = executor.label(billet, READ_FULL)
-    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_KNOWN)
-    billet = executor.branch_nonzero(billet, backend.SCRATCH0, READ_DONE)
-    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
-    billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, 1)
-    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
-    billet = executor.add_immediate(billet, backend.VALUE, backend.VALUE, words.string_data + 1)
-    billet = executor.call(billet, "rt_alloc")
-    billet = executor.load_immediate(billet, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
-    billet = executor.store32(billet, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
-    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_OBJECT)
-    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_OBJECT)
-    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, words.payload + words.string_data)
-    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.VALUE, words.payload + words.string_data)
-    billet = executor.load(billet, backend.SCRATCH2, backend.STACK, words.bytes * READ_TOTAL)
-    billet = executor.label(billet, READ_COPY)
-    billet = executor.jump_if_zero(billet, backend.SCRATCH2, READ_LOOP)
-    billet = executor.load_byte(billet, backend.SCRATCH3, backend.SCRATCH0, 0)
-    billet = executor.store_byte(billet, backend.SCRATCH3, backend.SCRATCH1, 0)
-    billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, 1)
-    billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, 1)
-    billet = executor.add_immediate(billet, backend.SCRATCH2, backend.SCRATCH2, -1)
-    out executor.jump(billet, READ_COPY)
-}
-
-skill emit_seek(billet, whence, fail) {
-    @executor = billet.executor
-    @words = billet.words
-    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_FD)
-    billet = executor.load_immediate(billet, backend.ERROR, 0)
-    (words.bytes == 8) {
-        billet = executor.load_immediate(billet, backend.ARG2, whence)
-        billet = executor.syscall(billet, system.SYSCALL_LSEEK)
-        out executor.branch_negative(billet, backend.VALUE, fail)
+    skill emit_log_open(billet) {
+        @endings = tails.Tails {}
+        @executor = billet.executor
+        billet = executor.label(billet, platform.LOG_OPEN)
+        billet = executor.load_immediate(billet, backend.VALUE, -100)
+        billet = executor.load_address(billet, backend.ERROR, LOG_PATH_LABEL, 0)
+        billet = executor.load_immediate(billet, backend.ARG2, LOG_FLAGS)
+        billet = executor.load_immediate(billet, backend.ARG3, 420)
+        billet = executor.syscall(billet, system.SYSCALL_OPENAT)
+        billet = executor.branch_negative(billet, backend.VALUE, ".L_log_open_failed")
+        billet = endings.succeeded(billet)
+        billet = endings.error_stub(billet, ".L_log_open_failed", abi.ERROR_FILE)
+        billet = executor.data_label(billet, backend.RODATA, LOG_PATH_LABEL)
+        out executor.data_text(billet, backend.RODATA, LOG_PATH)
     }
-    billet = executor.load_immediate(billet, backend.ARG2, 0)
-    billet = executor.add_immediate(billet, backend.ARG3, backend.STACK, words.bytes * READ_OFFSET)
-    billet = executor.load_immediate(billet, backend.ARG4, whence)
-    billet = executor.syscall(billet, system.SYSCALL_LSEEK)
-    billet = executor.branch_negative(billet, backend.VALUE, fail)
-    out executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_OFFSET)
-}
 
-skill emit_file_write(billet) {
-    out emit_writer(billet, platform.FILE_WRITE, FILE_MODE, no)
-}
+    skill emit_heap(billet) {
+        @endings = tails.Tails {}
+        @executor = billet.executor
+        billet = executor.label(billet, platform.HEAP)
+        billet = executor.move(billet, backend.ERROR, backend.VALUE)
+        billet = executor.load_address(billet, backend.VALUE, state.HEAP_START, 0)
+        billet = executor.load_immediate(billet, backend.SCRATCH0, PAGE_ROUND)
+        billet = executor.add(billet, backend.VALUE, backend.VALUE, backend.SCRATCH0)
+        billet = executor.load_immediate(billet, backend.SCRATCH0, PAGE_MASK)
+        billet = executor.and(billet, backend.VALUE, backend.VALUE, backend.SCRATCH0)
+        billet = executor.load_immediate(billet, backend.ARG2, MAP_PROTECTION)
+        billet = executor.load_immediate(billet, backend.ARG3, MAP_FLAGS)
+        billet = executor.load_immediate(billet, backend.ARG4, -1)
+        billet = executor.load_immediate(billet, backend.ARG5, 0)
+        billet = executor.syscall(billet, system.SYSCALL_MMAP)
+        billet = executor.load_immediate(billet, backend.SCRATCH0, MAP_FAILED_FROM)
+        billet = executor.branch_greater_equal_unsigned(billet, backend.VALUE, backend.SCRATCH0, ".L_heap_refused")
+        (billet.words.bytes == 8) {
+            billet = executor.shift_right_unsigned(billet, backend.SCRATCH0, backend.VALUE, LOW_BITS)
+            billet = executor.load_immediate(billet, backend.SCRATCH1, 0)
+            billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH1, ".L_heap_refused")
+        }
+        billet = endings.succeeded(billet)
+        out endings.error_stub(billet, ".L_heap_refused", abi.ERROR_MEMORY_EXHAUSTED)
+    }
 
-skill emit_file_write_program(billet) {
-    out emit_writer(billet, platform.FILE_WRITE_PROGRAM, PROGRAM_MODE, yes)
-}
+    skill emit_stack(billet) {
+        @endings = tails.Tails {}
+        @executor = billet.executor
+        billet = executor.label(billet, platform.STACK)
+        billet = executor.move(billet, backend.ERROR, backend.VALUE)
+        billet = executor.load_immediate(billet, backend.VALUE, 0)
+        billet = executor.load_immediate(billet, backend.ARG2, MAP_PROTECTION)
+        billet = executor.load_immediate(billet, backend.ARG3, MAP_FLAGS)
+        billet = executor.load_immediate(billet, backend.ARG4, -1)
+        billet = executor.load_immediate(billet, backend.ARG5, 0)
+        billet = executor.syscall(billet, system.SYSCALL_MMAP)
+        billet = executor.load_immediate(billet, backend.SCRATCH0, MAP_FAILED_FROM)
+        billet = executor.branch_greater_equal_unsigned(billet, backend.VALUE, backend.SCRATCH0, ".L_stack_refused")
+        billet = executor.add(billet, backend.VALUE, backend.VALUE, backend.ERROR)
+        billet = endings.succeeded(billet)
+        out endings.error_stub(billet, ".L_stack_refused", abi.ERROR_NOT_SUPPORTED)
+    }
 
-skill emit_writer(billet, name, mode, executable) {
-    @endings = tails.Tails {}
-    @executor = billet.executor
-    @words = billet.words
-    billet = executor.label(billet, name)
-    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 8)
-    billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 7)
-    billet = executor.store(billet, backend.ERROR, backend.STACK, words.bytes * 6)
-    billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
-    billet = executor.add_immediate(billet, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
-    billet = executor.load_immediate(billet, backend.VALUE, -100)
-    billet = executor.load_immediate(billet, backend.ARG2, 577)
-    billet = executor.load_immediate(billet, backend.ARG3, mode)
-    billet = executor.syscall(billet, system.SYSCALL_OPENAT)
-    billet = executor.branch_negative(billet, backend.VALUE, FILE_ERROR)
-    billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * 5)
-    (executable == yes) {
-        billet = executor.load_immediate(billet, backend.ERROR, mode)
-        billet = executor.syscall(billet, system.SYSCALL_FCHMOD)
+    skill emit_exit(billet) {
+        @executor = billet.executor
+        billet = executor.label(billet, platform.EXIT)
+        out executor.syscall(billet, system.SYSCALL_EXIT)
+    }
+
+    skill emit_file_read(billet) {
+        @endings = tails.Tails {}
+        @executor = billet.executor
+        @words = billet.words
+        billet = executor.label(billet, platform.FILE_READ)
+        billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 8)
+        billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 7)
+        billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+        billet = executor.add_immediate(billet, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
+        billet = executor.load_immediate(billet, backend.VALUE, -100)
+        billet = executor.load_immediate(billet, backend.ARG2, 0)
+        billet = executor.load_immediate(billet, backend.ARG3, 0)
+        billet = executor.syscall(billet, system.SYSCALL_OPENAT)
         billet = executor.branch_negative(billet, backend.VALUE, FILE_ERROR)
+        billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_FD)
+        billet = emit_seek(billet, SEEK_END, READ_UNKNOWN)
+        billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
+        billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_KNOWN)
+        billet = emit_seek(billet, SEEK_SET, FILE_ERROR)
+        billet = executor.jump(billet, READ_MEASURED)
+        billet = executor.label(billet, READ_UNKNOWN)
+        billet = executor.store_zero(billet, backend.STACK, words.bytes * READ_SIZE)
+        billet = executor.store_zero(billet, backend.STACK, words.bytes * READ_KNOWN)
+        billet = executor.label(billet, READ_MEASURED)
+        billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
+        billet = executor.branch_nonzero(billet, backend.VALUE, READ_SIZED)
+        billet = executor.load_immediate(billet, backend.VALUE, READ_CHUNK)
+        billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
+        billet = executor.label(billet, READ_SIZED)
+        billet = executor.add_immediate(billet, backend.VALUE, backend.VALUE, words.string_data + 1)
+        billet = executor.call(billet, "rt_alloc")
+        billet = executor.load_immediate(billet, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
+        billet = executor.store32(billet, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+        billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_OBJECT)
+        billet = executor.load_immediate(billet, backend.SCRATCH0, 0)
+        billet = executor.store(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
+        billet = executor.label(billet, READ_LOOP)
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
+        billet = executor.load(billet, backend.SCRATCH1, backend.STACK, words.bytes * READ_SIZE)
+        billet = executor.branch_greater_equal(billet, backend.SCRATCH0, backend.SCRATCH1, READ_FULL)
+        billet = executor.load(billet, backend.ERROR, backend.STACK, words.bytes * READ_OBJECT)
+        billet = executor.add_immediate(billet, backend.ERROR, backend.ERROR, words.payload + words.string_data)
+        billet = executor.add(billet, backend.ERROR, backend.ERROR, backend.SCRATCH0)
+        billet = executor.sub(billet, backend.ARG2, backend.SCRATCH1, backend.SCRATCH0)
+        billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_FD)
+        billet = executor.syscall(billet, system.SYSCALL_READ)
+        billet = executor.branch_negative(billet, backend.VALUE, FILE_ERROR)
+        billet = executor.branch_zero(billet, backend.VALUE, READ_DONE)
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
+        billet = executor.add(billet, backend.SCRATCH0, backend.SCRATCH0, backend.VALUE)
+        billet = executor.store(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_TOTAL)
+        billet = executor.jump(billet, READ_LOOP)
+        billet = emit_read_grow(billet)
+        billet = executor.label(billet, READ_DONE)
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_OBJECT)
+        billet = executor.load(billet, backend.SCRATCH2, backend.STACK, words.bytes * READ_TOTAL)
+        billet = executor.store(billet, backend.SCRATCH2, backend.SCRATCH0, words.payload)
+        billet = executor.add(billet, backend.SCRATCH1, backend.SCRATCH0, backend.SCRATCH2)
+        billet = executor.store_byte_zero(billet, backend.SCRATCH1, words.payload + words.string_data)
+        billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_FD)
+        billet = executor.syscall(billet, system.SYSCALL_CLOSE)
+        billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_OBJECT)
+        billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+        billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 7)
+        billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 8)
+        out endings.succeeded(billet)
     }
-    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * 6)
-    billet = executor.and_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, abi.PAYLOAD_MASK)
-    billet = executor.load(billet, backend.ARG2, backend.SCRATCH0, words.payload)
-    billet = executor.add_immediate(billet, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
-    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * 5)
-    billet = executor.syscall(billet, system.SYSCALL_WRITE)
-    billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * 5)
-    billet = executor.syscall(billet, system.SYSCALL_CLOSE)
-    billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
-    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 7)
-    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 8)
-    out endings.succeeded(billet)
-}
 
-skill emit_file_error(billet) {
-    @executor = billet.executor
-    @words = billet.words
-    billet = executor.label(billet, FILE_ERROR)
-    billet = executor.load_immediate(billet, backend.VALUE, 0)
-    billet = executor.load_immediate(billet, backend.ERROR, abi.ERROR_FILE)
-    billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 7)
-    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 8)
-    out executor.ret(billet)
-}
-
-skill emit_terminal_mode(billet, request, offset) {
-    @executor = billet.executor
-    billet = executor.load_immediate(billet, backend.VALUE, STDIN)
-    billet = executor.load_immediate(billet, backend.ERROR, request)
-    billet = executor.add_immediate(billet, backend.ARG2, backend.STACK, offset)
-    out executor.syscall(billet, system.SYSCALL_IOCTL)
-}
-
-skill key_label(name) {
-    out ".L_key_name_{name}"
-}
-
-skill text_label(name) {
-    out "rt_key_text_{name}"
-}
-
-skill emit_name_branches(billet, bytes, names, value) {
-    @executor = billet.executor
-    drum (group.count(bytes)) {
-        billet = executor.load_immediate(billet, backend.SCRATCH2, group.get(bytes, beat))
-        billet = executor.branch_equal(billet, value, backend.SCRATCH2, key_label(group.get(names, beat)))
+    skill emit_read_grow(billet) {
+        @executor = billet.executor
+        @words = billet.words
+        billet = executor.label(billet, READ_FULL)
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_KNOWN)
+        billet = executor.branch_nonzero(billet, backend.SCRATCH0, READ_DONE)
+        billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
+        billet = executor.shift_left(billet, backend.VALUE, backend.VALUE, 1)
+        billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_SIZE)
+        billet = executor.add_immediate(billet, backend.VALUE, backend.VALUE, words.string_data + 1)
+        billet = executor.call(billet, "rt_alloc")
+        billet = executor.load_immediate(billet, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
+        billet = executor.store32(billet, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * READ_OBJECT)
+        billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * READ_OBJECT)
+        billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, words.payload + words.string_data)
+        billet = executor.add_immediate(billet, backend.SCRATCH1, backend.VALUE, words.payload + words.string_data)
+        billet = executor.load(billet, backend.SCRATCH2, backend.STACK, words.bytes * READ_TOTAL)
+        billet = executor.label(billet, READ_COPY)
+        billet = executor.jump_if_zero(billet, backend.SCRATCH2, READ_LOOP)
+        billet = executor.load_byte(billet, backend.SCRATCH3, backend.SCRATCH0, 0)
+        billet = executor.store_byte(billet, backend.SCRATCH3, backend.SCRATCH1, 0)
+        billet = executor.add_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, 1)
+        billet = executor.add_immediate(billet, backend.SCRATCH1, backend.SCRATCH1, 1)
+        billet = executor.add_immediate(billet, backend.SCRATCH2, backend.SCRATCH2, -1)
+        out executor.jump(billet, READ_COPY)
     }
-    out billet
-}
 
-skill emit_name_results(billet) {
-    drum (KEY_NAMES) {
-        billet = emit_name_result(billet, beat)
+    skill emit_seek(billet, whence, fail) {
+        @executor = billet.executor
+        @words = billet.words
+        billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_FD)
+        billet = executor.load_immediate(billet, backend.ERROR, 0)
+        (words.bytes == 8) {
+            billet = executor.load_immediate(billet, backend.ARG2, whence)
+            billet = executor.syscall(billet, system.SYSCALL_LSEEK)
+            out executor.branch_negative(billet, backend.VALUE, fail)
+        }
+        billet = executor.load_immediate(billet, backend.ARG2, 0)
+        billet = executor.add_immediate(billet, backend.ARG3, backend.STACK, words.bytes * READ_OFFSET)
+        billet = executor.load_immediate(billet, backend.ARG4, whence)
+        billet = executor.syscall(billet, system.SYSCALL_LSEEK)
+        billet = executor.branch_negative(billet, backend.VALUE, fail)
+        out executor.load(billet, backend.VALUE, backend.STACK, words.bytes * READ_OFFSET)
     }
-    out emit_name_result(billet, "none")
-}
 
-skill emit_name_result(billet, name) {
-    @executor = billet.executor
-    billet = executor.label(billet, key_label(name))
-    billet = executor.load_address(billet, backend.VALUE, text_label(name), 0)
-    billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
-    out executor.jump(billet, ".L_key_done")
-}
-skill emit_key_bytes(billet) {
-    @executor = billet.executor
-    @words = billet.words
-    billet = executor.label(billet, ".L_key_bytes")
-    billet = executor.load(billet, backend.VALUE, backend.STACK, key_slot(billet.words, KEY_COUNT))
-    billet = executor.add_immediate(billet, backend.VALUE, backend.VALUE, words.string_data + 1)
-    billet = executor.call(billet, "rt_alloc")
-    billet = executor.store(billet, backend.VALUE, backend.STACK, key_slot(billet.words, KEY_OBJECT))
-    billet = executor.load_immediate(billet, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
-    billet = executor.store32(billet, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
-    billet = executor.load(billet, backend.SCRATCH1, backend.STACK, key_slot(billet.words, KEY_COUNT))
-    billet = executor.store(billet, backend.SCRATCH1, backend.VALUE, words.payload)
-    billet = executor.load_immediate(billet, backend.SCRATCH2, 0)
-    billet = executor.label(billet, ".L_key_copy")
-    billet = executor.branch_greater_equal(billet, backend.SCRATCH2, backend.SCRATCH1, ".L_key_copied")
-    billet = executor.add(billet, backend.SCRATCH3, backend.STACK, backend.SCRATCH2)
-    billet = executor.load_byte(billet, backend.SCRATCH4, backend.SCRATCH3, KEY_BUFFER)
-    billet = executor.add(billet, backend.SCRATCH5, backend.VALUE, backend.SCRATCH2)
-    billet = executor.store_byte(billet, backend.SCRATCH4, backend.SCRATCH5, words.payload + words.string_data)
-    billet = executor.add_immediate(billet, backend.SCRATCH2, backend.SCRATCH2, 1)
-    billet = executor.jump(billet, ".L_key_copy")
-    billet = executor.label(billet, ".L_key_copied")
-    billet = executor.add(billet, backend.SCRATCH5, backend.VALUE, backend.SCRATCH1)
-    billet = executor.store_byte_zero(billet, backend.SCRATCH5, words.payload + words.string_data)
-    out executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
-}
-
-skill key_slot(words, slot) {
-    out KEY_SLOTS + slot * words.bytes
-}
-
-skill key_frame(words) {
-    @bytes = KEY_SLOTS + 4 * words.bytes
-    out (bytes + 15) / 16 * 16
-}
-
-skill emit_key(billet) {
-    @endings = tails.Tails {}
-    @executor = billet.executor
-    @words = billet.words
-    billet = executor.label(billet, platform.KEY)
-    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -key_frame(billet.words))
-    billet = executor.store(billet, backend.RETURN, backend.STACK, key_frame(billet.words) - billet.words.bytes)
-    billet = executor.store_zero(billet, backend.STACK, key_slot(billet.words, KEY_TERMINAL))
-
-    billet = emit_terminal_mode(billet, TERMINAL_GET, SAVED_TERMIOS)
-    billet = executor.branch_negative(billet, backend.VALUE, ".L_key_read")
-    billet = executor.load_immediate(billet, backend.SCRATCH0, 1)
-    billet = executor.store(billet, backend.SCRATCH0, backend.STACK, key_slot(billet.words, KEY_TERMINAL))
-    drum (TERMIOS_WORDS) {
-        billet = executor.load32(billet, backend.SCRATCH0, backend.STACK, SAVED_TERMIOS + beat * 4)
-        billet = executor.store32(billet, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + beat * 4)
+    skill emit_file_write(billet) {
+        out emit_writer(billet, platform.FILE_WRITE, FILE_MODE, no)
     }
-    billet = executor.load32(billet, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
-    billet = executor.and_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, RAW_LOCAL_MASK)
-    billet = executor.store32(billet, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
-    billet = executor.load_immediate(billet, backend.SCRATCH0, 1)
-    billet = executor.store_byte(billet, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_MIN)
-    billet = executor.store_byte_zero(billet, backend.STACK, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_TIME)
-    billet = emit_terminal_mode(billet, TERMINAL_SET, RAW_TERMIOS)
 
-    billet = executor.label(billet, ".L_key_read")
-    billet = executor.load_immediate(billet, backend.VALUE, STDIN)
-    billet = executor.add_immediate(billet, backend.ERROR, backend.STACK, KEY_BUFFER)
-    billet = executor.load_immediate(billet, backend.ARG2, 1)
-    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, key_slot(billet.words, KEY_TERMINAL))
-    billet = executor.branch_zero(billet, backend.SCRATCH0, ".L_key_size")
-    billet = executor.load_immediate(billet, backend.ARG2, KEY_BUFFER_BYTES)
-    billet = executor.label(billet, ".L_key_size")
-    billet = executor.syscall(billet, system.SYSCALL_READ)
-    billet = executor.store(billet, backend.VALUE, backend.STACK, key_slot(billet.words, KEY_COUNT))
-
-    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, key_slot(billet.words, KEY_TERMINAL))
-    billet = executor.branch_zero(billet, backend.SCRATCH0, ".L_key_restored")
-    billet = emit_terminal_mode(billet, TERMINAL_SET, SAVED_TERMIOS)
-    billet = executor.label(billet, ".L_key_restored")
-
-    billet = executor.load(billet, backend.SCRATCH0, backend.STACK, key_slot(billet.words, KEY_COUNT))
-    billet = executor.branch_not_positive(billet, backend.SCRATCH0, key_label("none"))
-    billet = executor.load_byte(billet, backend.SCRATCH1, backend.STACK, KEY_BUFFER)
-    billet = executor.load_immediate(billet, backend.SCRATCH2, INTERRUPT_BYTE)
-    billet = executor.branch_not_equal(billet, backend.SCRATCH1, backend.SCRATCH2, ".L_key_live")
-    billet = executor.load_immediate(billet, backend.VALUE, INTERRUPT_EXIT)
-    billet = executor.syscall(billet, system.SYSCALL_EXIT)
-    billet = executor.label(billet, ".L_key_live")
-
-    billet = executor.load_immediate(billet, backend.SCRATCH2, 1)
-    billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH2, ".L_key_sequence")
-    billet = emit_name_branches(billet, SINGLE_KEYS, SINGLE_NAMES, backend.SCRATCH1)
-    billet = executor.jump(billet, ".L_key_bytes")
-
-    billet = executor.label(billet, ".L_key_sequence")
-    billet = executor.load_immediate(billet, backend.SCRATCH2, 3)
-    billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH2, ".L_key_bytes")
-    billet = executor.load_immediate(billet, backend.SCRATCH2, 27)
-    billet = executor.branch_not_equal(billet, backend.SCRATCH1, backend.SCRATCH2, ".L_key_bytes")
-    billet = executor.load_byte(billet, backend.SCRATCH3, backend.STACK, KEY_BUFFER + 1)
-    billet = executor.load_immediate(billet, backend.SCRATCH2, 91)
-    billet = executor.branch_not_equal(billet, backend.SCRATCH3, backend.SCRATCH2, ".L_key_bytes")
-    billet = executor.load_byte(billet, backend.SCRATCH3, backend.STACK, KEY_BUFFER + 2)
-    billet = emit_name_branches(billet, ARROW_KEYS, ARROW_NAMES, backend.SCRATCH3)
-
-    billet = emit_key_bytes(billet)
-    billet = executor.jump(billet, ".L_key_done")
-    billet = emit_name_results(billet)
-
-    billet = executor.label(billet, ".L_key_done")
-    billet = executor.load(billet, backend.RETURN, backend.STACK, key_frame(billet.words) - billet.words.bytes)
-    billet = executor.add_immediate(billet, backend.STACK, backend.STACK, key_frame(billet.words))
-    out endings.succeeded(billet)
-}
-
-skill append_key_data(billet) {
-    @console = terminal.Terminal {}
-    drum (KEY_NAMES) {
-        billet = console.append_message(billet, text_label(beat), beat)
+    skill emit_file_write_program(billet) {
+        out emit_writer(billet, platform.FILE_WRITE_PROGRAM, PROGRAM_MODE, yes)
     }
-    out console.append_message(billet, text_label("none"), "")
+
+    skill emit_writer(billet, label_name, mode, executable) {
+        @endings = tails.Tails {}
+        @executor = billet.executor
+        @words = billet.words
+        billet = executor.label(billet, label_name)
+        billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -words.bytes * 8)
+        billet = executor.store(billet, backend.RETURN, backend.STACK, words.bytes * 7)
+        billet = executor.store(billet, backend.ERROR, backend.STACK, words.bytes * 6)
+        billet = executor.and_immediate(billet, backend.SCRATCH0, backend.VALUE, abi.PAYLOAD_MASK)
+        billet = executor.add_immediate(billet, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
+        billet = executor.load_immediate(billet, backend.VALUE, -100)
+        billet = executor.load_immediate(billet, backend.ARG2, 577)
+        billet = executor.load_immediate(billet, backend.ARG3, mode)
+        billet = executor.syscall(billet, system.SYSCALL_OPENAT)
+        billet = executor.branch_negative(billet, backend.VALUE, FILE_ERROR)
+        billet = executor.store(billet, backend.VALUE, backend.STACK, words.bytes * 5)
+        (executable == yes) {
+            billet = executor.load_immediate(billet, backend.ERROR, mode)
+            billet = executor.syscall(billet, system.SYSCALL_FCHMOD)
+            billet = executor.branch_negative(billet, backend.VALUE, FILE_ERROR)
+        }
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, words.bytes * 6)
+        billet = executor.and_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, abi.PAYLOAD_MASK)
+        billet = executor.load(billet, backend.ARG2, backend.SCRATCH0, words.payload)
+        billet = executor.add_immediate(billet, backend.ERROR, backend.SCRATCH0, words.payload + words.string_data)
+        billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * 5)
+        billet = executor.syscall(billet, system.SYSCALL_WRITE)
+        billet = executor.load(billet, backend.VALUE, backend.STACK, words.bytes * 5)
+        billet = executor.syscall(billet, system.SYSCALL_CLOSE)
+        billet = executor.load_immediate(billet, backend.VALUE, abi.NONE)
+        billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 7)
+        billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 8)
+        out endings.succeeded(billet)
+    }
+
+    skill emit_file_error(billet) {
+        @executor = billet.executor
+        @words = billet.words
+        billet = executor.label(billet, FILE_ERROR)
+        billet = executor.load_immediate(billet, backend.VALUE, 0)
+        billet = executor.load_immediate(billet, backend.ERROR, abi.ERROR_FILE)
+        billet = executor.load(billet, backend.RETURN, backend.STACK, words.bytes * 7)
+        billet = executor.add_immediate(billet, backend.STACK, backend.STACK, words.bytes * 8)
+        out executor.ret(billet)
+    }
+
+    skill emit_terminal_mode(billet, request, offset) {
+        @executor = billet.executor
+        billet = executor.load_immediate(billet, backend.VALUE, STDIN)
+        billet = executor.load_immediate(billet, backend.ERROR, request)
+        billet = executor.add_immediate(billet, backend.ARG2, backend.STACK, offset)
+        out executor.syscall(billet, system.SYSCALL_IOCTL)
+    }
+
+    skill key_label(key) {
+        out ".L_key_name_{key}"
+    }
+
+    skill text_label(key) {
+        out "rt_key_text_{key}"
+    }
+
+    skill emit_name_branches(billet, bytes, names, value) {
+        @executor = billet.executor
+        drum (group.count(bytes)) {
+            billet = executor.load_immediate(billet, backend.SCRATCH2, group.get(bytes, beat))
+            billet = executor.branch_equal(billet, value, backend.SCRATCH2, key_label(group.get(names, beat)))
+        }
+        out billet
+    }
+
+    skill emit_name_results(billet) {
+        drum (KEY_NAMES) {
+            billet = emit_name_result(billet, beat)
+        }
+        out emit_name_result(billet, "none")
+    }
+
+    skill emit_name_result(billet, key) {
+        @executor = billet.executor
+        billet = executor.label(billet, key_label(key))
+        billet = executor.load_address(billet, backend.VALUE, text_label(key), 0)
+        billet = executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+        out executor.jump(billet, ".L_key_done")
+    }
+
+    skill emit_key_bytes(billet) {
+        @executor = billet.executor
+        @words = billet.words
+        billet = executor.label(billet, ".L_key_bytes")
+        billet = executor.load(billet, backend.VALUE, backend.STACK, key_slot(billet.words, KEY_COUNT))
+        billet = executor.add_immediate(billet, backend.VALUE, backend.VALUE, words.string_data + 1)
+        billet = executor.call(billet, "rt_alloc")
+        billet = executor.store(billet, backend.VALUE, backend.STACK, key_slot(billet.words, KEY_OBJECT))
+        billet = executor.load_immediate(billet, backend.SCRATCH0, abi.OBJECT_KIND_STRING)
+        billet = executor.store32(billet, backend.SCRATCH0, backend.VALUE, abi.OBJECT_HEADER_KIND_OFFSET)
+        billet = executor.load(billet, backend.SCRATCH1, backend.STACK, key_slot(billet.words, KEY_COUNT))
+        billet = executor.store(billet, backend.SCRATCH1, backend.VALUE, words.payload)
+        billet = executor.load_immediate(billet, backend.SCRATCH2, 0)
+        billet = executor.label(billet, ".L_key_copy")
+        billet = executor.branch_greater_equal(billet, backend.SCRATCH2, backend.SCRATCH1, ".L_key_copied")
+        billet = executor.add(billet, backend.SCRATCH3, backend.STACK, backend.SCRATCH2)
+        billet = executor.load_byte(billet, backend.SCRATCH4, backend.SCRATCH3, KEY_BUFFER)
+        billet = executor.add(billet, backend.SCRATCH5, backend.VALUE, backend.SCRATCH2)
+        billet = executor.store_byte(billet, backend.SCRATCH4, backend.SCRATCH5, words.payload + words.string_data)
+        billet = executor.add_immediate(billet, backend.SCRATCH2, backend.SCRATCH2, 1)
+        billet = executor.jump(billet, ".L_key_copy")
+        billet = executor.label(billet, ".L_key_copied")
+        billet = executor.add(billet, backend.SCRATCH5, backend.VALUE, backend.SCRATCH1)
+        billet = executor.store_byte_zero(billet, backend.SCRATCH5, words.payload + words.string_data)
+        out executor.or_immediate(billet, backend.VALUE, backend.VALUE, abi.TAG_STRING)
+    }
+
+    skill key_slot(words, slot) {
+        out KEY_SLOTS + slot * words.bytes
+    }
+
+    skill key_frame(words) {
+        @bytes = KEY_SLOTS + 4 * words.bytes
+        out (bytes + 15) / 16 * 16
+    }
+
+    skill emit_key(billet) {
+        @endings = tails.Tails {}
+        @executor = billet.executor
+        @words = billet.words
+        billet = executor.label(billet, platform.KEY)
+        billet = executor.add_immediate(billet, backend.STACK, backend.STACK, -key_frame(billet.words))
+        billet = executor.store(billet, backend.RETURN, backend.STACK, key_frame(billet.words) - billet.words.bytes)
+        billet = executor.store_zero(billet, backend.STACK, key_slot(billet.words, KEY_TERMINAL))
+
+        billet = emit_terminal_mode(billet, TERMINAL_GET, SAVED_TERMIOS)
+        billet = executor.branch_negative(billet, backend.VALUE, ".L_key_read")
+        billet = executor.load_immediate(billet, backend.SCRATCH0, 1)
+        billet = executor.store(billet, backend.SCRATCH0, backend.STACK, key_slot(billet.words, KEY_TERMINAL))
+        drum (TERMIOS_WORDS) {
+            billet = executor.load32(billet, backend.SCRATCH0, backend.STACK, SAVED_TERMIOS + beat * 4)
+            billet = executor.store32(billet, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + beat * 4)
+        }
+        billet = executor.load32(billet, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
+        billet = executor.and_immediate(billet, backend.SCRATCH0, backend.SCRATCH0, RAW_LOCAL_MASK)
+        billet = executor.store32(billet, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_LOCAL_FLAGS)
+        billet = executor.load_immediate(billet, backend.SCRATCH0, 1)
+        billet = executor.store_byte(billet, backend.SCRATCH0, backend.STACK, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_MIN)
+        billet = executor.store_byte_zero(billet, backend.STACK, RAW_TERMIOS + TERMIOS_CONTROL + CONTROL_TIME)
+        billet = emit_terminal_mode(billet, TERMINAL_SET, RAW_TERMIOS)
+
+        billet = executor.label(billet, ".L_key_read")
+        billet = executor.load_immediate(billet, backend.VALUE, STDIN)
+        billet = executor.add_immediate(billet, backend.ERROR, backend.STACK, KEY_BUFFER)
+        billet = executor.load_immediate(billet, backend.ARG2, 1)
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, key_slot(billet.words, KEY_TERMINAL))
+        billet = executor.branch_zero(billet, backend.SCRATCH0, ".L_key_size")
+        billet = executor.load_immediate(billet, backend.ARG2, KEY_BUFFER_BYTES)
+        billet = executor.label(billet, ".L_key_size")
+        billet = executor.syscall(billet, system.SYSCALL_READ)
+        billet = executor.store(billet, backend.VALUE, backend.STACK, key_slot(billet.words, KEY_COUNT))
+
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, key_slot(billet.words, KEY_TERMINAL))
+        billet = executor.branch_zero(billet, backend.SCRATCH0, ".L_key_restored")
+        billet = emit_terminal_mode(billet, TERMINAL_SET, SAVED_TERMIOS)
+        billet = executor.label(billet, ".L_key_restored")
+
+        billet = executor.load(billet, backend.SCRATCH0, backend.STACK, key_slot(billet.words, KEY_COUNT))
+        billet = executor.branch_not_positive(billet, backend.SCRATCH0, key_label("none"))
+        billet = executor.load_byte(billet, backend.SCRATCH1, backend.STACK, KEY_BUFFER)
+        billet = executor.load_immediate(billet, backend.SCRATCH2, INTERRUPT_BYTE)
+        billet = executor.branch_not_equal(billet, backend.SCRATCH1, backend.SCRATCH2, ".L_key_live")
+        billet = executor.load_immediate(billet, backend.VALUE, INTERRUPT_EXIT)
+        billet = executor.syscall(billet, system.SYSCALL_EXIT)
+        billet = executor.label(billet, ".L_key_live")
+
+        billet = executor.load_immediate(billet, backend.SCRATCH2, 1)
+        billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH2, ".L_key_sequence")
+        billet = emit_name_branches(billet, SINGLE_KEYS, SINGLE_NAMES, backend.SCRATCH1)
+        billet = executor.jump(billet, ".L_key_bytes")
+
+        billet = executor.label(billet, ".L_key_sequence")
+        billet = executor.load_immediate(billet, backend.SCRATCH2, 3)
+        billet = executor.branch_not_equal(billet, backend.SCRATCH0, backend.SCRATCH2, ".L_key_bytes")
+        billet = executor.load_immediate(billet, backend.SCRATCH2, 27)
+        billet = executor.branch_not_equal(billet, backend.SCRATCH1, backend.SCRATCH2, ".L_key_bytes")
+        billet = executor.load_byte(billet, backend.SCRATCH3, backend.STACK, KEY_BUFFER + 1)
+        billet = executor.load_immediate(billet, backend.SCRATCH2, 91)
+        billet = executor.branch_not_equal(billet, backend.SCRATCH3, backend.SCRATCH2, ".L_key_bytes")
+        billet = executor.load_byte(billet, backend.SCRATCH3, backend.STACK, KEY_BUFFER + 2)
+        billet = emit_name_branches(billet, ARROW_KEYS, ARROW_NAMES, backend.SCRATCH3)
+
+        billet = emit_key_bytes(billet)
+        billet = executor.jump(billet, ".L_key_done")
+        billet = emit_name_results(billet)
+
+        billet = executor.label(billet, ".L_key_done")
+        billet = executor.load(billet, backend.RETURN, backend.STACK, key_frame(billet.words) - billet.words.bytes)
+        billet = executor.add_immediate(billet, backend.STACK, backend.STACK, key_frame(billet.words))
+        out endings.succeeded(billet)
+    }
+
+    skill append_key_data(billet) {
+        @console = terminal.Terminal {}
+        drum (KEY_NAMES) {
+            billet = console.append_message(billet, text_label(beat), beat)
+        }
+        out console.append_message(billet, text_label("none"), "")
+    }
 }
+
