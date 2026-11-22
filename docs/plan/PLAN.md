@@ -23,11 +23,11 @@ ANSWERS, в строке остаётся `→ Q-NNN`); **отложено** —
 
 ## 1. Баги
 
-пусто; баги Acer — в [плане Acer](../../soft/system/acer_bench/PLAN.md)
+пусто; баги Acer — в [плане Acer](https://github.com/zephyr-m/saltic-soft/blob/master/soft/system/acer_bench/PLAN.md)
 
 ## 2. Проверка на Acer после переезда
 
-переехал в [план Acer](../../soft/system/acer_bench/PLAN.md) (решение автора 11.11.2026)
+переехал в [план Acer](https://github.com/zephyr-m/saltic-soft/blob/master/soft/system/acer_bench/PLAN.md) (решение автора 11.11.2026)
 
 ## 3. Язык: решения есть — сделать (до первого свистка)
 

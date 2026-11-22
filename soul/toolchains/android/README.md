@@ -3,7 +3,7 @@
 Программа Saltic как приложение APK без Java: `NativeActivity` грузит
 `libmain.so` (AArch64) и зовёт `ANativeActivity_onCreate`. Записана 13.11.2026.
 
-- **Сборка:** `just android [имя]` — сборщик `main.saltic` (программа `soft/<категория>/<имя>/android/main.saltic`, имя пакета — по папке программы) пишет `.so`
+- **Сборка:** `just android [имя]` в saltic-soft — сборщик `main.saltic` (программа `soft/<категория>/<имя>/android/main.saltic`, имя пакета — по папке программы) пишет `.so`
   (`compiler/gorn/linker/shared`), манифест и zip (`formats/apk`), `apksigner`
   подписывает. Готовый APK — `.cache/build/android/<имя>.apk`.
 - **Платформа:** `compiler.gorn.platform.android` — вход, окно, журнал, выход в Android;

@@ -1,7 +1,7 @@
 # Платы
 
 Железо, на котором живёт или будет жить Saltic. Сборщик цели — в
-`soul/toolchains/<цель>/`, программы — в `soft/<категория>/<программа>/`
+`soul/toolchains/<цель>/`, программы — в репозитории saltic-soft, `soft/<категория>/<программа>/`
 (отличия платформ — в подпапке платформы), драйверы — реестр адаптеров (`saltic-registry/registry/adapters/<платформа>/`).
 
 Файл `<плата>.md` без сборщика — заглушка: плата записана в план, но ещё не
@@ -10,7 +10,7 @@
 | Плата | Сборщик | Бэкенд | Состояние |
 |---|---|---|---|
 | QEMU virt | `soul/toolchains/qemu_virt` | RV32I | ✅ есть |
-| Acer и любой ПК с UEFI | `soul/toolchains/saltic` (цель x86_64-uefi); стенд — `soft/system/acer_bench` | x86-64 | ✅ есть |
+| Acer и любой ПК с UEFI | `soul/toolchains/saltic` (цель x86_64-uefi); стенд — saltic-soft `soft/system/acer_bench` | x86-64 | ✅ есть |
 | Android (POCO X6 Pro) | `soul/toolchains/android` | ARM64 | ✅ есть |
 | ESP32 DevKit | `soul/toolchains/esp32` | Xtensa LX6 | ✅ есть |
 | Браузер и Node (WASI) | `soul/toolchains/wasm` | wasm32 | ✅ есть |

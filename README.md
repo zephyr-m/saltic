@@ -101,7 +101,7 @@ pip устал
 - **Стенд Acer Aspire E5-575G через UEFI** — агент на диске, управление по
   кабелю и mRPC, драйвер Ethernet RTL8111 и свой стек (ARP, IPv4, UDP), Wi-Fi
   QCA9377 до `SERVICE_READY`, блиттер видеокарты Intel.
-- **Программы** (`soft/`) — «Сцена», «Бастион», SalticIDE, Полигон, почта,
+- **Программы** (репозиторий [saltic-soft](https://github.com/zephyr-m/saltic-soft)) — «Сцена», «Бастион», SalticIDE, Полигон, почта,
   алхимия языка, доска задач, биржа, взгляд на телефоне, куб на ESP32, игры
   стола qemu-virt.
 - **Интерфейс** — JTML (пять атомов) и закрытая библиотека жителей UIEngine по
@@ -118,14 +118,14 @@ pip устал
 soul/seed/        семя: core, io, proof и compiler (библиотека без входа)
 soul/toolchains/  сборщики целей: saltic (полка), qemu_virt, android, esp32, wasm
 soul/canonical/   эталон языка        soul/craft/   инструменты языка
-soft/             программы: <категория>/<программа>/, платформы — подпапками
-workbench/        инструменты разработки: проверки, lens, установка, Acer
+workbench/        инструменты разработки: проверки, lens, Acer, tarantul
 tests/  bootstrap/  formats/  docs/
 ```
 
 Библиотеки и адаптеры (графика, шрифты, ввод, UIEngine, драйверы, прошивка
 UEFI, окно Wayland) — в реестре; `just tarantul` привозит их в `tarantul/`,
-программы пишут `use tarantul.<пакет>.…`.
+программы пишут `use tarantul.<пакет>.…`. Сами программы — в
+[saltic-soft](https://github.com/zephyr-m/saltic-soft), он берёт язык и полку отсюда (`SALTIC_HOME`).
 
 ## Быстрый старт
 
@@ -137,12 +137,10 @@ nix --extra-experimental-features "nix-command flakes" develop
 
 - `just global-check` — проверка всего: самосборка с паспортами (неподвижная
   точка rv64 и arm64, полка x86-64), тесты на rv32i, x86-64, RV64 и
-  ARM64, тесты ОС-программ, платформы (qemu-virt, UEFI), кодировщики x86-64,
+  ARM64, тесты библиотек, платформы (qemu-virt, UEFI), кодировщики x86-64,
   ARM64 и ESP32, wasm — карточками со случаями каждой ветки;
 - `just test` — тесты (группы — [docs/process/TESTING.md](docs/process/TESTING.md));
-- `just entries` — все входы проекта через чекер, без сборки;
-- `just qemu-graphics` — стол qemu-virt с программами в окне QEMU;
-- `just install <имя>` — поставить программу на этот ноут (меню и рабочий стол).
+- `just entries` — все входы проекта через чекер, без сборки.
 
 Собрать свою программу компилятором с полки:
 
