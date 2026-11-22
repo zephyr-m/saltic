@@ -1,0 +1,210 @@
+-- shop — лавка «Бастиона»: цены башен (×1,5 за каждую такую же) и улучшений
+-- (×1,6 за уровень), покупки по щелчку панели и мастер — разовое улучшение за
+-- MASTER_PRICE: раз в MASTER_GAP мс берёт самое дешёвое из башен и улучшений,
+-- если хватает золота. Мир — realm (world.World); что вышло — realm.news.
+--
+-- Shop:
+--     press(realm, id) — щелчок: buy-archer, buy-cannon, buy-frost, up-damage,
+--         up-speed, up-income, up-master, pause
+--     tend(realm, ms) — ход мастера
+--     towers_on_sale(realm) -> [Offer] башен; upgrades(realm) -> [Offer] улучшений
+--     count_of(realm, code) / tower_price(realm, code) / upgrade_price(base, level)
+--     master_title(realm) / bought_upgrade(realm, price, which) / bought_tower(realm, code)
+
+use core.str
+use core.group
+use soft.games.bastion.world.tower
+use soft.games.bastion.shop.offer
+
+DAMAGE_STEP = 40
+SPEED_STEP = 15
+MASTER_PRICE = 1500
+MASTER_GAP = 1000
+
+Shop = Box {
+    skill tend(realm, ms) {
+        (realm.master == no) {
+            out none
+        }
+        realm.master_wait = realm.master_wait - ms
+        (realm.master_wait > 0) {
+            out none
+        }
+        realm.master_wait = MASTER_GAP
+        @cheapest = ""
+        @lowest = -1
+        @room = (group.count(realm.towers) < group.count(realm.spots))
+        @ids = ["buy-archer", "buy-cannon", "buy-frost"]
+        drum (3) {
+            @price = tower_price(realm, beat)
+            ((room == yes) ○ ((lowest < 0) ○○ (price < lowest))) {
+                cheapest = group.get(ids, beat)
+                lowest = price
+            }
+        }
+        drum (upgrades(realm)) {
+            (((beat.done == no) ○ (str.bytes(beat.id) > 0)) ○ ((lowest < 0) ○○ (beat.price < lowest))) {
+                cheapest = beat.id
+                lowest = beat.price
+            }
+        }
+        ((lowest < 0) ○○ (realm.gold < lowest)) {
+            out none
+        }
+        press(realm, cheapest)
+        @said = realm.news
+        realm.news = "мастер — {said}"
+        out none
+    }
+
+    skill count_of(realm, code) {
+        @total = 0
+        drum (realm.towers) {
+            (beat.code() == code) {
+                total = total + 1
+            }
+        }
+        out total
+    }
+
+    skill tower_price(realm, code) {
+        @price = group.get([100, 400, 800], code)
+        drum (count_of(realm, code)) {
+            price = price * 3 / 2
+        }
+        out price
+    }
+
+    skill upgrade_price(base, level) {
+        @price = base
+        drum (level) {
+            price = price * 8 / 5
+        }
+        out price
+    }
+
+    skill towers_on_sale(realm) {
+        @offers = []
+        @ids = ["buy-archer", "buy-cannon", "buy-frost"]
+        drum (3) {
+            @sample = tower.tower_of(beat, 0, 0, 1)
+            offers = group.add(offers, offer.Offer {
+                id = group.get(ids, beat),
+                icon = sample.icon(),
+                title = sample.title(),
+                count = count_of(realm, beat),
+                power = sample.power(),
+                price = tower_price(realm, beat)
+            })
+        }
+        out offers
+    }
+
+    skill upgrades(realm) {
+        @percent = DAMAGE_STEP * realm.damage_level
+        @faster = SPEED_STEP * realm.speed_level
+        @flow = realm.income()
+        out [
+            offer.Offer {
+                id = "up-damage",
+                title = "урон +{percent}%",
+                price = upgrade_price(200, realm.damage_level)
+            },
+            offer.Offer {
+                id = "up-speed",
+                title = "скорость +{faster}%",
+                price = upgrade_price(150, realm.speed_level)
+            },
+            offer.Offer {
+                id = "up-income",
+                title = "доход {flow}/с",
+                price = upgrade_price(300, realm.income_level)
+            },
+            offer.Offer {
+                id = "up-master",
+                title = master_title(realm),
+                price = MASTER_PRICE,
+                done = realm.master
+            }
+        ]
+    }
+
+    skill press(realm, id) {
+        (id == "pause") {
+            realm.paused = (realm.paused == no)
+            realm.news = "пауза"
+            (realm.paused == no) {
+                realm.news = "дальше"
+            }
+            out none
+        }
+        (id == "up-damage") {
+            out bought_upgrade(realm, upgrade_price(200, realm.damage_level), "damage")
+        }
+        (id == "up-speed") {
+            out bought_upgrade(realm, upgrade_price(150, realm.speed_level), "speed")
+        }
+        (id == "up-income") {
+            out bought_upgrade(realm, upgrade_price(300, realm.income_level), "income")
+        }
+        ((id == "up-master") ○ (realm.master == no)) {
+            out bought_upgrade(realm, MASTER_PRICE, "master")
+        }
+        @ids = ["buy-archer", "buy-cannon", "buy-frost"]
+        drum (3) {
+            (group.get(ids, beat) == id) {
+                out bought_tower(realm, beat)
+            }
+        }
+        out none
+    }
+
+    skill master_title(realm) {
+        (realm.master == yes) {
+            out "мастер строит сам"
+        }
+        out "мастер: строит без тебя"
+    }
+
+    skill bought_upgrade(realm, price, which) {
+        (realm.gold < price) {
+            realm.news = "мало золота: улучшение стоит {price}"
+            out none
+        }
+        realm.gold = realm.gold - price
+        realm.news = "улучшено за {price}"
+        (which == "damage") {
+            realm.damage_level = realm.damage_level + 1
+        }
+        (which == "speed") {
+            realm.speed_level = realm.speed_level + 1
+        }
+        (which == "income") {
+            realm.income_level = realm.income_level + 1
+        }
+        (which == "master") {
+            realm.master = yes
+            realm.news = "мастер нанят: теперь строит сам"
+        }
+        out none
+    }
+
+    skill bought_tower(realm, code) {
+        @price = tower_price(realm, code)
+        (realm.gold < price) {
+            realm.news = "мало золота: башня стоит {price}"
+            out none
+        }
+        (group.count(realm.towers) >= group.count(realm.spots)) {
+            realm.news = "мест под башни больше нет"
+            out none
+        }
+        @spot = group.get(realm.spots, group.count(realm.towers))
+        realm.gold = realm.gold - price
+        @built = tower.tower_of(code, group.get(spot, 0), group.get(spot, 1), 1)
+        realm.towers = group.add(realm.towers, built)
+        @name = built.title()
+        realm.news = "поставлен: {name} за {price}"
+        out none
+    }
+}

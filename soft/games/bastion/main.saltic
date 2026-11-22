@@ -1,0 +1,193 @@
+-- main — вход «Бастиона» (soft/games/bastion), idle tower defense: окно Wayland
+-- на этом компьютере. Интерфейс — жители UIEngine (Panel), поле — свой слой
+-- пикселями (Field) поверх места box с id field. Мир живёт по часам
+-- (time.now): шаг не длиннее STEP_MOST мс, поле рисуется каждый кадр, панель —
+-- раз в PANEL_EVERY мс и после щелчка, сохранение — раз в SAVE_EVERY мс и
+-- при выходе. «×» окна — выход. Пока только Linux.
+--
+-- Window { canvas, link, palette, runtime, reader, realm, board, ground,
+--     keeper, store, area, clock, panel_wait, save_wait, packet, hold, joined } —
+--     окно и всё долгое — его поля; area — место поля после раскладки
+--     open() — окно, шрифты, мир из сохранения, первый кадр; NoWindow
+--     typeface_of(path) -> Typeface из файла
+--     shown() — пересобрать JTML, нарисовать его и поле поверх, показать
+--     painted() — только поле и показать
+--     field_place() -> TargetSlot места поля после раскладки; FieldMissing
+--     elapsed() -> мс с прошлого кадра (переход через полночь учтён)
+--     turn() -> no, когда пора выходить
+-- program() — вход
+
+use io
+use io.file
+use core.bytes
+use core.group
+use core.socket
+use core.time
+use os.icons
+use os.fonts.ttf
+use os.target.linux.screen
+use os.screen.graphics
+use os.input.gestures
+use tarantul.uiengine.jtml
+use tarantul.uiengine.jtml.read
+use tarantul.uiengine.draw.atoms
+use tarantul.uiengine.draw.typeface
+use tarantul.uiengine.themes
+use soft.games.bastion.world
+use soft.games.bastion.view.panel
+use soft.games.bastion.view.field
+use soft.games.bastion.save
+use soft.games.bastion.shop
+
+REGULAR = "os/fonts/inter/Inter-Regular.ttf"
+BOLD = "os/fonts/inter/Inter-Bold.ttf"
+MONO = "os/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
+ICONS = "os/icons/lucide/icons.txt"
+TITLE = "Бастион"
+WIDE = 1400
+HIGH = 860
+TICK = 16
+STEP_MOST = 250
+PANEL_EVERY = 300
+SAVE_EVERY = 10000
+
+Window = Box {
+    canvas = graphics.Screen {},
+    link = screen.Link {},
+    palette = atoms.Palette {},
+    runtime = jtml.Runtime {},
+    reader = gestures.Reader {},
+    realm = world.World {},
+    board = panel.Panel {},
+    ground = field.Field {},
+    keeper = save.Keeper {},
+    store = shop.Shop {},
+    area = jtml.TargetSlot {},
+    clock = 0,
+    panel_wait = 0,
+    save_wait = SAVE_EVERY,
+    packet = bytes.new(8192),
+    hold = bytes.new(4096),
+    joined = bytes.new(12288)
+
+    skill open() {
+        @host = screen.sized(TITLE, WIDE, HIGH)
+        (group.count(host) == 0) {
+            out error.NoWindow
+        }
+        canvas = group.get(host, 0)
+        link = group.get(host, 1)
+        @sheet = file.read_bytes(ICONS)
+        @dark = themes.named("soft", canvas)
+        @lettered = atoms.with_faces(dark, typeface_of(REGULAR), typeface_of(BOLD), typeface_of(MONO))
+        palette = atoms.with_icons(lettered, icons.open(ttf.from_bytes(sheet), bytes.count(sheet)))
+        realm.fresh()
+        clock = time.now()
+        keeper.restore(realm, clock)
+        out shown()
+    }
+
+    skill typeface_of(path) {
+        out typeface.from_bytes(file.read_bytes(path))
+    }
+
+    skill field_place() {
+        drum (runtime.targets) {
+            (beat.id == panel.FIELD) {
+                out beat
+            }
+        }
+        out error.FieldMissing
+    }
+
+    skill shown() {
+        @tree = atoms.fitted(read.page(board.page(realm)), no, palette)
+        runtime = jtml.mount(canvas, tree)
+        atoms.draw(canvas, runtime, palette)
+        area = field_place()
+        panel_wait = PANEL_EVERY
+        out painted()
+    }
+
+    skill painted() {
+        ground.paint(canvas, palette, realm, area.x, area.y, area.width, area.height)
+        out screen.present(link)
+    }
+
+    skill elapsed() {
+        @now = time.now()
+        @spent = now - clock
+        (spent < 0) {
+            spent = spent + time.DAY_MILLISECONDS
+        }
+        clock = now
+        out spent
+    }
+
+    skill turn() {
+        ((link.way_closed == yes) ○○ (link.way_failed == yes)) {
+            keeper.store(realm, clock)
+            out no
+        }
+        screen.pump(link, packet, hold, joined)
+        @drained = reader.drain(link.way_events)
+        link.way_events = drained.core
+        @clicked = no
+        drum (drained.gestures) {
+            (beat.kind == gestures.Kind.CLICK) {
+                @hit = jtml.hit(runtime, beat.x, beat.y)
+                pick {
+                    (hit.found == yes) {
+                        store.press(realm, hit.id)
+                        io.show("бастион: щелчок {beat.x},{beat.y} — {hit.id}: {realm.news}")
+                    }
+                    {
+                        io.show("бастион: щелчок {beat.x},{beat.y} — мимо кнопок")
+                    }
+                }
+                clicked = yes
+            }
+        }
+        @spent = elapsed()
+        @left = spent
+        always {
+            (left <= 0) {
+                leave
+            }
+            @chunk = left
+            (chunk > STEP_MOST) {
+                chunk = STEP_MOST
+            }
+            realm.step(chunk)
+            store.tend(realm, chunk)
+            left = left - chunk
+        }
+        panel_wait = panel_wait - spent
+        save_wait = save_wait - spent
+        (save_wait <= 0) {
+            keeper.store(realm, clock)
+            save_wait = SAVE_EVERY
+        }
+        pick {
+            ((clicked == yes) ○○ (panel_wait <= 0)) {
+                shown()
+            }
+            {
+                painted()
+            }
+        }
+        socket.sleep(TICK)
+        out yes
+    }
+}
+
+program() {
+    @window = Window {}
+    window.open()
+    always {
+        (window.turn() == no) {
+            leave
+        }
+    }
+    out none
+}
